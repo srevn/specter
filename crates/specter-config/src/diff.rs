@@ -51,6 +51,21 @@ pub fn diff(old: &Config, new: &Config) -> WatchRegistryDiff {
 /// to the diff (the entry isn't in either filtered set) — they
 /// apply on the next `false → true` transition via the fresh
 /// attach.
+///
+/// Modified entries are partitioned by
+/// [`SubSpec::requires_new_profile`]:
+///
+/// - **`modified_identity`** — path / scan / max_settle / events
+///   differ; the Sub must move to a different Profile partition. The
+///   engine validates the new anchor's parse, then runs
+///   `detach_old → attach_new`.
+/// - **`modified_params`** — only per-Sub fields differ (`program`,
+///   `scope`, `settle`, `log_output`). The engine rebinds the live
+///   Sub in place; no Profile churn, no kernel-watch flap, no
+///   baseline loss.
+///
+/// The partition is exhaustive and disjoint: every modified entry
+/// lands in exactly one bucket.
 fn diff_subs(old: &Config, new: &Config) -> SubRegistryDiff {
     let old_by_name: BTreeMap<&CompactString, &SubSpec> =
         old.active_watches().map(|s| (&s.name, s)).collect();
@@ -58,14 +73,18 @@ fn diff_subs(old: &Config, new: &Config) -> SubRegistryDiff {
         new.active_watches().map(|s| (&s.name, s)).collect();
 
     let mut added: Vec<SubAttachRequest> = Vec::new();
-    let mut modified: Vec<SubAttachRequest> = Vec::new();
+    let mut modified_identity: Vec<SubAttachRequest> = Vec::new();
+    let mut modified_params: Vec<SubAttachRequest> = Vec::new();
     let mut removed: Vec<CompactString> = Vec::new();
 
     for spec in new.active_watches() {
         match old_by_name.get(&spec.name) {
             None => added.push(spec.to_attach_request()),
-            Some(old_spec) if **old_spec != *spec => modified.push(spec.to_attach_request()),
-            Some(_) => {}
+            Some(old_spec) if **old_spec == *spec => {} // unchanged
+            Some(old_spec) if old_spec.requires_new_profile(spec) => {
+                modified_identity.push(spec.to_attach_request());
+            }
+            Some(_) => modified_params.push(spec.to_attach_request()),
         }
     }
 
@@ -77,22 +96,24 @@ fn diff_subs(old: &Config, new: &Config) -> SubRegistryDiff {
 
     // `removed` is collected from a `BTreeMap`'s keys, so it is already
     // name-ordered by construction — the debug assertion pins the
-    // invariant without paying for a runtime sort. `modified` is built
-    // from source-order `active_watches()` and is the load-bearing
-    // sort: replay stability keys on config content, never slotmap
-    // mint order. Names are unique by validation, so `sort_unstable_by`
-    // is observably indistinguishable from a stable sort and strictly
-    // cheaper.
+    // invariant without paying for a runtime sort. Both `modified_*`
+    // buckets are built from source-order `active_watches()` and are
+    // the load-bearing sort: replay stability keys on config content,
+    // never slotmap mint order. Names are unique by validation, so
+    // `sort_unstable_by` is observably indistinguishable from a stable
+    // sort and strictly cheaper.
     debug_assert!(
         removed.is_sorted(),
         "removed must inherit BTreeMap key order",
     );
-    modified.sort_unstable_by(|a, b| a.params.name.cmp(&b.params.name));
+    modified_identity.sort_unstable_by(|a, b| a.params.name.cmp(&b.params.name));
+    modified_params.sort_unstable_by(|a, b| a.params.name.cmp(&b.params.name));
 
     SubRegistryDiff {
         added,
         removed,
-        modified,
+        modified_identity,
+        modified_params,
     }
 }
 
@@ -197,7 +218,8 @@ mod tests {
         let d = diff(&a, &b);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
         assert!(d.promoters.added.is_empty());
         assert!(d.promoters.removed.is_empty());
         assert!(d.promoters.modified.is_empty());
@@ -215,7 +237,8 @@ mod tests {
         assert_eq!(d.subs.added[0].params.name, "a");
         assert_eq!(d.subs.added[1].params.name, "b");
         assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
     }
 
     #[test]
@@ -228,7 +251,8 @@ mod tests {
         let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert_eq!(d.subs.removed, vec![CompactString::from("a")]);
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
     }
 
     #[test]
@@ -240,11 +264,15 @@ mod tests {
         let d = diff(&a, &b);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
     }
 
+    /// Command change ⇒ per-Sub field only ⇒ `modified_params`. The
+    /// identity bucket stays empty: the partition is exhaustive and
+    /// disjoint per watch name.
     #[test]
-    fn different_command_at_same_name_yields_modified() {
+    fn different_command_lands_in_modified_params() {
         let old_blocks = [block("a", "echo")];
         let new_blocks = [block("a", "fmt")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
@@ -253,8 +281,9 @@ mod tests {
         let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
-        assert_eq!(d.subs.modified.len(), 1);
-        assert_eq!(d.subs.modified[0].params.name, "a");
+        assert!(d.subs.modified_identity.is_empty());
+        assert_eq!(d.subs.modified_params.len(), 1);
+        assert_eq!(d.subs.modified_params[0].params.name, "a");
     }
 
     #[test]
@@ -271,8 +300,11 @@ mod tests {
 
         assert_eq!(d.subs.removed, vec![CompactString::from("b")]);
 
-        assert_eq!(d.subs.modified.len(), 1);
-        assert_eq!(d.subs.modified[0].params.name, "a");
+        // `block("a", "echo") → block("a", "fmt")` is a program-only
+        // change ⇒ `modified_params`.
+        assert!(d.subs.modified_identity.is_empty());
+        assert_eq!(d.subs.modified_params.len(), 1);
+        assert_eq!(d.subs.modified_params[0].params.name, "a");
     }
 
     #[test]
@@ -285,7 +317,8 @@ mod tests {
         let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
     }
 
     #[test]
@@ -299,11 +332,17 @@ mod tests {
         assert_eq!(d.subs.added.len(), 1);
         assert_eq!(d.subs.added[0].params.name, "z");
         assert_eq!(d.subs.removed, vec![CompactString::from("a")]);
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
     }
 
+    /// `settle` is a per-Sub field, not a Profile-identity field ⇒
+    /// `modified_params`. Pinning the bucket guards against a future
+    /// `settle`-into-identity drift that would silently re-route this
+    /// case through `modified_identity` (detach+attach with baseline
+    /// loss) instead of in-place rebind.
     #[test]
-    fn settle_change_marks_modified() {
+    fn settle_change_lands_in_modified_params() {
         let old_blocks = [block_full("a", "echo", "200ms")];
         let new_blocks = [block_full("a", "echo", "500ms")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
@@ -312,7 +351,8 @@ mod tests {
         let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
-        assert_eq!(d.subs.modified.len(), 1);
+        assert!(d.subs.modified_identity.is_empty());
+        assert_eq!(d.subs.modified_params.len(), 1);
     }
 
     #[test]
@@ -332,7 +372,7 @@ mod tests {
     }
 
     #[test]
-    fn modified_sorted_by_name() {
+    fn modified_params_sorted_by_name() {
         let old_blocks = [block("b", "echo"), block("a", "echo")];
         let new_blocks = [block("b", "fmt"), block("a", "fmt")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
@@ -340,15 +380,20 @@ mod tests {
         let d = diff(&old, &new);
         let order: Vec<&str> = d
             .subs
-            .modified
+            .modified_params
             .iter()
             .map(|r| r.params.name.as_str())
             .collect();
         assert_eq!(order, vec!["a", "b"]);
     }
 
+    /// `events` folds into `ProfileIdentity::config_hash` ⇒
+    /// `modified_identity`. Same role guard as
+    /// [`settle_change_lands_in_modified_params`]: pinning the bucket
+    /// makes a future identity-into-params drift visible at the diff
+    /// layer.
     #[test]
-    fn events_change_marks_modified_in_diff() {
+    fn events_change_lands_in_modified_identity() {
         let old_blocks = [block("a", "echo")];
         let new_blocks = [format!(
             "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
@@ -360,10 +405,11 @@ mod tests {
         let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
-        assert_eq!(d.subs.modified.len(), 1);
-        assert_eq!(d.subs.modified[0].params.name, "a");
+        assert!(d.subs.modified_params.is_empty());
+        assert_eq!(d.subs.modified_identity.len(), 1);
+        assert_eq!(d.subs.modified_identity[0].params.name, "a");
         assert_eq!(
-            d.subs.modified[0].identity.events,
+            d.subs.modified_identity[0].identity.events,
             specter_core::ClassSet::CONTENT
         );
     }
@@ -381,7 +427,16 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let d = diff(&old, &new);
-        assert!(d.subs.modified.is_empty(), "got {:?}", d.subs.modified);
+        assert!(
+            d.subs.modified_identity.is_empty(),
+            "identity bucket: {:?}",
+            d.subs.modified_identity,
+        );
+        assert!(
+            d.subs.modified_params.is_empty(),
+            "params bucket: {:?}",
+            d.subs.modified_params,
+        );
     }
 
     #[test]
@@ -399,7 +454,39 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let d = diff(&old, &new);
-        assert!(d.subs.modified.is_empty(), "got {:?}", d.subs.modified);
+        assert!(
+            d.subs.modified_identity.is_empty(),
+            "identity bucket: {:?}",
+            d.subs.modified_identity,
+        );
+        assert!(
+            d.subs.modified_params.is_empty(),
+            "params bucket: {:?}",
+            d.subs.modified_params,
+        );
+    }
+
+    /// `scan` (recursive flag) folds into `ProfileIdentity::config_hash`
+    /// ⇒ `modified_identity`. Same name, same path, different scan ⇒
+    /// the Sub must move to a different Profile. Distinct from
+    /// `events_change_lands_in_modified_identity` because `scan` is a
+    /// nested struct (`ScanConfig`) where `events` is a `ClassSet`
+    /// bitmask — exercising a struct-equality path the bitmask test
+    /// doesn't.
+    #[test]
+    fn scan_change_lands_in_modified_identity() {
+        let old_blocks = [block("a", "echo")];
+        let new_blocks = [format!(
+            "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
+             actions = [{{ exec = [\"echo\"] }}]\nrecursive = false\n",
+        )];
+        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
+        let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
+
+        let d = diff(&old, &new);
+        assert!(d.subs.modified_params.is_empty());
+        assert_eq!(d.subs.modified_identity.len(), 1);
+        assert_eq!(d.subs.modified_identity[0].params.name, "a");
     }
 
     // ---- Promoter (dynamic) side ----
@@ -521,7 +608,8 @@ mod tests {
         );
     }
 
-    /// `promoters.modified` sorts by name (mirrors `subs.modified`).
+    /// `promoters.modified` sorts by name (mirrors the Sub-side
+    /// `modified_*` buckets, both individually sorted in `diff_subs`).
     #[test]
     fn promoter_modified_sorted_by_name() {
         let old_blocks = [
@@ -559,7 +647,8 @@ mod tests {
 
         assert_eq!(d.subs.removed, vec![CompactString::from("foo")]);
         assert!(d.subs.added.is_empty());
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
         assert_eq!(d.promoters.added.len(), 1);
         assert_eq!(d.promoters.added[0].name, "foo");
         assert!(d.promoters.removed.is_empty());
@@ -584,7 +673,8 @@ mod tests {
         assert_eq!(d.subs.added.len(), 1);
         assert_eq!(d.subs.added[0].params.name, "foo");
         assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
     }
 
     /// Mixed reload: one Sub modify, one Promoter add, one of each
@@ -610,8 +700,10 @@ mod tests {
 
         assert_eq!(d.subs.removed, vec![CompactString::from("static_drop")]);
         assert!(d.subs.added.is_empty());
-        assert_eq!(d.subs.modified.len(), 1);
-        assert_eq!(d.subs.modified[0].params.name, "static_keep");
+        // `static_keep`: echo → fmt is a program-only change ⇒ params bucket.
+        assert!(d.subs.modified_identity.is_empty());
+        assert_eq!(d.subs.modified_params.len(), 1);
+        assert_eq!(d.subs.modified_params[0].params.name, "static_keep");
 
         assert_eq!(d.promoters.removed, vec![CompactString::from("dyn_drop")]);
         assert_eq!(d.promoters.added.len(), 1);
@@ -646,7 +738,8 @@ mod tests {
         let d = diff(&old, &new);
         assert_eq!(d.subs.removed, vec![CompactString::from("a")]);
         assert!(d.subs.added.is_empty());
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
     }
 
     /// Reverse: `false → true` re-introduces the entry, surfacing as
@@ -659,7 +752,8 @@ mod tests {
         assert_eq!(d.subs.added.len(), 1);
         assert_eq!(d.subs.added[0].params.name, "a");
         assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
     }
 
     /// Edits to other fields while the entry is disabled produce no
@@ -673,7 +767,8 @@ mod tests {
         let d = diff(&old, &new);
         assert!(d.subs.added.is_empty());
         assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified.is_empty());
+        assert!(d.subs.modified_identity.is_empty());
+        assert!(d.subs.modified_params.is_empty());
     }
 
     /// Promoter-side enabled flip mirrors the static side. One

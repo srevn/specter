@@ -116,6 +116,11 @@ pub(in crate::driver) fn log_diagnostic(d: &Diagnostic) {
             "config reload removed a dynamic watch the engine never \
              attached (likely a prior path error); nothing to reap",
         ),
+        Diagnostic::ConfigDiffRebindFallbackAttach { name } => tracing::info!(
+            %name,
+            "config reload rebind found no live Sub (prior attach likely \
+             failed); degrading to fresh attach",
+        ),
         Diagnostic::ProbeVanished { profile, intent } => {
             tracing::warn!(?profile, ?intent, "probe returned Vanished");
         }
@@ -321,6 +326,14 @@ pub(in crate::driver) fn log_diagnostic(d: &Diagnostic) {
                 "dynamic sub attached (promoter-spawned)",
             ),
         },
+        Diagnostic::SubRebound { sub } => tracing::info!(
+            ?sub,
+            "sub rebound (per-Sub fields updated in place; baseline preserved)",
+        ),
+        Diagnostic::RebindUnknownSub { sub } => tracing::warn!(
+            ?sub,
+            "rebind targeted an unknown Sub (dispatcher routing breach)",
+        ),
         Diagnostic::PromoterAttached { promoter, name } => tracing::info!(
             ?promoter,
             %name,

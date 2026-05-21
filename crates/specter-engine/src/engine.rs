@@ -434,6 +434,49 @@ impl Engine {
         Some(resolved)
     }
 
+    /// Pure pre-check that returns `true` iff a subsequent
+    /// [`Self::attach_sub_inner`] call with `req` would clear its only
+    /// fallible boundary — `Tree::parse_attach_path` for a `Path`
+    /// anchor, or slot liveness for a `Resource` anchor. Mutates
+    /// nothing; never installs a scaffold, never promotes a role.
+    ///
+    /// Sole consumer is [`Self::on_config_diff`]'s `modified_identity`
+    /// arm: it runs the validate *before* detaching the old Sub so a
+    /// malformed path doesn't tear down a live attachment for nothing.
+    /// The detach + attach pair is then total — validate said yes, so
+    /// the attach won't surface a parse error.
+    ///
+    /// Emits the same diagnostic [`Self::attach_sub_inner`] would on
+    /// the failure path (`AttachPathInvalid` / `AttachResourceStale`),
+    /// so the validate-then-act site never re-emits on its own. The
+    /// re-parse at attach time (one `Tree::parse_attach_path` call,
+    /// O(path length), pure) is the cost of total composition; the
+    /// attach has no engine-state precondition the validate could lock
+    /// in.
+    pub(crate) fn validate_sub_attach(&self, req: &SubAttachRequest, out: &mut StepOutput) -> bool {
+        match &req.anchor {
+            SubAttachAnchor::Path(p) => match Tree::parse_attach_path(p) {
+                Ok(_) => true,
+                Err(err) => {
+                    out.diagnostics.push(Diagnostic::AttachPathInvalid {
+                        path: std::sync::Arc::from(p.as_path()),
+                        hint: err.hint(),
+                    });
+                    false
+                }
+            },
+            SubAttachAnchor::Resource(r) => {
+                if self.tree.get(*r).is_some() {
+                    true
+                } else {
+                    out.diagnostics
+                        .push(Diagnostic::AttachResourceStale { resource: *r });
+                    false
+                }
+            }
+        }
+    }
+
     /// Phase 2 of `attach_sub_inner` — register the Sub and emit
     /// [`Diagnostic::SubAttached`].
     ///
@@ -950,6 +993,45 @@ impl Engine {
             }
             None => {}
         }
+    }
+
+    /// In-place per-Sub rebind — the `modified_params` arm of
+    /// [`Self::on_config_diff`]. Replaces `sub`'s `program`, `scope`,
+    /// `settle`, and `log_output` via the engine-internal edge method
+    /// [`SubRegistry::rebind`]; preserves `SubId`, `profile`, `name`,
+    /// `source_promoter`, and `has_fired`.
+    ///
+    /// Touches no Profile state, no Tree slot, and no kernel watch: the
+    /// silent biggest win over the `modified_identity` detach+attach
+    /// path is that the anchor's `watch_demand` stays installed
+    /// throughout the rebind — there is no brief "no watcher" window.
+    ///
+    /// Bookkeeping is one tiny ledger update: when `params.settle`
+    /// differs from the prior settle, the Profile's `settle` floor (min
+    /// over its live Subs) is recomputed via
+    /// [`Self::recompute_profile_settle`]. The currently-armed settle
+    /// timer (if any) keeps its existing deadline; the *next* settle
+    /// window uses the new floor.
+    ///
+    /// On a stale [`SubId`] (the rebind invariant says the dispatcher
+    /// just resolved through `find_by_name`, so this is structurally
+    /// unexpected), emits [`Diagnostic::RebindUnknownSub`] and returns
+    /// without mutating engine state.
+    pub(crate) fn rebind_sub_inner(
+        &mut self,
+        sub: SubId,
+        new_params: SubParams,
+        out: &mut StepOutput,
+    ) {
+        let new_settle = new_params.settle;
+        let Some((prior_settle, profile)) = self.subs.rebind(sub, new_params) else {
+            out.diagnostics.push(Diagnostic::RebindUnknownSub { sub });
+            return;
+        };
+        if prior_settle != new_settle {
+            self.recompute_profile_settle(profile);
+        }
+        out.diagnostics.push(Diagnostic::SubRebound { sub });
     }
 
     /// Reap a Profile: release every contribution it holds (anchor watch,

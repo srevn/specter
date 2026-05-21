@@ -17,18 +17,21 @@ fn load(name: &str) -> Config {
 fn three_watches_against_minimal_classifies_each_correctly() {
     // minimal.toml has watch `build` with actions = [{ exec = ["echo"] }].
     // three-watches.toml has `build` (cmd ["make"]), `lint`, `fmt`.
-    // small → big: `build` is modified, `lint`+`fmt` are added.
+    // small → big: `build`'s command changed (params-only ⇒ modified_params),
+    // `lint`+`fmt` are added.
     let small = load("minimal.toml");
     let big = load("three-watches.toml");
 
     let going_up = diff(&small, &big);
     assert_eq!(going_up.subs.added.len(), 2);
-    assert_eq!(going_up.subs.modified.len(), 1);
+    assert!(going_up.subs.modified_identity.is_empty());
+    assert_eq!(going_up.subs.modified_params.len(), 1);
     assert!(going_up.subs.removed.is_empty());
 
     let going_down = diff(&big, &small);
     assert!(going_down.subs.added.is_empty());
-    assert_eq!(going_down.subs.modified.len(), 1);
+    assert!(going_down.subs.modified_identity.is_empty());
+    assert_eq!(going_down.subs.modified_params.len(), 1);
     assert_eq!(going_down.subs.removed.len(), 2);
 }
 
@@ -39,7 +42,8 @@ fn identical_fixture_yields_no_diff() {
     let d = diff(&a, &b);
     assert!(d.subs.added.is_empty());
     assert!(d.subs.removed.is_empty());
-    assert!(d.subs.modified.is_empty());
+    assert!(d.subs.modified_identity.is_empty());
+    assert!(d.subs.modified_params.is_empty());
     assert!(d.promoters.added.is_empty());
     assert!(d.promoters.removed.is_empty());
     assert!(d.promoters.modified.is_empty());
@@ -59,19 +63,25 @@ fn reorder_only_yields_no_diff() {
     assert!(d.subs.added.is_empty(), "added: {:?}", d.subs.added);
     assert!(d.subs.removed.is_empty(), "removed: {:?}", d.subs.removed);
     assert!(
-        d.subs.modified.is_empty(),
-        "modified: {:?}",
-        d.subs.modified
+        d.subs.modified_identity.is_empty(),
+        "modified_identity: {:?}",
+        d.subs.modified_identity,
+    );
+    assert!(
+        d.subs.modified_params.is_empty(),
+        "modified_params: {:?}",
+        d.subs.modified_params,
     );
 }
 
 #[test]
-fn changing_only_command_marks_modified() {
+fn changing_only_command_marks_modified_params() {
     let toml_a = "[[watch]]\nname = \"a\"\npath = \"/\"\nactions = [{ exec = [\"echo\"] }]";
     let toml_b = "[[watch]]\nname = \"a\"\npath = \"/\"\nactions = [{ exec = [\"fmt\"] }]";
     let a = Config::from_str(toml_a).unwrap();
     let b = Config::from_str(toml_b).unwrap();
     let d = diff(&a, &b);
-    assert_eq!(d.subs.modified.len(), 1);
-    assert_eq!(d.subs.modified[0].params.name, "a");
+    assert!(d.subs.modified_identity.is_empty());
+    assert_eq!(d.subs.modified_params.len(), 1);
+    assert_eq!(d.subs.modified_params[0].params.name, "a");
 }

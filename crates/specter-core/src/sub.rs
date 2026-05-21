@@ -154,29 +154,67 @@ impl SubAttachRequest {
 /// Hot-reload diff. Computed by the TOML loader; consumed by
 /// `Engine::step(Input::ConfigDiff(_))`.
 ///
-/// Name-keyed: `removed` carries operator watch names; `added` and
-/// `modified` carry pre-id [`SubAttachRequest`]s (the name lives
-/// inside `params.name`). The engine resolves name → [`SubId`] at
-/// apply time through its own authoritative `by_name` index —
-/// identity resolution is a registry-owner operation, not the
-/// loader's. Engine processes `removed → modified → added` atomically
-/// in one step, with parent-edge recompute after each detach/attach.
+/// Name-keyed: `removed` carries operator watch names; `added`,
+/// `modified_identity`, and `modified_params` carry pre-id
+/// [`SubAttachRequest`]s (the name lives inside `params.name`). The
+/// engine resolves name → [`SubId`] at apply time through its own
+/// authoritative `by_name` index — identity resolution is a
+/// registry-owner operation, not the loader's.
+///
+/// **The `modified` bucket is split.** Two semantically distinct
+/// transformations live behind a "modified watch":
+///
+/// - **Identity change** (`modified_identity`): the anchor path, scan
+///   config, max_settle, or events mask differs from the prior spec.
+///   Any of these forces the Sub onto a different Profile partition
+///   (the partition key is `(anchor_resource, ProfileIdentity::config_hash())`).
+///   The engine validates the new anchor's parse first, then performs
+///   `detach_old → attach_new`. Validation failure leaves the old Sub
+///   in place — structural rollback at the composition layer.
+/// - **Params change** (`modified_params`): the anchor and identity are
+///   unchanged; only per-Sub fields (`program`, `scope`, `settle`,
+///   `log_output`) differ. The engine rebinds the live Sub in place
+///   via [`SubRegistry::rebind`]: no Profile churn, no kernel-watch
+///   flap, no baseline loss. On the rare case where the prior attach
+///   failed and the Sub never entered the registry, the engine
+///   degrades the entry to a fresh attach
+///   ([`crate::Diagnostic::ConfigDiffRebindFallbackAttach`] narrates
+///   the reason).
+///
+/// Engine processes `removed → modified_params → modified_identity →
+/// added` atomically in one step. The four buckets are name-disjoint
+/// by diff construction.
 #[derive(Clone, Debug, Default)]
 pub struct SubRegistryDiff {
+    /// Fresh attaches.
     pub added: Vec<SubAttachRequest>,
+    /// Detaches by operator watch name.
     pub removed: Vec<CompactString>,
-    pub modified: Vec<SubAttachRequest>,
+    /// Path / scan / max_settle / events changed — the Sub must move
+    /// to a different Profile partition. Engine validates the new
+    /// anchor's parse, then detaches the old Sub and attaches the new.
+    /// Validation failure leaves the old Sub in place (rollback).
+    pub modified_identity: Vec<SubAttachRequest>,
+    /// Per-Sub fields only (`program`, `scope`, `settle`,
+    /// `log_output`); anchor and identity unchanged. Engine rebinds in
+    /// place via [`SubRegistry::rebind`] — no Profile churn, no
+    /// kernel-watch flap. When the named Sub is unexpectedly absent
+    /// from the registry (prior attach failed), the engine degrades
+    /// the entry to a fresh attach.
+    pub modified_params: Vec<SubAttachRequest>,
 }
 
 impl SubRegistryDiff {
     /// True iff every bucket is empty — the "no Sub-side changes"
     /// short-circuit the reload pipeline tests before handing the diff
-    /// to the engine. Single point of truth: future bucket additions
-    /// (the validate-then-act split into `modified_identity` /
-    /// `modified_params`) extend this method, never the callers.
+    /// to the engine. Single point of truth: every bucket future or
+    /// present is named here.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.added.is_empty() && self.removed.is_empty() && self.modified.is_empty()
+        self.added.is_empty()
+            && self.removed.is_empty()
+            && self.modified_identity.is_empty()
+            && self.modified_params.is_empty()
     }
 }
 
@@ -488,6 +526,65 @@ impl SubRegistry {
         if let Some(s) = self.subs.get_mut(sub) {
             s.has_fired = true;
         }
+    }
+
+    /// Replace `sub`'s per-Sub fields with `new_params` in place — the
+    /// `modified_params` arm of hot-reload's [`SubRegistryDiff`] split.
+    ///
+    /// **Preserves**: [`SubId`], `profile`, `name`, `source_promoter`,
+    /// `has_fired`. The first two are structural (the slotmap key and
+    /// the Profile join are invariants of this Sub's lifetime); `name`
+    /// and `source_promoter` are pinned by the rebind invariant
+    /// (callers route through [`Self::find_by_name`], which keys on
+    /// `name`, and a `source_promoter` change would cross the
+    /// static↔dynamic boundary the diff already maps to add+remove).
+    /// `has_fired` is preserved because the B1 dedup floor reads it as
+    /// "this Sub has already announced the current stable tree state";
+    /// a program swap changes *what runs*, not *whether the tree
+    /// changed*.
+    ///
+    /// **Replaces**: `program`, `scope`, `settle`, `log_output`;
+    /// recomputes `needs_diff` (derived from `scope` + the program's
+    /// diff-placeholder set).
+    ///
+    /// Returns `Some((prior_settle, profile))` on success: `prior_settle`
+    /// is the per-Sub settle the caller compares against
+    /// `new_params.settle` to gate a Profile-settle recompute; `profile`
+    /// is the rebound Sub's host Profile, threaded out so the wrapper
+    /// avoids a second `get(sub)` for the recompute target. Both reads
+    /// fold into the same `get_mut` the mutation uses — the wrapper's
+    /// recompute gate becomes a single comparison with no follow-up
+    /// lookup. `Sub.profile` is invariant for the Sub's lifetime, so
+    /// returning it costs nothing observable on the rebind itself.
+    ///
+    /// Returns `None` on a stale [`SubId`]. The invariant is that the
+    /// dispatcher resolves through [`Self::find_by_name`] in the same
+    /// step as the rebind, so a stale id is structurally unexpected;
+    /// the caller surfaces it via [`crate::Diagnostic::RebindUnknownSub`].
+    ///
+    /// `debug_assert!`s pin the `name` / `source_promoter` invariants —
+    /// a release-mode breach would silently rewrite the identifying
+    /// fields under the registry's `by_name` index, leaving the index
+    /// pointing at the wrong [`SubId`]; the assertions catch the
+    /// breach at the call site.
+    pub fn rebind(&mut self, sub: SubId, new_params: SubParams) -> Option<(Duration, ProfileId)> {
+        let s = self.subs.get_mut(sub)?;
+        debug_assert_eq!(
+            s.name, new_params.name,
+            "rebind cannot change Sub name (rebind identity invariant)",
+        );
+        debug_assert_eq!(
+            s.source_promoter, new_params.source_promoter,
+            "rebind cannot change source_promoter (static↔dynamic boundary)",
+        );
+        let prior_settle = s.settle;
+        let profile = s.profile;
+        s.program = new_params.program;
+        s.scope = new_params.scope;
+        s.settle = new_params.settle;
+        s.log_output = new_params.log_output;
+        s.needs_diff = s.scope == EffectScope::PerStableFile || s.program.references_diff_derived();
+        Some((prior_settle, profile))
     }
 
     /// Clear `sub`'s fire history — the `EffectComplete::Failed` clear.
@@ -995,18 +1092,158 @@ mod tests {
     }
 
     /// Diff is plain data — pins the `Default` shape and the
-    /// [`SubRegistryDiff::is_empty`] contract in one place. A populated
-    /// bucket flips the predicate to `false`, so the AND-over-buckets
-    /// impl stays load-bearing under future field growth.
+    /// [`SubRegistryDiff::is_empty`] contract in one place. **Each**
+    /// of the four buckets independently flips the predicate, so a
+    /// future bucket addition that forgets to extend `is_empty` is
+    /// caught here.
     #[test]
-    fn sub_registry_diff_is_empty_predicate() {
-        let mut d = SubRegistryDiff::default();
-        assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
-        assert!(d.modified.is_empty());
-        assert!(d.is_empty(), "default is empty");
-        d.removed.push(CompactString::from("a"));
-        assert!(!d.is_empty(), "populated bucket flips is_empty");
+    fn sub_registry_diff_is_empty_per_bucket() {
+        assert!(SubRegistryDiff::default().is_empty(), "default is empty");
+
+        let req = || {
+            crate::SubAttachRequest::for_anchor(
+                "a".into(),
+                crate::SubAttachAnchor::Path(std::path::PathBuf::from("/a")),
+                crate::ScanConfig::builder().build(),
+                Duration::from_hours(1),
+                SETTLE,
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                crate::ClassSet::DEFAULT_SUBTREE_ROOT,
+                false,
+            )
+        };
+
+        for (label, d) in [
+            (
+                "added",
+                SubRegistryDiff {
+                    added: vec![req()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "removed",
+                SubRegistryDiff {
+                    removed: vec![CompactString::from("a")],
+                    ..Default::default()
+                },
+            ),
+            (
+                "modified_identity",
+                SubRegistryDiff {
+                    modified_identity: vec![req()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "modified_params",
+                SubRegistryDiff {
+                    modified_params: vec![req()],
+                    ..Default::default()
+                },
+            ),
+        ] {
+            assert!(
+                !d.is_empty(),
+                "populating `{label}` must flip is_empty to false",
+            );
+        }
+    }
+
+    /// `SubRegistry::rebind` replaces the four per-Sub fields and
+    /// preserves the structural ones — including `has_fired`, which
+    /// the B1 dedup floor reads as "this Sub has already announced
+    /// the current stable tree state." A program swap changes *what
+    /// runs*, not *whether the tree changed*, so the flag must not
+    /// reset on rebind.
+    #[test]
+    fn rebind_replaces_per_sub_fields_and_preserves_has_fired() {
+        let mut reg = SubRegistry::new();
+        let pid = ProfileId::default();
+        let original = anchor_only_program();
+        let sid = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "build".into(),
+                program: Arc::clone(&original),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
+        reg.mark_fired(sid);
+
+        let new_program = program_with(Placeholder::Created);
+        let new_settle = SETTLE + SETTLE;
+        let prior = reg.rebind(
+            sid,
+            SubParams {
+                name: "build".into(),
+                program: Arc::clone(&new_program),
+                scope: EffectScope::PerStableFile,
+                settle: new_settle,
+                log_output: true,
+                source_promoter: None,
+            },
+        );
+
+        assert_eq!(
+            prior,
+            Some((SETTLE, pid)),
+            "rebind returns the prior settle and the host Profile",
+        );
+        let s = reg.get(sid).expect("Sub preserved across rebind");
+        assert!(s.has_fired, "has_fired preserved across rebind");
+        assert_eq!(s.name, "build", "name preserved");
+        assert_eq!(s.profile, pid, "profile preserved");
+        assert!(s.source_promoter.is_none(), "source_promoter preserved");
+        assert_eq!(s.scope, EffectScope::PerStableFile, "scope replaced");
+        assert_eq!(s.settle, new_settle, "settle replaced");
+        assert!(s.log_output, "log_output replaced");
+        assert!(
+            Arc::ptr_eq(&s.program, &new_program),
+            "program Arc replaced (no rewrap)",
+        );
+        assert!(
+            s.needs_diff,
+            "needs_diff recomputed — PerStableFile alone sets it true",
+        );
+    }
+
+    /// Stale `SubId` returns `None`. The dispatcher resolves through
+    /// `find_by_name` in the same step as the rebind, so this surface
+    /// is rarely hit in production; the engine wraps it in a
+    /// `RebindUnknownSub` diagnostic when it does.
+    #[test]
+    fn rebind_returns_none_on_stale_sub_id() {
+        let mut reg = SubRegistry::new();
+        let pid = ProfileId::default();
+        let sid = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "build".into(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
+        reg.remove(sid).expect("removed");
+        let res = reg.rebind(
+            sid,
+            SubParams {
+                name: "build".into(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        );
+        assert!(res.is_none(), "stale SubId yields None");
     }
 }
 

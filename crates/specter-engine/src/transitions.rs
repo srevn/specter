@@ -36,8 +36,8 @@ use specter_core::{
     EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent, PostFirePhase,
     PreFirePhase, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, ProfileId,
     ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority, QuiescenceVerdict,
-    ReapTrigger, Resource, ResourceId, ResourceKind, StepOutput, SubId, TimerId, TimerKind,
-    TreeSnapshot, WatchFailure, WatchRegistryDiff,
+    ReapTrigger, Resource, ResourceId, ResourceKind, StepOutput, SubAttachRequest, SubId, TimerId,
+    TimerKind, TreeSnapshot, WatchFailure, WatchRegistryDiff,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -1083,43 +1083,76 @@ impl Engine {
     /// authoritative `by_name` indices, never bin-side off the
     /// order-unguaranteed diagnostic stream.
     ///
+    /// # Sub side (four buckets, validate-then-act)
+    ///
+    /// The `modified` bucket is split into two semantically distinct
+    /// transformations; the engine's response collapses to each arm's
+    /// natural shape:
+    ///
     /// 1. **Sub `removed`** — resolve the name. `Some` ⇒
     ///    `detach_sub_inner` (reap the Profile if its last Sub left,
     ///    defer if active). `None` ⇒ [`Diagnostic::ConfigDiffUnknownSub`]
     ///    (a name whose prior attach failed and never entered the
     ///    registry — nothing to detach).
-    /// 2. **Sub `modified`** — resolve the name; detach the old id if
-    ///    present, then `attach_sub_inner`. A name the engine never
-    ///    attached resolves `None` ⇒ attach-only: the modify becomes a
-    ///    retrying fresh attach against the now-maybe-valid path
-    ///    (strictly more correct than the prior silent-skip-forever).
-    /// 3. **Sub `added`** — `attach_sub_inner` materialises the anchor
+    /// 2. **Sub `modified_params`** — anchor + identity unchanged;
+    ///    only per-Sub fields differ. Resolve the name; on `Some`,
+    ///    [`Self::rebind_sub_inner`] rebinds the Sub in place via the
+    ///    [`SubRegistry::rebind`] edge — no Profile churn, no
+    ///    kernel-watch flap, no baseline loss. On `None`, the prior
+    ///    attach failed and the Sub never entered the registry;
+    ///    the engine degrades the entry to a fresh attach
+    ///    ([`Diagnostic::ConfigDiffRebindFallbackAttach`] narrates
+    ///    the reason).
+    /// 3. **Sub `modified_identity`** — path / scan / max_settle /
+    ///    events changed; the Sub must move to a different Profile
+    ///    partition. [`Self::validate_sub_attach`] pre-checks the only
+    ///    fallible boundary (the new anchor's parse); on success, the
+    ///    engine detaches the old Sub (if present) and attaches the
+    ///    new. On validation failure the old Sub stays in place —
+    ///    **structural rollback** at the composition layer: the
+    ///    validate site captures nothing, attach re-derives, so the
+    ///    state-mid-operation problem doesn't arise.
+    /// 4. **Sub `added`** — `attach_sub_inner` materialises the anchor
     ///    and registers the Sub.
-    /// 4. **Promoter `removed`** — resolve the name. `Some` ⇒
+    ///
+    /// **Sub-side ordering: removed → params → identity → added.**
+    /// `removed` first frees name slots a downstream identity-arm might
+    /// want (defense in depth — the four buckets are name-disjoint by
+    /// diff construction). `modified_params` next is the cheapest path
+    /// (in-place rebind, no Profile churn) and locks in the new params
+    /// before any reap could drop the Sub. `modified_identity` next:
+    /// validation precedes detach so a malformed new path doesn't tear
+    /// down a live attachment for nothing. `added` last, after every
+    /// detach has freed its name slot.
+    ///
+    /// # Promoter side (wholesale modify, validate-then-act)
+    ///
+    /// 5. **Promoter `removed`** — resolve the name. `Some` ⇒
     ///    `reap_promoter_inner` (cancel the in-flight probe, detach
     ///    every dynamic Sub, release per-Resource contributions, drop
     ///    the registry entry). `None` ⇒
-    ///    [`Diagnostic::ConfigDiffUnknownPromoter`] (closes the old
-    ///    asymmetry where this case was a silent no-op).
-    /// 5. **Promoter `modified`** — wholesale: resolve, reap the old
-    ///    id if present, then `attach_promoter_inner`. The `name`
-    ///    survives across the cycle (the diff keys on it); the
-    ///    `PromoterId` is freshly minted.
-    /// 6. **Promoter `added`** — `attach_promoter_inner` runs descent
+    ///    [`Diagnostic::ConfigDiffUnknownPromoter`].
+    /// 6. **Promoter `modified`** — wholesale: dynamic-Sub fan-out
+    ///    makes per-Promoter rebind cross-cutting (every active dynamic
+    ///    Sub on the Promoter would need to rebind in lockstep), so v1
+    ///    retains the wholesale shape. [`Self::validate_promoter_attach`]
+    ///    pre-checks the rendered literal-prefix parse; on success, the
+    ///    engine reaps the old Promoter (if present) and attaches the
+    ///    new. On validation failure the old Promoter stays in place
+    ///    (same structural rollback as the Sub identity arm).
+    /// 7. **Promoter `added`** — `attach_promoter_inner` runs descent
     ///    or immediate-Active per the literal-prefix materialisation
     ///    outcome.
     ///
     /// Sub-side runs fully before the Promoter side so a static↔dynamic
     /// migration observes a registry that already reflects the
-    /// freshly-applied static Subs. Within each kind, removals run
-    /// before additions so a name-recycling rename doesn't transiently
-    /// alias against the old entry. The three lists per side are
+    /// freshly-applied static Subs. Within each side, the buckets are
     /// name-disjoint by diff construction, and each `find_by_name`
     /// reads the live registry *after* prior mutations in the same
     /// step — exactly the id the bin mirror used to supply.
     ///
-    /// All resulting ops (across every attach / detach in the diff)
-    /// merge into a single sorted `StepOutput`.
+    /// All resulting ops (across every attach / detach / rebind in the
+    /// diff) merge into a single sorted `StepOutput`.
     pub(crate) fn on_config_diff(
         &mut self,
         diff: WatchRegistryDiff,
@@ -1128,7 +1161,7 @@ impl Engine {
     ) {
         let WatchRegistryDiff { subs, promoters } = diff;
 
-        // ---- Sub side (removed → modified → added) ----
+        // ---- Sub side: removed → modified_params → modified_identity → added ----
         for name in subs.removed {
             match self.subs.find_by_name(&name) {
                 Some(sid) => self.detach_sub_inner(sid, out),
@@ -1137,7 +1170,34 @@ impl Engine {
                     .push(Diagnostic::ConfigDiffUnknownSub { name }),
             }
         }
-        for req in subs.modified {
+        for req in subs.modified_params {
+            match self.subs.find_by_name(&req.params.name) {
+                Some(sid) => {
+                    let SubAttachRequest { params, .. } = req;
+                    self.rebind_sub_inner(sid, params, out);
+                }
+                None => {
+                    // Prior attach failed; the Sub never entered the
+                    // registry. Params alone cannot apply to a
+                    // non-existent Sub — degrade to a fresh attach,
+                    // narrating the *reason* (the fallback attach
+                    // emits its own lifecycle diagnostics).
+                    out.diagnostics
+                        .push(Diagnostic::ConfigDiffRebindFallbackAttach {
+                            name: req.params.name.clone(),
+                        });
+                    let _ = self.attach_sub_inner(req, now, out);
+                }
+            }
+        }
+        for req in subs.modified_identity {
+            // Validate-then-act: a malformed new anchor leaves the old
+            // Sub in place. The validate is a pure read; on success
+            // the attach re-derives, so no engine state is captured
+            // across the detach-attach boundary.
+            if !self.validate_sub_attach(&req, out) {
+                continue;
+            }
             if let Some(old) = self.subs.find_by_name(&req.params.name) {
                 self.detach_sub_inner(old, out);
             }
@@ -1147,7 +1207,7 @@ impl Engine {
             let _ = self.attach_sub_inner(req, now, out);
         }
 
-        // ---- Promoter side (structurally identical) ----
+        // ---- Promoter side (wholesale modify retained for v1) ----
         for name in promoters.removed {
             match self.promoters.find_by_name(&name) {
                 Some(pid) => self.reap_promoter_inner(pid, out),
@@ -1157,6 +1217,9 @@ impl Engine {
             }
         }
         for req in promoters.modified {
+            if !Self::validate_promoter_attach(&req, out) {
+                continue;
+            }
             if let Some(old) = self.promoters.find_by_name(&req.name) {
                 self.reap_promoter_inner(old, out);
             }

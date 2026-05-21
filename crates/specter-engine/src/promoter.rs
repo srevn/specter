@@ -257,6 +257,51 @@ impl Engine {
         Some(promoter_id)
     }
 
+    /// Pure pre-check that returns `true` iff a subsequent
+    /// [`Self::attach_promoter_inner`] call with `req` would clear its
+    /// only fallible boundary — `Tree::parse_attach_path` on the
+    /// rendered literal prefix. Mutates nothing; never installs a
+    /// scaffold, never mints a `PromoterId`.
+    ///
+    /// Sole consumer is [`Self::on_config_diff`]'s `promoters.modified`
+    /// arm: it runs the validate *before* reaping the old Promoter so
+    /// a malformed prefix doesn't tear down a live Promoter for nothing.
+    /// The reap + attach pair is then total — validate said yes, so the
+    /// attach won't surface a parse error.
+    ///
+    /// Emits the same diagnostic [`Self::attach_promoter_inner`] would
+    /// on the failure path (`AttachPathInvalid`), so the validate-then-act
+    /// site never re-emits on its own. The re-parse at attach time (one
+    /// `Tree::parse_attach_path` call, O(prefix length), pure) is the cost
+    /// of total composition.
+    ///
+    /// Defense-in-depth: a `PatternSpec` that survived parse
+    /// validation cannot fail this check (the parser is strictly
+    /// stricter than `Tree::parse_attach_path`), so failure here would
+    /// signal an upstream contract breach. Emitting on failure rather
+    /// than `unreachable!`'ing keeps the engine total on bad input.
+    ///
+    /// Associated function — no engine state is read. The Sub-side
+    /// counterpart [`Self::validate_sub_attach`] is a `&self` method
+    /// because its `Resource` arm reads `self.tree`; this side has only
+    /// the rendered-prefix arm, so the honest shape carries no `&self`.
+    pub(crate) fn validate_promoter_attach(
+        req: &PromoterAttachRequest,
+        out: &mut StepOutput,
+    ) -> bool {
+        let prefix_path = render_literal_prefix(&req.pattern_spec);
+        match Tree::parse_attach_path(&prefix_path) {
+            Ok(_) => true,
+            Err(err) => {
+                out.diagnostics.push(Diagnostic::AttachPathInvalid {
+                    path: Arc::from(prefix_path),
+                    hint: err.hint(),
+                });
+                false
+            }
+        }
+    }
+
     /// Single helper for both Promoter materialisation paths —
     /// structurally identical to [`Engine::materialize_profile_anchor`]'s
     /// prefix → parent handoff:

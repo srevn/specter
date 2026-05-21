@@ -3651,16 +3651,17 @@ fn config_diff_removed_then_added_atomic() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// The name-keyed shim resolves `removed` / `modified` against the
+/// The name-keyed shim resolves `removed` / `modified_*` against the
 /// engine's own registry:
 ///
 /// - a `removed` name the engine never attached emits
 ///   `Diagnostic::ConfigDiffUnknownSub` — not a silent skip, and not a
 ///   stale-id `DetachUnknownSub`;
-/// - a `modified` name the engine never attached degrades to an
-///   attach-only retry — the watch is registered fresh rather than
-///   skipped, so a name whose earlier attach failed
-///   (`AttachPathInvalid`) can recover on a later reload.
+/// - a `modified_params` name the engine never attached degrades to an
+///   attach-only retry, narrated by `ConfigDiffRebindFallbackAttach`.
+///   A watch whose earlier attach failed (`AttachPathInvalid`) can
+///   recover on a later reload through this path rather than being
+///   skipped forever.
 ///
 /// Pins the Sub side; the Promoter twin is
 /// `config_diff_promoter_removed_with_unknown_name_emits_diagnostic`.
@@ -3681,7 +3682,7 @@ fn config_diff_unknown_removed_diagnoses_unknown_modified_retries_as_attach() {
     );
     let mut subs = specter_core::SubRegistryDiff::default();
     subs.removed.push(CompactString::from("ghost")); // never attached
-    subs.modified.push(revenant); // never attached ⇒ attach-only
+    subs.modified_params.push(revenant); // never attached ⇒ attach-only fallback
 
     let out = e.step(
         Input::ConfigDiff(WatchRegistryDiff {
@@ -3700,6 +3701,15 @@ fn config_diff_unknown_removed_diagnoses_unknown_modified_retries_as_attach() {
         out.diagnostics,
     );
     assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ConfigDiffRebindFallbackAttach { name } if name == "revenant"
+        )),
+        "modified_params name with no live Sub must narrate \
+         ConfigDiffRebindFallbackAttach; got {:?}",
+        out.diagnostics,
+    );
+    assert!(
         !out.diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::DetachUnknownSub { .. })),
@@ -3708,8 +3718,8 @@ fn config_diff_unknown_removed_diagnoses_unknown_modified_retries_as_attach() {
     );
     assert!(
         e.subs().find_by_name("revenant").is_some(),
-        "a `modified` name the engine never attached retries as a fresh \
-         attach (registered, not skipped forever)",
+        "a `modified_params` name the engine never attached retries as \
+         a fresh attach (registered, not skipped forever)",
     );
     assert!(
         e.subs().find_by_name("ghost").is_none(),

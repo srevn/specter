@@ -99,22 +99,18 @@ fn mixed_add_diff_emits_both_lifecycle_diagnostics() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `subs.modified` + `promoters.modified` together: each modify is
-/// reap-then-attach. The `SubAttached` for the modified static Sub
-/// and the `PromoterAttached` for the modified Promoter both emit;
-/// each is preceded by the corresponding reap (no `SubDetached`
-/// variant exists — the absence is the contract — but
-/// `PromoterReaped` precedes the fresh `PromoterAttached`).
-///
-/// Pins the bin's reconciliation discipline: a modified entry
-/// surfaces as one `*Reaped` for the old + one `*Attached` for
-/// the new, in that order; the bin's name-keyed map overwrite
-/// produces the correct end state.
+/// `subs.modified_params` + `promoters.modified` in one diff exercise
+/// the two arms' contrasting shapes: the Sub side rebinds the live
+/// Sub in place (preserving [`SubId`]) while the Promoter side runs
+/// wholesale reap-then-attach (minting a fresh [`PromoterId`]). The
+/// Promoter pair is ordered: `PromoterReaped` precedes the fresh
+/// `PromoterAttached` so the bin's reconciliation discipline observes
+/// the correct end state.
 // Codebase-standard SubId/PromoterId names; the old↔new × Sub↔Promoter
 // parallelism is this test's subject, not accidental similarity.
 #[allow(clippy::similar_names)]
 #[test]
-fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
+fn mixed_modify_diff_rebinds_sub_and_reaps_then_attaches_promoter() {
     let mut e = Engine::new();
     let sub_req = sub_req_at_root("build", &mut e);
 
@@ -125,12 +121,10 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
         specter_core::testkit::first_attached_sub(&attach_out_a).expect("attach_sub succeeded");
     let old_pid = attach_promoter(&mut e, "logs", "/var/log/*.log", now);
 
-    // Build a modify-diff: same names; both entries with a
-    // structurally-distinct request. The static Sub keeps its
-    // resource but with a different command (the test rig's
-    // `empty_program()` — for symmetry; the registry minted a
-    // fresh id regardless on modify). The Promoter changes its
-    // pattern (pattern source changed).
+    // Same anchor, same identity (the params bucket discriminator) —
+    // the Sub falls into `modified_params` and the engine rebinds in
+    // place. The Promoter changes its pattern source (identity in the
+    // operator sense) and so goes through the wholesale reap+attach.
     let modify_sub_req = SubAttachRequest {
         anchor: sub_req.anchor,
         identity: sub_req.identity,
@@ -143,7 +137,7 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
 
     let diff = WatchRegistryDiff {
         subs: SubRegistryDiff {
-            modified: vec![modify_sub_req],
+            modified_params: vec![modify_sub_req],
             ..Default::default()
         },
         promoters: PromoterRegistryDiff {
@@ -153,14 +147,12 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
     };
     let out = e.step(Input::ConfigDiff(diff), now);
 
-    // PromoterReaped(old_pid) precedes PromoterAttached(name=logs)
-    // for the modified Promoter. SubAttached(name=build) appears
-    // for the modified Sub. (No SubDetached / SubReaped variant —
-    // the diff's `removed`/`modified` lists are the authoritative
-    // source for what disappeared.)
+    // Promoter: PromoterReaped(old_pid) precedes
+    // PromoterAttached(name=logs). Sub: SubRebound for the live
+    // SubId, no SubAttached (rebind preserves the id).
     let mut saw_promoter_reaped = false;
     let mut saw_promoter_attached_after = false;
-    let mut saw_sub_attached_for_build = false;
+    let mut saw_sub_rebound = false;
     for d in &out.diagnostics {
         match d {
             Diagnostic::PromoterReaped { promoter } if *promoter == old_pid => {
@@ -174,11 +166,10 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
                 );
                 saw_promoter_attached_after = true;
             }
-            Diagnostic::SubAttached {
-                name,
-                source_promoter: None,
-                ..
-            } if name == "build" => saw_sub_attached_for_build = true,
+            Diagnostic::SubRebound { sub } if *sub == old_sid => saw_sub_rebound = true,
+            Diagnostic::SubAttached { sub, .. } if *sub == old_sid => panic!(
+                "modified_params must rebind in place, not re-attach (got SubAttached for old_sid)",
+            ),
             _ => {}
         }
     }
@@ -188,13 +179,17 @@ fn mixed_modify_diff_emits_reap_then_attach_for_both_streams() {
         "PromoterAttached emitted on modify"
     );
     assert!(
-        saw_sub_attached_for_build,
-        "SubAttached emitted on Sub modify"
+        saw_sub_rebound,
+        "SubRebound emitted on modified_params (in-place rebind)",
     );
 
-    // Registry state: fresh ids minted, old ids gone.
-    let new_sid = e.subs().find_by_name("build").expect("build re-registered");
-    assert_ne!(new_sid, old_sid, "Sub modify mints a fresh id");
+    // Registry state: Sub preserves its id (rebind); Promoter mints
+    // a fresh id (wholesale modify).
+    let new_sid = e.subs().find_by_name("build").expect("build still live");
+    assert_eq!(
+        new_sid, old_sid,
+        "modified_params rebind preserves the SubId",
+    );
     let new_pid = e
         .promoters()
         .find_by_name("logs")

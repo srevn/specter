@@ -136,10 +136,14 @@ impl EngineDriver {
         // before the diff moves into the engine. Name-keyed: the
         // engine resolves each name to its live id against its own
         // registries, so the bin keeps no `name → id` mirror to
-        // reconcile afterwards.
+        // reconcile afterwards. The Sub side reports `modified_identity`
+        // and `modified_params` separately so triage can see at a
+        // glance whether a reload tore down Profiles (identity) or
+        // only rebound per-Sub fields (params).
         let added_n = diff.subs.added.len();
         let removed_n = diff.subs.removed.len();
-        let modified_n = diff.subs.modified.len();
+        let modified_identity_n = diff.subs.modified_identity.len();
+        let modified_params_n = diff.subs.modified_params.len();
         let promoter_added_n = diff.promoters.added.len();
         let promoter_removed_n = diff.promoters.removed.len();
         let promoter_modified_n = diff.promoters.modified.len();
@@ -152,7 +156,8 @@ impl EngineDriver {
         tracing::info!(
             added = added_n,
             removed = removed_n,
-            modified = modified_n,
+            modified_identity = modified_identity_n,
+            modified_params = modified_params_n,
             promoters_added = promoter_added_n,
             promoters_removed = promoter_removed_n,
             promoters_modified = promoter_modified_n,

@@ -187,6 +187,17 @@ pub enum Diagnostic {
     /// the engine has no record of. Benign and informational: there is
     /// nothing to reap.
     ConfigDiffUnknownPromoter { name: CompactString },
+    /// `Input::ConfigDiff`'s Sub `modified_params` bucket named a watch
+    /// the engine has no record of — typically a name whose prior
+    /// attach failed ([`Self::AttachPathInvalid`]) so it never entered
+    /// the registry. The dispatcher cannot rebind a Sub that does not
+    /// exist, so it degrades the entry to a fresh attach (the same
+    /// effect a future operator-driven attach would have on a clean
+    /// registry). This variant frames the *reason* for triage; the
+    /// fallback attach emits its own lifecycle diagnostics
+    /// ([`Self::SubAttached`] on success, [`Self::AttachPathInvalid`] /
+    /// [`Self::AttachResourceStale`] on failure) independently.
+    ConfigDiffRebindFallbackAttach { name: CompactString },
     /// Probe returned `Vanished` during a `Seed` or `Standard` burst. The
     /// Engine's response differs by intent; the variant preserves the intent
     /// for log readability.
@@ -534,6 +545,31 @@ pub enum Diagnostic {
         name: CompactString,
         source_promoter: Option<PromoterId>,
     },
+    /// A Sub's per-Sub fields (`program`, `scope`, `settle`,
+    /// `log_output`) were rebound in place via `rebind_sub_inner` — the
+    /// `modified_params` arm of [`crate::WatchRegistryDiff`]'s Sub side.
+    /// Symmetric with [`Self::SubAttached`]; pure operator narration.
+    ///
+    /// **`has_fired` is preserved across rebind.** The B1 dedup floor
+    /// reads it as "this Sub has already announced the current stable
+    /// tree state"; a program swap changes *what runs*, not *whether
+    /// the tree changed*. The next event-driven burst picks up the new
+    /// program; the next `seed_drift_observed` picks up the new scope
+    /// and `needs_diff`. Operators who specifically want a re-fire
+    /// after a program swap can restart Specter.
+    ///
+    /// No `name` field: identity is by id, and the rebind invariant
+    /// guarantees the prior `SubAttached`'s name is still in force.
+    SubRebound { sub: SubId },
+    /// `rebind_sub_inner` was invoked with a stale [`SubId`]. The
+    /// invariant is that the dispatcher resolves names through
+    /// [`crate::SubRegistry::find_by_name`] in the same step as the
+    /// rebind, so a stale id is structurally unexpected: the variant
+    /// surfaces a routing breach rather than a benign no-op. Distinct
+    /// from [`Self::DetachUnknownSub`] (a stale-id detach attempt) and
+    /// from [`Self::EffectCompleteForUnknownSub`] (a stray completion
+    /// arrival).
+    RebindUnknownSub { sub: SubId },
     /// A Promoter has been registered with the engine and assigned
     /// `promoter`. Emitted by `attach_promoter_inner`. Pure operator
     /// narration (the bin logs it at INFO); `name` carries the

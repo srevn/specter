@@ -207,6 +207,18 @@ pub struct SubSpec {
     /// field compare unequal. The diff layer's filter strips disabled
     /// entries *before* the equality check, so this matters only for
     /// future consumers that compare unfiltered specs.
+    ///
+    /// **Cost of a disable → re-enable cycle.** Because the diff
+    /// surfaces a `false → true` flip as `subs.added` (and the reverse
+    /// as `subs.removed`), every disable/re-enable cycle reaps the
+    /// Sub's Profile (its last live Sub left) and mints a fresh
+    /// Profile on re-enable. The fresh Profile has no baseline, so
+    /// changes that landed on the tree *during* the disabled window
+    /// are folded into the first post-re-enable Seed rather than
+    /// surfacing as a fire. Operators relying on baseline continuity
+    /// across reconfiguration should avoid the disable/re-enable
+    /// pattern for transient toggles; a future "suspend, don't reap"
+    /// path is the deeper fix.
     pub enabled: bool,
 }
 
@@ -224,6 +236,37 @@ impl SubSpec {
             self.events,
             self.log_output,
         )
+    }
+
+    /// True iff changing the live attachment from `self` to `other`
+    /// would require a different Profile partition — the discriminator
+    /// behind hot-reload's `modified_identity` vs `modified_params`
+    /// split.
+    ///
+    /// The engine partitions Profiles on
+    /// `(anchor_resource, ProfileIdentity::config_hash())`. Four
+    /// `SubSpec` fields fold into that key: `path` resolves into the
+    /// anchor resource; `scan`, `max_settle`, and `events` fold into
+    /// the hash via `ProfileIdentity::config_hash`. Any difference on
+    /// these forces the Sub onto a different Profile and routes the
+    /// entry into `modified_identity`.
+    ///
+    /// The remaining `SubSpec` fields — `program`, `scope`, `settle`,
+    /// `log_output` — live on `SubParams` and rebind in place; they do
+    /// not partition the Profile. The `name` field is the diff key
+    /// (two specs differing on `name` are distinct entries, not a
+    /// modification) and `enabled` is filtered out before the diff
+    /// runs (an enabled-flip surfaces as added/removed, not modified).
+    ///
+    /// Field-derived, not hash-derived: comparing fields directly is
+    /// allocation-free and avoids constructing a [`ProfileIdentity`]
+    /// only to compare and discard.
+    #[must_use]
+    pub(crate) fn requires_new_profile(&self, other: &Self) -> bool {
+        self.path != other.path
+            || self.scan != other.scan
+            || self.max_settle != other.max_settle
+            || self.events != other.events
     }
 }
 
@@ -260,10 +303,15 @@ pub struct PromoterSpec {
     /// Threaded into each synthesized dynamic Sub. See
     /// [`SubSpec::log_output`].
     pub log_output: bool,
-    /// Operator-controlled suppression flag — see [`SubSpec::enabled`].
-    /// Disabling a Promoter is structurally equivalent to removing it:
-    /// no descent runs, no dynamic Subs are spawned, no
-    /// `watch_demand` is contributed. Re-enabling triggers a fresh
+    /// Operator-controlled suppression flag — see [`SubSpec::enabled`]
+    /// (including the disable→re-enable baseline-loss cost, which
+    /// applies identically here: every disable/re-enable cycle reaps
+    /// the Promoter and re-attaches fresh, so any dynamic Subs the
+    /// pattern would have spawned during the disabled window only
+    /// surface on the next post-re-enable enumeration). Disabling a
+    /// Promoter is structurally equivalent to removing it: no descent
+    /// runs, no dynamic Subs are spawned, no `watch_demand` is
+    /// contributed. Re-enabling triggers a fresh
     /// `attach_promoter_inner` (no zombie revival path exists for
     /// Promoters in v1; dynamic Subs spawned across a disable/enable
     /// cycle get freshly-minted `SubId`s).
