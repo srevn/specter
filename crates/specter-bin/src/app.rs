@@ -31,6 +31,7 @@ use specter_sensor::{
     ConfigWatcher, DrainWindow, FsWatcher, WakeHandle, WatcherEvent, WorkerProber,
     default_config_watcher, default_watcher,
 };
+use std::io;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
 use std::process::ExitCode;
@@ -202,13 +203,26 @@ pub fn run(cli: Cli) -> ExitCode {
     );
 
     // Watcher thread.
-    let watcher_handle = spawn_watcher_thread(watcher, chans.watcher, Arc::clone(&shutdown_flag));
+    let watcher_handle =
+        match spawn_watcher_thread(watcher, chans.watcher, Arc::clone(&shutdown_flag)) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!(?e, "failed to spawn watcher thread");
+                return ExitCode::from(1);
+            }
+        };
 
     // Actuator thread.
     let actuator_concurrency = cli
         .concurrency
         .map_or(specter_actuator::DEFAULT_CONCURRENCY, NonZeroUsize::get);
-    let actuator_handle = spawn_actuator_thread(actuator_concurrency, chans.actuator);
+    let actuator_handle = match spawn_actuator_thread(actuator_concurrency, chans.actuator) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(?e, "failed to spawn actuator thread");
+            return ExitCode::from(1);
+        }
+    };
 
     // Engine driver — main thread.
     let config_path = cli.config;
@@ -254,11 +268,20 @@ pub fn run(cli: Cli) -> ExitCode {
                 let (config_event_tx, config_event_rx) = bounded::<()>(1);
                 match FileMeta::from_path(&config_path) {
                     Ok(post_init_meta) if post_init_meta != initial_meta => {
-                        if toctou_reload_tx.try_send(()).is_ok() {
-                            tracing::info!(
-                                "config changed during startup; reload queued via SIGHUP path"
-                            );
-                        }
+                        // Meta inequality is the *detection* fact; the
+                        // `try_send` outcome is the *delivery* fact. Log
+                        // the detection unconditionally — `Err(Full)`
+                        // means an operator-issued SIGHUP raced the
+                        // lstat between `spawn_signal_thread` above and
+                        // here, and the queued pulse will handle this
+                        // same drift; silently dropping the *pulse* is
+                        // correct (one reload covers both drifts),
+                        // silently dropping the *log* is the bug.
+                        // `FileMeta` covers mtime / size / mode, so an
+                        // in-place `echo > file` is caught alongside
+                        // the atomic-save (write-tmp → rename) flow.
+                        tracing::info!("config changed during startup; reload queued");
+                        let _ = toctou_reload_tx.try_send(());
                     }
                     Ok(_) => {}
                     Err(e) => tracing::warn!(
@@ -267,11 +290,17 @@ pub fn run(cli: Cli) -> ExitCode {
                     ),
                 }
                 let cw_wake = watcher.wake_handle();
-                let cw_handle = spawn_config_watcher_thread(
+                let cw_handle = match spawn_config_watcher_thread(
                     watcher,
                     ConfigWatcherSide { config_event_tx },
                     Arc::clone(&shutdown_flag),
-                );
+                ) {
+                    Ok(h) => h,
+                    Err(e) => {
+                        tracing::error!(?e, "failed to spawn config-watcher thread");
+                        return ExitCode::from(1);
+                    }
+                };
                 (Some(config_event_rx), Some((cw_handle, cw_wake)))
             }
             Err(e) => {
@@ -398,11 +427,18 @@ pub(crate) struct CliLogOverrides {
 
 /// Spawn the watcher thread. Owns the [`DefaultWatcher`] for its
 /// lifetime; drop closes the underlying fd(s) on exit.
+///
+/// Returns the [`JoinHandle`] on success and the underlying
+/// [`io::Error`] on `thread::Builder::spawn` failure (typically
+/// `EAGAIN` under process-wide thread-limit pressure). The caller
+/// translates the error to a startup-fail [`ExitCode`], mirroring the
+/// uniform "startup failure → exit 1" contract every other init path
+/// in [`run`] honours.
 fn spawn_watcher_thread(
     mut watcher: specter_sensor::DefaultWatcher,
     sides: crate::channels::WatcherSide,
     shutdown_flag: Arc<AtomicBool>,
-) -> JoinHandle<()> {
+) -> io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("specter-watcher".into())
         .spawn(move || {
@@ -419,7 +455,6 @@ fn spawn_watcher_thread(
             }
             // `watcher` drops here, closing the kqueue fd.
         })
-        .expect("spawn watcher thread")
 }
 
 /// Watcher event loop body. Generic over the watcher type so sibling
@@ -512,11 +547,15 @@ pub(crate) fn watcher_loop<W: FsWatcher>(
 /// [`ConfigWatcher`] implementation, and a `catch_unwind` around the
 /// loop body localises a watcher-side panic to "thread exits;
 /// SIGHUP-only continues" — the rest of the bin keeps running.
+///
+/// Returns [`io::Error`] on `thread::Builder::spawn` failure; the
+/// caller translates to a startup-fail [`ExitCode`], same shape as
+/// every other init path in [`run`].
 fn spawn_config_watcher_thread(
     mut watcher: specter_sensor::DefaultConfigWatcher,
     sides: crate::channels::ConfigWatcherSide,
     shutdown_flag: Arc<AtomicBool>,
-) -> JoinHandle<()> {
+) -> io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("specter-config-watcher".into())
         .spawn(move || {
@@ -531,7 +570,6 @@ fn spawn_config_watcher_thread(
             }
             // `watcher` drops here, closing the kqueue / inotify fd(s).
         })
-        .expect("spawn config-watcher thread")
 }
 
 /// Config-watcher event loop. Generic over the watcher type so sibling
@@ -632,10 +670,14 @@ pub(crate) fn apply_watch_op<W: FsWatcher>(
 /// Spawn the actuator thread. Constructs [`SubprocessActuator`] with
 /// the resolved concurrency, runs the controller blocking until either
 /// `effects_rx` disconnects or `shutdown_actuator_rx` fires.
+///
+/// Returns [`io::Error`] on `thread::Builder::spawn` failure; the
+/// caller translates to a startup-fail [`ExitCode`], same shape as
+/// every other init path in [`run`].
 fn spawn_actuator_thread(
     concurrency: usize,
     sides: crate::channels::ActuatorSide,
-) -> JoinHandle<()> {
+) -> io::Result<JoinHandle<()>> {
     thread::Builder::new()
         .name("specter-actuator".into())
         .spawn(move || {
@@ -657,7 +699,6 @@ fn spawn_actuator_thread(
                 );
             }
         })
-        .expect("spawn actuator thread")
 }
 
 #[cfg(test)]

@@ -42,15 +42,15 @@ use std::time::{Duration, Instant};
 
 /// Max gap between two terminations before the second escalates to a
 /// hard exit. Operator pressing Ctrl-C twice in <2s → "I'm done waiting."
-pub const HARD_EXIT_WINDOW: Duration = Duration::from_secs(2);
+pub(crate) const HARD_EXIT_WINDOW: Duration = Duration::from_secs(2);
 
 /// Exit code conventionally used for "killed by SIGINT" (128 + 2).
-pub const HARD_EXIT_CODE: i32 = 130;
+pub(crate) const HARD_EXIT_CODE: i32 = 130;
 
 /// Outcome of a single [`dispatch_signal`] call. Production code
 /// ignores it; tests assert on it.
 #[derive(Debug, Eq, PartialEq)]
-pub enum SignalOutcome {
+pub(crate) enum SignalOutcome {
     /// SIGHUP routed through `reload_signal_tx`.
     ReloadRequested,
     /// First SIGINT/SIGTERM observed; shutdown broadcast.
@@ -69,8 +69,8 @@ pub enum SignalOutcome {
 /// signal thread; sibling tests construct one and drive
 /// [`dispatch_signal`] manually.
 #[derive(Debug, Default)]
-pub struct SignalState {
-    pub first_term: Option<Instant>,
+pub(crate) struct SignalState {
+    pub(crate) first_term: Option<Instant>,
 }
 
 /// Pure-ish dispatch — separated from [`Signals::forever`] so tests
@@ -79,7 +79,7 @@ pub struct SignalState {
 /// `exit_fn` is invoked on the hard-exit path (second SIGINT/SIGTERM
 /// within [`HARD_EXIT_WINDOW`]). Production passes `|code| std::process::exit(code)`;
 /// tests pass a closure that records the request.
-pub fn dispatch_signal<F>(
+pub(crate) fn dispatch_signal<F>(
     sig: i32,
     now: Instant,
     state: &mut SignalState,
@@ -93,10 +93,20 @@ where
 {
     match sig {
         SIGHUP => {
-            tracing::info!("SIGHUP — config reload requested");
-            // try_send returns Err(Full) if a previous SIGHUP is
-            // already queued — which is what we want (coalesce).
-            let _ = side.reload_signal_tx.try_send(());
+            // Branch the log on the routing outcome so an operator
+            // sees the structural state per pulse. `Err(Full)` (slot
+            // already pulsed) and `Err(Disconnected)` (engine driver
+            // gone — shutting down) both fold to "coalesced" from the
+            // operator's perspective; debug is the right severity for
+            // the duplicate-pulse path. The return is unconditional —
+            // the operator's intent to reload is the same regardless
+            // of how the dispatch routed.
+            match side.reload_signal_tx.try_send(()) {
+                Ok(()) => tracing::info!("SIGHUP — config reload queued"),
+                Err(_) => {
+                    tracing::debug!("SIGHUP — coalesced (prior reload still pending)");
+                }
+            }
             SignalOutcome::ReloadRequested
         }
         SIGINT | SIGTERM => {
@@ -140,7 +150,7 @@ where
 /// thread-private signal mask, basically a fork-bomb scenario), the
 /// inner closure logs and returns; the bin proceeds without signal
 /// handling and exits via Ctrl-C's kernel-default action.
-pub fn spawn_signal_thread(
+pub(crate) fn spawn_signal_thread(
     side: SignalSide,
     shutdown_flag: Arc<AtomicBool>,
     wake_handle: Box<dyn WakeHandle>,

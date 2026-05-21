@@ -54,7 +54,7 @@ use tracing_subscriber::{
 ///
 /// Cheap to construct via `ObservabilityHandle::noop` for tests that
 /// don't exercise the SIGHUP API.
-pub struct ObservabilityHandle {
+pub(crate) struct ObservabilityHandle {
     /// Reload handle for the level filter. `None` for noop handles
     /// (tests). Path / destination changes are not hot-reloaded in v1.
     level_reload: Option<reload::Handle<EnvFilter, Registry>>,
@@ -82,7 +82,7 @@ impl ObservabilityHandle {
     /// engine driver) at `error!` and otherwise ignored — a failed reload
     /// leaves the existing level in place. Returns `Ok(())` for noop
     /// handles (the level is already a no-op).
-    pub fn set_level(&self, level: LogLevel) -> Result<(), reload::Error> {
+    pub(crate) fn set_level(&self, level: LogLevel) -> Result<(), reload::Error> {
         let Some(handle) = &self.level_reload else {
             return Ok(());
         };
@@ -94,7 +94,7 @@ impl ObservabilityHandle {
     /// `Stderr` (no-op). Production callers (the SIGHUP path) call this
     /// unconditionally; logrotate's `copytruncate` mode benefits even
     /// when the path didn't change in config.
-    pub fn reopen_file(&self) -> io::Result<()> {
+    pub(crate) fn reopen_file(&self) -> io::Result<()> {
         let Some(handle) = &self.file_reopen else {
             return Ok(());
         };
@@ -107,7 +107,7 @@ impl ObservabilityHandle {
     /// The file destination's path, if any. Used by the driver for log
     /// messages — never to make routing decisions.
     #[must_use]
-    pub fn file_path(&self) -> Option<&Path> {
+    pub(crate) fn file_path(&self) -> Option<&Path> {
         self.file_path.as_deref()
     }
 
@@ -142,7 +142,7 @@ impl ObservabilityHandle {
 /// thread); the field is never read directly.
 #[must_use = "drop the guard *last* — `tracing::*` events fired on a \
               dropped guard's appender are silently discarded"]
-pub struct ObservabilityGuard {
+pub(crate) struct ObservabilityGuard {
     file_guard: Option<WorkerGuard>,
 }
 
@@ -155,9 +155,8 @@ impl std::fmt::Debug for ObservabilityGuard {
 }
 
 /// Install the global subscriber. Must be called exactly once per
-/// process; a second call returns
-/// [`io::ErrorKind::AlreadyExists`] (the global subscriber slot is
-/// taken).
+/// process; a second call returns an [`io::Error`] whose `Display`
+/// text identifies the subscriber slot as already taken.
 ///
 /// Validation of `cfg` is the caller's responsibility — for
 /// [`LogDestination::File`], `cfg.path` must be `Some` and absolute,
@@ -165,7 +164,7 @@ impl std::fmt::Debug for ObservabilityGuard {
 /// once; an `io::Error` propagates with the offending path embedded so
 /// the bin can surface a sane startup failure message before the
 /// subscriber is alive.
-pub fn init(cfg: &LogConfig) -> io::Result<(ObservabilityHandle, ObservabilityGuard)> {
+pub(crate) fn init(cfg: &LogConfig) -> io::Result<(ObservabilityHandle, ObservabilityGuard)> {
     let directive = level_directive(cfg.level);
     let env_filter = EnvFilter::new(directive);
     let (filter_layer, level_reload) = reload::Layer::new(env_filter);
@@ -249,14 +248,15 @@ const fn level_directive(level: LogLevel) -> &'static str {
     }
 }
 
-/// Map `try_init`'s opaque error to `AlreadyExists` so `App::run` can
-/// distinguish "subscriber slot taken" (a programming bug or test-suite
-/// state leak) from genuine I/O failures.
+/// Map `try_init`'s opaque error to an `io::Error` whose `Display` text
+/// identifies the cause. The `ErrorKind` is `Other` — there is no
+/// standard `io::ErrorKind` variant for "global subscriber already
+/// installed," and `AlreadyExists` is path-existence semantics that
+/// would mislead any caller matching on kind. The bin's callers
+/// (`App::run`) match on neither — they format `Display` to stderr and
+/// exit — so the kind is purely documentary.
 fn already_installed_err(e: &tracing_subscriber::util::TryInitError) -> io::Error {
-    io::Error::new(
-        io::ErrorKind::AlreadyExists,
-        format!("global tracing subscriber already installed: {e}"),
-    )
+    io::Error::other(format!("global tracing subscriber already installed: {e}"))
 }
 
 /// Reopenable file writer for the `file` destination.
