@@ -1464,6 +1464,16 @@ impl Engine {
         // `reap_profile`'s structural enforcement.
         self.cancel_owner_probe(ProbeOwner::Promoter(promoter_id), out);
 
+        // Reap is the only "done with this owner forever" edge; drop
+        // its `DispatchLedger` high-water so the debug-only `BTreeMap`
+        // doesn't grow with the cumulative count of ever-attached
+        // Promoters. Correctness-preserving (the next attach at the
+        // same SlotMap slot bumps the generation, producing a distinct
+        // `ProbeOwner`); release-only the call compiles out.
+        #[cfg(debug_assertions)]
+        self.dispatch_ledger
+            .forget(ProbeOwner::Promoter(promoter_id));
+
         // 2. Detach every dynamic Sub this Promoter minted. Derived
         // from live `SubRegistry` truth (the dedup map was deleted —
         // nothing to drain, nothing to drift) by scanning for

@@ -1188,6 +1188,15 @@ impl Engine {
         // tripwire in every build — the discard *is* the enforcement.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
 
+        // Reap is the only "done with this owner forever" edge; drop
+        // its `DispatchLedger` high-water so the debug-only `BTreeMap`
+        // doesn't grow with the cumulative count of ever-attached
+        // Profiles. Correctness-preserving (the next attach at the
+        // same SlotMap slot bumps the generation, producing a distinct
+        // `ProbeOwner`); release-only the call compiles out.
+        #[cfg(debug_assertions)]
+        self.dispatch_ledger.forget(ProbeOwner::Profile(profile_id));
+
         // Release quartet — group (2) of the partial order (see rustdoc).
         // Members are mutually independent; the four helpers touch
         // disjoint state. Code order chosen for readability (1-to-1

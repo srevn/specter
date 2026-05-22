@@ -142,6 +142,22 @@ impl DispatchLedger {
              {prior:?} — a probe correlation reached a dispatch arm more than once",
         );
     }
+
+    /// Drop `owner`'s high-water entry, bounding the ledger's memory
+    /// under owner churn — without this the `BTreeMap` would grow with
+    /// the cumulative count of distinct `ProbeOwner` values ever
+    /// observed (property tests / fuzzers that attach and reap
+    /// repeatedly). Correctness-preserving: a re-attach at the same
+    /// `SlotMap` slot bumps the generation, so the re-formed
+    /// `ProbeOwner = (index, generation)` is distinct and starts a
+    /// fresh high-water regardless of this remove; the engine-wide
+    /// monotone mint preserves the strictly-greater invariant either
+    /// way. Sole callers: the two reap helpers (`reap_profile`,
+    /// `reap_promoter_inner`), immediately after the cancel that
+    /// disarms the owner's slot for the last time.
+    pub(crate) fn forget(&mut self, owner: ProbeOwner) {
+        self.high_water.remove(&owner);
+    }
 }
 
 impl Engine {
