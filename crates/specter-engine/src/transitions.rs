@@ -2934,6 +2934,25 @@ impl Engine {
         };
         let outstanding = *outstanding;
         let zombie = matches!(finish, BurstFinish::Reap);
+
+        // Engine→actuator effect-cancel emission — the single
+        // abandonment site, structural dual of `cancel_owner_probe`
+        // for probes. Emitted *before* the phase change so the
+        // actuator sees the cancel ahead of any rebase probe
+        // response that could (in a future cross-step sequence)
+        // trigger a `restart_burst_from_fire_tail_residual` and
+        // re-submit effects for the same profile. The actuator's
+        // `handle_cancel` SIGTERMs in-flight children for this
+        // profile and drops queued work; the wait threads still
+        // drive natural reap, and the engine routes the late
+        // `EffectComplete` to `EffectCompleteOutsideAwaiting`
+        // (zombie case routes to `EffectCompleteForUnknownSub`).
+        // Same emission shape for both zombie and force-rebasing —
+        // the OS resources held by hung children must be released
+        // regardless of whether the Profile has a consumer for the
+        // rebased baseline.
+        out.push_cancel_effect(profile_id);
+
         out.diagnostics.push(if zombie {
             Diagnostic::AwaitGateDeadlineReap {
                 profile: profile_id,

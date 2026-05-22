@@ -6552,13 +6552,16 @@ mod props {
     }
 
     fn extend_step_output(dst: &mut StepOutput, src: StepOutput) {
-        let (watch_ops, probe_ops, effects, diagnostics) = src.into_parts();
+        let (watch_ops, probe_ops, effects, cancel_effects, diagnostics) = src.into_parts();
         dst.watch_ops.extend(watch_ops);
         for op in probe_ops.into_values() {
             dst.push_probe_op(op);
         }
         for ef in effects {
             dst.push_effect(ef);
+        }
+        for profile in cancel_effects {
+            dst.push_cancel_effect(profile);
         }
         dst.diagnostics.extend(diagnostics);
     }

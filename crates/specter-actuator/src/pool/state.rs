@@ -49,7 +49,7 @@ use crate::timer;
 use crate::tmp::DiffTmpFile;
 use crossbeam::channel::Sender;
 use specter_core::program::{BranchTarget, ExecAction, SpawnBody};
-use specter_core::{DedupKey, Effect, EffectOutcome, Input, SubId, Termination};
+use specter_core::{DedupKey, Effect, EffectOutcome, Input, ProfileId, SubId, Termination};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -367,6 +367,105 @@ impl ActuatorState {
     ) {
         self.reap_pump(reaped, engine_in, spawner, reap_tx);
         self.pump(spawner, reap_tx, engine_in);
+    }
+
+    /// Engine-driven per-profile abandon of in-flight effects.
+    ///
+    /// Sole caller: the controller's `effects_rx` arm on
+    /// [`specter_core::EffectOp::Cancel`], fed by the engine's
+    /// `handle_gate_deadline` emission. The engine is the authority
+    /// on what's worth running; this handler is the obeyer.
+    ///
+    /// **Per matching slot** (slots whose [`DedupKey::profile`] equals
+    /// `profile`):
+    ///
+    /// 1. Drop `pending` and `plan_continue` — queued work the engine
+    ///    has already given up on; either becoming live would respawn
+    ///    work the engine doesn't track.
+    /// 2. Clear `in_ready_queue` — paired with the `ready_queue`
+    ///    `retain` below; together they preserve the "in queue ⇔ flag
+    ///    set" invariant the pump's blocked-scratch drain pins.
+    /// 3. SIGTERM the running child if any. The signaler short-
+    ///    circuits on `is_dead`, so a race with a natural reap is
+    ///    benign (SIGTERM on a reaped pid is a documented no-op).
+    /// 4. Leave `slot.running` in place. The wait thread will deliver
+    ///    [`Reaped`](super::Reaped) through the existing pipeline;
+    ///    [`Self::handle_reap`] will run [`Self::terminate_plan`] and
+    ///    emit [`Input::EffectComplete`] to the engine, which routes
+    ///    that late completion to `EffectCompleteOutsideAwaiting` (the
+    ///    Profile has left `Awaiting` by then).
+    ///
+    /// **Ready-queue cleanup is load-bearing.** The pump's spawn arm
+    /// unconditionally calls `slot.pending.take().expect(...)` after
+    /// the `plan_continue` branch. If this handler left a key in
+    /// `ready_queue` with `pending = None && plan_continue = None`,
+    /// the next pump would pop that key and panic on the `expect`. So
+    /// this handler MUST `retain` the queue to drop cancelled-profile
+    /// keys; clearing `in_ready_queue` in step 2 keeps the "in queue
+    /// ⇔ flag set" invariant the blocked-scratch drain pins.
+    ///
+    /// **`running_subs` is NOT touched.** A SIGTERMed child still
+    /// drives reap → [`Self::handle_reap`] → [`Self::terminate_plan`],
+    /// which owns the `running_subs` removal. Removing here would
+    /// race with the concurrent reap and could clobber a same-Sub
+    /// fresh plan at a different [`DedupKey`] — the precise scenario
+    /// `terminate_stale` guards against (see its rustdoc on why the
+    /// per-Sub gate's bump pairs to a specific `(sub, key)` plan, not
+    /// to `sub` alone).
+    ///
+    /// **Idempotent.** Cancel for a profile with no in-flight effects
+    /// is a no-op: the filter produces an empty key set, the `retain`
+    /// walks the queue with no removals, no signals fire.
+    pub fn handle_cancel(&mut self, profile: ProfileId) {
+        // Snapshot matching keys before mutation — iterating
+        // `self.slots` and mutating individual slots in the same scope
+        // would alias. The collected `Vec` is bounded by the number of
+        // matching slots (≤ concurrency), so the heap allocation is
+        // small and rare. `DedupKey` is `Copy`, so the collect is a
+        // memcpy of slotmap-keyed handles, not an unbounded clone.
+        let keys: Vec<DedupKey> = self
+            .slots
+            .keys()
+            .filter_map(|k| (k.profile() == profile).then_some(*k))
+            .collect();
+        if keys.is_empty() {
+            return;
+        }
+
+        for key in &keys {
+            // `get_mut` rather than `expect`: the snapshot was taken
+            // immediately above on the same controller thread, but the
+            // `Option` keeps `handle_cancel` total against any future
+            // refactor that touches the slot map between snapshot and
+            // iteration.
+            let Some(slot) = self.slots.get_mut(key) else {
+                continue;
+            };
+            slot.pending = None;
+            slot.plan_continue = None;
+            slot.in_ready_queue = false;
+            if let Some(job) = slot.running.as_ref()
+                && let Err(e) = job.signaler.signal_term()
+            {
+                // Best-effort: a closed signaler (already-reaped child)
+                // is benign; the natural reap continues to drive
+                // teardown through `handle_reap` → `terminate_plan`.
+                tracing::debug!(?key, pid = job.pid, ?e, "cancel SIGTERM failed");
+            }
+        }
+
+        // Drop every cancelled-profile key from the ready queue. O(N)
+        // where N = current queue length, bounded by concurrency plus
+        // queue headroom. Cancel is rare (gate-deadline only), so the
+        // walk is fine; `retain` preserves the FIFO order of the
+        // surviving keys.
+        self.ready_queue.retain(|k| k.profile() != profile);
+
+        tracing::debug!(
+            ?profile,
+            count = keys.len(),
+            "handle_cancel: SIGTERM + ready-queue clean complete"
+        );
     }
 
     /// Shutdown-phase reap handler. Forces the plan to terminus on
@@ -2648,4 +2747,147 @@ mod tests {
     // `specter-core::program::op::tests`; end-to-end behaviour is
     // covered by the multi-step advance/terminate tests above plus the
     // controller-level tests in `pool.rs`.
+
+    // ---------- handle_cancel (engine-driven per-profile abandon) ----------
+
+    /// When the engine's `handle_gate_deadline` fires, the actuator
+    /// must SIGTERM every in-flight child for the cancelled profile
+    /// AND drop queued work so the pump's blocked-scratch invariant
+    /// (`in queue ⇔ flag set ⇔ pending|plan_continue is Some`) holds.
+    /// `running_subs` stays untouched here — `terminate_plan`, driven
+    /// by the natural reap that follows SIGTERM, owns that lifecycle.
+    ///
+    /// One test pins all three load-bearing invariants in one shot:
+    /// SIGTERM-only-for-matching-profile, ready-queue cleanup,
+    /// per-Sub gate hold preservation.
+    #[test]
+    fn handle_cancel_sigterms_matching_profile_cleans_queue_preserves_running_subs() {
+        let mut state = test_state(nz(4));
+
+        // Profile P: two distinct DedupKeys at the same profile —
+        //   K1: running (will receive SIGTERM)
+        //   K2: pending only, in ready_queue (will be queue-cleaned)
+        // Profile Q: one running key (untouched — different profile)
+        let p_sub = unique_sub_id(100);
+        let p_profile = unique_profile_id(100);
+        let p_k1 = DedupKey::PerFile {
+            sub: p_sub,
+            profile: p_profile,
+            resource: unique_resource_id(1),
+        };
+        let p_k2 = DedupKey::PerFile {
+            sub: p_sub,
+            profile: p_profile,
+            resource: unique_resource_id(2),
+        };
+        let q_sub = unique_sub_id(200);
+        let q_profile = unique_profile_id(200);
+        let q_key = DedupKey::PerFile {
+            sub: q_sub,
+            profile: q_profile,
+            resource: unique_resource_id(3),
+        };
+
+        // P's running slot — carries a counting signaler so we can
+        // assert exactly one SIGTERM was delivered through this child.
+        let p_k1_signaler = Arc::new(CountingSignaler::default());
+        let p_k1_effect = Arc::new(dummy_effect(p_k1, unique_resource_id(1), 1));
+        state.slots.insert(
+            p_k1,
+            Slot {
+                running: Some(stub_running_job(p_k1_effect, Arc::clone(&p_k1_signaler))),
+                ..Slot::default()
+            },
+        );
+
+        // P's queued slot — pending only, in ready_queue. The
+        // load-bearing case: handle_cancel MUST purge this key, else
+        // the next pump's `slot.pending.take().expect(...)` panics.
+        let p_k2_pending = dummy_effect(p_k2, unique_resource_id(2), 2);
+        state.slots.insert(
+            p_k2,
+            Slot {
+                pending: Some(p_k2_pending),
+                in_ready_queue: true,
+                ..Slot::default()
+            },
+        );
+        state.ready_queue.push_back(p_k2);
+
+        // Q's running slot — different profile, must not receive a
+        // signal. Distinct counting signaler so cross-profile bleed
+        // would show up as a non-zero `term` count.
+        let q_signaler = Arc::new(CountingSignaler::default());
+        let q_effect = Arc::new(dummy_effect(q_key, unique_resource_id(3), 3));
+        state.slots.insert(
+            q_key,
+            Slot {
+                running: Some(stub_running_job(q_effect, Arc::clone(&q_signaler))),
+                ..Slot::default()
+            },
+        );
+
+        // Per-Sub gate holds for both live plans — handle_cancel must
+        // preserve both holds; `terminate_plan` (driven by the
+        // post-SIGTERM natural reap) owns the removal.
+        state.running_subs.insert(p_sub);
+        state.running_subs.insert(q_sub);
+
+        state.handle_cancel(p_profile);
+
+        // (1) P's running child got exactly one SIGTERM.
+        assert_eq!(
+            p_k1_signaler.term.load(Ordering::SeqCst),
+            1,
+            "P's running child must receive exactly one SIGTERM",
+        );
+        // (2) Q's running child got NO signal — cross-profile bleed
+        //     would invert the cancel-by-profile contract.
+        assert_eq!(
+            q_signaler.term.load(Ordering::SeqCst),
+            0,
+            "Q's running child must not receive a SIGTERM (different profile)",
+        );
+
+        // (3) P's queued slot was cleaned: pending dropped,
+        //     in_ready_queue cleared, ready_queue purged. The
+        //     load-bearing panic-prevention invariant — the next
+        //     pump's `pending.take().expect()` would panic if the
+        //     key remained in the queue with an empty slot.
+        let p_k2_slot = state.slots.get(&p_k2).expect("P-k2 slot preserved");
+        assert!(
+            p_k2_slot.pending.is_none(),
+            "P-k2's pending must be dropped",
+        );
+        assert!(
+            !p_k2_slot.in_ready_queue,
+            "P-k2's in_ready_queue must be cleared (pump invariant)",
+        );
+        assert!(
+            !state.ready_queue.iter().any(|k| *k == p_k2),
+            "ready_queue must not contain a P-keyed slot (pump invariant)",
+        );
+
+        // (4) P's running slot still carries the job — terminate_plan
+        //     (driven by the natural reap that follows SIGTERM) owns
+        //     the running-side teardown. Removing it here would race
+        //     with the concurrent reap.
+        let p_k1_slot = state.slots.get(&p_k1).expect("P-k1 slot preserved");
+        assert!(
+            p_k1_slot.running.is_some(),
+            "P-k1's running stays in place — terminate_plan owns the take",
+        );
+
+        // (5) `running_subs` UNCHANGED — both live plans keep their
+        //     per-Sub gate hold across the cancel. terminate_plan
+        //     (Pump-policy, via handle_reap) is the sole remover.
+        assert!(
+            state.running_subs.contains(&p_sub),
+            "P's per-Sub gate hold preserved (terminate_plan owns the remove)",
+        );
+        assert!(
+            state.running_subs.contains(&q_sub),
+            "Q's per-Sub gate hold preserved (different profile, untouched)",
+        );
+    }
 }

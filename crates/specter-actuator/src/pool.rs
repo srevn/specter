@@ -17,7 +17,7 @@ mod state;
 use crate::env::EnvSnapshot;
 use crate::spawner::Spawner;
 use crossbeam::channel::{Receiver, Sender};
-use specter_core::{DedupKey, Effect, EffectOutcome, Input, SubId};
+use specter_core::{DedupKey, EffectOp, EffectOutcome, Input, SubId};
 use state::ActuatorState;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -174,9 +174,10 @@ impl SubprocessActuator {
         }
     }
 
-    /// Block until shutdown. Drains effects, dispatches to spawner,
-    /// reaps wait threads, propagates [`Input::EffectComplete`].
-    /// Returns when `effects_rx` disconnects or `shutdown_rx` signals;
+    /// Block until shutdown. Drains [`EffectOp`]s (submit + cancel)
+    /// off `effects_rx`, dispatches to spawner / cancel handler, reaps
+    /// wait threads, propagates [`Input::EffectComplete`]. Returns
+    /// when `effects_rx` disconnects or `shutdown_rx` signals;
     /// performs the SIGTERM → 5s grace → SIGKILL sequence on the
     /// way out. If `hard_shutdown_rx` fires (operator pressed Ctrl-C
     /// twice within `HARD_EXIT_WINDOW`), the grace is pre-empted: the
@@ -199,7 +200,7 @@ impl SubprocessActuator {
     #[allow(clippy::needless_pass_by_value)]
     pub fn run(
         &mut self,
-        effects_rx: Receiver<Effect>,
+        effects_rx: Receiver<EffectOp>,
         shutdown_rx: Receiver<()>,
         hard_shutdown_rx: Receiver<()>,
         engine_in: Sender<Input>,
@@ -210,8 +211,19 @@ impl SubprocessActuator {
         loop {
             crossbeam::select! {
                 recv(effects_rx) -> msg => match msg {
-                    Ok(effect) => self.state.handle_submit(effect, spawner, &self.reap_tx, &engine_in),
-                    Err(_)     => break, // bin closed channel
+                    Ok(EffectOp::Submit(effect)) => {
+                        self.state.handle_submit(effect, spawner, &self.reap_tx, &engine_in);
+                    }
+                    Ok(EffectOp::Cancel { profile }) => {
+                        // Engine-driven abandon: SIGTERM in-flight effects
+                        // for `profile`, drop queued work for the same
+                        // profile. The wait threads still drive natural
+                        // reap → handle_reap → terminate_plan, which emits
+                        // EffectComplete; the engine routes that late
+                        // completion to EffectCompleteOutsideAwaiting.
+                        self.state.handle_cancel(profile);
+                    }
+                    Err(_) => break, // bin closed channel
                 },
                 recv(self.reap_rx) -> msg => match msg {
                     Ok(r)  => self.state.handle_reap(r, &engine_in, spawner, &self.reap_tx),
@@ -334,7 +346,7 @@ mod tests {
     use specter_core::program::{BranchTarget, MultiStage, ProgramBuilder, SpawnBody};
     use specter_core::testkit::{predicate_then_program, single_exec_program};
     use specter_core::{
-        ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon,
+        ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon, EffectOp,
         EffectOutcome, EffectTarget, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
         Termination,
     };
@@ -443,8 +455,13 @@ mod tests {
 
     /// Spawn the controller in a thread; return the channels + a join
     /// handle. `concurrency` is the global cap.
+    ///
+    /// Tests submit Effects via [`Self::submit`], which lifts `Effect`
+    /// into [`EffectOp::Submit`] at the channel boundary; cancel-arm
+    /// coverage lives in `pool/state.rs`'s direct `handle_cancel`
+    /// tests against pre-loaded state.
     struct Harness {
-        effects_tx: Sender<Effect>,
+        effects_tx: Sender<EffectOp>,
         shutdown_tx: Sender<()>,
         hard_shutdown_tx: Sender<()>,
         hard_shutdown_done_rx: Receiver<()>,
@@ -504,7 +521,7 @@ mod tests {
         /// Common backbone: spawn the controller thread around a
         /// freshly-built actuator and wire the channels.
         fn spawn_controller(build: impl FnOnce() -> SubprocessActuator + Send + 'static) -> Self {
-            let (effects_tx, effects_rx) = bounded::<Effect>(1024);
+            let (effects_tx, effects_rx) = bounded::<EffectOp>(1024);
             let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
             let (hard_shutdown_tx, hard_shutdown_rx) = bounded::<()>(1);
             let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded::<()>(1);
@@ -537,7 +554,7 @@ mod tests {
         }
 
         fn submit(&self, e: Effect) {
-            self.effects_tx.send(e).expect("submit");
+            self.effects_tx.send(EffectOp::Submit(e)).expect("submit");
         }
 
         fn shutdown(&mut self) {

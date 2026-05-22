@@ -34,10 +34,10 @@ pub use fs_id::FsIdentity;
 pub use ids::{CorrelationId, ProbeCorrelation, ProfileId, PromoterId, ResourceId, SubId, TimerId};
 pub use input::{FsEvent, Input, OverflowScope, WatchRegistryDiff};
 pub use op::{
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProofAuthority,
+    EffectOp, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProofAuthority,
     ProofObligation, WatchFailure, WatchOp,
 };
-pub use output::{ProbeOps, SortedEffects, StepOutput, StepOutputParts};
+pub use output::{CancelEffects, ProbeOps, SortedEffects, StepOutput, StepOutputParts};
 pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use probe::ProbeSlot;
 pub use profile::{

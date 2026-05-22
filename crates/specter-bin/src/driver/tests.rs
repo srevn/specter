@@ -1795,6 +1795,104 @@ fn forward_shutdown_wins_when_full_channel_signaled() {
     drop(watcher_side);
 }
 
+/// Forward dispatches a `StepOutput` with both `cancel_effects` and
+/// `effects` populated as `EffectOp::Cancel` then `EffectOp::Submit`
+/// on the same `effects_tx` channel, cancels first.
+///
+/// Pins the wire contract: the engine→actuator channel carries
+/// `EffectOp`, and cancel-effects (gate-deadline abandonment)
+/// dispatch *before* any submit in the same step. The same-step
+/// collision is unconstructable in production (`handle_gate_deadline`
+/// emits no Effects; fire-and-settle emits no cancel), but a future
+/// emission site that crossed the two streams would inherit the
+/// right "kill stale before spawn new" ordering from this dispatch
+/// shape.
+#[test]
+fn forward_dispatches_cancel_before_submit_on_effects_tx() {
+    use slotmap::KeyData;
+    use specter_core::testkit::single_exec_program;
+    use specter_core::{
+        ArgPart, ArgTemplate, CorrelationId, Effect, EffectCommon, EffectOp, ProfileId,
+    };
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let rig = rig_for(config, cfg_path);
+    let TestRig {
+        driver,
+        actuator_side,
+        ..
+    } = rig;
+
+    // Two distinct profile ids; BTreeSet iteration order is intrinsic
+    // to the key (`KeyData` Ord), so pid_a < pid_b yields pid_a first.
+    let pid_a = ProfileId::from(KeyData::from_ffi(0x10));
+    let pid_b = ProfileId::from(KeyData::from_ffi(0x20));
+
+    // Minimal Effect — `EffectOp::Submit` is the dominant variant
+    // width, but the dispatch contract under test is the order, not
+    // the Submit payload's content.
+    let submit_effect = {
+        let common = EffectCommon {
+            sub: specter_core::SubId::default(),
+            profile: ProfileId::from(KeyData::from_ffi(0x30)),
+            anchor: specter_core::ResourceId::default(),
+            correlation: CorrelationId::default(),
+            forced: false,
+            capture_output: false,
+            sub_name: compact_str::CompactString::new(""),
+            program: single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/true")])]),
+            anchor_path: Arc::from(PathBuf::new()),
+            anchor_kind: specter_core::ResourceKind::Dir,
+            exclude: Arc::from(Vec::<compact_str::CompactString>::new()),
+        };
+        Effect::subtree(common, None)
+    };
+
+    let mut out = StepOutput::default();
+    out.push_cancel_effect(pid_a);
+    out.push_cancel_effect(pid_b);
+    out.push_effect(submit_effect);
+    out.sort_for_emission();
+
+    let outcome = driver.forward(out);
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    // Drain `effects_rx` and assert the order. Cancels first
+    // (pid_a < pid_b by `KeyData` Ord), then the Submit.
+    let mut received: Vec<EffectOp> = Vec::new();
+    while let Ok(op) = actuator_side.effects_rx.try_recv() {
+        received.push(op);
+    }
+    assert_eq!(
+        received.len(),
+        3,
+        "two cancels + one submit reached the wire"
+    );
+    assert!(
+        matches!(received[0], EffectOp::Cancel { profile } if profile == pid_a),
+        "first dispatched op must be the lower-keyed cancel; got {:?}",
+        received[0],
+    );
+    assert!(
+        matches!(received[1], EffectOp::Cancel { profile } if profile == pid_b),
+        "second dispatched op must be the higher-keyed cancel; got {:?}",
+        received[1],
+    );
+    assert!(
+        matches!(received[2], EffectOp::Submit(_)),
+        "submit dispatches after all cancels (defense in depth); got {:?}",
+        received[2],
+    );
+
+    // Drop in safe order — keep the driver alive past actuator_side
+    // (we drained it but never disconnected). The probe slot armed
+    // here? None — `forward` doesn't touch probes for this fixture.
+    drop(driver);
+    drop(actuator_side);
+}
+
 /// When `run_initial_attach`'s `forward` returns `Break`, the
 /// Seed-Verifying probe slot armed by the just-attached Profile must
 /// be disarmed before returning — otherwise dropping the driver

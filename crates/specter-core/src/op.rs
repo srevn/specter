@@ -1,5 +1,6 @@
 //! Watch and Probe ops, plus their request/response payloads.
 
+use crate::effect::Effect;
 use crate::ids::{ProbeCorrelation, ProfileId, PromoterId, ResourceId};
 use crate::resource::ResourceKind;
 use crate::scan_config::ScanConfig;
@@ -425,6 +426,44 @@ impl ProbeOp {
             Self::Cancel { owner } => *owner,
         }
     }
+}
+
+/// Engine→actuator wire vocabulary.
+///
+/// Structurally parallel to [`WatchOp`] and [`ProbeOp`]: submit and
+/// cancel ride as variants of one enum, so a single FIFO channel
+/// preserves causal order between same-profile submit and cancel
+/// without any extra synchronisation. The actuator's controller
+/// dispatches on the variant — [`Self::Submit`] enters `handle_submit`,
+/// [`Self::Cancel`] enters `handle_cancel`.
+///
+/// `Cancel` is emitted by the engine at the `handle_gate_deadline`
+/// edge (the sole abandonment site — the engine waits for natural
+/// completion otherwise). The actuator's `handle_cancel` walks every
+/// slot whose [`crate::DedupKey::profile`] matches, drops queued
+/// `pending` / `plan_continue` (work the engine has given up on),
+/// SIGTERMs the running child (if any), and lets the existing reap
+/// pipeline deliver `EffectComplete` naturally. The engine routes
+/// that late completion to `EffectCompleteOutsideAwaiting` (the
+/// Profile has already left `Awaiting` by then).
+///
+/// **Memory.** `Submit(Effect)` is the dominant variant width; the
+/// channel slot size is dictated by it. `Cancel { profile }` pays
+/// only the discriminant on top of an 8-byte `ProfileId`. The
+/// `large_enum_variant` allowance below mirrors [`ProbeOp`]'s —
+/// boxing `Submit` would add a heap allocation per emitted Effect
+/// for no gain (bursts emit Effects in batches; cancel is sparse —
+/// gate-deadline only).
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone)]
+pub enum EffectOp {
+    /// Engine emits an Effect for the actuator to coalesce + spawn.
+    Submit(Effect),
+    /// Engine abandons every in-flight effect belonging to `profile`.
+    /// Actuator SIGTERMs any running child for keys whose
+    /// [`crate::DedupKey::profile`] matches and drops queued
+    /// `pending` / `plan_continue` work for the same key set.
+    Cancel { profile: ProfileId },
 }
 
 #[cfg(test)]

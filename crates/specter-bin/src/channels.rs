@@ -31,7 +31,7 @@
 //! `Prober::submit/cancel` directly via an `Arc<dyn Prober>` clone.
 
 use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
-use specter_core::{Effect, Input, WatchOp};
+use specter_core::{EffectOp, Input, WatchOp};
 
 /// All channel handles for the bin, materialized as per-consumer-thread
 /// bundles. [`Channels::new`] allocates every unconditional pair and
@@ -69,7 +69,7 @@ pub struct EnginePieces {
     pub reload_signal_rx: Receiver<()>,
     pub shutdown_engine_rx: Receiver<()>,
     pub watch_ops_tx: Sender<WatchOp>,
-    pub effects_tx: Sender<Effect>,
+    pub effects_tx: Sender<EffectOp>,
 }
 
 impl EnginePieces {
@@ -109,7 +109,7 @@ pub struct EngineSide {
     pub reload_signal_rx: Receiver<()>,
     pub shutdown_engine_rx: Receiver<()>,
     pub watch_ops_tx: Sender<WatchOp>,
-    pub effects_tx: Sender<Effect>,
+    pub effects_tx: Sender<EffectOp>,
     /// Auto-reload pulse drain — `Some` only when the config watcher
     /// thread spawned, `None` under `--no-config-watch` or a watcher
     /// init failure. The driver's tick gates both its drain loop and
@@ -143,7 +143,7 @@ pub struct WatcherSide {
 #[derive(Debug)]
 #[must_use]
 pub struct ActuatorSide {
-    pub effects_rx: Receiver<Effect>,
+    pub effects_rx: Receiver<EffectOp>,
     pub shutdown_actuator_rx: Receiver<()>,
     pub hard_shutdown_actuator_rx: Receiver<()>,
     pub effect_in_tx: Sender<Input>,
@@ -301,11 +301,15 @@ mod tests {
         use compact_str::CompactString;
         use specter_core::testkit::single_exec_program;
         use specter_core::{
-            ArgPart, ArgTemplate, CorrelationId, EffectCommon, ProfileId, ResourceKind, SubId,
+            ArgPart, ArgTemplate, CorrelationId, Effect, EffectCommon, ProfileId, ResourceKind,
+            SubId,
         };
         use std::path::PathBuf;
         use std::sync::Arc;
         let chans = Channels::new();
+        // `EffectOp::Submit(Effect)` is the dominant variant width; the
+        // channel slot size is dictated by it, so this test still pins
+        // the bounded capacity against the production payload shape.
         let dummy = || {
             let common = EffectCommon {
                 sub: SubId::default(),
@@ -320,7 +324,7 @@ mod tests {
                 anchor_kind: ResourceKind::Dir,
                 exclude: Arc::from(Vec::<CompactString>::new()),
             };
-            Effect::subtree(common, None)
+            EffectOp::Submit(Effect::subtree(common, None))
         };
         for _ in 0..1024 {
             chans

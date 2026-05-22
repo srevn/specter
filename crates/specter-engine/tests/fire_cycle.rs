@@ -529,8 +529,9 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
 fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
     // Drive to Awaiting; advance clock past gate_deadline; pop_expired
     // returns the AwaitGateDeadline timer; on_timer_expired runs
-    // handle_gate_deadline → AwaitGateDeadlineForceRebasing diagnostic;
-    // phase == Rebasing; rebase probe emitted.
+    // handle_gate_deadline → AwaitGateDeadlineForceRebasing diagnostic
+    // + EffectOp::Cancel emission for the profile; phase == Rebasing;
+    // rebase probe emitted.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -551,12 +552,15 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
             },
             gate_t,
         );
-        let (_, probe_ops, _, diagnostics) = s.into_parts();
+        let (_, probe_ops, _, cancel_effects, diagnostics) = s.into_parts();
         for d in diagnostics {
             combined.diagnostics.push(d);
         }
         for op in probe_ops.into_values() {
             combined.push_probe_op(op);
+        }
+        for profile in cancel_effects {
+            combined.push_cancel_effect(profile);
         }
     }
     assert!(
@@ -566,6 +570,16 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
                 if *profile == pid,
         )),
         "gate-deadline force-rebasing diagnostic emitted",
+    );
+    // The engine tells the actuator to abandon in-flight effects
+    // on the same edge it gives up waiting on them; without this,
+    // orphaned children would hold permits, FDs, and diff-tmp files
+    // until process exit.
+    let cancels: Vec<_> = combined.cancel_effects().iter().collect();
+    assert_eq!(
+        cancels,
+        vec![pid],
+        "gate-deadline emits exactly one EffectOp::Cancel for the profile",
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
@@ -623,12 +637,15 @@ fn fire_cycle_gate_deadline_on_zombie_burst_reaps_profile() {
             },
             gate_t,
         );
-        let (_, probe_ops, _, diagnostics) = s.into_parts();
+        let (_, probe_ops, _, cancel_effects, diagnostics) = s.into_parts();
         for d in diagnostics {
             combined.diagnostics.push(d);
         }
         for op in probe_ops.into_values() {
             combined.push_probe_op(op);
+        }
+        for profile in cancel_effects {
+            combined.push_cancel_effect(profile);
         }
     }
     assert!(
@@ -638,6 +655,16 @@ fn fire_cycle_gate_deadline_on_zombie_burst_reaps_profile() {
                 if *profile == pid,
         )),
         "gate-deadline reap diagnostic emitted on zombie burst",
+    );
+    // The zombie burst still emits Cancel — the actuator must
+    // SIGTERM the orphaned children even when the Profile is dying
+    // (the engine has already let go of any consumer for the
+    // rebased baseline, but the children still hold OS resources).
+    let cancels: Vec<_> = combined.cancel_effects().iter().collect();
+    assert_eq!(
+        cancels,
+        vec![pid],
+        "zombie gate-deadline emits Cancel for the dying profile",
     );
     assert!(
         e.profiles().get(pid).is_none(),
@@ -1136,7 +1163,7 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
             },
             post_burst_deadline,
         );
-        let (_, probe_ops, _, _) = s.into_parts();
+        let (_, probe_ops, _, _, _) = s.into_parts();
         for op in probe_ops.into_values() {
             combined.push_probe_op(op);
         }

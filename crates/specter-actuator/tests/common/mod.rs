@@ -18,8 +18,8 @@ use specter_actuator::{OsSpawner, SubprocessActuator};
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon, ExecAction,
-    Input, ProfileId, ResourceId, ResourceKind, SubId,
+    ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon, EffectOp,
+    ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -53,7 +53,7 @@ pub fn unique_profile_id(seed: u64) -> ProfileId {
 }
 
 pub struct Harness {
-    pub effects_tx: Sender<Effect>,
+    pub effects_tx: Sender<EffectOp>,
     pub shutdown_tx: Sender<()>,
     pub hard_shutdown_tx: Sender<()>,
     pub hard_shutdown_done_rx: Receiver<()>,
@@ -63,7 +63,7 @@ pub struct Harness {
 
 impl Harness {
     pub fn new(concurrency: usize) -> Self {
-        let (effects_tx, effects_rx) = bounded::<Effect>(1024);
+        let (effects_tx, effects_rx) = bounded::<EffectOp>(1024);
         let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
         let (hard_shutdown_tx, hard_shutdown_rx) = bounded::<()>(1);
         let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded::<()>(1);
@@ -94,7 +94,7 @@ impl Harness {
     }
 
     pub fn submit(&self, e: Effect) {
-        self.effects_tx.send(e).expect("submit");
+        self.effects_tx.send(EffectOp::Submit(e)).expect("submit");
     }
 
     pub fn shutdown(&mut self) {

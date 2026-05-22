@@ -4,7 +4,10 @@
 //! [`EngineDriver::forward`] ships every [`StepOutput`] onward:
 //! `watch_ops` → `watch_ops_tx` with a `wake_handle.wake()` per
 //! successful send; `probe_ops` → `prober.submit` / `cancel`;
-//! `effects` → `effects_tx`; `diagnostics` → [`log_diagnostic`].
+//! `cancel_effects` + `effects` → `effects_tx` (lifted to
+//! [`EffectOp::Cancel`] / [`EffectOp::Submit`], cancels first so a
+//! defensive same-step cancel + submit for one profile would kill
+//! stale before spawn new); `diagnostics` → [`log_diagnostic`].
 //! Every channel send races `shutdown_engine_rx` so a queued shutdown
 //! pulse pre-empts back-pressure (a full bounded channel cannot wedge
 //! the tick on SIGTERM). Per-channel disconnect policy is explicit at
@@ -14,7 +17,7 @@
 //! to a tracing event; its severities are the operator-facing catalogue.
 
 use super::EngineDriver;
-use specter_core::{Diagnostic, ProbeOp, StepOutput};
+use specter_core::{Diagnostic, EffectOp, ProbeOp, StepOutput};
 use std::ops::ControlFlow;
 
 impl EngineDriver {
@@ -75,7 +78,7 @@ impl EngineDriver {
         // `StepOutput`-returning entry point sorts before returning), so
         // a single by-value destructure preserves the sort and the
         // dispatch order below without one clone per Effect.
-        let (watch_ops, probe_ops, effects, diagnostics) = out.into_parts();
+        let (watch_ops, probe_ops, effects, cancel_effects, diagnostics) = out.into_parts();
 
         for op in watch_ops {
             crossbeam::select! {
@@ -97,9 +100,28 @@ impl EngineDriver {
             }
         }
 
+        // Cancel-effects dispatch BEFORE submits over the same `effects_tx`.
+        // Defense in depth: by construction a same-step cancel + submit
+        // for one profile cannot occur (`handle_gate_deadline` emits no
+        // Effects; the post-fire stable verdict path emits no cancel),
+        // but if a future emission site ever introduced the cross-stream
+        // race, "kill stale before spawn new" is the right ordering and
+        // is structural here, not a documented convention. Same
+        // `effects_tx` channel keeps the engine→actuator FIFO single,
+        // so causal order between same-profile cancel and a later
+        // submit (in a later step) is preserved automatically.
+        for profile in cancel_effects {
+            crossbeam::select! {
+                send(self.sides.effects_tx, EffectOp::Cancel { profile }) -> res => if res.is_err() {
+                    tracing::warn!(?profile, "effects disconnected; dropping cancel");
+                },
+                recv(self.sides.shutdown_engine_rx) -> _ => return ControlFlow::Break(()),
+            }
+        }
+
         for eff in effects {
             crossbeam::select! {
-                send(self.sides.effects_tx, eff) -> res => if res.is_err() {
+                send(self.sides.effects_tx, EffectOp::Submit(eff)) -> res => if res.is_err() {
                     tracing::warn!("effects disconnected; dropping effect");
                 },
                 recv(self.sides.shutdown_engine_rx) -> _ => return ControlFlow::Break(()),
