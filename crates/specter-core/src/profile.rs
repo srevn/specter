@@ -3131,8 +3131,7 @@ impl ProfileMap {
             .push((hash, id));
         tree.get_mut(resource)
             .expect("ProfileMap::attach: resource has no live Tree slot")
-            .profiles
-            .push((hash, id));
+            .insert_profile_anchor(hash, id);
         id
     }
 
@@ -3148,8 +3147,7 @@ impl ProfileMap {
             v.retain(|(h, pid)| !(*pid == id && *h == p.config_hash()));
         }
         if let Some(r) = tree.get_mut(p.resource) {
-            r.profiles
-                .retain(|(h, pid)| !(*pid == id && *h == p.config_hash()));
+            r.remove_profile_anchor(p.config_hash(), id);
         }
         Some(p)
     }

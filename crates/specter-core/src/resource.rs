@@ -1,10 +1,11 @@
 //! `Resource` and friends.
 //!
 //! `Resource` lives inside `Tree`'s `SlotMap`. The structurally
-//! load-bearing fields (`parent`, `segment`, `children`, `profiles`)
-//! are `pub(crate)` — mutating them outside the routes that maintain
-//! the corresponding indices corrupts the Tree. Cross-crate read
-//! access is via the accessor methods (`parent()`, `children()`,
+//! load-bearing fields (`parent`, `segment`, `children`) are
+//! `pub(crate)`; `profiles` is module-private (the typed-mutator
+//! paragraph below). Mutating any of them outside the routes that
+//! maintain the corresponding indices corrupts the Tree. Cross-crate
+//! read access is via the accessor methods (`parent()`, `children()`,
 //! `profiles()`); a slot's own segment string is read through
 //! [`crate::Tree::name`] (no standalone `segment()` accessor — the
 //! key type is a Tree-internal detail).
@@ -39,6 +40,17 @@
 //! no-op guard internally. Read access is via
 //! [`Resource::proxy_promoters`]; the vector is also one of the four
 //! structural claimants on [`Resource::has_anchors`].
+//!
+//! `profiles` is module-private — a back-ref vector kept in lockstep
+//! with `ProfileMap.by_resource` (the engine's Profile side). A raw
+//! push / retain could desynchronise the two halves of that join, so
+//! the sole mutators are the typed
+//! [`Resource::insert_profile_anchor`] /
+//! [`Resource::remove_profile_anchor`]; each returns the
+//! empty ↔ non-empty retention-edge `bool` (the same edge-reporting
+//! convention as the contributions / `proxy_promoters` mutators). Read
+//! access is via [`Resource::profiles`]; the vector is also one of the
+//! four structural claimants on [`Resource::has_anchors`].
 //!
 //! `role` is `pub`; the engine writes it directly. Role is metadata
 //! (no refcount edges), so a typed setter would buy nothing.
@@ -150,7 +162,18 @@ pub struct Resource {
     /// no dependency on global Tree attach history
     /// ([`crate::Tree::children_ids`]).
     pub(crate) children: BTreeMap<CompactString, ResourceId>,
-    pub(crate) profiles: SmallVec<[(u64, ProfileId); 1]>,
+    /// Profile back-ref — the right side of the
+    /// `ProfileMap.by_resource` join, one entry per
+    /// `(config_hash, ProfileId)` Profile anchored at this slot. The
+    /// engine's `ProfileMap::attach` inserts (via
+    /// [`Resource::insert_profile_anchor`]) and `ProfileMap::detach`
+    /// removes (via [`Resource::remove_profile_anchor`]), keeping this
+    /// vector and `ProfileMap.by_resource` in lockstep. Module-private
+    /// so a raw push / retain can't break that lockstep. Inline cap 1
+    /// covers the typical case: most Resources have at most one
+    /// Profile anchored at them; cross-`ScanConfig` sharing on one
+    /// slot is rare.
+    profiles: SmallVec<[(u64, ProfileId); 1]>,
     /// Promoter back-ref — the right side of the `Promoter.proxies`
     /// join, one entry per Promoter proxying this slot. The engine's
     /// `register_proxy` inserts (via
@@ -396,9 +419,10 @@ impl Resource {
         &self.children
     }
 
-    /// `(config_hash, profile)` pairs anchoring this Resource. Mutated only
-    /// by `ProfileMap::attach`/`detach`, which keep `Resource.profiles` and
-    /// `ProfileMap.by_resource` in lockstep.
+    /// `(config_hash, profile)` pairs anchoring this Resource.
+    /// Read-only view; the lockstep with `ProfileMap.by_resource` is
+    /// held through [`Resource::insert_profile_anchor`] /
+    /// [`Resource::remove_profile_anchor`].
     #[must_use]
     pub fn profiles(&self) -> &[(u64, ProfileId)] {
         &self.profiles
@@ -451,6 +475,51 @@ impl Resource {
         }
         self.proxy_promoters.retain(|p| *p != id);
         self.proxy_promoters.is_empty()
+    }
+
+    /// Register a `(config_hash, pid)` Profile anchor at this slot,
+    /// keeping `Resource.profiles` in lockstep with
+    /// `ProfileMap.by_resource`. Idempotent: a `(config_hash, pid)`
+    /// pair already present is left untouched and reports no edge.
+    /// `ProfileMap::attach`'s upstream `debug_assert!` already rules
+    /// out the double-attach path in production; the dedup check here
+    /// mirrors [`Self::insert_proxy_promoter`]'s shape and is cheap on
+    /// the inline-cap-1 `SmallVec`.
+    ///
+    /// Returns `true` iff this call traversed the empty → non-empty
+    /// retention edge (the slot just gained its first Profile anchor),
+    /// matching the `proxy_promoters` mutator's edge-reporting
+    /// convention.
+    pub fn insert_profile_anchor(&mut self, config_hash: u64, pid: ProfileId) -> bool {
+        if self
+            .profiles
+            .iter()
+            .any(|(h, p)| *h == config_hash && *p == pid)
+        {
+            return false;
+        }
+        let was_empty = self.profiles.is_empty();
+        self.profiles.push((config_hash, pid));
+        was_empty
+    }
+
+    /// Drop the `(config_hash, pid)` Profile anchor at this slot,
+    /// leaving every co-resident `(_, _)` pair in place (filter, not
+    /// clear). Idempotent: an absent pair, or an already-empty vector
+    /// (reachable post-[`crate::Tree::vacate`] or on a double detach),
+    /// is a no-op that reports no edge.
+    ///
+    /// Returns `true` iff this call traversed the non-empty → empty
+    /// retention edge (the slot just lost its last Profile anchor) —
+    /// the symmetric inverse of [`Self::insert_profile_anchor`]'s
+    /// empty → non-empty edge.
+    pub fn remove_profile_anchor(&mut self, config_hash: u64, pid: ProfileId) -> bool {
+        if self.profiles.is_empty() {
+            return false;
+        }
+        self.profiles
+            .retain(|(h, p)| !(*p == pid && *h == config_hash));
+        self.profiles.is_empty()
     }
 
     /// Probed kind of this slot. `None` means the slot has not yet been
@@ -599,7 +668,7 @@ mod tests {
     #[test]
     fn anchored_when_profiles_present() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        r.profiles.push((42, crate::ids::ProfileId::default()));
+        r.insert_profile_anchor(42, crate::ids::ProfileId::default());
         assert!(r.has_anchors());
     }
 
