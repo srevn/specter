@@ -737,6 +737,8 @@ impl PreFireBurst {
     ///
     /// `intent` is preserved (read by `dispatch_rebase_*` for the
     /// diagnostic).
+    ///
+    /// Sole production caller: `transition_to_awaiting` in `burst.rs`.
     #[must_use]
     pub fn into_post_fire(self, outstanding: u32, gate_deadline: TimerId) -> PostFireBurst {
         PostFireBurst::new(
@@ -945,6 +947,9 @@ impl PostFireBurst {
     /// burst opens its own fresh [`CertifiedPrior`] N=2 sequence and
     /// pre-fire `burst_deadline`, exactly as a fresh
     /// `start_standard_burst`.
+    ///
+    /// Sole production caller: `restart_burst_from_fire_tail_residual`
+    /// in `burst.rs`.
     #[must_use]
     pub fn into_pre_fire_residual(
         self,
@@ -2537,17 +2542,18 @@ impl Profile {
         }
     }
 
-    /// Sole legitimate post-construction writer of `state`. Returns the
-    /// prior state via `mem::replace` so the typed-move callers
-    /// (`transition_to_awaiting` → [`PreFireBurst::into_post_fire`];
-    /// `restart_burst_from_fire_tail_residual` →
-    /// [`PostFireBurst::into_pre_fire_residual`]; `finish_burst_to_idle`)
-    /// can consume the prior burst by value without holding a `&mut
-    /// state` borrow across the move. Shape-agnostic:
-    /// transition preconditions are owned by the engine boundary
-    /// (`require_idle` / `require_active_pre_fire`), not duplicated here.
-    /// Not `#[must_use]` — whole-value-replace callers discard the return;
-    /// only the typed-move callers bind it.
+    /// General-purpose `state` writer; returns the prior via
+    /// `mem::replace` so typed-move callers (`transition_to_awaiting` →
+    /// [`PreFireBurst::into_post_fire`]; `restart_burst_from_fire_tail_residual`
+    /// → [`PostFireBurst::into_pre_fire_residual`]; `finish_burst_to_idle`)
+    /// consume the prior burst without holding `&mut state` across the
+    /// move. Preconditions live at the engine boundary (`require_idle` /
+    /// `require_active_pre_fire`), not here.
+    ///
+    /// [`Self::materialize_anchor`] is the single documented bypass —
+    /// a three-field atomic `Pending → (Idle, AnchorClaim::Held,
+    /// classified)` write; [`Self::is_nonsteady`]'s carrier count is
+    /// invariant under it by construction.
     pub const fn transition_state(&mut self, new: ProfileState) -> ProfileState {
         std::mem::replace(&mut self.state, new)
     }
@@ -2611,7 +2617,10 @@ impl Profile {
     /// Borrow the pre-fire burst payload iff
     /// `state == Active(PreFire(_), _)` — a read of the state's
     /// structural shape, *not* a variant transition (the variant-level
-    /// move still routes through [`Self::transition_state`]).
+    /// move still routes through [`Self::transition_state`]). Sole
+    /// production caller surface: `burst.rs` named helpers — the
+    /// single-source-of-mutation rule for `Active(_)` phase fields,
+    /// inherited by the symmetric [`Self::post_fire_burst_mut`].
     pub const fn pre_fire_burst_mut(&mut self) -> Option<&mut PreFireBurst> {
         match &mut self.state {
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => Some(pre),
