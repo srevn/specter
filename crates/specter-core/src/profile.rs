@@ -407,9 +407,8 @@ pub enum PreFirePhase {
 /// - No `last_event_time`: the pre-fire settle-deadline source.
 ///
 /// The pre-fire `dirty` (the captured-path basis) also does not cross;
-/// the post-fire `dirty` is a *distinct, freshly-empty* provenance
-/// accumulator (the fire-tail residual), not the pre-fire one carried
-/// over.
+/// the post-fire `final_window_residual` is a *distinct, freshly-empty*
+/// provenance accumulator, not the pre-fire one carried over.
 ///
 /// `intent: BurstIntent` survives post-fire so
 /// `dispatch_rebase_{vanished,failed}` can tag the `ProbeVanished` /
@@ -465,7 +464,7 @@ pub struct PostFireBurst {
     /// fires only for the real race. The restarted burst's settle
     /// window reckons from the rebase-response instant, not the absorbed
     /// events', a bounded ≤ one-`settle` extra re-fire latency.
-    pub dirty: DirtyProvenance,
+    pub final_window_residual: DirtyProvenance,
     /// The post-fire rebase loop's N=2 quiescence proof — the prior
     /// `Authoritative` sample of the *post-command* tree. Born fresh
     /// ([`CertifiedPrior::new`]) at [`Self::new`]; advanced only via
@@ -726,8 +725,8 @@ impl PreFireBurst {
     /// - `forced` — no fire decision left in the post-fire lifecycle.
     /// - `probe_target` — Rebasing always targets the anchor.
     /// - `last_event_time` / `dirty` — pre-fire-only event state.
-    ///   Post-fire opens a *fresh, empty* `dirty` (the fire-tail
-    ///   residual), not the pre-fire captured-path provenance.
+    ///   Post-fire opens a *fresh, empty* `final_window_residual` (the
+    ///   fire-tail residual), not the pre-fire captured-path provenance.
     /// - `certified` — the pre-fire proof is **not** carried across:
     ///   the post-command tree the rebase loop must prove quiescent is
     ///   a different tree than the one the pre-fire carrier proved, so
@@ -807,11 +806,15 @@ impl PostFireBurst {
     /// only cross-crate construction path (fixtures included) — there is
     /// exactly one place a `PostFireBurst` is born.
     #[must_use]
-    pub const fn new(intent: BurstIntent, phase: PostFirePhase, dirty: DirtyProvenance) -> Self {
+    pub const fn new(
+        intent: BurstIntent,
+        phase: PostFirePhase,
+        final_window_residual: DirtyProvenance,
+    ) -> Self {
         Self {
             intent,
             phase,
-            dirty,
+            final_window_residual,
             certified: CertifiedPrior::new(),
             rebase_ceiling: RebaseCeilingState::NotStarted,
         }
@@ -909,7 +912,7 @@ impl PostFireBurst {
     /// burst — the symmetric inverse of [`PreFireBurst::into_post_fire`].
     ///
     /// Consumes the post-fire burst at the rebase-ok boundary and re-arms
-    /// a Standard debounce burst, moving the fire-tail residual `dirty`
+    /// a Standard debounce burst, moving the `final_window_residual`
     /// provenance over whole: the events `absorb_event_into_fire_tail`
     /// captured while the rebase probe was already in flight. Without
     /// this the residual has no consumer — it drops when the post-fire
@@ -959,11 +962,11 @@ impl PostFireBurst {
         now: Instant,
     ) -> PreFireBurst {
         debug_assert!(
-            !self.dirty.is_empty(),
+            !self.final_window_residual.is_empty(),
             "into_pre_fire_residual: empty residual — the restart has no \
              seed; the caller must gate on a non-empty fire-tail residual",
         );
-        let residual = self.dirty;
+        let residual = self.final_window_residual;
         PreFireBurst {
             burst_deadline,
             phase: PreFirePhase::Batching { settle_timer },
@@ -5001,11 +5004,12 @@ mod tests {
         let post = p
             .post_fire_burst_mut()
             .expect("PostFire carries the payload");
-        post.dirty.note(r, Arc::from(Path::new("/w/anchor")));
+        post.final_window_residual
+            .note(r, Arc::from(Path::new("/w/anchor")));
         assert!(
             p.post_fire_burst_mut()
                 .expect("still PostFire")
-                .dirty
+                .final_window_residual
                 .chains()
                 .contains(Path::new("/w/anchor")),
             "mutation through the projection persists",

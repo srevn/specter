@@ -1,12 +1,12 @@
 //! Subprocess pool controller — single thread, drains submits + reaps +
 //! shutdown, owns slot state.
 //!
-//! Channel topology:
+//! Channel topology (`N` = resolved concurrency, [`resolve_concurrency`]):
 //!
 //! ```text
 //! bin --(effects, bounded(1024))--> Controller
 //! Controller --(engine_inbound, unbounded)--> Engine
-//! Controller <--(reap_rx, bounded(64))-- WaitThread × N
+//! Controller <--(reap_rx, bounded(N))-- WaitThread × N
 //! bin --(shutdown, bounded(1) broadcast)--> Controller
 //! ```
 //!
@@ -63,6 +63,25 @@ fn resolve_concurrency(concurrency: usize) -> NonZeroUsize {
     })
 }
 
+/// Build the [`Reaped`] back-channel sized to the resolved concurrency.
+///
+/// One slot per in-flight [`crate::pool::state::RunningJob`]: every wait
+/// thread sends exactly one [`Reaped`] in its lifetime ([`state::wait_loop`]
+/// after `drop(permit)`), and the live wait-thread count is bounded by
+/// the permit cap. So a fully-saturated pool draining in lock-step never
+/// blocks a permit-released wait thread on `reap_tx.send` waiting for
+/// the controller to consume — backpressure becomes a single-slot
+/// blip only when the controller has fallen behind the spawn rate, and
+/// the bin's bounded(1024) `effects_rx` upstream sets the operator-
+/// visible backpressure ceiling anyway.
+///
+/// Shared between [`SubprocessActuator::new`] and the test constructors
+/// so the cap stays single-source — the upper bound is a property of
+/// the wait-thread protocol, not the entry point.
+fn reap_channel(resolved: NonZeroUsize) -> (Sender<Reaped>, Receiver<Reaped>) {
+    crossbeam::channel::bounded::<Reaped>(resolved.get())
+}
+
 /// The actuator's controller. One per process. Owns the slot map, ready
 /// queue, per-Sub counter, and global semaphore. Blocks in [`Self::run`]
 /// for the lifetime of the bin process.
@@ -90,7 +109,7 @@ impl SubprocessActuator {
     #[must_use]
     pub fn new(concurrency: usize) -> Self {
         let resolved = resolve_concurrency(concurrency);
-        let (reap_tx, reap_rx) = crossbeam::channel::bounded::<Reaped>(64);
+        let (reap_tx, reap_rx) = reap_channel(resolved);
         Self {
             state: ActuatorState::new(
                 resolved,
@@ -147,7 +166,7 @@ impl SubprocessActuator {
         actuator_pid: u32,
     ) -> Self {
         let resolved = resolve_concurrency(concurrency);
-        let (reap_tx, reap_rx) = crossbeam::channel::bounded::<Reaped>(64);
+        let (reap_tx, reap_rx) = reap_channel(resolved);
         Self {
             state: ActuatorState::new(resolved, env, temp_dir, actuator_pid, grace),
             reap_tx,

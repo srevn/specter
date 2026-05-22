@@ -5060,10 +5060,13 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
         _ => panic!("expected Active(Awaiting)"),
     };
     assert!(
-        burst.dirty.chains().contains(&descendant_path),
+        burst
+            .final_window_residual
+            .chains()
+            .contains(&descendant_path),
         "Awaiting absorb must accumulate the event's path into \
-         dirty for the next Rebasing probe; got {:?}",
-        burst.dirty.chains(),
+         the fire-tail residual for the next Rebasing probe; got {:?}",
+        burst.final_window_residual.chains(),
     );
 
     // EffectComplete::Ok → transition_to_rebasing.
@@ -5106,7 +5109,7 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
     };
     assert!(matches!(burst.phase, PostFirePhase::Rebasing(_)));
     assert!(
-        burst.dirty.is_empty(),
+        burst.final_window_residual.is_empty(),
         "transition_to_rebasing resets the fire-tail residual at the \
          loop entry — the Awaiting-absorbed event is folded into the \
          WholeSubtree read, not carried as a restart seed",

@@ -2726,7 +2726,8 @@ impl Engine {
                     .map(specter_core::Profile::state)
                 {
                     Some(ProfileState::Active(ActiveBurst::PostFire(post), finish)) => {
-                        !post.dirty.is_empty() && matches!(finish, BurstFinish::ReturnToIdle)
+                        !post.final_window_residual.is_empty()
+                            && matches!(finish, BurstFinish::ReturnToIdle)
                     }
                     _ => false,
                 };

@@ -53,7 +53,7 @@
 //! - `transition_to_rebasing` — `Awaiting → Rebasing` (mutates
 //!   `PostFireBurst`).
 //! - `absorb_event_into_fire_tail` — FsEvent during post-fire (notes
-//!   into `PostFireBurst.dirty`).
+//!   into `PostFireBurst.final_window_residual`).
 //! - `restart_burst_from_fire_tail_residual` — `Active(PostFire)` →
 //!   `Active(PreFire(Batching))` typed move at rebase-ok when a
 //!   `ReturnToIdle` burst carries a non-empty residual (origin-agnostic
@@ -1093,7 +1093,7 @@ impl Engine {
         // terminal from spuriously restarting on every tree-touching
         // command. Earlier-round absorbs are not lost — the
         // `WholeSubtree` walk observes them regardless.
-        post.dirty.clear();
+        post.final_window_residual.clear();
         post.phase = PostFirePhase::Rebasing(ProbeSlot::armed(correlation, ()));
 
         // The choke reads the correlation back off the `Rebasing` slot,
@@ -1325,16 +1325,16 @@ impl Engine {
     /// not start a fresh burst: the command the burst just fired writes
     /// to the watched tree, and every such write would otherwise drive
     /// its own burst (the self-trigger loop). The event is deferred into
-    /// `PostFireBurst.dirty` instead.
+    /// `PostFireBurst.final_window_residual` instead.
     ///
     /// The rebase loop's soundness does **not** depend on this set: the
     /// rebase probe walks `WholeSubtree`, so every absorbed event is
     /// re-observed by the next sample and folded into the quiescence
     /// verdict whether or not it is recorded here — the loop exits
     /// `Stable` only once two settle-spaced full reads agree (the
-    /// command's own output included). `dirty` survives only
-    /// as the final-window restart seed (reset at every `Rebasing`
-    /// entry by `transition_to_rebasing`); it is the POSIX content-edit
+    /// command's own output included). The residual survives only as
+    /// the final-window restart seed (reset at every `Rebasing` entry
+    /// by `transition_to_rebasing`); it is the POSIX content-edit
     /// hole's closure for the *restart* decision, not the walk.
     ///
     /// `event` is threaded purely for the diagnostic so an operator can
@@ -1355,7 +1355,8 @@ impl Engine {
             .get_mut(profile_id)
             .and_then(Profile::post_fire_burst_mut)
         {
-            post.dirty.note(event_resource, Arc::clone(event_path));
+            post.final_window_residual
+                .note(event_resource, Arc::clone(event_path));
             out.diagnostics.push(Diagnostic::EventAbsorbedByFireTail {
                 profile: profile_id,
                 resource: event_resource,
