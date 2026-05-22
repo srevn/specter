@@ -274,6 +274,29 @@ impl Engine {
     /// both the response path and the cancel path route through; one
     /// owner is in one state variant holding one slot, so the disarm is
     /// unambiguous.
+    ///
+    /// **Two consumer classes share this seam; the [`DispatchLedger`]
+    /// recording protocol distinguishes them.** Both classes disarm
+    /// here — yielding the same `Some(correlation)` on a previously
+    /// armed slot — and the structural correctness law is held by the
+    /// caller pattern, not by lifting the record into this seam (that
+    /// would split the disarm primitive in two, exactly the design fork
+    /// the linear protocol exists to prevent).
+    ///
+    /// - **Dispatch** ([`Self::on_profile_probe_response`],
+    ///   [`Self::on_promoter_probe_response`]): record on
+    ///   [`DispatchLedger`] *after* this consume and *before* the
+    ///   `dispatch_*` arm. The ledger's strictly-greater assert is the
+    ///   cross-step witness that no correlation reaches a dispatch arm
+    ///   twice.
+    /// - **Abandon** ([`Self::cancel_owner_probe`],
+    ///   [`Self::cancel_all_in_flight_probes`], and the
+    ///   `on_sensor_overflow` reseed arm that disarms without a wire
+    ///   `Cancel`): MUST NOT record. An abandon advances no dispatch,
+    ///   so the next legitimate dispatch is necessarily ≤ the abandoned
+    ///   correlation under engine-wide monotone minting, and recording
+    ///   the abandon would spuriously trip the strictly-greater assert
+    ///   on it.
     #[must_use]
     pub(crate) fn take_owner_probe(&mut self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
         match owner {

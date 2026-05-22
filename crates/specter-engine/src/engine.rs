@@ -165,6 +165,15 @@ impl Engine {
     /// `name → PromoterId`) is resolved engine-side through each
     /// registry's `by_name` index, so the dispatcher's uniform shape
     /// (one input, one [`StepOutput`]) holds across every variant.
+    ///
+    /// **MUST NOT be wrapped in `catch_unwind`.**
+    /// [`specter_core::ProbeSlot`]'s in-unwind silence depends on a
+    /// mid-`step` panic being fatal — *and* on the engine thread being
+    /// the only thread that mutates `ProbeSlot`s, so an unwind on any
+    /// other thread never reaches an armed slot. The driver's `tick` /
+    /// `run` carry the matching contract; this is the engine-side
+    /// mirror, the seam any library or test consumer of the engine
+    /// crate that bypasses the driver first encounters.
     pub fn step(&mut self, input: Input, now: Instant) -> StepOutput {
         let mut out = StepOutput::default();
         match input {
