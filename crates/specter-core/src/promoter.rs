@@ -339,6 +339,7 @@ impl Promoter {
     /// correlation, or `None`. The single state-level consume; the
     /// disarm leaves the state variant intact. Symmetric with
     /// [`Profile::take_probe`](crate::Profile::take_probe).
+    #[must_use]
     pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
         self.state.take_probe()
     }
@@ -529,6 +530,7 @@ impl PromoterState {
     /// disarm leaves the state variant intact, so a route computed
     /// before this call stays valid after it. Owner-symmetric with
     /// [`crate::ProfileState::take_probe`].
+    #[must_use]
     pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
         match self {
             Self::PrefixPending(d) => d.disarm_probe(),

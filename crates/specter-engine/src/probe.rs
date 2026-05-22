@@ -274,6 +274,7 @@ impl Engine {
     /// both the response path and the cancel path route through; one
     /// owner is in one state variant holding one slot, so the disarm is
     /// unambiguous.
+    #[must_use]
     pub(crate) fn take_owner_probe(&mut self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
         match owner {
             ProbeOwner::Profile(pid) => self.profiles.get_mut(pid).and_then(Profile::take_probe),

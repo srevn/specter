@@ -1501,6 +1501,7 @@ impl ProfileState {
     /// intact — only the slot empties — so a route computed before this
     /// call stays valid after it. Owner-symmetric with
     /// [`crate::PromoterState::take_probe`].
+    #[must_use]
     pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
         match self {
             Self::Active(ActiveBurst::PreFire(burst), _) => match &mut burst.phase {
@@ -1680,6 +1681,7 @@ impl DescentState {
     /// protocol instead of a raw field and `probe` stays
     /// module-private. Routing-once is unaffected — the engine still
     /// sees exactly one consume entry point per owner.
+    #[must_use]
     pub(crate) const fn disarm_probe(&mut self) -> Option<ProbeCorrelation> {
         self.probe.disarm()
     }
@@ -2978,6 +2980,7 @@ impl Profile {
     /// correlation — thin delegator to [`ProfileState::take_probe`],
     /// joining the in-place state-mutator family beside
     /// [`Self::descent_state_mut`] / [`Self::mark_active_for_reap`].
+    #[must_use]
     pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
         self.state.take_probe()
     }
