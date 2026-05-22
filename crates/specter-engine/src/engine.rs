@@ -86,12 +86,14 @@ pub struct Engine {
     /// `effect_correlations`: the two id spaces stay structurally
     /// separate at the type level.
     pub(crate) correlations: MonotonicCounter<ProbeCorrelation>,
-    /// Monotonic counter for [`CorrelationId`] minting. Bumped at
-    /// every `Effect` push in `transitions.rs::emit_effects` so the
-    /// actuator-side coalescer can correlate completions back to the
-    /// originating Effect across the Latest dedup. Phantom-typed
-    /// distinct from the probe-side counter: the two id spaces stay
-    /// structurally separate at the type level.
+    /// Monotonic counter for [`CorrelationId`] minting. Bumped at every
+    /// `Effect` push in `transitions.rs::emit_effects` to stamp each
+    /// emission with a process-unique narration id — completion routing
+    /// is `DedupKey`-keyed and never reads it; see
+    /// [`specter_core::Effect::correlation`] for what the actuator
+    /// actually consumes it for. Phantom-typed distinct from the
+    /// probe-side counter: the two id spaces stay structurally separate
+    /// at the type level.
     pub(crate) effect_correlations: MonotonicCounter<CorrelationId>,
     /// Reusable relative-path buffer for [`crate::coverage::covers`],
     /// owned at engine scope so its capacity survives across `step`

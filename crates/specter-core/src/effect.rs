@@ -42,6 +42,17 @@ pub struct Effect {
     /// derivable from [`Effect::key`] — `DedupKey::Subtree` does not
     /// carry it — so it is an irreducible identity scalar.
     pub anchor: ResourceId,
+    /// Operator-narration only — not part of the engine↔actuator
+    /// completion-routing contract. The engine resolves a
+    /// [`crate::Input::EffectComplete`] back to its Profile via
+    /// `DedupKey::profile()` (in `on_effect_complete`'s pass-1 route)
+    /// and the actuator coalesces by [`DedupKey`] alone; this id is
+    /// consumed only for the `SPECTER_CORRELATION` env, the diff tmp
+    /// filename, and tracing keys. The engine mints it because the
+    /// monotone floor already lives at engine scope
+    /// (`Engine.effect_correlations`); moving the mint actuator-side
+    /// would buy nothing — the same operator-narration id with one
+    /// extra cross-actor hop.
     pub correlation: CorrelationId,
     pub forced: bool,
     pub capture_output: bool,

@@ -529,8 +529,8 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
 fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
     // Drive to Awaiting; advance clock past gate_deadline; pop_expired
     // returns the AwaitGateDeadline timer; on_timer_expired runs
-    // handle_gate_deadline → AwaitGateDeadlineElapsed diagnostic; phase
-    // == Rebasing; rebase probe emitted.
+    // handle_gate_deadline → AwaitGateDeadlineForceRebasing diagnostic;
+    // phase == Rebasing; rebase probe emitted.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -562,10 +562,10 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
     assert!(
         combined.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::AwaitGateDeadlineElapsed { profile, outstanding: 1 }
+            Diagnostic::AwaitGateDeadlineForceRebasing { profile, outstanding: 1 }
                 if *profile == pid,
         )),
-        "gate-deadline elapsed diagnostic emitted",
+        "gate-deadline force-rebasing diagnostic emitted",
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
@@ -586,6 +586,70 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
         "rebase probe emitted on gate-deadline force-transition"
     );
     let _ = e.cancel_all_in_flight_probes();
+}
+
+#[test]
+fn fire_cycle_gate_deadline_on_zombie_burst_reaps_profile() {
+    // Detach the only Sub mid-Awaiting → BurstFinish::Reap (the zombie
+    // burst), then let gate_deadline expire. handle_gate_deadline emits
+    // AwaitGateDeadlineReap (not ForceRebasing) and routes through
+    // finish_burst_to_idle → reap_profile, eliding the rebase probe a
+    // dying Profile has no consumer for.
+    let mut e = Engine::new();
+    let r = anchor_dir(&mut e, "src");
+    let now = Instant::now();
+    let snap = dir_snap(&[]);
+    let (sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, &snap, now);
+    let _stable_out =
+        drive_to_awaiting(&mut e, pid, r, &snap, seed_done + Duration::from_millis(10));
+
+    let _detach_out = e.step(Input::DetachSub(sid), seed_done + Duration::from_millis(15));
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state().burst_finish(),
+            Some(BurstFinish::Reap)
+        ),
+        "detach during Awaiting flips the burst's finish directive to Reap",
+    );
+
+    let gate_t = seed_done + Duration::from_millis(10) + MAX_SETTLE * 8;
+    let mut combined = StepOutput::default();
+    while let Some(entry) = e.pop_expired(gate_t) {
+        let s = e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            gate_t,
+        );
+        let (_, probe_ops, _, diagnostics) = s.into_parts();
+        for d in diagnostics {
+            combined.diagnostics.push(d);
+        }
+        for op in probe_ops.into_values() {
+            combined.push_probe_op(op);
+        }
+    }
+    assert!(
+        combined.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::AwaitGateDeadlineReap { profile, outstanding: 1 }
+                if *profile == pid,
+        )),
+        "gate-deadline reap diagnostic emitted on zombie burst",
+    );
+    assert!(
+        e.profiles().get(pid).is_none(),
+        "zombie burst reaped; Profile gone from registry",
+    );
+    assert!(
+        combined.probe_ops().iter().all(|op| !matches!(
+            op,
+            ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid),
+        )),
+        "no rebase probe emitted — the wasted round-trip on a dying Profile is elided",
+    );
 }
 
 #[test]

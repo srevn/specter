@@ -401,12 +401,35 @@ pub enum Diagnostic {
         event: FsEvent,
     },
     /// `AwaitGateDeadline` timer elapsed before all outstanding
-    /// `EffectComplete`s arrived. Indicates the actuator likely has a
-    /// hung child or a slow command; the engine force-transitions the
-    /// burst to [`crate::PostFirePhase::Rebasing`] so it can re-establish
-    /// a baseline against disk reality. Late completions land in
-    /// [`Self::EffectCompleteOutsideAwaiting`].
-    AwaitGateDeadlineElapsed {
+    /// `EffectComplete`s arrived on a live (non-Reap) burst — the
+    /// actuator likely has a hung child or a slow command. The engine
+    /// force-transitions the burst from
+    /// [`crate::PostFirePhase::Awaiting`] to
+    /// [`crate::PostFirePhase::Rebasing`] so it can re-establish a
+    /// baseline against disk reality. Late completions for this
+    /// profile land in [`Self::EffectCompleteOutsideAwaiting`].
+    ///
+    /// Paired with [`Self::AwaitGateDeadlineReap`] — the same trigger
+    /// on a zombie burst takes the reap path instead, and operators
+    /// see distinct vocabularies for the two recoveries.
+    AwaitGateDeadlineForceRebasing {
+        profile: ProfileId,
+        outstanding: u32,
+    },
+    /// `AwaitGateDeadline` timer elapsed before all outstanding
+    /// `EffectComplete`s arrived on a zombie
+    /// ([`crate::BurstFinish::Reap`]) burst — the only Sub detached
+    /// mid-`Awaiting`, so the burst has no consumer for a rebased
+    /// baseline. The engine elides the rebase round-trip (wasted work
+    /// on a dying Profile) and routes through `finish_burst_to_idle`,
+    /// which then dispatches the deferred reap. Late completions land
+    /// in [`Self::EffectCompleteForUnknownSub`] (the Sub left the
+    /// registry at detach).
+    ///
+    /// The structural mirror of [`Self::AwaitGateDeadlineForceRebasing`]
+    /// — same gate-deadline trigger, the [`crate::BurstFinish`] in
+    /// effect at expiry picks the variant.
+    AwaitGateDeadlineReap {
         profile: ProfileId,
         outstanding: u32,
     },

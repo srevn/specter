@@ -288,13 +288,22 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?event,
             "fs event absorbed by fire-tail (Awaiting/Rebasing); folded into post-fire rebase",
         ),
-        Diagnostic::AwaitGateDeadlineElapsed {
+        Diagnostic::AwaitGateDeadlineForceRebasing {
             profile,
             outstanding,
         } => tracing::warn!(
             ?profile,
             outstanding,
             "await-gate deadline elapsed; force-transitioning to Rebasing (actuator likely hung)",
+        ),
+        Diagnostic::AwaitGateDeadlineReap {
+            profile,
+            outstanding,
+        } => tracing::warn!(
+            ?profile,
+            outstanding,
+            "await-gate deadline elapsed on zombie burst; \
+             skipping rebase and reaping profile (actuator likely hung, sole sub detached)",
         ),
         Diagnostic::QuiescenceCeilingUnreadable {
             profile,

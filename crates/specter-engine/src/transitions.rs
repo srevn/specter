@@ -2934,9 +2934,16 @@ impl Engine {
         };
         let outstanding = *outstanding;
         let zombie = matches!(finish, BurstFinish::Reap);
-        out.diagnostics.push(Diagnostic::AwaitGateDeadlineElapsed {
-            profile: profile_id,
-            outstanding,
+        out.diagnostics.push(if zombie {
+            Diagnostic::AwaitGateDeadlineReap {
+                profile: profile_id,
+                outstanding,
+            }
+        } else {
+            Diagnostic::AwaitGateDeadlineForceRebasing {
+                profile: profile_id,
+                outstanding,
+            }
         });
         if zombie {
             self.finish_burst_to_idle(profile_id, out);
