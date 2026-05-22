@@ -299,7 +299,7 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let resource = p.resource;
+        let resource = p.resource();
         let settle = p.settle;
         let max_settle = p.max_settle();
 
@@ -389,7 +389,7 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let resource = p.resource;
+        let resource = p.resource();
         let settle = p.settle;
         let max_settle = p.max_settle();
 
@@ -1429,7 +1429,7 @@ impl Engine {
         // not a duplicated guard.
         let Some((resource, settle, max_settle)) = self.profiles.get(profile_id).and_then(|p| {
             matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _)).then_some((
-                p.resource,
+                p.resource(),
                 p.settle,
                 p.max_settle(),
             ))
@@ -1599,14 +1599,14 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 /// live-id resolution (anchor fallback), never the captured-path basis.
 pub(crate) fn pre_fire_target(p: &Profile, pre: &PreFireBurst, tree: &Tree) -> ResourceId {
     match (p.kind(), pre.intent) {
-        (Some(ResourceKind::File), _) | (_, BurstIntent::Seed) => p.resource,
+        (Some(ResourceKind::File), _) | (_, BurstIntent::Seed) => p.resource(),
         _ => match pre.dirty.lca_path() {
             Some(lca) => promote_to_dir(
-                resolve_under_anchor(p.resource, &lca, tree),
-                p.resource,
+                resolve_under_anchor(p.resource(), &lca, tree),
+                p.resource(),
                 tree,
             ),
-            None => p.resource,
+            None => p.resource(),
         },
     }
 }
@@ -1691,7 +1691,7 @@ mod tests {
     fn start_standard_burst_schedules_two_timers_no_probe() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        let r = e.profiles.get(pid).unwrap().resource;
+        let r = e.profiles.get(pid).unwrap().resource();
         let rp = rpath(&e, r);
         e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
 
@@ -1714,7 +1714,7 @@ mod tests {
     fn transition_to_verifying_mints_correlation_and_emits_probe() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        let r = e.profiles.get(pid).unwrap().resource;
+        let r = e.profiles.get(pid).unwrap().resource();
         let rp = rpath(&e, r);
         e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         let mut out = StepOutput::default();
@@ -1748,7 +1748,7 @@ mod tests {
     fn verify_probe_correlation_is_state_resident() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        let r = e.profiles.get(pid).unwrap().resource;
+        let r = e.profiles.get(pid).unwrap().resource();
         let rp = rpath(&e, r);
         e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         e.transition_to_verifying(pid, &mut out);
@@ -1786,7 +1786,7 @@ mod tests {
         let mut out = StepOutput::default();
         e.transition_to_verifying(pid, &mut out);
         let mut out = StepOutput::default();
-        let r = e.profiles.get(pid).unwrap().resource;
+        let r = e.profiles.get(pid).unwrap().resource();
         let rp = rpath(&e, r);
 
         e.event_drives_batching(pid, r, &rp, Instant::now(), &mut out);
@@ -1817,7 +1817,7 @@ mod tests {
         // Already in Batching: a fresh FsEvent reschedules without Cancel.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        let r = e.profiles.get(pid).unwrap().resource;
+        let r = e.profiles.get(pid).unwrap().resource();
         let rp = rpath(&e, r);
         e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         let mut out = StepOutput::default();
@@ -1849,7 +1849,7 @@ mod tests {
         // responded.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        let resource = e.profiles.get(pid).unwrap().resource;
+        let resource = e.profiles.get(pid).unwrap().resource();
         let rp = rpath(&e, resource);
         let now = Instant::now();
         e.start_standard_burst(pid, resource, &rp, now, &mut out);
@@ -1883,7 +1883,7 @@ mod tests {
     fn finish_burst_to_idle_armed_slot_trips_debug_assert() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        let r = e.profiles.get(pid).unwrap().resource;
+        let r = e.profiles.get(pid).unwrap().resource();
         let rp = rpath(&e, r);
         e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         e.transition_to_verifying(pid, &mut out);
@@ -1910,7 +1910,7 @@ mod tests {
     fn finish_burst_to_idle_after_disarm_returns_to_idle() {
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        let r = e.profiles.get(pid).unwrap().resource;
+        let r = e.profiles.get(pid).unwrap().resource();
         let rp = rpath(&e, r);
         e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         e.transition_to_verifying(pid, &mut out);
@@ -1940,7 +1940,7 @@ mod tests {
         // `last_event + settle` — holds without per-event heap pushes.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
-        let r = e.profiles.get(pid).unwrap().resource;
+        let r = e.profiles.get(pid).unwrap().resource();
         let rp = rpath(&e, r);
         let t0 = Instant::now();
         e.start_standard_burst(pid, r, &rp, t0, &mut out);
@@ -2091,7 +2091,7 @@ mod tests {
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.burst_deadline,
             _ => panic!("expected Active(PreFire)"),
         };
-        let r = e.profiles.get(pid).unwrap().resource;
+        let r = e.profiles.get(pid).unwrap().resource();
         let rp = rpath(&e, r);
 
         e.event_drives_batching(pid, r, &rp, Instant::now(), &mut out);

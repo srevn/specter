@@ -63,7 +63,7 @@ fn attach_at(
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     (sid, pid, out)
 }
 

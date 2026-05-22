@@ -324,7 +324,18 @@ impl std::ops::BitAndAssign for ClassSet {
 #[derive(Debug)]
 pub struct Sub {
     pub name: CompactString,
-    pub profile: ProfileId,
+    /// The Profile this Sub attaches to — the join axis of the per-Sub
+    /// fire bookkeeping onto a `(Resource, ScanConfig)` partition.
+    ///
+    /// **Write-once** at [`Sub::from_request`]: re-assigning this would
+    /// orphan [`SubRegistry::by_profile`] (the secondary index by
+    /// `ProfileId`), break the `Sub`-to-`Profile` lifetime
+    /// presupposition every dispatcher reads, and silently re-target
+    /// fire history. The invariant is held by encapsulation —
+    /// module-private with no setter — matching the discipline on
+    /// [`crate::Profile::resource`] (the same write-once join axis on
+    /// the Profile side).
+    profile: ProfileId,
     pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
     /// Per-Sub debounce floor. `max_settle` and `events` are *not*
@@ -391,6 +402,14 @@ impl Sub {
             source_promoter: params.source_promoter,
             has_fired: false,
         }
+    }
+
+    /// The Profile this Sub attaches to. Write-once at
+    /// [`Self::from_request`]; see the field rustdoc for the
+    /// load-bearing invariant.
+    #[must_use]
+    pub const fn profile(&self) -> ProfileId {
+        self.profile
     }
 }
 

@@ -46,7 +46,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).expect("sub").profile;
+    let pid = e.subs().get(sid).expect("sub").profile();
     assert!(
         first_probe_correlation(&attach_out).is_none(),
         "Batching-first Seed emits no probe at attach (no probe at attach)",
@@ -217,7 +217,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).expect("sub").profile;
+    let pid = e.subs().get(sid).expect("sub").profile();
     assert!(
         first_probe_correlation(&attach_out).is_none(),
         "Batching-first Seed emits no probe at attach (no probe at attach)",

@@ -36,7 +36,7 @@ fn attach_subtree_root(
     );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     (sid, pid)
 }
 
@@ -321,7 +321,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     let initial_corr = first_probe_correlation(&attach_out).expect("descent probe");
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
@@ -613,7 +613,7 @@ fn watch_op_rejected_purges_co_claimed_resource() {
     let sub_attach_out = e.step(Input::AttachSub(req), now);
     let sid_p =
         specter_core::testkit::first_attached_sub(&sub_attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid_p).unwrap().profile;
+    let pid = e.subs().get(sid_p).unwrap().profile();
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),

@@ -56,7 +56,7 @@ pub fn drain_due(e: &mut Engine, at: Instant) {
 /// `SubId` → its `ProfileId` via the public registry.
 #[must_use]
 pub fn pid_of(e: &Engine, sid: SubId) -> ProfileId {
-    e.subs().get(sid).expect("sub present").profile
+    e.subs().get(sid).expect("sub present").profile()
 }
 
 /// First in-flight `Probe` correlation in `out`, if any.
@@ -561,9 +561,9 @@ pub fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubI
         .map(|(sid, s)| {
             let anchor = e
                 .profiles()
-                .get(s.profile)
+                .get(s.profile())
                 .expect("a live dynamic Sub's Profile is live")
-                .resource;
+                .resource();
             (anchor, sid)
         })
         .collect()

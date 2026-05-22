@@ -145,7 +145,7 @@ fn full_lifecycle_attach_promote_seed_reap() {
         .subs()
         .get(dynamic_sub_id)
         .expect("dynamic Sub registered")
-        .profile;
+        .profile();
 
     // Diagnostics on the promote step:
     // - PromotionKindObserved for the matched path.
@@ -477,7 +477,7 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
     let attach_p_out = e.step(Input::AttachSub(req), now);
     let sid =
         specter_core::testkit::first_attached_sub(&attach_p_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),

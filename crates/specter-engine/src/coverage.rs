@@ -52,7 +52,7 @@ use std::path::PathBuf;
 /// a live slot).
 #[must_use]
 pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut PathBuf) -> bool {
-    let anchor = profile.resource;
+    let anchor = profile.resource();
 
     if target == anchor {
         return true;
@@ -160,7 +160,7 @@ pub(crate) fn nearest_covering_ancestor(
     profiles: &ProfileMap,
     child: ProfileId,
 ) -> Option<ProfileId> {
-    let child_resource = profiles.get(child)?.resource;
+    let child_resource = profiles.get(child)?.resource();
     // Cold path (a Draining-phase query, not the per-event hot path):
     // own a local scratch reused across the ancestor loop's `covers`
     // calls. The signature stays clean — threading `&mut PathBuf`
@@ -260,7 +260,7 @@ pub(crate) fn has_active_standard_descendant(
     profiles: &ProfileMap,
     ancestor: ProfileId,
 ) -> bool {
-    let Some(root) = profiles.get(ancestor).map(|p| p.resource) else {
+    let Some(root) = profiles.get(ancestor).map(Profile::resource) else {
         return false;
     };
     // Strict descendants only: seed the stack with `root`'s children,
@@ -601,7 +601,7 @@ mod tests {
         let (_root, profile) = anchor(&mut tree, "root", recursive_unbounded());
         // Build a Resource then drop it via reap so the id is stale.
         let temp = tree
-            .ensure_child(profile.resource, "ghost", ResourceRole::User)
+            .ensure_child(profile.resource(), "ghost", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, temp, ResourceKind::Dir);
         // Need to drop everything that anchors `temp`. `temp` has no children

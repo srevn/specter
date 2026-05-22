@@ -579,7 +579,7 @@ impl crate::Engine {
         debug_assert!(
             self.profiles
                 .get(profile_id)
-                .is_some_and(|p| p.resource == new_resource),
+                .is_some_and(|p| p.resource() == new_resource),
             "descent anchor materialization: Profile.resource diverges from descent anchor",
         );
 

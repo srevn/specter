@@ -88,7 +88,7 @@ fn engine_with_attached_sub() -> (
     };
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
     (e, pid, sid, r, now)
 }
 
@@ -283,7 +283,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
 
     assert_eq!(
         e.profiles.get(pid).and_then(specter_core::Profile::kind),
@@ -353,7 +353,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
     assert_eq!(
         e.profiles.get(pid).and_then(specter_core::Profile::kind),
         None,
@@ -420,7 +420,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
     assert_eq!(
         e.profiles.get(pid).and_then(specter_core::Profile::kind),
         None,
@@ -484,7 +484,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
     assert!(
         matches!(
             e.profiles.get(pid).map(specter_core::Profile::state),
@@ -552,7 +552,7 @@ fn kind_mismatched_response_routes_through_finalize_anchor_lost_debug() {
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
     // Complete the Seed burst so the Profile lands Idle at kind =
     // Some(File). A Seed burst is Batching-first and pins on
     // the second settle-spaced equal `AnchorOk` (the first sample is
@@ -658,7 +658,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
     let out = e.step(Input::AttachSub(req), now);
     let sid2 = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     assert_eq!(e.subs.at(pid).len(), pre_count + 1);
-    assert_eq!(e.subs.get(sid2).unwrap().profile, pid, "shared Profile");
+    assert_eq!(e.subs.get(sid2).unwrap().profile(), pid, "shared Profile");
     // No fresh watch/probe emitted: existing Profile already has them.
     assert!(out.watch_ops.is_empty());
     assert!(out.probe_ops().is_empty());
@@ -1113,7 +1113,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
     // Seed → Idle. A Seed burst is Batching-first and pins on
     // the second settle-spaced equal `AnchorOk` (the first sample is
     // `Unstable` by construction); drive both cycles.
@@ -1256,7 +1256,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
 
     // Seed → leaf v1; Standard injects the same leaf so the verdict
     // is stable (matching the conventional pattern across this file).
@@ -1724,7 +1724,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     };
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
     complete_seed_burst(&mut e, pid);
 
     let child = e
@@ -2374,7 +2374,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
     };
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
     assert!(e.subs.get(sid).unwrap().needs_diff);
 
     // Seed burst → baseline = empty snapshot.
@@ -2767,8 +2767,8 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     let attach_out = e.step(Input::AttachSub(req_b), Instant::now());
     let sid_b =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid_a = e.subs.get(sid_a).unwrap().profile;
-    let pid_b = e.subs.get(sid_b).unwrap().profile;
+    let pid_a = e.subs.get(sid_a).unwrap().profile();
+    let pid_b = e.subs.get(sid_b).unwrap().profile();
     // Both descents at /foo (different anchors).
     assert!(e.descent_state(ProbeOwner::Profile(pid_a)).is_some());
     assert!(e.descent_state(ProbeOwner::Profile(pid_b)).is_some());
@@ -3217,8 +3217,8 @@ fn sensor_overflow_resource_scope_filters_profiles() {
     let attach_out = e.step(Input::AttachSub(req_b), now);
     let sid_b =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid_a = e.subs.get(sid_a).unwrap().profile;
-    let pid_b = e.subs.get(sid_b).unwrap().profile;
+    let pid_a = e.subs.get(sid_a).unwrap().profile();
+    let pid_b = e.subs.get(sid_b).unwrap().profile();
     complete_seed_burst(&mut e, pid_a);
     complete_seed_burst(&mut e, pid_b);
     assert!(matches!(
@@ -3512,7 +3512,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
     );
     let sid_fast =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid_fast).unwrap().profile;
+    let pid = e.subs.get(sid_fast).unwrap().profile();
     let _ = e.step(
         Input::AttachSub(SubAttachRequest {
             anchor: SubAttachAnchor::Resource(r),
@@ -4081,7 +4081,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
 
     // Complete Seed with empty baseline (Batching-first; full N=2 pin).
     complete_seed_burst(&mut e, pid);
@@ -4227,7 +4227,7 @@ fn per_stable_file_skips_dir_entries() {
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
 
     // Seed completes against a snapshot already containing one Dir
     // (`subdir`). After Seed, `subdir` is in the baseline and won't
@@ -4454,7 +4454,7 @@ fn subtree_effect_target_is_anchor_at_emission() {
         "Subtree.target is the Profile anchor at emission time",
     );
     assert_eq!(
-        e.profiles.get(pid).unwrap().resource,
+        e.profiles.get(pid).unwrap().resource(),
         root,
         "anchor is unchanged post-emit (sanity)",
     );
@@ -4624,7 +4624,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     };
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
     assert!(
         e.profiles.get(pid).unwrap().has_per_file_fds(),
         "CONTENT-mask Profile has has_per_file_fds = true at construction",
@@ -4685,7 +4685,7 @@ fn structure_only_profile_has_per_file_fds_false() {
     };
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
     assert!(!e.profiles.get(pid).unwrap().has_per_file_fds());
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -5011,7 +5011,7 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs.get(sid).unwrap().profile;
+    let pid = e.subs.get(sid).unwrap().profile();
 
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
     assert_eq!(stable_out.effects().len(), 1, "stable verdict fires Effect");
@@ -5951,7 +5951,7 @@ fn attach_per_stable_file_sibling(
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("per-file sibling attached");
     assert_eq!(
-        e.subs.get(sid).unwrap().profile,
+        e.subs.get(sid).unwrap().profile(),
         pid,
         "per-file sibling shares the original Profile (same anchor + config_hash)",
     );
@@ -6313,7 +6313,7 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
     let out_b = e.step(Input::AttachSub(req_b), now);
     let sid_b = specter_core::testkit::first_attached_sub(&out_b).expect("sibling attached");
     assert_eq!(
-        e.subs.get(sid_b).unwrap().profile,
+        e.subs.get(sid_b).unwrap().profile(),
         pid,
         "sibling shares the original Profile (same anchor + config_hash)",
     );
@@ -6462,7 +6462,7 @@ mod props {
         t: &mut Instant,
         last_correlation: &mut Option<specter_core::ProbeCorrelation>,
     ) -> StepOutput {
-        let pid = e.subs.get(sid).unwrap().profile;
+        let pid = e.subs.get(sid).unwrap().profile();
         let out = match action {
             Action::FsEvent(event) => e.step(Input::FsEvent { resource: r, event }, *t),
             Action::AdvanceTime(ms) => {
@@ -6645,7 +6645,7 @@ mod props {
         ) {
             let (mut e, sid, r, mut t, mut last_correlation) =
                 fresh_engine_with_sub();
-            let pid = e.subs.get(sid).unwrap().profile;
+            let pid = e.subs.get(sid).unwrap().profile();
 
             // attach_sub starts a Batching-first Seed burst — no probe
             // until its settle expires, so outstanding = 0.
@@ -6729,7 +6729,7 @@ mod props {
         ) {
             let (mut e, sid, _r, now, _last_correlation) =
                 fresh_engine_with_sub();
-            let pid = e.subs.get(sid).unwrap().profile;
+            let pid = e.subs.get(sid).unwrap().profile();
             // Batching-first Seed: expire the settle timer so the verify
             // probe is in flight, then answer it with the random outcome.
             seed_settle_to_verifying(&mut e, now);
@@ -6769,7 +6769,7 @@ mod props {
         ) {
             let (mut e, sid, r, mut t, mut last_correlation) =
                 fresh_engine_with_sub();
-            let pid = e.subs.get(sid).unwrap().profile;
+            let pid = e.subs.get(sid).unwrap().profile();
             for action in actions {
                 let _ = run_action(&mut e, sid, r, action, &mut t, &mut last_correlation);
                 if e.profiles.get(pid).is_some() {

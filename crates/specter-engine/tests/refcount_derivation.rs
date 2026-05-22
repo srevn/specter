@@ -37,18 +37,18 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
     };
 
     let s1 = attach(&mut e, "A");
-    let pid = e.subs().get(s1).expect("Sub A live").profile;
+    let pid = e.subs().get(s1).expect("Sub A live").profile();
     assert_eq!(e.subs().at(pid).len(), 1, "one Sub attached");
 
     let s2 = attach(&mut e, "B");
     let s3 = attach(&mut e, "C");
     assert_eq!(
-        e.subs().get(s2).unwrap().profile,
+        e.subs().get(s2).unwrap().profile(),
         pid,
         "B shares the Profile (same config_hash)",
     );
     assert_eq!(
-        e.subs().get(s3).unwrap().profile,
+        e.subs().get(s3).unwrap().profile(),
         pid,
         "C shares the Profile"
     );
@@ -64,7 +64,7 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
     assert!(e.subs().get(s2).is_none(), "B gone from the registry");
     for s in [s1, s3] {
         assert_eq!(
-            e.subs().get(s).unwrap().profile,
+            e.subs().get(s).unwrap().profile(),
             pid,
             "survivors still share the Profile",
         );
@@ -73,7 +73,7 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
     // Re-attach pushes the derived count back up — symmetric.
     let s4 = attach(&mut e, "D");
     assert_eq!(
-        e.subs().get(s4).unwrap().profile,
+        e.subs().get(s4).unwrap().profile(),
         pid,
         "D shares the Profile"
     );

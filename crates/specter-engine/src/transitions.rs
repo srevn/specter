@@ -34,10 +34,10 @@ use specter_core::{
     ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind, ClassSet,
     ContribKey, DedupKey, DescentRemaining, DescentState, Diagnostic, Effect, EffectCommon,
     EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent, PostFirePhase,
-    PreFirePhase, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, ProfileId,
-    ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority, QuiescenceVerdict,
-    ReapTrigger, Resource, ResourceId, ResourceKind, StepOutput, SubAttachRequest, SubId, TimerId,
-    TimerKind, TreeSnapshot, WatchFailure, WatchRegistryDiff,
+    PreFirePhase, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Profile,
+    ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority,
+    QuiescenceVerdict, ReapTrigger, Resource, ResourceId, ResourceKind, StepOutput,
+    SubAttachRequest, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchRegistryDiff,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -189,7 +189,7 @@ impl Engine {
             let Some((is_anchor, profile_events)) = self
                 .profiles
                 .get(profile_id)
-                .map(|p| (p.resource == resource, p.events()))
+                .map(|p| (p.resource() == resource, p.events()))
             else {
                 continue;
             };
@@ -240,7 +240,7 @@ impl Engine {
         parent: ResourceId,
         out: &mut StepOutput,
     ) {
-        let Some(anchor) = self.profiles.get(profile_id).map(|p| p.resource) else {
+        let Some(anchor) = self.profiles.get(profile_id).map(Profile::resource) else {
             return;
         };
         let Some(anchor_name) = self.tree.name(anchor).map(CompactString::from) else {
@@ -1280,7 +1280,7 @@ impl Engine {
         let mut parent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         let mut descent_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
         for (pid, p) in self.profiles.iter() {
-            if matches!(p.anchor_claim(), AnchorClaim::Held) && p.resource == resource {
+            if matches!(p.anchor_claim(), AnchorClaim::Held) && p.resource() == resource {
                 anchor_claimers.push(pid);
             }
             if p.watch_root_parent() == Some(resource) {
@@ -1714,7 +1714,7 @@ impl Engine {
     fn profiles_in_subtree(&self, r: ResourceId) -> smallvec::SmallVec<[ProfileId; 8]> {
         self.profiles
             .iter()
-            .filter(|(_, p)| p.resource == r || self.tree.ancestors(p.resource).any(|a| a == r))
+            .filter(|(_, p)| p.resource() == r || self.tree.ancestors(p.resource()).any(|a| a == r))
             .map(|(pid, _)| pid)
             .collect()
     }
@@ -1929,7 +1929,7 @@ impl Engine {
         let anchor_resource: ResourceId = self
             .profiles
             .get(profile_id)
-            .map(|p| p.resource)
+            .map(Profile::resource)
             .unwrap_or_default();
         let anchor_path: Arc<Path> = self.tree.path_of(anchor_resource).unwrap_or_else(|| {
             debug_assert!(
@@ -2468,7 +2468,7 @@ impl Engine {
         let p = self.profiles.get(profile_id)?;
         Some(match p.pre_fire_burst() {
             Some(pre) => pre.probe_target,
-            None => p.resource,
+            None => p.resource(),
         })
     }
 
@@ -2693,7 +2693,7 @@ impl Engine {
         // (`transition_to_rebasing` always probes `Profile.resource`;
         // `PostFireBurst` carries no `probe_target`). Kind agreement and
         // the verdict fold are owned upstream by the shared certifier.
-        let Some(target) = self.profiles.get(profile_id).map(|p| p.resource) else {
+        let Some(target) = self.profiles.get(profile_id).map(Profile::resource) else {
             return;
         };
         // The rebase-loop ceiling latch, read off the public `state()`
@@ -3056,7 +3056,7 @@ impl Engine {
         if matches!(p.state().burst_finish(), Some(BurstFinish::Reap)) {
             return EmitOutcome::default();
         }
-        let resource = p.resource;
+        let resource = p.resource();
         let baseline_snap = p.baseline();
         let current_snap = p.current();
         // Read the cached anchor classification. `None` falls back to
@@ -3200,7 +3200,7 @@ impl Engine {
         out: &mut StepOutput,
     ) -> u32 {
         let profile_id = match self.subs.get(sub_id) {
-            Some(s) => s.profile,
+            Some(s) => s.profile(),
             None => return 0,
         };
         let mut count: u32 = 0;

@@ -133,7 +133,7 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         now,
     );
     let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
-    let pid_parent = e.subs().get(sid_p).unwrap().profile;
+    let pid_parent = e.subs().get(sid_p).unwrap().profile();
     // The parent's Seed is Batching-first; drive its N=2
     // quiescence proof to a pinned `Idle` baseline (per-Profile, by-id
     // timer steps so the child Seed below is untouched).
@@ -156,7 +156,7 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         now,
     );
     let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
-    let pid_child = e.subs().get(sid_c).unwrap().profile;
+    let pid_child = e.subs().get(sid_c).unwrap().profile();
     // Drive the child's Seed N=2, rebased strictly past the parent
     // Seed's consumed settle windows. The child attached at `now` so
     // its Batching settle id is read fresh from its still-Batching
@@ -528,7 +528,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         now,
     );
     let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
-    let pid_parent = e.subs().get(sid_p).unwrap().profile;
+    let pid_parent = e.subs().get(sid_p).unwrap().profile();
     // The parent's Seed is Batching-first; drive its N=2
     // quiescence proof to a pinned `Idle` baseline (per-Profile, by-id
     // timer steps so the child Seed below stays untouched).
@@ -549,7 +549,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         now,
     );
     let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
-    let pid_child = e.subs().get(sid_c).unwrap().profile;
+    let pid_child = e.subs().get(sid_c).unwrap().profile();
     // Drive the child's Seed N=2, rebased strictly past the parent
     // Seed's consumed settle windows.
     let child_seed_done = seed_to_idle(&mut e, pid_child, &dir_snap(&[]), parent_seed_done);
@@ -630,7 +630,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         parent_parked_at,
     );
     let sid_m = specter_core::testkit::first_attached_sub(&out_m).expect("attach_sub succeeded");
-    let pid_mid = e.subs().get(sid_m).unwrap().profile;
+    let pid_mid = e.subs().get(sid_m).unwrap().profile();
     assert!(
         !out_m.probe_ops().iter().any(|op| matches!(
             op,
@@ -782,7 +782,7 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         now,
     );
     let sid_a = specter_core::testkit::first_attached_sub(&out_a).expect("attach_sub succeeded");
-    let pid_a = e.subs().get(sid_a).unwrap().profile;
+    let pid_a = e.subs().get(sid_a).unwrap().profile();
     // Every Seed is Batching-first; drive A's N=2 quiescence
     // proof to a pinned `Idle` baseline (per-Profile, by-id timer steps
     // so the B and P Seeds below stay untouched).
@@ -807,7 +807,7 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         now,
     );
     let sid_b = specter_core::testkit::first_attached_sub(&out_b).expect("attach_sub succeeded");
-    let pid_b = e.subs().get(sid_b).unwrap().profile;
+    let pid_b = e.subs().get(sid_b).unwrap().profile();
     // Drive B's Seed N=2, rebased strictly past A's consumed settle
     // windows. B then sits pinned at `Idle` — exactly the state the
     // later immediate-reap detach requires.
@@ -829,7 +829,7 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         now,
     );
     let sid_p = specter_core::testkit::first_attached_sub(&out_pp).expect("attach_sub succeeded");
-    let pid_p = e.subs().get(sid_p).unwrap().profile;
+    let pid_p = e.subs().get(sid_p).unwrap().profile();
     // Drive P's Seed N=2, rebased strictly past B's consumed settle
     // windows.
     let p_seed_done = seed_to_idle(&mut e, pid_p, &dir_snap(&[]), b_seed_done);
@@ -1025,7 +1025,7 @@ fn co_located_profiles_independently_record_shared_resource_obligation() {
     );
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid_a = e.subs().get(sid_a).unwrap().profile;
+    let pid_a = e.subs().get(sid_a).unwrap().profile();
 
     let attach_out = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
@@ -1043,7 +1043,7 @@ fn co_located_profiles_independently_record_shared_resource_obligation() {
     );
     let sid_b =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid_b = e.subs().get(sid_b).unwrap().profile;
+    let pid_b = e.subs().get(sid_b).unwrap().profile();
 
     assert_ne!(pid_a, pid_b, "distinct config_hash ⇒ distinct Profiles");
     assert_eq!(
@@ -1173,7 +1173,7 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     );
     let sid_child =
         specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
-    let pid_child = e.subs().get(sid_child).unwrap().profile;
+    let pid_child = e.subs().get(sid_child).unwrap().profile();
     // The child's Seed is Batching-first; drive its N=2
     // quiescence proof to a pinned `Idle` baseline (per-Profile, by-id
     // timer steps so the parent Seed below stays untouched).
@@ -1196,7 +1196,7 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     );
     let sid_parent =
         specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
-    let pid_parent = e.subs().get(sid_parent).unwrap().profile;
+    let pid_parent = e.subs().get(sid_parent).unwrap().profile();
     // Drive the parent's Seed N=2, rebased strictly past the child
     // Seed's consumed settle windows.
     let parent_seed_done = seed_to_idle(&mut e, pid_parent, &dir_snap(&[]), child_seed_done);

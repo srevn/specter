@@ -645,7 +645,7 @@ fn mixed_resident_recovery_does_not_duplicate_dynamic_sub() {
     let promoted = dynamic_subs_of(&e, pid);
     assert_eq!(promoted.len(), 1);
     let (foo_anchor, dyn_sid) = promoted.into_iter().next().unwrap();
-    let profile = e.subs().get(dyn_sid).expect("dynamic Sub alive").profile;
+    let profile = e.subs().get(dyn_sid).expect("dynamic Sub alive").profile();
 
     // A static Sub co-resident at the same anchor joins the Profile via
     // dedup — it keeps the Profile (and hence the dynamic Sub) alive
@@ -670,7 +670,7 @@ fn mixed_resident_recovery_does_not_duplicate_dynamic_sub() {
     let static_sid =
         specter_core::testkit::first_attached_sub(&s_out).expect("static attach succeeded");
     assert_eq!(
-        e.subs().get(static_sid).unwrap().profile,
+        e.subs().get(static_sid).unwrap().profile(),
         profile,
         "static Sub dedups onto the dynamic Sub's Profile",
     );

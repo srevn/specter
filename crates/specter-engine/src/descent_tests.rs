@@ -94,7 +94,7 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     (e, sid, pid)
 }
 
@@ -180,7 +180,7 @@ fn descent_two_levels_advances_progressively() {
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
 
     // First probe at /foo. Inject "bar" appears.
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
@@ -451,7 +451,7 @@ fn absolute_attach_bootstraps_fs_root_segment() {
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
 
     // Tree contains the synthetic FS-root and the `tmp` scaffold.
     let root = e.tree().lookup(None, "/").expect("FS-root bootstrapped");
@@ -569,7 +569,7 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
 
     let root = e.tree().lookup(None, "/").unwrap();
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
@@ -746,7 +746,7 @@ fn descent_state_helper_returns_none_for_idle() {
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     // Materialized Profile starts a Seed burst — Active, not Idle. Drive
     // it to completion to land in Idle.
     let probe = e
@@ -783,7 +783,7 @@ fn descent_state_helper_returns_none_for_active() {
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     // Materialized Profile starts a Seed burst — state is Active.
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
@@ -893,7 +893,7 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     assert_eq!(
         e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::Held,

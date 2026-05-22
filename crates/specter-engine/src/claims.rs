@@ -55,7 +55,7 @@ impl Engine {
         let AnchorClaim::Held = p.anchor_claim() else {
             return;
         };
-        let resource = p.resource;
+        let resource = p.resource();
 
         if let Some(p) = self.profiles.get_mut(pid) {
             p.release_anchor_claim_now();
@@ -199,7 +199,7 @@ impl Engine {
             let Some(profile) = self.profiles.get(pid) else {
                 return;
             };
-            let anchor = profile.resource;
+            let anchor = profile.resource();
             apply_diff_to_tree(
                 &diff,
                 profile,

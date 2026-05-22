@@ -39,7 +39,7 @@ fn config_diff_add_sub_to_existing_profile() {
         now,
     );
     let sid_a = specter_core::testkit::first_attached_sub(&attach).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid_a).unwrap().profile;
+    let pid = e.subs().get(sid_a).unwrap().profile();
     assert_eq!(e.subs().at(pid).len(), 1);
 
     // ConfigDiff with one added Sub at the same anchor + same cfg.
@@ -103,7 +103,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid_a).unwrap().profile;
+    let pid = e.subs().get(sid_a).unwrap().profile();
     let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Profile is Idle. Remove via ConfigDiff (by operator watch name).
@@ -158,7 +158,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
     );
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid_a).unwrap().profile;
+    let pid = e.subs().get(sid_a).unwrap().profile();
     let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Drive a Standard burst (after the Seed's two settle windows).
@@ -243,7 +243,7 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     );
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid_a).unwrap().profile;
+    let pid = e.subs().get(sid_a).unwrap().profile();
     let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Drive a Standard burst (after the Seed's two settle windows).
@@ -284,7 +284,7 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     let sid_b = e.subs().find_by_name("A").expect("A still live");
     assert_eq!(sid_b, sid_a, "modified_params rebind preserves SubId");
     assert_eq!(
-        e.subs().get(sid_a).unwrap().profile,
+        e.subs().get(sid_a).unwrap().profile(),
         pid,
         "Sub stays on the same Profile",
     );
@@ -349,7 +349,7 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
         now,
     );
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Rebind to a longer settle. Everything else identical, including
@@ -380,7 +380,8 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
 
     let sub_after = e.subs().get(sid).expect("Sub preserved across rebind");
     assert_eq!(
-        sub_after.profile, pid,
+        sub_after.profile(),
+        pid,
         "rebind preserves the Sub's ProfileId",
     );
     assert_eq!(sub_after.settle, new_settle, "Sub.settle is the new value");
@@ -445,7 +446,7 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
         now,
     );
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // modified_identity with a malformed path — `Tree::parse_attach_path`
@@ -484,7 +485,7 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
         "old SubId survives validate failure — structural rollback",
     );
     assert_eq!(
-        e.subs().get(sid).unwrap().profile,
+        e.subs().get(sid).unwrap().profile(),
         pid,
         "old Profile unchanged",
     );
@@ -522,7 +523,7 @@ fn effect_complete_after_detach_drops_silently() {
         now,
     );
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Detach via ConfigDiff (by operator watch name).
@@ -603,7 +604,7 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
     );
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid_a = e.subs().get(sid_a).unwrap().profile;
+    let pid_a = e.subs().get(sid_a).unwrap().profile();
     let seed_done = seed_to_idle(&mut e, pid_a, &dir_snap(&[]), now);
 
     // Same path, different scan ⇒ `modified_identity`. Path-based

@@ -270,7 +270,7 @@ fn it_ef_2b_profile_events_invariant_across_sub_attach_detach() {
     );
 
     // The surviving Sub still belongs to that same Profile.
-    assert_eq!(e.subs().get(sid_b).unwrap().profile, pid_a);
+    assert_eq!(e.subs().get(sid_b).unwrap().profile(), pid_a);
     let _ = e.cancel_all_in_flight_probes();
 }
 

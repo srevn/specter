@@ -373,7 +373,7 @@ pub(crate) fn graft(
     scratch: &mut PathBuf,
 ) {
     let anchor = match profiles.get(profile_id) {
-        Some(p) => p.resource,
+        Some(p) => p.resource(),
         None => return,
     };
 

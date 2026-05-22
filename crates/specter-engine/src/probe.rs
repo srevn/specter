@@ -450,7 +450,7 @@ impl Engine {
         match owner {
             ProbeOwner::Profile(pid) => {
                 let p = self.profiles.get(pid)?;
-                let anchor = p.resource;
+                let anchor = p.resource();
 
                 // Read the correlation BACK off the armed slot via the
                 // *same* pub projection `pending_probe_for` reads

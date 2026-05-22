@@ -922,14 +922,14 @@ impl Engine {
     /// schedule until `finish_burst_to_idle`.
     pub(crate) fn detach_sub_inner(&mut self, sub: SubId, out: &mut StepOutput) {
         let profile_id = match self.subs.remove(sub) {
-            Some(s) => s.profile,
+            Some(s) => s.profile(),
             None => {
                 out.diagnostics.push(Diagnostic::DetachUnknownSub { sub });
                 return;
             }
         };
 
-        // A live Sub's `.profile` is live by the attach invariant; this
+        // A live Sub's `.profile()` is live by the attach invariant; this
         // guard is defence-in-depth — same effect as the get_mut-borrow
         // bail it replaces, but no Profile write happens here (the
         // post-detach count is derived from the registry).
@@ -1170,7 +1170,7 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let anchor = p.resource;
+        let anchor = p.resource();
 
         // Trichotomy invariant: Pending and AnchorClaim::Held are mutually
         // exclusive. Descent flips Pending → Idle and bumps the anchor
@@ -2035,7 +2035,7 @@ mod tests {
         );
         let sid_a =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-        let pid = e.subs().get(sid_a).unwrap().profile;
+        let pid = e.subs().get(sid_a).unwrap().profile();
         let watch_demand_after_attach = e.tree.get(r).unwrap().watch_demand();
         assert_eq!(watch_demand_after_attach, 1, "anchor watch_demand from A");
 
@@ -2056,7 +2056,7 @@ mod tests {
         );
         let sid_b =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-        let pid_b = e.subs().get(sid_b).unwrap().profile;
+        let pid_b = e.subs().get(sid_b).unwrap().profile();
 
         assert_eq!(pid_b, pid, "B reuses A's Profile");
         assert_eq!(
@@ -2117,7 +2117,7 @@ mod tests {
         );
         let sid_a =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-        let pid = e.subs().get(sid_a).unwrap().profile;
+        let pid = e.subs().get(sid_a).unwrap().profile();
         // Batching-first Seed: expire the settle timer (settle = 50ms)
         // so the verify probe is in flight before the revival below.
         let t_settle = now + Duration::from_millis(50);
@@ -2233,7 +2233,7 @@ mod tests {
         let now = Instant::now();
         let out = e.step(Input::AttachSub(req), now);
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
-        let pid = e.subs().get(sid).expect("Sub alive").profile;
+        let pid = e.subs().get(sid).expect("Sub alive").profile();
 
         // Install a Dir snapshot on Profile.current so the descendant
         // release has a snapshot to take. Mirrors what

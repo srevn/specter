@@ -136,7 +136,7 @@ fn engine_with_materialised_profile(
     let t0 = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
 
     // Drive the Batching-first Seed through its N=2 proof so `current`
     // and `baseline` pin to the empty-dir observation.
@@ -425,7 +425,7 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
     let t0 = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     drive_fresh_seed_to_idle(
         &mut e,
         pid,
@@ -508,7 +508,7 @@ fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
     let t0 = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), t0);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
 
     // Seed-Ok response materialises descendant /a/b as a Dir.
     drive_fresh_seed_to_idle(&mut e, pid, dir_snap(vec![("b", EntryKind::Dir, 7)]), t0);

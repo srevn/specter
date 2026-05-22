@@ -39,7 +39,7 @@ fn attach_sub_creates_watch_root_parent_contribution() {
     );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
 
     assert_eq!(
         e.tree().get(src).unwrap().watch_demand(),
@@ -79,7 +79,7 @@ fn root_anchor_has_no_watch_root_parent() {
     );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     assert!(e.profiles().get(pid).unwrap().watch_root_parent().is_none());
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -109,7 +109,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
 
     // Drive Seed → Idle. The Seed is Batching-first with an
     // N=2 settle-spaced quiescence proof (no probe at attach); the

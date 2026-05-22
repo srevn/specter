@@ -148,9 +148,9 @@ fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubId> {
         .map(|(sid, s)| {
             let anchor = e
                 .profiles
-                .get(s.profile)
+                .get(s.profile())
                 .expect("a live dynamic Sub's Profile is live")
-                .resource;
+                .resource();
             (anchor, sid)
         })
         .collect()
@@ -1804,7 +1804,7 @@ fn anchor_terminal_all_dynamic_reaps_profile_and_notifies_promoter() {
         1,
         "exactly one dynamic Sub minted",
     );
-    let profile_id = e.subs().get(sid).expect("Sub alive").profile;
+    let profile_id = e.subs().get(sid).expect("Sub alive").profile();
     assert!(e.profiles.get(profile_id).is_some(), "Profile attached");
     // Sanity: the Sub carries source_promoter.
     assert_eq!(e.subs().get(sid).and_then(|s| s.source_promoter), Some(pid),);
@@ -1856,7 +1856,7 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
     // finalize_anchor_lost (Profile lives, watch_root_parent retained).
     let mut e = Engine::new();
     let (pid, dyn_sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
-    let profile_id = e.subs().get(dyn_sid).expect("Sub alive").profile;
+    let profile_id = e.subs().get(dyn_sid).expect("Sub alive").profile();
     let static_req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(anchor),
         identity: ProfileIdentity {
@@ -1877,7 +1877,7 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
     let static_sid =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     assert_eq!(
-        e.subs().get(static_sid).unwrap().profile,
+        e.subs().get(static_sid).unwrap().profile(),
         profile_id,
         "static Sub joins the dynamic Sub's Profile via dedup",
     );
@@ -1951,7 +1951,7 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
     };
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let profile_id = e.subs().get(sid).unwrap().profile;
+    let profile_id = e.subs().get(sid).unwrap().profile();
 
     let _ = e.step(
         Input::FsEvent {
@@ -1982,7 +1982,7 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
 fn anchor_terminal_predicate_static_sub_makes_mixed() {
     let mut e = Engine::new();
     let (pid, dyn_sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
-    let profile_id = e.subs().get(dyn_sid).expect("Sub alive").profile;
+    let profile_id = e.subs().get(dyn_sid).expect("Sub alive").profile();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(anchor),
         identity: ProfileIdentity {

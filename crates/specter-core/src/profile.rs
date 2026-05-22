@@ -2163,14 +2163,13 @@ struct TreeContributions {
 /// One stability state machine per `(Resource, ProfileIdentity)`,
 /// decomposed into single-concern substructures.
 ///
-/// Only `resource` (the slot axis) and `settle` (the per-Profile
-/// mutable debounce param the engine recomputes as
-/// `min(remaining_subs.settles)`) are `pub` fields. Every other
-/// concern is module-private, exposing a typed accessor/transition API
-/// — the cross-crate write surface is `Profile`'s `pub fn`s, never a
-/// field assignment. The substructures that own a cross-field
-/// invariant: `ProfileConfig` (frozen identity ⇒ derived caches),
-/// `AnchorClassification` (snapshot-shape ⊕ baseline/witness
+/// Only `settle` (the per-Profile mutable debounce param the engine
+/// recomputes as `min(remaining_subs.settles)`) is a `pub` field;
+/// every other concern is module-private, exposing a typed accessor /
+/// transition API — the cross-crate write surface is `Profile`'s
+/// `pub fn`s, never a field assignment. The substructures that own a
+/// cross-field invariant: `ProfileConfig` (frozen identity ⇒ derived
+/// caches), `AnchorClassification` (snapshot-shape ⊕ baseline/witness
 /// exclusion), `TreeContributions` (deferred Tree releases — drift =
 /// refcount leak). The burst state machine needs no such wrapper: it
 /// is the plain module-private [`ProfileState`] field `state`, read
@@ -2185,9 +2184,16 @@ struct TreeContributions {
 #[derive(Debug)]
 pub struct Profile {
     /// The Tree slot this Profile's stability machine anchors at — the
-    /// slot axis of the `(resource, config_hash)` partition key. Stays
-    /// `pub`: a plain identity read with no invariant to guard.
-    pub resource: ResourceId,
+    /// slot axis of the `(resource, config_hash)` partition key.
+    ///
+    /// **Write-once** at [`Profile::new`]: re-assigning this would
+    /// desynchronise [`ProfileMap::by_resource`] (the secondary index
+    /// by [`ResourceId`]), [`crate::Resource::profiles`] (the slot-side
+    /// back-ref vector), and every reader of [`Self::resource`]. The
+    /// invariant is held by encapsulation — module-private with no
+    /// setter — matching the discipline on [`Self::cfg`] (`config_hash`
+    /// is the other half of the partition key, frozen the same way).
+    resource: ResourceId,
     /// Frozen config identity and its derived caches. Read via
     /// [`Self::config`] / [`Self::config_hash`] /
     /// [`Self::exclude_strings`] / [`Self::max_settle`] /
@@ -2676,6 +2682,15 @@ impl Profile {
     #[must_use]
     pub const fn config(&self) -> &ScanConfig {
         &self.cfg.identity.config
+    }
+
+    /// The Tree slot this Profile anchors at — the slot axis of the
+    /// `(resource, config_hash)` partition key. Write-once at
+    /// [`Self::new`]; see the field rustdoc for the load-bearing
+    /// invariant.
+    #[must_use]
+    pub const fn resource(&self) -> ResourceId {
+        self.resource
     }
 
     /// The lifetime-stable canonical config hash — the config axis of

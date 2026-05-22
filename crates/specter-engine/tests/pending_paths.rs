@@ -42,7 +42,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
 
     // Initial pending state: intermediate scaffold in place; anchor
     // already has role=User ("role = User for the
@@ -145,7 +145,7 @@ fn pending_path_failed_probe_retains_state() {
     );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     let corr = first_probe_correlation(&attach_out).expect("descent probe");
 
     let out = e.step(
@@ -195,7 +195,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     let corr = first_probe_correlation(&attach_out).expect("descent probe");
 
     // No-progress response — descent stays pending.
@@ -255,7 +255,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
     // The immediate Seed is Batching-first: no probe at attach.
     assert!(
         first_probe_correlation(&attach_out).is_none(),
@@ -330,7 +330,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
 
     // Profile is Pending with an in-flight descent probe.
     let initial_corr = first_probe_correlation(&attach_out).expect("descent probe at attach");
@@ -393,10 +393,10 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
-    let pid = e.subs().get(sid).unwrap().profile;
+    let pid = e.subs().get(sid).unwrap().profile();
 
     let p = e.profiles().get(pid).expect("Profile attached");
-    let anchor = p.resource;
+    let anchor = p.resource();
     let prefix = match p.state() {
         ProfileState::Pending(d) => d.current_prefix(),
         s => panic!("expected Pending, got {s:?}"),
@@ -503,7 +503,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let attach_a_out = e.step(Input::AttachSub(req_a), now);
     let sid_a =
         specter_core::testkit::first_attached_sub(&attach_a_out).expect("attach_sub succeeded");
-    let pid_a = e.subs().get(sid_a).unwrap().profile;
+    let pid_a = e.subs().get(sid_a).unwrap().profile();
     let a_corr = first_probe_correlation(&attach_a_out).expect("descent probe at attach");
     e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -537,7 +537,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let attach_b_out = e.step(Input::AttachSub(req_b), now);
     let sid_b =
         specter_core::testkit::first_attached_sub(&attach_b_out).expect("attach_sub succeeded");
-    let pid_b = e.subs().get(sid_b).unwrap().profile;
+    let pid_b = e.subs().get(sid_b).unwrap().profile();
     assert!(
         first_probe_correlation(&attach_b_out).is_none(),
         "Batching-first Seed emits no probe at attach",
@@ -582,7 +582,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let attach_c_out = e.step(Input::AttachSub(req_c), c_attach);
     let sid_c =
         specter_core::testkit::first_attached_sub(&attach_c_out).expect("attach_sub succeeded");
-    let pid_c = e.subs().get(sid_c).unwrap().profile;
+    let pid_c = e.subs().get(sid_c).unwrap().profile();
     assert!(
         first_probe_correlation(&attach_c_out).is_none(),
         "Batching-first Seed emits no probe at attach",
