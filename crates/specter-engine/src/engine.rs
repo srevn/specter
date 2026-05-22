@@ -602,7 +602,7 @@ impl Engine {
         if let Some(p) = self.profiles.get_mut(profile_id) {
             p.install_anchor_claim_held();
         }
-        self.set_watch_root_parent(profile_id, anchor, out);
+        self.set_watch_root_parent(profile_id, out);
 
         self.start_seed_burst(profile_id, None, now, out);
     }
@@ -700,6 +700,15 @@ impl Engine {
     /// the anchor exists on disk and so does its parent) and
     /// `descent::dispatch_descent_ok` (anchor materialization).
     ///
+    /// **Anchor sourced from owner state.** The anchor is read back via
+    /// [`Profile::resource`] rather than taken as a parameter: the slot
+    /// is the Profile's own identity axis, write-once for the Profile's
+    /// lifetime (the slot identity `(parent, segment)` is itself
+    /// write-once in the Tree). A caller-passes-wrong-anchor breach
+    /// class is unrepresentable — the seam reads the single source of
+    /// truth at every entry, so the cache cannot drift against the
+    /// Tree's `parent(resource)` under a routing mistake.
+    ///
     /// **Per-file recovery limitation.** This parent-edge channel is
     /// what makes `rm -rf anchor` survivable: the anchor
     /// re-materialises via descent and a post-recovery Seed-Ok
@@ -714,37 +723,17 @@ impl Engine {
     /// overflow-window reactions the same way but carries no witness,
     /// so that subclass is a further v1 limitation the diagnostic
     /// does not cover (deferred with the per-leaf-witness work).
-    pub(crate) fn set_watch_root_parent(
-        &mut self,
-        profile_id: ProfileId,
-        anchor: ResourceId,
-        out: &mut StepOutput,
-    ) {
+    pub(crate) fn set_watch_root_parent(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        let Some((anchor, cached_parent)) = self
+            .profiles
+            .get(profile_id)
+            .map(|p| (p.resource(), p.watch_root_parent()))
+        else {
+            return;
+        };
         let Some(parent_id) = self.tree.parent(anchor) else {
             return;
         };
-
-        // Cache-coherence invariant. If the cache already names a parent,
-        // it must equal the Tree's current `parent(anchor)` — the anchor's
-        // parent in the Tree is structurally stable for the Profile's
-        // lifetime (Tree slot identity is `(parent, segment)` and the
-        // anchor's `(parent, segment)` doesn't migrate). A mismatched
-        // cache would mean either the parent migrated under us (impossible
-        // by Tree invariants) or a prior `set_watch_root_parent` wrote
-        // against a different anchor for this Profile (a routing breach).
-        // The release path (`release_watch_root_parent_claim`) reads the
-        // cache to key the contribution removal, so a stale cache would
-        // leak the old parent's `+1`.
-        debug_assert!(
-            self.profiles.get(profile_id).is_none_or(|p| p
-                .watch_root_parent()
-                .is_none_or(|cached| cached == parent_id)),
-            "set_watch_root_parent: cached parent must agree with the materialised \
-             anchor's parent (profile = {profile_id:?}, cached = {:?}, tree_parent = {parent_id:?})",
-            self.profiles
-                .get(profile_id)
-                .and_then(specter_core::Profile::watch_root_parent),
-        );
 
         // Idempotent: "Watch root deletion" recovery re-enters descent
         // on a Profile whose `watch_root_parent` field was set at the
@@ -754,11 +743,7 @@ impl Engine {
         // helper again, double-bumping the parent's `watch_demand` for
         // the same Profile. Skip the bump if the cache already points
         // at the same parent id.
-        let already_set = self
-            .profiles
-            .get(profile_id)
-            .is_some_and(|p| p.watch_root_parent() == Some(parent_id));
-        if already_set {
+        if cached_parent == Some(parent_id) {
             return;
         }
 
@@ -789,14 +774,32 @@ impl Engine {
     /// Set up the Promoter's parent-edge recovery contribution — the
     /// structural twin of [`Self::set_watch_root_parent`] for the
     /// Promoter side. Installs a `+1 STRUCTURE`
-    /// [`ContribKey::PromoterPrefixParent`] `watch_demand` at
-    /// `terminus`'s parent, so a `rm -rf` of the materialised
+    /// [`ContribKey::PromoterPrefixParent`] `watch_demand` at the
+    /// terminus's parent, so a `rm -rf` of the materialised
     /// literal-prefix directory is detectable via the surviving parent
     /// watch and the Promoter can re-descend (the recovery flow in
     /// `classify_event_carriers` → `start_promoter_prefix_recovery`).
     /// Caches the parent id on `Promoter.prefix_parent` so reap /
     /// FD-exhaustion purge can release the contribution without
     /// re-deriving.
+    ///
+    /// **Terminus sourced from owner state.** The terminus is read back
+    /// via [`Promoter::terminus`] rather than taken as a parameter: the
+    /// proxy registered at `pattern_component_index ==
+    /// literal_prefix_len` is the terminus's own structural address,
+    /// uniquely identified inside the `Active` proxies map for the
+    /// Promoter's lifetime. A caller-passes-wrong-terminus breach class
+    /// is unrepresentable — the seam reads the single source of truth
+    /// at every entry, so the cache cannot drift against the Tree's
+    /// `parent(terminus)` under a routing mistake.
+    ///
+    /// **No terminus ⇒ no channel.** The early return covers
+    /// `PrefixPending` (no terminus until materialisation) and the
+    /// transient `Active { proxies: ∅ }` window before
+    /// [`Self::enter_active`]'s `register_proxy` step installs the
+    /// terminus entry — the helper's sole production caller runs
+    /// `register_proxy` first, so in correct operation the slot is
+    /// always populated by the time the helper reads back.
     ///
     /// **No parent ⇒ no channel.** A `terminus == "/"` Promoter
     /// (`literal_prefix_len == 1`) has no parent in the Tree; the early
@@ -809,12 +812,7 @@ impl Engine {
     /// `Promoter.prefix_parent` is *still* set from the original
     /// materialisation (the rewind machine never clears it). The
     /// `already_set` short-circuit skips the second `add_watch`, so the
-    /// parent's `watch_demand` does not leak `+1` per recovery. The
-    /// cache-coherence `debug_assert!` pins any drift loudly: Tree slot
-    /// identity is `(parent, segment)` and the terminus's parent does
-    /// not migrate for the Promoter's lifetime, so a mismatched cache
-    /// would mean a routing breach (a prior call against a different
-    /// terminus) and the release path would leak the old parent's `+1`.
+    /// parent's `watch_demand` does not leak `+1` per recovery.
     ///
     /// Reuses `ResourceRole::WatchRootParent` — the role is metadata
     /// only (retention runs through the contribution, never the role),
@@ -822,35 +820,23 @@ impl Engine {
     /// proliferating a near-identical role.
     ///
     /// Sole call site: [`Self::enter_active`] (both the
-    /// immediate-`Materialized` and `PrefixPending → Active` arms).
+    /// immediate-`Materialized` and `PrefixPending → Active` arms,
+    /// each of which has just registered the terminus proxy).
     pub(crate) fn set_promoter_prefix_parent(
         &mut self,
         promoter_id: PromoterId,
-        terminus: ResourceId,
         out: &mut StepOutput,
     ) {
+        let Some((terminus, cached_parent)) = self
+            .promoters
+            .get(promoter_id)
+            .and_then(|q| q.terminus().map(|t| (t, q.prefix_parent())))
+        else {
+            return;
+        };
         let Some(parent_id) = self.tree.parent(terminus) else {
             return;
         };
-
-        // Cache-coherence invariant — mirror of
-        // `set_watch_root_parent`'s. A cached parent that disagrees with
-        // the Tree's current `parent(terminus)` is a routing breach (the
-        // terminus's `(parent, segment)` identity is structurally stable
-        // for the Promoter's lifetime); the release path keys the
-        // contribution removal off the cache, so a stale cache would
-        // leak the old parent's `+1`.
-        debug_assert!(
-            self.promoters
-                .get(promoter_id)
-                .is_none_or(|q| q.prefix_parent().is_none_or(|cached| cached == parent_id)),
-            "set_promoter_prefix_parent: cached prefix_parent must agree with the \
-             materialised terminus's parent (promoter = {promoter_id:?}, cached = {:?}, \
-             tree_parent = {parent_id:?})",
-            self.promoters
-                .get(promoter_id)
-                .and_then(specter_core::Promoter::prefix_parent),
-        );
 
         // Idempotent: terminus-loss recovery re-enters `enter_active`
         // with `prefix_parent` still cached from the original
@@ -858,11 +844,7 @@ impl Engine {
         // names this parent keeps the parent's `watch_demand`
         // contribution at exactly `+1` across any number of
         // loss → recovery cycles.
-        let already_set = self
-            .promoters
-            .get(promoter_id)
-            .is_some_and(|q| q.prefix_parent() == Some(parent_id));
-        if already_set {
+        if cached_parent == Some(parent_id) {
             return;
         }
 
@@ -1966,7 +1948,7 @@ mod tests {
 
         // First call: bumps parent's watch_demand and caches it on Profile.
         let mut out = StepOutput::default();
-        e.set_watch_root_parent(pid, anchor, &mut out);
+        e.set_watch_root_parent(pid, &mut out);
         let after_first = e.tree.get(parent).unwrap().watch_demand();
         assert_eq!(after_first, 1, "first call bumps parent watch_demand");
         assert_eq!(
@@ -1974,9 +1956,12 @@ mod tests {
             Some(parent)
         );
 
-        // Second call with the same anchor: must be a no-op (no bump).
+        // Second call against the same Profile: must be a no-op (no bump).
+        // The anchor is sourced from `Profile::resource()` — write-once for
+        // the Profile's lifetime — so the second call sees the cache equal
+        // to `tree.parent(Profile::resource())` and short-circuits.
         let mut out2 = StepOutput::default();
-        e.set_watch_root_parent(pid, anchor, &mut out2);
+        e.set_watch_root_parent(pid, &mut out2);
         let after_second = e.tree.get(parent).unwrap().watch_demand();
         assert_eq!(after_second, 1, "second call does NOT double-bump");
         assert!(

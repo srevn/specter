@@ -381,7 +381,7 @@ impl Engine {
         // 2. Hand off the prior prefix's STRUCTURE contribution. Plain
         // `sub_watch` — NOT `sub_watch_then_try_reap`: under the
         // recovery symmetry the prior prefix *is* the terminus's parent
-        // and must stay watched as the preserved recovery edge (step 3
+        // and must stay watched as the preserved recovery edge (step 4
         // re-claims it under [`ContribKey::PromoterPrefixParent`]).
         // Try-reaping here would be wrong; it would also be a no-op in
         // practice (the freshly-materialised terminus is still its
@@ -398,26 +398,32 @@ impl Engine {
             );
         }
 
-        // 3. Install the preserved parent-edge recovery contribution —
-        // uniform for BOTH paths (descent: `prior == parent(terminus)`;
-        // immediate-Materialized: `prior == None`, no descent contrib
-        // ever existed — exactly `bootstrap_immediate`'s shape, which
-        // calls `set_watch_root_parent` with no prior descent release).
-        // Idempotent on the terminus-loss recovery cycle: the helper's
-        // `already_set` short-circuit keeps the parent's `watch_demand`
-        // at exactly `+1` across any number of loss → recovery cycles.
-        self.set_promoter_prefix_parent(promoter_id, new_proxy_resource, out);
-
-        // 4. Register the proxy at new_proxy_resource. `register_proxy`
+        // 3. Register the proxy at new_proxy_resource. `register_proxy`
         // inserts into proxies map, queues enumeration (gated on
         // !already_carries per [H-5]), bumps watch_demand, and sets
-        // the back-ref.
+        // the back-ref. Runs BEFORE step 4 so the terminus has a home
+        // in `Promoter.proxies` — step 4's parent-edge helper sources
+        // its target via `Promoter::terminus()` rather than threading a
+        // parameter the engine seam would otherwise have to trust.
         self.register_proxy(
             promoter_id,
             new_proxy_resource,
             pattern_component_index,
             out,
         );
+
+        // 4. Install the preserved parent-edge recovery contribution —
+        // uniform for BOTH paths (descent: `prior == parent(terminus)`;
+        // immediate-Materialized: `prior == None`, no descent contrib
+        // ever existed — exactly `bootstrap_immediate`'s shape, which
+        // calls `set_watch_root_parent` with no prior descent release).
+        // Reads the terminus back from `Promoter::terminus()` — the
+        // proxy registered at step 3 with `pattern_component_index ==
+        // literal_prefix_len` is its own structural address.
+        // Idempotent on the terminus-loss recovery cycle: the helper's
+        // `already_set` short-circuit keeps the parent's `watch_demand`
+        // at exactly `+1` across any number of loss → recovery cycles.
+        self.set_promoter_prefix_parent(promoter_id, out);
 
         // 5. Drain initial enumeration (single-slot: no probe in
         // flight here, so this dispatches immediately).

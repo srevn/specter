@@ -263,10 +263,9 @@ impl Promoter {
     /// contribution there. `None` for a root-prefix Promoter
     /// (`terminus == "/"`, no parent) and before the prefix first
     /// materialises. Read seam over the private field;
-    /// `Engine::set_promoter_prefix_parent` uses it for the
-    /// cache-coherence and idempotence checks,
-    /// `classify_event_carriers` for the recovery discriminant. The
-    /// structural mirror of
+    /// `Engine::set_promoter_prefix_parent` uses it for the idempotence
+    /// short-circuit, `classify_event_carriers` for the recovery
+    /// discriminant. The structural mirror of
     /// [`Profile::watch_root_parent`](crate::Profile::watch_root_parent).
     #[must_use]
     pub const fn prefix_parent(&self) -> Option<ResourceId> {
@@ -275,9 +274,8 @@ impl Promoter {
 
     /// Cache the parent-edge recovery slot. The single write seam,
     /// wrapped by `Engine::set_promoter_prefix_parent` (which also
-    /// installs the Tree-side `add_watch` and the cache-coherence
-    /// `debug_assert!`). Plain set — idempotence and coherence are the
-    /// engine wrapper's concern, not duplicated here. Mirror of
+    /// installs the Tree-side `add_watch`). Plain set — idempotence is
+    /// the engine wrapper's concern, not duplicated here. Mirror of
     /// [`Profile::set_watch_root_parent`](crate::Profile::set_watch_root_parent).
     pub const fn set_prefix_parent(&mut self, parent: ResourceId) {
         self.prefix_parent = Some(parent);
@@ -292,6 +290,40 @@ impl Promoter {
     #[must_use]
     pub const fn take_prefix_parent(&mut self) -> Option<ResourceId> {
         self.prefix_parent.take()
+    }
+
+    /// The literal-prefix terminus slot — the `Active` proxy registered
+    /// at `pattern_component_index == pattern.literal_prefix_len()`.
+    /// `None` for `PrefixPending` (the prefix has not yet materialised,
+    /// so no terminus exists) and for the brief intra-step window in
+    /// `enter_active` between [`Self::enter_active_empty`] (state →
+    /// `Active { proxies: ∅ }`) and the `register_proxy` that installs
+    /// the terminus entry.
+    ///
+    /// Derived from `Active.proxies`: exactly one entry per `Active`
+    /// lifetime sits at the terminus position (`enter_active` registers
+    /// it once with `pattern_component_index == literal_prefix_len`,
+    /// and the enumeration forward pass only ever inserts sub-proxies
+    /// at strictly greater component indices). The terminus is fixed
+    /// for the `Active` lifetime — terminus loss flips to `PrefixPending`
+    /// (proxies cleared) and the next `Active` re-elects a fresh
+    /// terminus through the same step.
+    ///
+    /// The structural mirror of
+    /// [`Profile::resource`](crate::Profile::resource) for the
+    /// dynamic-prefix side: `Engine::set_promoter_prefix_parent` reads
+    /// its terminus back through this accessor instead of trusting an
+    /// inbound parameter, so a caller-passes-wrong-terminus breach
+    /// class is unrepresentable.
+    #[must_use]
+    pub fn terminus(&self) -> Option<ResourceId> {
+        let PromoterState::Active { proxies, .. } = &self.state else {
+            return None;
+        };
+        let lpl = self.pattern.literal_prefix_len();
+        proxies
+            .iter()
+            .find_map(|(r, p)| (p.pattern_component_index == lpl).then_some(*r))
     }
 
     /// Mutable descent projection — `Some` only in `PrefixPending`

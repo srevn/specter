@@ -597,7 +597,7 @@ impl crate::Engine {
             out,
         );
 
-        self.set_watch_root_parent(profile_id, new_resource, out);
+        self.set_watch_root_parent(profile_id, out);
         self.start_seed_burst(profile_id, None, now, out);
     }
 
