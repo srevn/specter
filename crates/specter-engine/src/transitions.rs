@@ -649,10 +649,7 @@ impl Engine {
 
         // The fold is over the freshly-walked *response* hash, never
         // `current` / `baseline` — the carrier's `advance` is the floor.
-        let response = match &snap {
-            TreeSnapshot::Dir(arc) => arc.dir_hash(),
-            TreeSnapshot::File(leaf) => leaf.leaf_hash(),
-        };
+        let response = snap.hash();
         let Some(verdict) = self
             .profiles
             .get_mut(profile_id)
@@ -2120,8 +2117,8 @@ impl Engine {
     fn warn_perfile_dropped_on_recovery(&self, profile_id: ProfileId, out: &mut StepOutput) {
         if let Some(p) = self.profiles.get(profile_id)
             && let Some(witness) = p.survival_witness()
-            && let Some(current) = p.current()
-            && current.hash() != witness
+            && let Some(current_h) = p.current_hash()
+            && current_h != witness
             && self.subs.has_per_stable_file_sub(profile_id)
         {
             out.diagnostics
@@ -2410,10 +2407,9 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return false;
         };
-        let Some(current) = p.current() else {
+        let Some(curr) = p.current_hash() else {
             return false;
         };
-        let curr = current.hash();
         match p.settled_hash() {
             Some(settled) => settled != curr,
             None => false,
@@ -3099,10 +3095,10 @@ impl Engine {
         // needs_diff / log_output, in the loop's single `subs.get`):
         // a Sub that has never fired suppresses nothing — it is its own
         // "first emission" — even when the tree happens to match.
-        let nothing_changed = baseline_snap
-            .as_ref()
-            .zip(current_snap.as_ref())
-            .is_some_and(|(b, c)| b.hash() == c.hash());
+        let nothing_changed = p
+            .baseline_hash()
+            .zip(p.current_hash())
+            .is_some_and(|(b, c)| b == c);
 
         let effect_forced = mode.effect_forced();
 

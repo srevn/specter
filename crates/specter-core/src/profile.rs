@@ -1997,18 +1997,33 @@ impl<S: AnchorPayload> SettledState<S> {
         }
     }
 
+    /// The active baseline's anchor-rooted hash — `Some` only in the
+    /// `Snapshot` arm. `Unset` and `Witness` yield `None`. The
+    /// hash-only sibling of [`Self::snapshot`] (no `TreeSnapshot`
+    /// re-wrap) and the Snapshot-only complement of
+    /// [`Self::witness_hash`] within [`Self::to_hash`]'s domain.
+    fn snapshot_hash(&self) -> Option<u128> {
+        match self {
+            Self::Snapshot(s) => Some(s.payload_hash()),
+            Self::Unset | Self::Witness(_) => None,
+        }
+    }
+
     /// The retained pre-loss hash — `Some` only across the
     /// loss→recovery window (`Witness`). An active `Snapshot`
     /// baseline and `Unset` both yield `None`: neither carries a
     /// survival witness.
     ///
-    /// The Witness-only complement of [`Self::snapshot`] (the
-    /// Snapshot-only owned projection) within [`Self::to_hash`]'s
-    /// domain — the three accessors are one lattice over the sum:
-    /// `to_hash` is `Some` iff exactly one of `snapshot` /
-    /// `witness_hash` is, never both (the variants are disjoint), so
-    /// no arm is double-counted and the witness can never be silently
-    /// folded into the active-baseline projection.
+    /// The Witness-only complement of [`Self::snapshot_hash`] (the
+    /// Snapshot-only hash projection) within [`Self::to_hash`]'s
+    /// domain — the four accessors are one lattice over the sum:
+    /// `to_hash` is `Some` iff exactly one of `snapshot_hash` /
+    /// `witness_hash` is, never both (the variants are disjoint),
+    /// so no arm is double-counted and the witness can never be
+    /// silently folded into the active-baseline projection.
+    /// [`Self::snapshot`] is the owned-projection sibling of
+    /// `snapshot_hash`; the algebra holds no owned witness, so the
+    /// owned lattice covers Snapshot only.
     const fn witness_hash(&self) -> Option<u128> {
         match self {
             Self::Witness(h) => Some(*h),
@@ -2692,7 +2707,8 @@ impl Profile {
     /// in active mode (a settled `Snapshot`). The sum stores the inner
     /// payload, not a `TreeSnapshot`, so this mints the wrapper (Arc
     /// bump for Dir, copy for File). `Unclassified`, a not-yet-settled
-    /// anchor, and the loss-window witness all yield `None`.
+    /// anchor, and the loss-window witness all yield `None`. Hash-only
+    /// readers should prefer [`Self::baseline_hash`] (no re-wrap).
     #[must_use]
     pub fn baseline(&self) -> Option<TreeSnapshot> {
         match &self.anchor {
@@ -2707,7 +2723,8 @@ impl Profile {
     /// cannot lend a `&TreeSnapshot` it does not store in that shape.
     /// Hot Dir readers that only need the inner `Arc` should prefer
     /// [`Self::current_dir`] (no re-wrap); presence-only readers
-    /// [`Self::current_is_some`].
+    /// [`Self::current_is_some`]; hash-only readers
+    /// [`Self::current_hash`].
     #[must_use]
     pub fn current(&self) -> Option<TreeSnapshot> {
         match &self.anchor {
@@ -2749,14 +2766,49 @@ impl Profile {
         }
     }
 
+    /// The settled baseline's anchor-rooted hash — `Some` only in
+    /// active mode (a settled `Snapshot`). The hash-only complement
+    /// of [`Self::baseline`] (no `TreeSnapshot` re-wrap). The
+    /// Snapshot-only narrower complement of [`Self::settled_hash`],
+    /// which also folds the loss-window `Witness` and the
+    /// `Unclassified { witness }` arms. `Unclassified`, a
+    /// not-yet-settled anchor, and the loss-window witness all yield
+    /// `None`.
+    #[must_use]
+    pub fn baseline_hash(&self) -> Option<u128> {
+        match &self.anchor {
+            AnchorClassification::Unclassified { .. } => None,
+            AnchorClassification::File { settled, .. } => settled.snapshot_hash(),
+            AnchorClassification::Dir { settled, .. } => settled.snapshot_hash(),
+        }
+    }
+
+    /// The live `current` snapshot's anchor-rooted hash. The hash-only
+    /// complement of [`Self::current`] (no `TreeSnapshot` re-wrap; the
+    /// presence-only sibling is [`Self::current_is_some`]).
+    /// `Unclassified` and a current-absent anchor both yield `None`.
+    #[must_use]
+    pub fn current_hash(&self) -> Option<u128> {
+        match &self.anchor {
+            AnchorClassification::Unclassified { .. } => None,
+            AnchorClassification::File { current, .. } => {
+                current.as_ref().map(AnchorPayload::payload_hash)
+            }
+            AnchorClassification::Dir { current, .. } => {
+                current.as_ref().map(AnchorPayload::payload_hash)
+            }
+        }
+    }
+
     /// The settled anchor-rooted hash the post-recovery drift verdict
     /// compares `current` against — one total function over the sum:
     /// active-mode `Snapshot` digests its payload, the loss-window
     /// `Witness` passes its retained hash through, the
     /// `Unclassified` arm yields its carried witness, and a
-    /// not-yet-settled anchor yields `None`. Replaces the separate
-    /// witness accessor plus the ad-hoc baseline-hash branch at the
-    /// drift reader.
+    /// not-yet-settled anchor yields `None`. The disjoint union of
+    /// [`Self::baseline_hash`] (Snapshot arm), [`Self::survival_witness`]
+    /// (Witness arm), and the `Unclassified { witness }` carried
+    /// hash — each input arm contributes to exactly one summand.
     #[must_use]
     pub fn settled_hash(&self) -> Option<u128> {
         match &self.anchor {

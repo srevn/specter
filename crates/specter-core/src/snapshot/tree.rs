@@ -653,12 +653,21 @@ impl TreeSnapshot {
 // Hash helpers
 // ---------------------------------------------------------------------------
 
-/// Per-child variant discriminator folded into `compute_dir_hash`.
-/// `0u8` is reserved (never emitted) — the gap defends against
-/// zero-padded inputs masquerading as a real tag and leaves room for
-/// future variants without renumbering the existing ones.
+// Per-child variant discriminators folded into `compute_dir_hash` so
+// the encoding is unambiguous across variants. `0u8` is reserved
+// (never emitted) — the gap defends against zero-padded inputs
+// masquerading as a real tag and leaves room for future variants
+// without renumbering the existing ones.
+
+/// Tag for `ChildEntry::Leaf`.
 const LEAF_TAG: u8 = 1;
+
+/// Tag for `DirChild::Covered` — a Dir child the snapshot recursed
+/// into; its subtree is observable.
 const DIR_COVERED_TAG: u8 = 2;
+
+/// Tag for `DirChild::Uncovered` — a Dir child the snapshot did not
+/// descend; its subtree is opaque.
 const DIR_UNCOVERED_TAG: u8 = 3;
 
 fn compute_leaf_hash(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> u128 {
@@ -881,8 +890,8 @@ pub enum SpliceResult {
 /// Returns [`SpliceResult::Spliced`] with `TreeSnapshot::Dir(prior)`
 /// (no allocation) when:
 /// - `target == anchor` and `dir_hash` matches (G7-trivial).
-/// - The recursive splice short-circuited at every level via `Arc::ptr_eq`
-///   or `dir_hash` equality (G7 propagation).
+/// - The recursive splice short-circuited at every level via `dir_hash`
+///   equality (G7 propagation).
 ///
 /// Returns [`SpliceResult::CrossedUncovered`] when the engine's "graft
 /// only into observed subtrees" contract is violated. The carried
@@ -1014,12 +1023,9 @@ fn splice_dir(
     let new_child = splice_dir(&pc, deeper, replacement, tree)?;
 
     // G7 per-level: propagate `Arc::clone(prior)` up the spine when
-    // nothing observable changed at this level. Same-Arc strictly
-    // implies equal `dir_hash` (the hash is a pure function of the
-    // data, computed eagerly at construction), so the hash arm
-    // subsumes the ptr_eq arm; the disjunct is the fast early-out
-    // for the common baseline-forwarded case.
-    if Arc::ptr_eq(&new_child, &pc) || new_child.dir_hash() == pc.dir_hash() {
+    // the rebuilt child's `dir_hash` matches — nothing observable
+    // changed at this level.
+    if new_child.dir_hash() == pc.dir_hash() {
         return Ok(Arc::clone(prior));
     }
 
@@ -1030,8 +1036,8 @@ fn splice_dir(
     // already present in the map).
     let mut new_entries = prior.entries.clone();
     *new_entries.get_mut(name).expect(
-        "splice_dir: entry at `name` is present in `new_entries` because \
-         `prior.lookup_covered_dir(name)` succeeded above",
+        "entry at `name` is present in `new_entries` because the prior \
+         `lookup_covered_dir(name)` resolution succeeded above",
     ) = ChildEntry::Dir(DirChild::Covered(new_child));
     // Preserve prior's `captured_with` on the rebuilt parent: it is
     // conceptually "still the same observation as prior, with one child
