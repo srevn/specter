@@ -1,35 +1,35 @@
-//! `StepOutput` and its determinism contract.
+//! `StepOutput` — the engine's per-step buffer.
 //!
-//! Two streams are sealed, by two different mechanisms:
+//! Four streams ride one value; shapes and seal mechanisms differ
+//! because the consumers and roles differ:
 //!
-//! - `effects` is a [`SortedEffects`] — a private buffer appended
-//!   unsorted via [`StepOutput::push_effect`], re-sorted by
-//!   [`StepOutput::sort_for_emission`] before the value escapes.
-//! - `probe_ops` is a [`ProbeOps`] — a private per-owner map appended
-//!   via [`StepOutput::push_probe_op`]. Order is intrinsic to the
-//!   [`ProbeOwner`] key and at most one op per owner is *structural*
-//!   (a later op for an owner replaces the earlier), so it needs
-//!   neither a reseal nor an assertion.
+//! - **`watch_ops`** — `pub SmallVec<[WatchOp; 2]>`. Sorted by
+//!   [`WatchOp::resource`]; resealed at the boundary by
+//!   [`StepOutput::sort_for_emission`].
+//! - **`effects`** — private [`SortedEffects`] (`SmallVec`). Sorted by
+//!   [`Effect::sort_key`]; resealed at the boundary by
+//!   [`StepOutput::sort_for_emission`].
+//! - **`probe_ops`** — private [`ProbeOps`] (`BTreeMap`). Order is
+//!   intrinsic to the [`ProbeOwner`] key; sealed structurally — a
+//!   per-owner last-writer-wins upsert ([`StepOutput::push_probe_op`])
+//!   makes "at most one op per owner, in owner order" unrepresentable
+//!   to violate.
+//! - **`diagnostics`** — `pub SmallVec<[Diagnostic; 2]>`. Insertion
+//!   order, intentionally unsealed: operator-readable, not part of
+//!   the determinism contract.
 //!
-//! Both are read only through [`StepOutput::effects`] /
-//! [`StepOutput::probe_ops`] / [`StepOutput::into_parts`], so observing
-//! either out of contract is unrepresentable.
+//! Probe **correctness** is the engine's response gate, not this
+//! stream's. A stale or superseded response folds to
+//! `StaleProbeResponse` regardless of op order; the per-owner shape
+//! mirrors the sensor's `expected` map only to spare the missed-
+//! syscall stall an unstructured stream could induce.
 //!
-//! The order weights differ. `watch_ops` and `effects` ordering is
-//! replay determinism — a reordering changes the log, not the outcome.
-//! `probe_ops` feeds the sensor's per-owner `expected` map, a
-//! syscall-saving pre-filter whose `submit` / `cancel` do not commute;
-//! [`ProbeOps`] *is* the producer-side image of that map, so a
-//! superseded op for an owner cannot survive to mis-drive it. Probe
-//! *correctness* is the engine's, not this stream's: a stale or
-//! superseded response folds to `StaleProbeResponse` at the engine's
-//! response gate regardless of op order. A mis-drained pair would only
-//! cost a missed syscall (a stall until re-driven), and the per-owner
-//! shape removes even that.
-//!
-//! Residual discipline: every `StepOutput`-returning entry point calls
-//! [`StepOutput::sort_for_emission`] before returning — it seals
-//! `watch_ops` / `effects`; `probe_ops` is already sealed by shape.
+//! Residual discipline: every `StepOutput`-returning entry point
+//! calls [`StepOutput::sort_for_emission`] before returning. Pinned
+//! at the engine boundary by `tests/integration.rs` —
+//! `step_output_is_sorted`,
+//! `cancel_all_in_flight_probes_returns_sealed_output`, and
+//! `reap_promoter_active_returns_sealed_output`.
 
 use crate::diag::Diagnostic;
 use crate::effect::Effect;
@@ -68,45 +68,30 @@ impl std::ops::Deref for SortedEffects {
 
 /// The `probe_ops` stream as a sealed per-owner map.
 ///
-/// The sensor's consumer state *is* "the last op per owner":
-/// `WorkerProber.expected` is a `BTreeMap<ProbeOwner, ProbeCorrelation>`
-/// — `submit` inserts, `cancel` removes, both keyed by owner. The
-/// engine mutates one owner per step and emits each op immediately
-/// downstream of its motivating transition, so the temporally last op
-/// for an owner is that owner's final state at step end. Producer and
-/// consumer are therefore the same data structure;
-/// `BTreeMap<ProbeOwner, ProbeOp>` is the type-honest shape, not a
-/// dedup tactic.
+/// Isomorphic to the sensor's `WorkerProber.expected:
+/// BTreeMap<ProbeOwner, ProbeCorrelation>` (`submit` inserts, `cancel`
+/// removes, both owner-keyed). Producer and consumer share one shape;
+/// `BTreeMap<ProbeOwner, ProbeOp>` is type-honest, not a dedup tactic.
 ///
-/// Last-writer-wins per owner is the type contract — a later op for an
-/// owner replaces the earlier. So at most one op per owner is
-/// *structural* (not asserted), and emission order is intrinsic to the
-/// [`ProbeOwner`] key (no reseal). Append-only from outside the module
-/// ([`StepOutput::push_probe_op`]); read via [`ProbeOps::iter`] or, at
-/// the terminal drain, [`StepOutput::into_parts`].
-///
-/// An empty map does not allocate (most steps emit no probe), so the
-/// sealed shape is also lighter on the hot `StepOutput` than four
-/// always-resident `large_enum_variant` inline slots were.
+/// Append-only from outside the module
+/// ([`StepOutput::push_probe_op`], a per-owner upsert); read via
+/// [`ProbeOps::iter`] or, at the terminal drain,
+/// [`StepOutput::into_parts`]. An empty map does not allocate (the
+/// common case), so the sealed shape is lighter on the hot
+/// `StepOutput` than always-resident inline slots would be.
 #[derive(Clone, Debug, Default)]
 pub struct ProbeOps(BTreeMap<ProbeOwner, ProbeOp>);
 
 impl ProbeOps {
-    /// Record `op`, replacing any prior op for the same owner.
-    /// Last-writer-wins is the type contract, isomorphic to the
-    /// sensor's `expected: BTreeMap<ProbeOwner, ProbeCorrelation>`
-    /// drain. Module-private: the sole external writer is
-    /// [`StepOutput::push_probe_op`], the analogue of
-    /// [`SortedEffects::push_unsorted`].
+    /// Record `op`, replacing any prior op for the same owner
+    /// (last-writer-wins — see type rustdoc). Module-private:
+    /// external writes go through [`StepOutput::push_probe_op`].
     fn upsert(&mut self, op: ProbeOp) {
         self.0.insert(op.owner(), op);
     }
 
     /// The ops in [`ProbeOwner`] order (`Profile` < `Promoter`, then
-    /// payload id). `DoubleEndedIterator` so a reverse scan is
-    /// available; at most one op per owner makes direction immaterial
-    /// for per-owner lookups, but call sites that read the stream
-    /// tail-first stay expressible.
+    /// payload id).
     #[must_use]
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ProbeOp> {
         self.0.values()
@@ -190,18 +175,9 @@ impl StepOutput {
 
     /// Seal the order-determined streams: `watch_ops` by
     /// [`WatchOp::resource`], `effects` by [`Effect::sort_key`].
+    /// `probe_ops` is owner-keyed by construction (no reseal);
     /// `diagnostics` follow insertion order (not part of the
-    /// user-visible guarantee).
-    ///
-    /// `probe_ops` needs no step here: a [`ProbeOps`] is owner-keyed
-    /// with at most one op per owner *by construction*, so it is
-    /// already in emission order — the prior per-owner sort and its
-    /// debug witness dissolved with the shape.
-    ///
-    /// `watch_ops` / `effects` order is **replay determinism** —
-    /// reorder them and the same work still happens, just logged
-    /// differently. Pure: every key derives from the op/effect's own
-    /// fields, so this needs no engine state.
+    /// contract).
     pub fn sort_for_emission(&mut self) {
         self.watch_ops.sort_by_key(WatchOp::resource);
         self.effects.reseal();

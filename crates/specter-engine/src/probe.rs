@@ -308,13 +308,13 @@ impl Engine {
     /// shutdown routinely coincides with one in flight (every
     /// settle / verify / rebase / descent window). The driver calls
     /// this once when a tick resolves to shutdown, before the engine
-    /// is torn down; every consume routes through
-    /// [`Self::cancel_owner_probe`] — the same disarm-then-`Cancel`
-    /// choke every internal abandon site uses — so the slot is
-    /// consumed (not forgotten, not leaked) and a graceful exit is
-    /// silent. The guard stays fully effective: a genuine mid-`step`
-    /// orphan still panics during that step, long before any shutdown
-    /// drain runs.
+    /// is torn down; every consume routes through the crate-private
+    /// `cancel_owner_probe` — the same disarm-then-`Cancel` choke
+    /// every internal abandon site uses — so the slot is consumed
+    /// (not forgotten, not leaked) and a graceful exit is silent.
+    /// The guard stays fully effective: a genuine mid-`step` orphan
+    /// still panics during that step, long before any shutdown drain
+    /// runs.
     ///
     /// Tests that freeze a Profile / Promoter mid-flight reuse this
     /// for the *same* teardown before dropping a local `Engine`, so a

@@ -213,11 +213,11 @@ pub trait ChildWaiter: Send {
 ///
 /// The lifecycle ratchet — [`Self::is_dead`] (read) paired with
 /// [`Self::mark_dead`] (write) — is the protocol-level surface. The
-/// `ChildWaiter` impl is the canonical early publisher
-/// ([`OsChildWaiter::wait`] marks dead before returning); wrapper
-/// sites that `catch_unwind` a waiter call [`Self::mark_dead`] as a
-/// backstop in case the impl panicked before reaching its own
-/// publish.
+/// `ChildWaiter` impl is the canonical early publisher (the
+/// crate-private `OsChildWaiter::wait` marks dead before returning);
+/// wrapper sites that `catch_unwind` a waiter call
+/// [`Self::mark_dead`] as a backstop in case the impl panicked before
+/// reaching its own publish.
 ///
 /// Neither layer fully closes the PID-reuse race: between `child.wait()`
 /// returning (kernel reaps the zombie; pid eligible for reuse) and the
@@ -228,7 +228,7 @@ pub trait ChildWaiter: Send {
 /// with high pid pressure; v2 may switch to process descriptors
 /// (pidfd / pdfork).
 ///
-/// [`OsChildWaiter::wait`]: super::os
+/// `OsChildWaiter::wait` lives in the crate-private `super::os`.
 pub trait ChildSignaler: Send + Sync {
     /// Send SIGTERM. ESRCH (child already gone) is collapsed to `Ok(())`.
     /// Short-circuits to `Ok(())` if the paired waiter has already
@@ -273,16 +273,16 @@ pub trait ChildSignaler: Send + Sync {
     /// The protocol-level write that pairs with [`Self::is_dead`].
     /// Wrapper sites that `catch_unwind` a [`ChildWaiter::wait`]
     /// invocation (the controller's `wait_loop`, and the per-stage
-    /// closures inside [`crate::pipe::PipeWaiter`]) call this after
-    /// the catch, so a panicking waiter impl that didn't reach its
-    /// own write site still publishes — closing the PID-reuse window
-    /// at the protocol layer. On the happy path the
+    /// closures inside the crate-private `PipeWaiter`) call this
+    /// after the catch, so a panicking waiter impl that didn't reach
+    /// its own write site still publishes — closing the PID-reuse
+    /// window at the protocol layer. On the happy path the
     /// [`ChildWaiter::wait`] impl is the early publisher; this
-    /// trait-level write is the additive backstop, idempotent against
-    /// it.
+    /// trait-level write is the additive backstop, idempotent
+    /// against it.
     ///
-    /// [`crate::pipe::CombinedSignaler::mark_dead`] fans the call out
-    /// to every per-stage signaler, so a pipe-level wrapper closes
-    /// the window for all stages with one call.
+    /// The crate-private `CombinedSignaler::mark_dead` fans the call
+    /// out to every per-stage signaler, so a pipe-level wrapper
+    /// closes the window for all stages with one call.
     fn mark_dead(&self);
 }

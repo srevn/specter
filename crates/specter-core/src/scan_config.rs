@@ -25,7 +25,7 @@ use std::time::Duration;
 /// A glob pattern: the canonical `source` text and its compiled matcher.
 ///
 /// `source` is the sole identity axis across `PartialEq`/`Eq`/`Ord` and
-/// the [`compute_config_hash`] fold. `matcher` is a transient compiled
+/// the `compute_config_hash` fold. `matcher` is a transient compiled
 /// artifact derived from `source` — never key any of those four on it.
 #[derive(Clone, Debug)]
 pub struct GlobPattern {
@@ -116,8 +116,8 @@ impl ScanConfig {
     /// `depth` (anchor = 0, direct child = 1, …) is in scope.
     ///
     /// The single source of the scope predicate. Two callers, one body:
-    /// - [`crate::coverage`] (engine, in `specter-engine`) tests every
-    ///   prefix from anchor → target — `kind` is in hand, single call.
+    /// - `specter_engine::coverage` tests every prefix from anchor →
+    ///   target — `kind` is in hand, single call.
     /// - The walker (`specter-sensor::prober`) tests each dirent —
     ///   `kind` is only known after `lstat`, so it splits the predicate
     ///   via [`Self::accepts_structural`] (pre-`lstat`) plus the
@@ -130,7 +130,7 @@ impl ScanConfig {
     /// `exclude` (full-`rel` test), and `pattern` (final-`File` only —
     /// directories are always covered; we descend through them).
     ///
-    /// **Fold-completeness ratchet.** Like [`compute_config_hash`], this
+    /// **Fold-completeness ratchet.** Like `compute_config_hash`, this
     /// predicate destructures `ScanConfig` exhaustively: a new field is
     /// a compile error here until it is folded in. The two parallel
     /// ratchets keep the partition key and the filter semantics

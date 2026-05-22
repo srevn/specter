@@ -83,7 +83,7 @@ impl SubprocessActuator {
     /// Captures three pieces of startup-immutable process state — the
     /// env snapshot, the temp directory, and the actuator pid — once
     /// here so the spawn path makes no `getenv` / `getpid` syscall per
-    /// Effect. All three live on [`ActuatorState`] for the actuator's
+    /// Effect. All three live on `ActuatorState` for the actuator's
     /// lifetime; the env snapshot is shared by `Arc` across resolver
     /// calls, `temp_dir` is shared by `Arc<Path>` across
     /// `DiffTmpFile::create` calls, and `actuator_pid` is a copy.

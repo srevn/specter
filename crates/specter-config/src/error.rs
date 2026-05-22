@@ -38,31 +38,28 @@ pub enum IssueKind {
     /// the destination resolves to `File`. Distinct from
     /// [`Self::EmptyName`] and [`Self::EmptyPath`].
     EmptyLogPath,
-    /// `[[watch]] path` is empty. Maps from
-    /// [`PathError::Empty`](crate::path::PathError::Empty). Distinct
-    /// from [`Self::EmptyName`] and [`Self::EmptyLogPath`] so
+    /// `[[watch]] path` is empty. Maps from `PathError::Empty`.
+    /// Distinct from [`Self::EmptyName`] and [`Self::EmptyLogPath`] so
     /// operator-triage categories stay one-to-one with their fields.
     EmptyPath,
     /// `[[watch]] path` contains a `..` component (anywhere). Maps
-    /// from [`PathError::ContainsParentDir`](crate::path::PathError::ContainsParentDir).
-    /// The operator must supply a literal absolute path without
-    /// parent-dir traversal — `..` segments would silently change
-    /// filesystem semantics by collapsing one symlink boundary.
+    /// from `PathError::ContainsParentDir`. The operator must supply
+    /// a literal absolute path without parent-dir traversal — `..`
+    /// segments would silently change filesystem semantics by
+    /// collapsing one symlink boundary.
     PathContainsParentDir,
     /// `[[watch]] path` canonicalisation hit a non-`NotFound` `io::Error`
     /// — `PermissionDenied` (EACCES), symlink loop (ELOOP), non-directory
-    /// in path (ENOTDIR), EIO, etc. Maps from
-    /// [`PathError::Inaccessible`](crate::path::PathError::Inaccessible).
+    /// in path (ENOTDIR), EIO, etc. Maps from `PathError::Inaccessible`.
     /// The detail line carries the cursor at fault and the underlying
     /// error so operators can distinguish the failure class without
     /// reaching for `strace` / `dtruss`.
     PathInaccessible,
     /// `[[watch]] path` canonicalised to a buffer carrying non-UTF-8
     /// segments — typically via symlink resolution onto a non-UTF-8
-    /// byte path. Maps from
-    /// [`PathError::NonUtf8`](crate::path::PathError::NonUtf8). The
-    /// engine's [`specter_core::Tree::parse_attach_path`] gate would
-    /// reject the path; surface up-front so the validator's contract
+    /// byte path. Maps from `PathError::NonUtf8`. The engine's
+    /// [`specter_core::Tree::parse_attach_path`] gate would reject the
+    /// path; surface up-front so the validator's contract
     /// ("ok ⇒ engine accepts the path") holds.
     NonUtf8Path,
     /// `actions = []` — at least one entry required.

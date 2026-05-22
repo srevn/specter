@@ -28,9 +28,9 @@ use std::path::PathBuf;
 ///
 /// **Depth-0 (`target == profile.resource`).** Always `true`. The anchor
 /// is part of the Profile's scope by construction — `FsEvent`s at the
-/// anchor must drive the anchor's burst, so coverage at the anchor
-/// is unconditional. [`ScanConfig::accepts`] bypasses every filter at
-/// depth 0 by the same rule.
+/// anchor must drive the anchor's burst, so coverage at the anchor is
+/// unconditional. [`specter_core::ScanConfig::accepts`] bypasses every
+/// filter at depth 0 by the same rule.
 ///
 /// **Descendants.** Build the cumulative relative path segment-by-segment
 /// from `profile.resource` to `target`, calling `accepts` at each

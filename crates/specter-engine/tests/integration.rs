@@ -15,12 +15,14 @@
 use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
     BurstIntent, ClassSet, Diagnostic, DirSnapshot, EntryKind, FsEvent, Input, ProbeCorrelation,
-    ProbeOutcome, ProbeOwner, ProbeResponse, Profile, ProfileIdentity, ProfileMap, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, Tree, WatchOp,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, Profile, ProfileIdentity, ProfileMap,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
+    Tree, WatchOp,
 };
 use specter_engine::testkit::{
-    anchor_dir, attach_returning, complete_effect_to_rebasing, first_probe_correlation,
-    rebase_loop_to_idle, seed_settle_to_verifying, seed_to_idle,
+    anchor_dir, attach_promoter, attach_returning, complete_effect_to_rebasing,
+    first_probe_correlation, pre_place_dir, rebase_loop_to_idle, seed_settle_to_verifying,
+    seed_to_idle,
 };
 use specter_engine::{Engine, covers};
 use std::path::PathBuf;
@@ -608,4 +610,103 @@ fn step_output_is_sorted() {
     let mut sorted = resources.clone();
     sorted.sort();
     assert_eq!(resources, sorted, "watch_ops sorted by ResourceId");
+}
+
+#[test]
+fn cancel_all_in_flight_probes_returns_sealed_output() {
+    // Graceful-shutdown probe drain. Two Profiles in Verifying — one
+    // probe in flight each — exercise the multi-owner cancel path; the
+    // returned `StepOutput` must carry only `ProbeOp::Cancel` ops, in
+    // owner order, with `watch_ops` and `effects` empty (the live
+    // falsifier of `bin/driver.rs`'s shutdown debug_assert).
+    let mut e = Engine::new();
+    let r1 = anchor_dir(&mut e, "src");
+    let r2 = anchor_dir(&mut e, "dist");
+    let t0 = Instant::now();
+    let (_, pid1, _) = attach_returning(
+        &mut e,
+        "build_src",
+        SubAttachAnchor::Resource(r1),
+        cfg_recursive(),
+        NO_EVENTS,
+        MAX_SETTLE,
+        t0,
+    );
+    let (_, pid2, _) = attach_returning(
+        &mut e,
+        "build_dist",
+        SubAttachAnchor::Resource(r2),
+        cfg_recursive(),
+        NO_EVENTS,
+        MAX_SETTLE,
+        t0,
+    );
+
+    // Expire each Profile's own Batching settle so both reach Verifying
+    // with a Seed probe in flight.
+    let _ = seed_settle_to_verifying(&mut e, pid1, t0);
+    let _ = seed_settle_to_verifying(&mut e, pid2, t0);
+
+    let out = e.cancel_all_in_flight_probes();
+
+    assert!(out.watch_ops.is_empty(), "cancel_all emits no watch ops");
+    assert!(out.effects().is_empty(), "cancel_all emits no effects");
+    let owners: Vec<ProbeOwner> = out
+        .probe_ops()
+        .iter()
+        .map(|op| match op {
+            ProbeOp::Cancel { owner } => *owner,
+            ProbeOp::Probe { .. } => panic!("cancel_all must emit only Cancel ops"),
+        })
+        .collect();
+    assert_eq!(
+        owners,
+        vec![ProbeOwner::Profile(pid1), ProbeOwner::Profile(pid2)],
+        "Cancels emitted in ProbeOwner order",
+    );
+}
+
+#[test]
+fn reap_promoter_active_returns_sealed_output() {
+    // A Promoter with multiple proxies emits multiple `Unwatch` ops
+    // across dynamic-Sub teardown plus per-proxy release. The returned
+    // `StepOutput` must reseal `watch_ops` by `ResourceId` — the
+    // contract `bin/driver/forward.rs` assumes when dispatching by
+    // by-value destructure.
+    let mut e = Engine::new();
+    let _ = pre_place_dir(&mut e, &["var", "log"]);
+    let t0 = Instant::now();
+    let pid = attach_promoter(&mut e, "logs", "/var/log/*.log", t0);
+
+    // Drive the initial enumeration: respond with a directory of two
+    // matching files. The Promoter mints a dynamic Sub per match,
+    // leaving it in `Active` with two proxies.
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Promoter(pid))
+        .expect("Promoter enumeration probe in flight after attach");
+    let snap = dir_snap(&[("a.log", EntryKind::File, 1), ("b.log", EntryKind::File, 2)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation,
+            outcome: ProbeOutcome::DirEnumerated(snap),
+        }),
+        t0,
+    );
+
+    let out = e.reap_promoter(pid);
+
+    let resources: Vec<ResourceId> = out.watch_ops.iter().map(WatchOp::resource).collect();
+    let mut sorted = resources.clone();
+    sorted.sort();
+    assert_eq!(
+        resources, sorted,
+        "reap_promoter must return watch_ops sealed by ResourceId",
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::PromoterReaped { promoter } if *promoter == pid)),
+        "PromoterReaped diagnostic emitted",
+    );
 }

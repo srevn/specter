@@ -426,3 +426,33 @@ impl ProbeOp {
         }
     }
 }
+
+#[cfg(test)]
+mod probe_owner_tests {
+    use super::ProbeOwner;
+    use crate::ids::{ProfileId, PromoterId};
+    use slotmap::KeyData;
+
+    /// `ProbeOwner`'s derived `Ord` keys [`crate::StepOutput::probe_ops`]
+    /// (the per-owner map) and underlies cross-version log-shape
+    /// stability. Pinning both inter- and intra-variant order here makes
+    /// a stylistic reorder of the variants fail on the file the reorder
+    /// lives on — a manual `Ord` impl would be ceremonial for a
+    /// two-variant enum and would surface the cross-variant invariant
+    /// no earlier than this test.
+    #[test]
+    fn ord_is_profile_then_promoter_then_payload() {
+        let p_lo = ProfileId::from(KeyData::from_ffi(1));
+        let p_hi = ProfileId::from(KeyData::from_ffi(2));
+        let q_lo = PromoterId::from(KeyData::from_ffi(1));
+        let q_hi = PromoterId::from(KeyData::from_ffi(2));
+
+        // Inter-variant: every Profile precedes every Promoter,
+        // regardless of payload (high Profile id still < low Promoter id).
+        assert!(ProbeOwner::Profile(p_hi) < ProbeOwner::Promoter(q_lo));
+
+        // Intra-variant: payload ordering within each variant.
+        assert!(ProbeOwner::Profile(p_lo) < ProbeOwner::Profile(p_hi));
+        assert!(ProbeOwner::Promoter(q_lo) < ProbeOwner::Promoter(q_hi));
+    }
+}

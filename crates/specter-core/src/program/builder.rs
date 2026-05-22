@@ -147,8 +147,8 @@ impl ProgramBuilder {
     ///   only obtainable by reusing one minted by a different builder;
     ///   it is rejected as [`ProgramError::StaleHandle`]. This is
     ///   `patch`'s own precondition, totally checked here.
-    /// - **Target valid.** Delegated to [`Self::patch_target_check`],
-    ///   which validates `Continue` targets and is a no-op for the
+    /// - **Target valid.** Delegated to `patch_target_check`, which
+    ///   validates `Continue` targets and is a no-op for the
     ///   payload-free `Terminate` / `Escape`.
     ///
     /// The origin check runs *first* and unconditionally: a stale

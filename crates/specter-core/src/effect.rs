@@ -163,6 +163,12 @@ impl Effect {
     /// Total order for [`crate::output::StepOutput`] effects: Subtree
     /// keys on the anchor resource, PerFile on the file resource.
     /// Replay determinism depends on this being stable.
+    ///
+    /// No `ProfileId` in the tuple. `SubId` already determines the
+    /// Profile (`Sub.profile` is functional), so adding it cannot
+    /// refine the partition. [`DedupKey::PerFile`] carries it for an
+    /// unrelated reason — that key doubles as the actuator's
+    /// per-Profile completion-credit lookup.
     #[must_use]
     pub const fn sort_key(&self) -> (SubId, ResourceId) {
         let resource = match &self.target {
