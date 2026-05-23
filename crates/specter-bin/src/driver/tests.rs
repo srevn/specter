@@ -8,6 +8,7 @@
 //! cfg(test)-only re-exports — the test surface is what this file
 //! references, nothing more.
 
+use super::state::ReloadTrigger;
 use super::{EngineDriver, TickOutcome};
 use crate::app::CliLogOverrides;
 use crate::channels::{ActuatorSide, Channels, WatcherSide};
@@ -1691,6 +1692,194 @@ actions   = [{{ exec = ["true"] }}]
     // that here before the rig drops.
     rig.shutdown_tx.try_send(()).expect("shutdown send");
     assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
+}
+
+// ===== DriverState reload counters =====
+//
+// `DriverState::record_reload` is the sole writer for
+// `reload_count` / `last_reload_at` / `last_reload_via`; the bump
+// fires inside `handle_reload` immediately after
+// `read_and_parse_config` returns `Some`. Three critical
+// scenarios pin the contract:
+//
+// - SIGHUP-driven apply-diff reload bumps with `trigger = Sighup`
+//   (exercises the `tick`-side caller wiring).
+// - Auto-reload settle-drift reload bumps with `trigger = AutoReload`
+//   (exercises the `apply_config_settle_expiry`-side caller wiring).
+// - Parse-fail reload (either trigger) does NOT bump — the early
+//   return short-circuits upstream of the record call.
+//
+// The empty-diff success branch and the SIGHUP-driven apply-diff
+// branch reach the same bump line; one apply-diff test suffices to
+// pin both. The parse-fail no-bump assertion is structurally
+// trigger-agnostic (the record is never called); one trigger's
+// coverage suffices.
+
+/// SIGHUP against a substantive diff: the post-parse bump records
+/// the operator pulse with `trigger = Sighup`, count moves from 0
+/// to 1, and the wall-clock stamp is populated.
+#[test]
+fn handle_reload_via_sighup_bumps_counters_with_sighup_trigger() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let v1_text = format!(
+        r#"
+[[watch]]
+name      = "a"
+path      = "{}"
+actions   = [{{ exec = ["true"] }}]
+"#,
+        tmp.path().display(),
+    );
+    let v2_text = format!(
+        r#"
+[[watch]]
+name      = "a"
+path      = "{0}"
+actions   = [{{ exec = ["true"] }}]
+
+[[watch]]
+name      = "b"
+path      = "{0}"
+actions   = [{{ exec = ["true"] }}]
+"#,
+        tmp.path().display(),
+    );
+    std::fs::write(&cfg_path, &v1_text).unwrap();
+    let initial = Config::from_str(&v1_text).expect("v1 parses");
+
+    let mut rig = rig_for(initial, cfg_path.clone());
+    let _ = rig.driver.run_initial_attach();
+
+    // Pre-bump: fresh-process zero state.
+    assert_eq!(rig.driver.driver_state.reload_count, 0);
+    assert!(rig.driver.driver_state.last_reload_at.is_none());
+    assert!(rig.driver.driver_state.last_reload_via.is_none());
+
+    // Substantive edit + SIGHUP pulse.
+    std::fs::write(&cfg_path, &v2_text).unwrap();
+    rig.reload_tx.try_send(()).expect("reload send");
+    rig.shutdown_tx.try_send(()).expect("shutdown send");
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
+
+    assert_eq!(
+        rig.driver.driver_state.reload_count, 1,
+        "successful SIGHUP reload bumps the counter",
+    );
+    assert!(
+        rig.driver.driver_state.last_reload_at.is_some(),
+        "successful SIGHUP reload stamps the wall-clock",
+    );
+    assert_eq!(
+        rig.driver.driver_state.last_reload_via,
+        Some(ReloadTrigger::Sighup),
+        "tick.rs caller threads `Sighup` into handle_reload",
+    );
+}
+
+/// Auto-reload settle expiry against drifted on-disk meta:
+/// `apply_config_settle_expiry` calls
+/// `handle_reload(AutoReload, _)`, the post-parse bump records the
+/// trigger as `AutoReload`. Pins the second caller's threading.
+#[test]
+fn handle_reload_via_auto_reload_bumps_counters_with_auto_reload_trigger() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let v1_text = format!(
+        r#"
+[[watch]]
+name      = "a"
+path      = "{}"
+actions   = [{{ exec = ["true"] }}]
+"#,
+        tmp.path().display(),
+    );
+    std::fs::write(&cfg_path, &v1_text).unwrap();
+    let v1_meta = FileMeta::from_path(&cfg_path).expect("v1 lstat ok");
+    let v1_config = Config::from_str(&v1_text).expect("v1 parses");
+
+    let mut rig = rig_for(v1_config, cfg_path.clone());
+    rig.driver.loader.config_meta = v1_meta;
+    let _ = rig.driver.run_initial_attach();
+
+    // Pre-bump: fresh-process zero state.
+    assert_eq!(rig.driver.driver_state.reload_count, 0);
+    assert_eq!(rig.driver.driver_state.last_reload_via, None);
+
+    // Edit the file so the lstat filter detects drift.
+    let v2_text = format!(
+        r#"
+[[watch]]
+name      = "a"
+path      = "{0}"
+actions   = [{{ exec = ["true"] }}]
+
+[[watch]]
+name      = "b"
+path      = "{0}"
+actions   = [{{ exec = ["true"] }}]
+"#,
+        tmp.path().display(),
+    );
+    std::thread::sleep(Duration::from_millis(10));
+    std::fs::write(&cfg_path, &v2_text).unwrap();
+
+    // Force settle expiry — bypasses the 100ms wall-clock wait;
+    // the helper's contract is the same regardless of caller.
+    let deadline = Instant::now();
+    rig.driver.config_settle_until = Some(deadline);
+    let _ = rig
+        .driver
+        .apply_config_settle_expiry(deadline + Duration::from_millis(1));
+
+    assert_eq!(
+        rig.driver.driver_state.reload_count, 1,
+        "successful auto-reload bumps the counter",
+    );
+    assert!(rig.driver.driver_state.last_reload_at.is_some());
+    assert_eq!(
+        rig.driver.driver_state.last_reload_via,
+        Some(ReloadTrigger::AutoReload),
+        "apply_config_settle_expiry threads `AutoReload` into handle_reload",
+    );
+
+    // The drift-driven reload left a Seed-Verifying probe armed —
+    // drain via begin_shutdown before the rig drops.
+    rig.shutdown_tx.try_send(()).expect("shutdown send");
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
+}
+
+/// Parse-fail reload (file present, malformed TOML): the early
+/// return in `handle_reload` short-circuits before
+/// `record_reload`, so the counters stay at their fresh-process
+/// zero. Pins the no-bump-on-failure half of the contract.
+#[test]
+fn handle_reload_does_not_bump_counters_on_parse_fail() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    // Write malformed TOML — parse fails, but the file exists so
+    // the post-fail lstat succeeds (covers the meta-rotation
+    // branch without bumping reload counters).
+    std::fs::write(&cfg_path, "not valid toml [[[").unwrap();
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    rig.reload_tx.try_send(()).expect("reload send");
+    rig.shutdown_tx.try_send(()).expect("shutdown send");
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
+
+    assert_eq!(
+        rig.driver.driver_state.reload_count, 0,
+        "parse-fail must not bump the counter",
+    );
+    assert!(
+        rig.driver.driver_state.last_reload_at.is_none(),
+        "parse-fail must not stamp the wall-clock",
+    );
+    assert!(
+        rig.driver.driver_state.last_reload_via.is_none(),
+        "parse-fail must not record a trigger",
+    );
 }
 
 // ===== Outbound disconnect + shutdown-race + attach-break drain =====
