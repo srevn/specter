@@ -27,8 +27,8 @@ use specter_core::{ProfileId, PromoterId, ResourceId, SubId, TimerId};
 use specter_core::Tree;
 // Profile state machine.
 use specter_core::{
-    AnchorClaim, BurstFinish, DescentRemaining, DescentState, DetachLifecycle, Profile, ProfileMap,
-    ProfileState, ReapTrigger, TimerKind,
+    AnchorClaim, BurstFinish, DescentRemaining, DescentState, DetachLifecycle, DetachReason,
+    Profile, ProfileMap, ProfileState, ReapTrigger, TimerKind,
 };
 // Registries.
 use specter_core::{
@@ -204,7 +204,16 @@ impl Engine {
                 let _ = self.attach_sub_inner(req, now, &mut out);
             }
             Input::DetachSub(sub) => {
-                self.detach_sub_inner(sub, &mut out);
+                // [`Input::DetachSub`] is the engine's public detach
+                // surface. Its sole external producer is the bin's IPC
+                // `disable` handler. Hardcode the canonical reason here
+                // so the engine's public input shape stays a single-arg
+                // `SubId` rather than widening with a caller-supplied
+                // reason that has exactly one valid value in v1.
+                // Internal call sites (`on_config_diff`,
+                // `reap_promoter_inner`) call `detach_sub_inner`
+                // directly with their own reason.
+                self.detach_sub_inner(sub, DetachReason::IpcDisabled, &mut out);
             }
             Input::AttachPromoter(req) => {
                 let _ = self.attach_promoter_inner(req, &mut out);
@@ -909,11 +918,26 @@ impl Engine {
     /// [`Self::on_config_diff`] composes multiple detach/attach
     /// operations into one [`StepOutput`] on hot reload.
     ///
+    /// `reason` is the per-call-site lifecycle attribution carried on
+    /// the emitted [`Diagnostic::SubDetached`]. Callers pass the
+    /// [`DetachReason`] variant that names their origin
+    /// ([`Input::DetachSub`] is canonically [`DetachReason::IpcDisabled`];
+    /// internal call sites supply their own — `ConfigDiffRemoved` /
+    /// `ConfigDiffIdentityChanged` from hot-reload, `PromoterReaped`
+    /// from the Promoter teardown loop). The diagnostic is emitted iff
+    /// the Sub was actually removed (the `DetachUnknownSub` early-return
+    /// suppresses it — no lifecycle change happened).
+    ///
     /// Time-independent: detach is a pure registry/refcount operation
     /// (no timer scheduling, no burst transitions that need a `now`).
     /// Bursts running on detached Profiles continue under their existing
     /// schedule until `finish_burst_to_idle`.
-    pub(crate) fn detach_sub_inner(&mut self, sub: SubId, out: &mut StepOutput) {
+    pub(crate) fn detach_sub_inner(
+        &mut self,
+        sub: SubId,
+        reason: DetachReason,
+        out: &mut StepOutput,
+    ) {
         let profile_id = match self.subs.remove(sub) {
             Some(s) => s.profile(),
             None => {
@@ -921,6 +945,19 @@ impl Engine {
                 return;
             }
         };
+        // Emit the lifecycle signal once per real detach — *after* the
+        // removal succeeded (the `DetachUnknownSub` arm above means no
+        // Sub left the registry, so there's nothing to narrate) and
+        // *before* the post-detach reap branches (so an immediate reap
+        // emitting `ProfileReaped` lands after the `SubDetached` that
+        // caused it; the post-`step` sort then orders them by
+        // [`StepOutput::sort_for_emission`]'s diagnostic seal, but
+        // emission-site order matches the causal chain).
+        out.diagnostics.push(Diagnostic::SubDetached {
+            sub,
+            profile: profile_id,
+            reason,
+        });
 
         // A live Sub's `.profile()` is live by the attach invariant; this
         // guard is defence-in-depth — same effect as the get_mut-borrow

@@ -108,6 +108,43 @@ pub enum SpliceFailureCause {
     IntermediateUncovered,
 }
 
+/// Why a Sub was detached from the engine.
+///
+/// Carried on [`Diagnostic::SubDetached`] so operators can distinguish
+/// lifecycle paths without inferring the trigger from surrounding
+/// diagnostics. Each variant names exactly one detach origin —
+/// adding one to the engine's detach surface is a compile error here.
+///
+/// - [`Self::ConfigDiffRemoved`]: the operator removed the `[[watch]]`
+///   block from config; hot-reload's `subs.removed` arm in
+///   `on_config_diff` drives the detach via `detach_sub_inner`.
+/// - [`Self::ConfigDiffIdentityChanged`]: the operator changed the
+///   Sub's identity (anchor / scan config / `max_settle` / events) in
+///   config; the diff's `modified_identity` bucket routes through
+///   detach + attach, so the same operator name briefly leaves the
+///   registry. Distinct from the in-place `modified_params` arm
+///   (which emits [`Diagnostic::SubRebound`] without any
+///   `SubDetached`). The bucket name is the precise term: `identity`
+///   is what changed; `name` and `has_fired` continuity is what the
+///   in-place arm preserves.
+/// - [`Self::IpcDisabled`]: an operator runtime-disabled the Sub via
+///   the bin's IPC `disable` verb; the bin sends
+///   [`crate::Input::DetachSub`] carrying this reason verbatim.
+/// - [`Self::PromoterReaped`]: a dynamic Sub's source Promoter
+///   reaped (operator removed the `[[promoter]]` block, or the
+///   Profile lost its anchor under an all-dynamic Sub set so the
+///   anchor-terminal teardown unwound the whole Profile). Pairs with
+///   [`Diagnostic::DynamicSubReaped`] (Promoter-keyed narration);
+///   `SubDetached` is the per-Sub lifecycle signal the latter
+///   complements.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DetachReason {
+    ConfigDiffRemoved,
+    ConfigDiffIdentityChanged,
+    IpcDisabled,
+    PromoterReaped,
+}
+
 /// Subject of a [`Diagnostic::PromoterClaimPurged`] emission.
 ///
 /// Promoter claims are a disjoint set from Profile claims; the
@@ -567,6 +604,44 @@ pub enum Diagnostic {
         sub: SubId,
         name: CompactString,
         source_promoter: Option<PromoterId>,
+    },
+    /// A Sub emitted [`crate::Effect`]s on this `emit_effects` pass.
+    /// `count` is `1` for a `SubtreeRoot` emission, and the per-leaf
+    /// emission count for a `PerStableFile` Sub — the diagnostic
+    /// aggregates the pass so a one-Sub-many-files burst is one wire
+    /// event, not N. Suppressed (B1-dedup) and skipped (scope-mismatch)
+    /// passes emit nothing; `count > 0` is structural for every
+    /// emission of this variant.
+    ///
+    /// The operator-facing lifecycle signal for a fire — increments
+    /// the per-Sub `fire_count` / `last_fired_at` counters.
+    SubFired {
+        sub: SubId,
+        profile: ProfileId,
+        count: u32,
+    },
+    /// A Sub was removed from the engine; `reason` demuxes the origin.
+    /// Emitted once per Sub removal — the operator-facing lifecycle
+    /// signal that complements [`Self::SubAttached`] /
+    /// [`Self::SubRebound`].
+    ///
+    /// Distinct from siblings:
+    /// - [`Self::DetachUnknownSub`] — a *failed* detach (stale id);
+    ///   no Sub was removed, no `SubDetached`.
+    /// - [`Self::DynamicSubReaped`] — Promoter-keyed narration for
+    ///   the same dynamic-Sub teardown that this variant captures
+    ///   per-Sub. The two pair: `DynamicSubReaped` carries the path,
+    ///   `SubDetached` carries the per-Sub
+    ///   `(sub, profile, reason)` triple.
+    /// - [`Self::SubRebound`] — in-place `modified_params` rebind;
+    ///   `has_fired` and the per-Sub history survive, no
+    ///   `SubDetached`. The `modified_identity` arm IS a detach +
+    ///   attach and DOES emit `SubDetached` with
+    ///   [`DetachReason::ConfigDiffIdentityChanged`].
+    SubDetached {
+        sub: SubId,
+        profile: ProfileId,
+        reason: DetachReason,
     },
     /// A Sub's per-Sub fields (`program`, `scope`, `settle`,
     /// `log_output`) were rebound in place via `rebind_sub_inner` — the

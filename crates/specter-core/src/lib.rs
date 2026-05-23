@@ -27,7 +27,9 @@ mod snapshot;
 mod sub;
 mod tree;
 
-pub use diag::{BurstHelper, ClaimKind, Diagnostic, PromoterClaimKind, SpliceFailureCause};
+pub use diag::{
+    BurstHelper, ClaimKind, DetachReason, Diagnostic, PromoterClaimKind, SpliceFailureCause,
+};
 pub use diff::{Diff, EntryRef, Rename};
 pub use effect::{DedupKey, Effect, EffectCommon, EffectOutcome, EffectTarget, Termination};
 pub use fs_id::FsIdentity;

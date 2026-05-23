@@ -32,11 +32,11 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind, ClassSet,
-    ContribKey, DedupKey, DescentRemaining, DescentState, Diagnostic, Effect, EffectCommon,
-    EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent, PostFirePhase,
-    PreFirePhase, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Profile,
-    ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority,
-    QuiescenceVerdict, ReapTrigger, Resource, ResourceId, ResourceKind, StepOutput,
+    ContribKey, DedupKey, DescentRemaining, DescentState, DetachReason, Diagnostic, Effect,
+    EffectCommon, EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent,
+    PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse,
+    ProbeSlot, Profile, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState,
+    ProofAuthority, QuiescenceVerdict, ReapTrigger, Resource, ResourceId, ResourceKind, StepOutput,
     SubAttachRequest, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchRegistryDiff,
 };
 use std::path::Path;
@@ -1161,7 +1161,7 @@ impl Engine {
         // ---- Sub side: removed → modified_params → modified_identity → added ----
         for name in subs.removed {
             match self.subs.find_by_name(&name) {
-                Some(sid) => self.detach_sub_inner(sid, out),
+                Some(sid) => self.detach_sub_inner(sid, DetachReason::ConfigDiffRemoved, out),
                 None => out
                     .diagnostics
                     .push(Diagnostic::ConfigDiffUnknownSub { name }),
@@ -1196,7 +1196,7 @@ impl Engine {
                 continue;
             }
             if let Some(old) = self.subs.find_by_name(&req.params.name) {
-                self.detach_sub_inner(old, out);
+                self.detach_sub_inner(old, DetachReason::ConfigDiffIdentityChanged, out);
             }
             let _ = self.attach_sub_inner(req, now, out);
         }
@@ -1940,15 +1940,28 @@ impl Engine {
             empty_path()
         });
 
-        // 3. Notify each source Promoter; remove each dynamic Sub from
-        // SubRegistry. SubRegistry's `by_profile` index drops the
-        // entry on the last remove, so the post-loop registry has no
-        // back-references for this Profile.
+        // 3. Notify each source Promoter; emit the per-Sub lifecycle
+        // signal; then remove each dynamic Sub from SubRegistry.
+        // `on_dynamic_sub_reaped` is the Promoter-keyed narration
+        // (path-carrying); [`Diagnostic::SubDetached`] is the per-Sub
+        // operator-facing signal a `wait --kind detach` IPC client
+        // filters on. Both fire in the same loop so the registry
+        // borrow is still live for `source_promoter` lookup; the
+        // remove pass below tears the entries down once the
+        // narration is done. SubRegistry's `by_profile` index drops
+        // the entry on the last remove, so the post-loop registry
+        // has no back-references for this Profile.
         let sub_ids: SmallVec<[SubId; 2]> = self.subs.at(profile_id).iter().copied().collect();
         for sid in sub_ids.iter().copied() {
-            if let Some(pid) = self.subs.get(sid).and_then(|s| s.source_promoter) {
-                self.on_dynamic_sub_reaped(pid, sid, &anchor_path, out);
-            }
+            let Some(pid) = self.subs.get(sid).and_then(|s| s.source_promoter) else {
+                continue;
+            };
+            self.on_dynamic_sub_reaped(pid, sid, &anchor_path, out);
+            out.diagnostics.push(Diagnostic::SubDetached {
+                sub: sid,
+                profile: profile_id,
+                reason: DetachReason::PromoterReaped,
+            });
         }
         for sid in sub_ids {
             let _ = self.subs.remove(sid);
@@ -2502,7 +2515,7 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        let outcome = self.emit_effects(profile_id, mode, out);
+        let outcome = self.emit_effects(profile_id, mode, now, out);
         if matches!(mode, EmitMode::SeedDrift { .. })
             && let Some(p) = self.profiles.get_mut(profile_id)
         {
@@ -3067,10 +3080,20 @@ impl Engine {
     /// to enter the `Awaiting` phase (`count > 0`) or short-circuit to
     /// `finish_burst_to_idle` (dedup-hash suppressed everything, no Subs
     /// matched, or the burst is flagged [`BurstFinish::Reap`]).
+    ///
+    /// **Per-Sub observational bookkeeping.** Each emission triggers
+    /// [`SubRegistry::record_fired`] (bumps `fire_count`, stamps
+    /// `last_fired_at = now`) and pushes one [`Diagnostic::SubFired`]
+    /// carrying the aggregated per-pass count (1 for SubtreeRoot, the
+    /// per-leaf count for PerStableFile). A `FireVerdict::SuppressDedup`
+    /// verdict instead bumps `dedup_suppressed_count` and emits
+    /// nothing. The B1-dedup-load-bearing [`SubRegistry::mark_fired`]
+    /// stays the SubtreeRoot edge — separate signal, separate writer.
     fn emit_effects(
         &mut self,
         profile_id: ProfileId,
         mode: EmitMode<'_>,
+        now: Instant,
         out: &mut StepOutput,
     ) -> EmitOutcome {
         let Some(p) = self.profiles.get(profile_id) else {
@@ -3139,7 +3162,15 @@ impl Engine {
                 None => continue,
             };
             match fire_decision(mode, scope, sub_id, already_fired, nothing_changed) {
-                FireVerdict::SkipScope | FireVerdict::SuppressDedup => continue,
+                FireVerdict::SkipScope => continue,
+                FireVerdict::SuppressDedup => {
+                    // Observational only: count the B1-dedup-suppressed
+                    // verdict so the operator-facing `list --wide`
+                    // surfaces how often a Sub's reaction *would* have
+                    // fired against an unchanged tree.
+                    self.subs.record_dedup_suppressed(sub_id);
+                    continue;
+                }
                 FireVerdict::Emit => {}
             }
             match scope {
@@ -3177,7 +3208,16 @@ impl Engine {
 
                     // Record the per-Sub fire (the `sub` borrow above
                     // ended with `push_effect`; `&mut self.subs` is free).
+                    // `mark_fired` is the load-bearing B1-dedup edge;
+                    // `record_fired` is the observational counter pair
+                    // that drives the operator-facing `list` projection.
                     self.subs.mark_fired(sub_id);
+                    self.subs.record_fired(sub_id, 1, now);
+                    out.diagnostics.push(Diagnostic::SubFired {
+                        sub: sub_id,
+                        profile: profile_id,
+                        count: 1,
+                    });
                 }
                 EffectScope::PerStableFile => {
                     // PerStableFile implies `needs_diff = true` at
@@ -3195,6 +3235,20 @@ impl Engine {
                         &exclude_strings,
                         out,
                     );
+                    if pushed > 0 {
+                        // Aggregated: one `SubFired` + one
+                        // `record_fired(pushed)` per pass, regardless of
+                        // how many leaf files matched. Keeps the wire
+                        // stream linear in Sub count, not in diff size
+                        // — the per-leaf Effects themselves carry the
+                        // per-file granularity downstream.
+                        self.subs.record_fired(sub_id, pushed, now);
+                        out.diagnostics.push(Diagnostic::SubFired {
+                            sub: sub_id,
+                            profile: profile_id,
+                            count: pushed,
+                        });
+                    }
                     count = count.saturating_add(pushed);
                 }
             }

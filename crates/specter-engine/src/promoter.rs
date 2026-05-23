@@ -59,8 +59,8 @@ use crate::probe::ProbeRoute;
 use crate::refcounts::{add_watch, sub_watch};
 use compact_str::{CompactString, format_compact};
 use specter_core::{
-    ClassSet, ContribKey, DescentState, Diagnostic, DirSnapshot, EntryKind, PatternComponent,
-    PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Promoter,
+    ClassSet, ContribKey, DescentState, DetachReason, Diagnostic, DirSnapshot, EntryKind,
+    PatternComponent, PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Promoter,
     PromoterAttachRequest, PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole,
     StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Tree,
 };
@@ -1490,7 +1490,7 @@ impl Engine {
             .map(|(sid, _)| sid)
             .collect();
         for sub_id in sub_ids {
-            self.detach_sub_inner(sub_id, out);
+            self.detach_sub_inner(sub_id, DetachReason::PromoterReaped, out);
         }
 
         // 3. Release the per-Resource claims. Both helpers are

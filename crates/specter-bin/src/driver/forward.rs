@@ -395,6 +395,22 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
                 "dynamic sub attached (promoter-spawned)",
             ),
         },
+        Diagnostic::SubFired {
+            sub,
+            profile,
+            count,
+        } => tracing::info!(
+            ?sub,
+            ?profile,
+            count,
+            "sub fired (aggregated per emit_effects pass; SubtreeRoot count=1, \
+             PerStableFile count=per-leaf matches)",
+        ),
+        Diagnostic::SubDetached {
+            sub,
+            profile,
+            reason,
+        } => tracing::info!(?sub, ?profile, ?reason, "sub detached",),
         Diagnostic::SubRebound { sub } => tracing::info!(
             ?sub,
             "sub rebound (per-Sub fields updated in place; baseline preserved)",

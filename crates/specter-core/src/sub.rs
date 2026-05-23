@@ -23,7 +23,7 @@ use smallvec::SmallVec;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 /// Where a Sub anchors.
 ///
@@ -374,6 +374,31 @@ pub struct Sub {
     /// real change, no refcount/state-machine corruption — so a plain
     /// `bool` carries it with no edge-method ceremony.
     pub has_fired: bool,
+    /// Engine instant at which this Sub last emitted an Effect, or
+    /// `None` for a Sub that has never fired. Observational only —
+    /// distinct from [`Self::has_fired`] (the load-bearing B1-dedup
+    /// signal): `last_fired_at` is `Some` iff `has_fired` is true, but
+    /// the value carries the timestamp the operator-facing `list` UI
+    /// renders as a relative or wall-clock instant (via the bin's
+    /// `start_instant`/`start_wall` reference pair). Written only
+    /// through [`SubRegistry::record_fired`].
+    pub last_fired_at: Option<Instant>,
+    /// Cumulative Effect emissions across this Sub's lifetime —
+    /// `SubtreeRoot` increments by 1 per fire, `PerStableFile` by the
+    /// per-file count of the emission pass. Observational; surfaces in
+    /// the IPC `list` projection. Saturating-add on increment (`u64`
+    /// holds a millennium of microsecond-cadence fires); written only
+    /// through [`SubRegistry::record_fired`].
+    pub fire_count: u64,
+    /// Cumulative B1-dedup-suppressed verdicts — bumped when this
+    /// `SubtreeRoot` Sub's `fire_decision` resolves to
+    /// `FireVerdict::SuppressDedup` (unchanged tree, already fired,
+    /// not forced). Observational; surfaces in `list --wide` for
+    /// operators tuning dedup behaviour. `PerStableFile` never
+    /// suppresses (its dedup is diff-membership), so this counter
+    /// stays zero on those Subs. Written only through
+    /// [`SubRegistry::record_dedup_suppressed`].
+    pub dedup_suppressed_count: u64,
 }
 
 impl Sub {
@@ -401,6 +426,9 @@ impl Sub {
             log_output: params.log_output,
             source_promoter: params.source_promoter,
             has_fired: false,
+            last_fired_at: None,
+            fire_count: 0,
+            dedup_suppressed_count: 0,
         }
     }
 
@@ -547,20 +575,57 @@ impl SubRegistry {
         }
     }
 
+    /// Record `count` successful Effect emissions on `sub` at `now`.
+    /// Bumps [`Sub::fire_count`] by `count` (saturating) and writes
+    /// [`Sub::last_fired_at`] = `Some(now)`. Observational —
+    /// [`Self::mark_fired`] is the load-bearing B1-dedup edge; this
+    /// one carries the per-Sub fire history the operator-facing `list`
+    /// projection renders.
+    ///
+    /// Called at most once per Sub per `emit_effects` pass on the
+    /// emit-side. `count` is `1` for a `SubtreeRoot` emission and the
+    /// per-file count for a `PerStableFile` emission (aggregated so
+    /// `Diagnostic::SubFired`'s wire stream isn't amplified by N).
+    /// A stale `SubId` is a silent no-op — the counter already died
+    /// with the slotmap entry, mirroring [`Self::mark_fired`].
+    pub fn record_fired(&mut self, sub: SubId, count: u32, now: Instant) {
+        if let Some(s) = self.subs.get_mut(sub) {
+            s.fire_count = s.fire_count.saturating_add(u64::from(count));
+            s.last_fired_at = Some(now);
+        }
+    }
+
+    /// Bump [`Sub::dedup_suppressed_count`] by one — written when
+    /// `emit_effects` resolves a `SubtreeRoot` Sub to
+    /// `FireVerdict::SuppressDedup` (unchanged tree + already-fired +
+    /// not forced). Saturating add; observational only. A stale
+    /// `SubId` is a silent no-op — same shape as [`Self::mark_fired`]
+    /// and [`Self::record_fired`].
+    pub fn record_dedup_suppressed(&mut self, sub: SubId) {
+        if let Some(s) = self.subs.get_mut(sub) {
+            s.dedup_suppressed_count = s.dedup_suppressed_count.saturating_add(1);
+        }
+    }
+
     /// Replace `sub`'s per-Sub fields with `new_params` in place — the
     /// `modified_params` arm of hot-reload's [`SubRegistryDiff`] split.
     ///
     /// **Preserves**: [`SubId`], `profile`, `name`, `source_promoter`,
-    /// `has_fired`. The first two are structural (the slotmap key and
-    /// the Profile join are invariants of this Sub's lifetime); `name`
-    /// and `source_promoter` are pinned by the rebind invariant
-    /// (callers route through [`Self::find_by_name`], which keys on
-    /// `name`, and a `source_promoter` change would cross the
-    /// static↔dynamic boundary the diff already maps to add+remove).
+    /// `has_fired`, `last_fired_at`, `fire_count`,
+    /// `dedup_suppressed_count`. The first two are structural (the
+    /// slotmap key and the Profile join are invariants of this Sub's
+    /// lifetime); `name` and `source_promoter` are pinned by the
+    /// rebind invariant (callers route through [`Self::find_by_name`],
+    /// which keys on `name`, and a `source_promoter` change would cross
+    /// the static↔dynamic boundary the diff already maps to add+remove).
     /// `has_fired` is preserved because the B1 dedup floor reads it as
     /// "this Sub has already announced the current stable tree state";
     /// a program swap changes *what runs*, not *whether the tree
-    /// changed*.
+    /// changed*. The three observational counters
+    /// (`last_fired_at` / `fire_count` / `dedup_suppressed_count`) are
+    /// preserved for the same reason — they record this Sub's history
+    /// under its operator-facing name, and a `modified_params` rebind
+    /// leaves both identity and history intact.
     ///
     /// **Replaces**: `program`, `scope`, `settle`, `log_output`;
     /// recomputes `needs_diff` (derived from `scope` + the program's
@@ -679,7 +744,7 @@ mod tests {
     };
     use compact_str::CompactString;
     use std::sync::Arc;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     const SETTLE: Duration = Duration::from_millis(100);
 
@@ -803,7 +868,11 @@ mod tests {
     /// / SeedDrift baseline. Relocated from the deleted per-Profile
     /// `new_profile_initialises_fired_subs_empty`: the history now
     /// lives per-Sub, so the "starts empty" contract is asserted on
-    /// the Sub, not the Profile.
+    /// the Sub, not the Profile. Also pins the three observational
+    /// counters' fresh state — `record_fired` /
+    /// `record_dedup_suppressed` are the only writers, so a fresh Sub
+    /// can never carry inherited history from a slotmap slot's prior
+    /// occupant.
     #[test]
     fn fresh_sub_starts_unfired() {
         let sub = Sub::from_request(
@@ -818,6 +887,85 @@ mod tests {
             },
         );
         assert!(!sub.has_fired, "fresh Sub: no prior Effect emission");
+        assert!(sub.last_fired_at.is_none(), "no fire timestamp");
+        assert_eq!(sub.fire_count, 0, "no cumulative fires");
+        assert_eq!(sub.dedup_suppressed_count, 0, "no suppressed verdicts");
+    }
+
+    /// `record_fired` accumulates per-pass counts into `fire_count` and
+    /// stamps `last_fired_at` with the supplied instant. The B1-dedup
+    /// `has_fired` is untouched — `mark_fired` and `record_fired` are
+    /// disjoint edge methods on disjoint pieces of fire history.
+    #[test]
+    fn record_fired_bumps_count_and_stamps_last_fired() {
+        let mut reg = SubRegistry::new();
+        let pid = ProfileId::default();
+        let sid = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "build".into(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
+        let t0 = Instant::now();
+        reg.record_fired(sid, 1, t0);
+        let s = reg.get(sid).expect("Sub alive");
+        assert_eq!(s.fire_count, 1, "first fire bumps count by 1");
+        assert_eq!(s.last_fired_at, Some(t0), "first fire stamps timestamp");
+        assert!(
+            !s.has_fired,
+            "record_fired must NOT touch has_fired (mark_fired owns it)",
+        );
+
+        // A PerStableFile-style aggregation: count=3 adds to the
+        // running total, timestamp advances.
+        let t1 = t0 + Duration::from_millis(10);
+        reg.record_fired(sid, 3, t1);
+        let s = reg.get(sid).expect("Sub alive");
+        assert_eq!(s.fire_count, 4, "second fire aggregates: 1 + 3 = 4");
+        assert_eq!(s.last_fired_at, Some(t1), "timestamp advances");
+
+        // Stale id is a silent no-op.
+        reg.remove(sid).expect("removed");
+        reg.record_fired(sid, 1, t1); // would otherwise panic on missing entry
+    }
+
+    /// `record_dedup_suppressed` increments the dedicated counter and
+    /// touches no other field — the SuppressDedup arm signals "Sub
+    /// would have fired but the dedup floor said no", distinct from
+    /// fires (`record_fired`) and the B1 flag (`mark_fired`).
+    #[test]
+    fn record_dedup_suppressed_bumps_only_its_own_counter() {
+        let mut reg = SubRegistry::new();
+        let pid = ProfileId::default();
+        let sid = reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "build".into(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+            },
+        ));
+        reg.record_dedup_suppressed(sid);
+        reg.record_dedup_suppressed(sid);
+        let s = reg.get(sid).expect("Sub alive");
+        assert_eq!(s.dedup_suppressed_count, 2);
+        assert_eq!(s.fire_count, 0, "suppression does not bump fire_count");
+        assert!(
+            s.last_fired_at.is_none(),
+            "suppression does not stamp last_fired_at",
+        );
+        assert!(!s.has_fired, "suppression does not touch has_fired");
+
+        reg.remove(sid).expect("removed");
+        reg.record_dedup_suppressed(sid); // stale id is a silent no-op
     }
 
     #[test]
@@ -1193,6 +1341,9 @@ mod tests {
             },
         ));
         reg.mark_fired(sid);
+        let fired_at = Instant::now();
+        reg.record_fired(sid, 7, fired_at);
+        reg.record_dedup_suppressed(sid);
 
         let new_program = program_with(Placeholder::Created);
         let new_settle = SETTLE + SETTLE;
@@ -1215,6 +1366,16 @@ mod tests {
         );
         let s = reg.get(sid).expect("Sub preserved across rebind");
         assert!(s.has_fired, "has_fired preserved across rebind");
+        assert_eq!(
+            s.last_fired_at,
+            Some(fired_at),
+            "last_fired_at preserved — operator-facing fire history",
+        );
+        assert_eq!(s.fire_count, 7, "fire_count preserved across rebind");
+        assert_eq!(
+            s.dedup_suppressed_count, 1,
+            "dedup_suppressed_count preserved across rebind",
+        );
         assert_eq!(s.name, "build", "name preserved");
         assert_eq!(s.profile, pid, "profile preserved");
         assert!(s.source_promoter.is_none(), "source_promoter preserved");
