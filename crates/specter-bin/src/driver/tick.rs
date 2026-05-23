@@ -59,6 +59,7 @@
 //! the drain ordering. The deadline math feeds `next_deadline` from the
 //! engine's timer heap; `None` (no timers armed) maps to a 1-day fallback.
 
+use super::state::ReloadTrigger;
 use super::{EngineDriver, TickOutcome};
 use crossbeam::channel::{Select, TryRecvError};
 use specter_core::{FsEvent, Input, ResourceId};
@@ -129,11 +130,14 @@ impl EngineDriver {
             }
         }
 
-        // Drain reload pulses (file I/O on this thread).
+        // Drain reload pulses (file I/O on this thread). SIGHUP is
+        // the only pulse source for this channel — auto-reload uses
+        // `config_event_rx` + settle-expiry — so every drained pulse
+        // here is attributed to `Sighup`.
         loop {
             match self.sides.reload_signal_rx.try_recv() {
                 Ok(()) => {
-                    if self.handle_reload(now).is_break() {
+                    if self.handle_reload(ReloadTrigger::Sighup, now).is_break() {
                         return self.begin_shutdown();
                     }
                 }

@@ -21,6 +21,7 @@
 //! meta-rotation discipline converges across both pulse sources.
 
 use super::EngineDriver;
+use super::state::ReloadTrigger;
 use specter_config::{Config, FileMeta, LogConfig};
 use specter_core::Input;
 use std::ops::ControlFlow;
@@ -64,7 +65,7 @@ impl EngineDriver {
         }
         self.config_settle_until = None;
         if self.config_meta_changed() {
-            self.handle_reload(now)
+            self.handle_reload(ReloadTrigger::AutoReload, now)
         } else {
             ControlFlow::Continue(())
         }
@@ -133,6 +134,15 @@ impl EngineDriver {
     /// — [`Self::config_meta_changed`]'s "Err = treat as changed"
     /// semantics keep the retry loop alive on the next pulse.
     ///
+    /// **Reload-counter discipline.** [`super::state::DriverState::record_reload`]
+    /// fires immediately after a successful parse — covering both
+    /// the empty-diff and apply-diff branches (the operator's pulse
+    /// is honoured either way; only the engine-side work differs).
+    /// A parse-fail short-circuits *before* this site, so the
+    /// counters never advance on a failed reload. The `trigger`
+    /// argument carries per-caller attribution (SIGHUP vs auto-
+    /// reload settle expiry).
+    ///
     /// Returns the [`ControlFlow`] from the apply-branch `forward` so
     /// a shutdown observed mid-apply (operator signal or
     /// `watch_ops_tx` disconnect) propagates back to the caller.
@@ -140,7 +150,11 @@ impl EngineDriver {
     /// has the diff applied, so the loader matches the engine on the
     /// way out, and the driver is about to shut down anyway — keeping
     /// the rotation in front of the return is the clearer invariant.
-    pub(super) fn handle_reload(&mut self, now: Instant) -> ControlFlow<()> {
+    pub(super) fn handle_reload(
+        &mut self,
+        trigger: ReloadTrigger,
+        now: Instant,
+    ) -> ControlFlow<()> {
         self.reopen_log_file();
 
         let Some((new_config, new_meta)) = self.read_and_parse_config() else {
@@ -149,6 +163,17 @@ impl EngineDriver {
             }
             return ControlFlow::Continue(());
         };
+
+        // Parse succeeded — bump the reload counters. The bump records
+        // that the operator's pulse was acknowledged, not that the
+        // engine-side apply succeeded: a shutdown observed mid-apply
+        // (forward returning Break below) still leaves the bump
+        // standing, mirroring the loader-rotation discipline ("we
+        // accepted the work; we may not finish it cleanly"). Both the
+        // empty-diff and apply-diff branches converge here for the
+        // same reason — an operator re-save of unchanged bytes is
+        // still a reload from the operator's view.
+        self.driver_state.record_reload(trigger);
 
         let applied_log = self.apply_log_reload(&new_config);
 

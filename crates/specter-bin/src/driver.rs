@@ -1,12 +1,14 @@
-//! Engine driver — the bin's main-thread loop, split across three
+//! Engine driver — the bin's main-thread loop, split across four
 //! focused submodules with the spine here.
 //!
-//! [`EngineDriver`] owns the [`Engine`], the [`Loader`], the
-//! engine-side channel bundle, the prober [`Arc`] clone and a
-//! wake-handle clone. This module holds the struct and its lifecycle
-//! ([`EngineDriver::new`], [`EngineDriver::run_initial_attach`],
-//! [`EngineDriver::run`]) plus the cancel-first shutdown drain
-//! (`begin_shutdown`). The load-bearing work is next to it:
+//! [`EngineDriver`] owns the [`Engine`], the [`Loader`], a
+//! [`state::DriverState`] (process-level facts: start instants +
+//! reload counters), the engine-side channel bundle, the prober
+//! [`Arc`] clone and a wake-handle clone. This module holds the
+//! struct and its lifecycle ([`EngineDriver::new`],
+//! [`EngineDriver::run_initial_attach`], [`EngineDriver::run`]) plus
+//! the cancel-first shutdown drain (`begin_shutdown`). The
+//! load-bearing work is next to it:
 //!
 //! - [`tick`] — one pass of the drain order (sensor → timers → reload
 //!   → config-settle → effects → block). The hot loop; new
@@ -14,6 +16,8 @@
 //! - [`reload`] — the SIGHUP + auto-reload settle pipeline.
 //! - [`forward`] — ships a `StepOutput` downstream and maps a
 //!   `Diagnostic` to tracing.
+//! - [`state`] — driver-owned process facts (startup instants,
+//!   reload counters) consumed by the IPC `status` surface.
 //!
 //! `run_initial_attach` walks `loader.current_config` in source order,
 //! attaching each Sub / Promoter and forwarding the resulting output
@@ -23,6 +27,7 @@
 
 mod forward;
 mod reload;
+mod state;
 mod tick;
 
 use crate::app::CliLogOverrides;
@@ -32,6 +37,7 @@ use crate::observability::ObservabilityHandle;
 use specter_core::Input;
 use specter_engine::Engine;
 use specter_sensor::{Prober, WakeHandle};
+use state::DriverState;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -79,6 +85,12 @@ pub struct EngineDriver {
     /// `reopen_file`). Held here so `handle_reload` can fire both on
     /// SIGHUP without going through the loader.
     obs_handle: ObservabilityHandle,
+    /// Process-level facts (startup instants + reload counters).
+    /// Constructed at boot via [`DriverState::new`] and mutated only
+    /// through [`DriverState::record_reload`] — the edge method
+    /// guarantees the counter fields move together. Consumed by the
+    /// IPC `status` surface.
+    driver_state: DriverState,
     sides: EngineSide,
     prober: Arc<dyn Prober>,
     wake_handle: Box<dyn WakeHandle>,
@@ -108,6 +120,7 @@ impl std::fmt::Debug for EngineDriver {
             .field("config_path", &self.config_path)
             .field("cli_log_overrides", &self.cli_log_overrides)
             .field("obs_handle", &self.obs_handle)
+            .field("driver_state", &self.driver_state)
             .finish_non_exhaustive()
     }
 }
@@ -130,6 +143,7 @@ impl EngineDriver {
             config_path,
             cli_log_overrides,
             obs_handle,
+            driver_state: DriverState::new(),
             sides,
             prober,
             wake_handle,
