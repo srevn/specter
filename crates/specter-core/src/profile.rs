@@ -1235,7 +1235,8 @@ impl ProfileState {
     /// zombie and live bursts share routing class because every
     /// burst-helper that consults the discriminant routes identically
     /// for both. Readers that need to distinguish call
-    /// [`Self::burst_finish`].
+    /// [`Self::burst_finish`]; readers that need the *phase* (operator
+    /// display vs routing) call [`Self::label`].
     #[must_use]
     pub const fn discriminant(&self) -> ProfileStateDiscriminant {
         match self {
@@ -1243,6 +1244,37 @@ impl ProfileState {
             Self::Pending(_) => ProfileStateDiscriminant::Pending,
             Self::Active(ActiveBurst::PreFire(_), _) => ProfileStateDiscriminant::ActivePreFire,
             Self::Active(ActiveBurst::PostFire(_), _) => ProfileStateDiscriminant::ActivePostFire,
+        }
+    }
+
+    /// Operator-display projection — one [`StateLabel`] per visible
+    /// phase. Distinct from [`Self::discriminant`]: the discriminant
+    /// names the four *routing classes* the burst helpers branch on
+    /// (collapsing `Batching | Verifying | Draining` to `ActivePreFire`
+    /// and `Awaiting | Rebasing | RebaseSettling` to `ActivePostFire`),
+    /// whereas this projection names the eight *phases* an operator
+    /// reading `specter status` / `specter list` would expect to see
+    /// — every leaf of the [`PreFirePhase`] / [`PostFirePhase`] split,
+    /// plus `Idle` and `Pending`.
+    ///
+    /// [`BurstFinish`] is collapsed (a zombie burst displays the same
+    /// label as a live one — the directive is operationally irrelevant
+    /// to the phase name).
+    #[must_use]
+    pub const fn label(&self) -> StateLabel {
+        match self {
+            Self::Idle => StateLabel::Idle,
+            Self::Pending(_) => StateLabel::Pending,
+            Self::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
+                PreFirePhase::Batching { .. } => StateLabel::Batching,
+                PreFirePhase::Verifying(_) => StateLabel::Verifying,
+                PreFirePhase::Draining => StateLabel::Draining,
+            },
+            Self::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
+                PostFirePhase::Awaiting { .. } => StateLabel::Awaiting,
+                PostFirePhase::Rebasing(_) => StateLabel::Rebasing,
+                PostFirePhase::RebaseSettling { .. } => StateLabel::RebaseSettling,
+            },
         }
     }
 
@@ -1527,8 +1559,8 @@ impl ProfileState {
 /// The four variants match the four routing classes the engine's burst
 /// helpers branch on. They are coarser than the full state enum
 /// (`Active(PreFire(Batching{settle_timer}))` collapses to
-/// `ActivePreFire`) — sufficient for operator triage, and stable
-/// against future phase additions.
+/// `ActivePreFire`) — for diagnostic triage; see [`StateLabel`] for
+/// operator display. Stable against future phase additions.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum ProfileStateDiscriminant {
     /// [`ProfileState::Idle`].
@@ -1539,6 +1571,41 @@ pub enum ProfileStateDiscriminant {
     ActivePreFire,
     /// [`ProfileState::Active`] with [`ActiveBurst::PostFire`].
     ActivePostFire,
+}
+
+/// Operator-display label for a [`ProfileState`] — the eight visible
+/// phases an operator reading `specter status` / `specter list` would
+/// expect to see.
+///
+/// Distinct from [`ProfileStateDiscriminant`]: the discriminant names
+/// the four *routing classes* the engine's burst helpers branch on,
+/// whereas this enum names the eight *phases* the state can occupy.
+/// Two enums, two consumers — diagnostics keep their stable
+/// `ActivePreFire` / `ActivePostFire` tag, operator surfaces print the
+/// phase (`Batching` / `Verifying` / `Draining` / `Awaiting` /
+/// `Rebasing` / `RebaseSettling`).
+///
+/// Constructed via [`ProfileState::label`]; the projection is
+/// exhaustive over the type space, so a future phase addition is a
+/// compile error rather than a silently-collapsing display.
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
+pub enum StateLabel {
+    /// [`ProfileState::Idle`] — no burst in flight.
+    Idle,
+    /// [`ProfileState::Pending`] — anchor path descent in flight.
+    Pending,
+    /// [`PreFirePhase::Batching`] — activity-gap settle wait.
+    Batching,
+    /// [`PreFirePhase::Verifying`] — pre-fire stability probe in flight.
+    Verifying,
+    /// [`PreFirePhase::Draining`] — self-stable, descendants still active.
+    Draining,
+    /// [`PostFirePhase::Awaiting`] — Effects emitted, gate counter open.
+    Awaiting,
+    /// [`PostFirePhase::Rebasing`] — post-fire baseline-capture probe.
+    Rebasing,
+    /// [`PostFirePhase::RebaseSettling`] — spacing wait between rebase samples.
+    RebaseSettling,
 }
 
 /// State for a Profile undergoing pending-path descent.

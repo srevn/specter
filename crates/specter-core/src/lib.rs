@@ -44,7 +44,7 @@ pub use profile::{
     ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, CertifiedPrior,
     DescentRemaining, DescentState, DetachLifecycle, DirtyProvenance, PostFireBurst, PostFirePhase,
     PreFireBurst, PreFirePhase, Profile, ProfileMap, ProfileState, ProfileStateDiscriminant,
-    QuiescenceVerdict, ReapTrigger, TimerKind,
+    QuiescenceVerdict, ReapTrigger, StateLabel, TimerKind,
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{
