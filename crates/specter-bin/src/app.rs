@@ -28,7 +28,7 @@ use crate::observability;
 use crate::signals::{register_signal_handlers, spawn_signal_thread};
 use crossbeam::channel::bounded;
 use specter_actuator::{SubprocessActuator, default_spawner};
-use specter_config::{Cli, Config, FileMeta};
+use specter_config::{Config, DaemonArgs, FileMeta};
 use specter_core::{Input, WatchOp};
 use specter_engine::Engine;
 use specter_sensor::{
@@ -66,7 +66,7 @@ use std::time::Duration;
 /// initialisation is the clearer home.
 const WATCHER_DRAIN_WINDOW: Duration = Duration::from_millis(50);
 
-/// Run the bin against `cli`.
+/// Run the bin against the parsed daemon arguments.
 ///
 /// Loads + validates the config, initializes tracing, starts every
 /// long-lived thread, drives the engine to completion, and runs the
@@ -74,11 +74,11 @@ const WATCHER_DRAIN_WINDOW: Duration = Duration::from_millis(50);
 /// exit; `ExitCode::from(1)` on startup failure (config / kqueue /
 /// prober / thread spawn).
 ///
-/// `Cli` is taken by value because every field is consumed (config
-/// moves into the driver; concurrency knobs are extracted then
+/// `DaemonArgs` is taken by value because every field is consumed
+/// (config moves into the driver; concurrency knobs are extracted then
 /// dropped); the `needless_pass_by_value` allow documents the intent.
 #[allow(clippy::needless_pass_by_value)]
-pub fn run(cli: Cli) -> ExitCode {
+pub fn run(args: DaemonArgs) -> ExitCode {
     // Register signal handlers before any other production action.
     // signal-hook's `sa_sigaction` captures any signal arriving during
     // the rest of init into its internal pipe (owned by the returned
@@ -102,7 +102,7 @@ pub fn run(cli: Cli) -> ExitCode {
     // `loader.config_meta` and is consulted by the auto-reload settle
     // filter to decide whether a watcher pulse reflects substantive
     // change.
-    let (initial_config, initial_meta) = match Config::from_path_with_meta(&cli.config) {
+    let (initial_config, initial_meta) = match Config::from_path_with_meta(&args.config) {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("specter: config load failed:\n{e}");
@@ -115,9 +115,9 @@ pub fn run(cli: Cli) -> ExitCode {
     // `ConfigError::Validate`): the issue's own `Display` carries the
     // field + detail + kind, so we forward it verbatim.
     let log_cfg = match initial_config.log.clone().merge_cli(
-        cli.log_level,
-        cli.log_destination,
-        cli.log_path.clone(),
+        args.log_level,
+        args.log_destination,
+        args.log_path.clone(),
     ) {
         Ok(c) => c,
         Err(issue) => {
@@ -152,7 +152,7 @@ pub fn run(cli: Cli) -> ExitCode {
         promoters = initial_config.promoters.len(),
         ?disabled_watches,
         ?disabled_promoters,
-        config = %cli.config.display(),
+        config = %args.config.display(),
         "specter starting"
     );
 
@@ -192,7 +192,7 @@ pub fn run(cli: Cli) -> ExitCode {
     // borrows the watcher bundle's `sensor_in_tx` and clones it once
     // per worker internally; the borrow ends here, leaving the bundle
     // free to move into the watcher thread below.
-    let probe_concurrency = cli
+    let probe_concurrency = args
         .probe_concurrency
         .map_or(specter_sensor::DEFAULT_CONCURRENCY, NonZeroUsize::get);
     let prober = match WorkerProber::new(
@@ -244,7 +244,7 @@ pub fn run(cli: Cli) -> ExitCode {
         };
 
     // Actuator thread.
-    let actuator_concurrency = cli
+    let actuator_concurrency = args
         .concurrency
         .map_or(specter_actuator::DEFAULT_CONCURRENCY, NonZeroUsize::get);
     let actuator_handle = match spawn_actuator_thread(actuator_concurrency, chans.actuator) {
@@ -256,11 +256,11 @@ pub fn run(cli: Cli) -> ExitCode {
     };
 
     // Engine driver — main thread.
-    let config_path = cli.config;
+    let config_path = args.config;
     let cli_log_overrides = CliLogOverrides {
-        level: cli.log_level,
-        destination: cli.log_destination,
-        path: cli.log_path,
+        level: args.log_level,
+        destination: args.log_destination,
+        path: args.log_path,
     };
 
     // Auto-reload — config-watcher init (default-on; opt-out via
@@ -290,7 +290,7 @@ pub fn run(cli: Cli) -> ExitCode {
     // settle delay, unlike steady-state pulses). The driver's
     // `handle_reload` re-reads the file with a fresh atomic capture
     // and rotates `loader.config_meta` to the post-edit identity.
-    let (config_event_rx, config_watcher_handles) = if cli.no_config_watch {
+    let (config_event_rx, config_watcher_handles) = if args.no_config_watch {
         tracing::info!("auto-reload disabled via --no-config-watch");
         (None, None)
     } else {

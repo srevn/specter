@@ -20,7 +20,10 @@ mod path;
 mod raw;
 mod template;
 
-pub use cli::Cli;
+pub use cli::{
+    Cli, ClientArgs, Command, DaemonArgs, ListArgs, NameTargetArgs, OutputFormat, ShowArgs,
+    StatusArgs, TailArgs, WaitArgs, WaitKind,
+};
 pub use config::{Config, LogConfig, LogDestination, LogLevel, PromoterSpec, SubSpec};
 pub use diff::diff;
 pub use error::{ConfigError, IssueKind, ValidationIssue};

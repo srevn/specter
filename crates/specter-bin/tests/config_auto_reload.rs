@@ -79,6 +79,7 @@ where
 {
     let bin = env!("CARGO_BIN_EXE_specter");
     Command::new(bin)
+        .arg("run")
         .arg("--config")
         .arg(cfg)
         .args(["--log-destination", "file"])

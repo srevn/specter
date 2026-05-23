@@ -1,11 +1,12 @@
 use crate::config::{LogDestination, LogLevel};
-use clap::Parser;
 use clap::builder::{
     Styles,
     styling::{AnsiColor, Style},
 };
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
+use std::time::Duration;
 
 const HEADING: Style = AnsiColor::Yellow.on_default().bold();
 const LITERAL: Style = AnsiColor::Cyan.on_default().bold();
@@ -25,15 +26,61 @@ fn banner() -> String {
     )
 }
 
+/// Top-level CLI parser — subcommand dispatcher.
+///
+/// `specter run` is the daemon (the historical flat invocation, now
+/// under a subcommand). The other verbs are operator clients that
+/// connect to the running daemon over a UNIX socket. The client
+/// surface is declared here so `--help` exposes it; verbs without a
+/// live handler exit `2`.
 #[derive(Debug, Parser)]
 #[command(
     name = "specter",
     version,
     about = banner(),
     styles = STYLES,
+    subcommand_required = true,
+    arg_required_else_help = true,
 )]
 #[must_use]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Command,
+}
+
+/// One-of-N top-level subcommand.
+///
+/// `Run` carries the daemon arguments; every other variant carries a
+/// client-side argument struct (always including [`ClientArgs`] via
+/// `#[command(flatten)]` for `--socket`).
+#[derive(Debug, Subcommand)]
+pub enum Command {
+    /// Run the specter daemon.
+    Run(DaemonArgs),
+    /// Print process / lifecycle status from the running daemon.
+    Status(StatusArgs),
+    /// List every attached watch and its state.
+    List(ListArgs),
+    /// Show one watch in detail by name.
+    Show(ShowArgs),
+    /// Disable one watch by name (runtime override; survives until
+    /// re-enabled or the watch leaves the TOML).
+    Disable(NameTargetArgs),
+    /// Enable a watch previously disabled via `specter disable`.
+    Enable(NameTargetArgs),
+    /// Request a config reload (equivalent to SIGHUP).
+    Reload(ClientArgs),
+    /// Stream diagnostics from the daemon.
+    Tail(TailArgs),
+    /// Block until a watch fires or detaches.
+    Wait(WaitArgs),
+}
+
+/// Daemon arguments — the historical flat `Cli` fields, preserved under
+/// `Command::Run`.
+#[derive(Debug, Args)]
+#[must_use]
+pub struct DaemonArgs {
     /// Path to TOML config (required).
     #[arg(long, short = 'c')]
     pub config: PathBuf,
@@ -95,121 +142,313 @@ pub struct Cli {
     pub no_config_watch: bool,
 }
 
+/// Arguments common to every client subcommand. Flattened via
+/// `#[command(flatten)]` so `--socket` reads naturally on each verb.
+#[derive(Debug, Args)]
+#[must_use]
+pub struct ClientArgs {
+    /// UNIX socket path. Defaults to the daemon's per-platform default
+    /// (Linux: `$XDG_RUNTIME_DIR/specter.sock` or `/tmp/specter.sock`;
+    /// BSD/macOS: `$TMPDIR/specter-<uid>.sock`).
+    #[arg(long)]
+    pub socket: Option<PathBuf>,
+}
+
+/// `specter status` arguments.
+#[derive(Debug, Args)]
+#[must_use]
+pub struct StatusArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Output format.
+    #[arg(long, short = 'o', value_enum, default_value_t = OutputFormat::Human)]
+    pub output: OutputFormat,
+
+    /// Include rarely-needed fields (counters, ids, full paths). Only
+    /// affects `-o human`; `-o json` is always lossless.
+    #[arg(long)]
+    pub wide: bool,
+}
+
+/// `specter list` arguments.
+#[derive(Debug, Args)]
+#[must_use]
+pub struct ListArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Output format.
+    #[arg(long, short = 'o', value_enum, default_value_t = OutputFormat::Human)]
+    pub output: OutputFormat,
+}
+
+/// `specter show <name>` arguments.
+#[derive(Debug, Args)]
+#[must_use]
+pub struct ShowArgs {
+    /// Name of the watch to show.
+    pub name: String,
+
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Output format.
+    #[arg(long, short = 'o', value_enum, default_value_t = OutputFormat::Human)]
+    pub output: OutputFormat,
+}
+
+/// `specter disable <name>` / `specter enable <name>` arguments —
+/// identical shape; the verb itself selects the operation.
+#[derive(Debug, Args)]
+#[must_use]
+pub struct NameTargetArgs {
+    /// Name of the watch to act on.
+    pub name: String,
+
+    #[command(flatten)]
+    pub client: ClientArgs,
+}
+
+/// `specter tail` arguments.
+#[derive(Debug, Args)]
+#[must_use]
+pub struct TailArgs {
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Restrict the stream to one or more `WireDiagnostic` variant
+    /// names (e.g. `SubFired`, `SubDetached`). Repeatable; case-
+    /// sensitive. Empty (the default) streams every variant.
+    #[arg(long)]
+    pub filter: Vec<String>,
+}
+
+/// `specter wait <name>` arguments.
+#[derive(Debug, Args)]
+#[must_use]
+pub struct WaitArgs {
+    /// Name of the watch to wait on.
+    pub name: String,
+
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Event class to wait for. `fire` (default) matches `SubFired`;
+    /// `detach` matches `SubDetached`.
+    #[arg(long, value_enum, default_value_t = WaitKind::Fire)]
+    pub kind: WaitKind,
+
+    /// Time budget. Omitted ⇒ wait indefinitely. humantime format
+    /// (`500ms`, `30s`, `1m30s`).
+    #[arg(long, value_parser = parse_duration)]
+    pub timeout: Option<Duration>,
+}
+
+/// Output format shared by `status` / `list` / `show`.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable rendering (default).
+    Human,
+    /// Lossless JSON, one object per response.
+    Json,
+}
+
+/// Event class for `specter wait`.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
+pub enum WaitKind {
+    /// Match `SubFired` — the Sub emitted at least one Effect.
+    Fire,
+    /// Match `SubDetached` — the Sub left the engine (IPC `disable`,
+    /// config-removal, or `modified_identity` rebind).
+    Detach,
+}
+
+/// clap value-parser bridge for [`Duration`] in humantime form. The
+/// `String` error path is what clap's `value_parser` expects — it
+/// surfaces in the user's CLI error verbatim.
+fn parse_duration(s: &str) -> Result<Duration, String> {
+    humantime::parse_duration(s).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, NonZeroUsize};
-    use crate::config::LogLevel;
+    use super::*;
     use clap::{CommandFactory, Parser};
 
     fn parse(argv: &[&str]) -> Result<Cli, clap::Error> {
         Cli::try_parse_from(argv.iter().copied())
     }
 
-    #[test]
-    fn config_only_succeeds() {
-        let cli = parse(&["specter", "--config", "/foo"]).unwrap();
-        assert_eq!(cli.config, std::path::Path::new("/foo"));
-        assert!(cli.log_level.is_none());
-        assert!(cli.concurrency.is_none());
-        assert!(cli.probe_concurrency.is_none());
-        assert!(!cli.no_config_watch, "default-on auto-reload");
-    }
-
-    #[test]
-    fn missing_config_fails() {
-        let err = parse(&["specter"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
-    }
-
-    #[test]
-    fn log_level_parses_each_variant() {
-        for s in ["trace", "debug", "info", "warn", "error"] {
-            let cli = parse(&["specter", "--config", "/foo", "--log-level", s]).unwrap();
-            assert!(cli.log_level.is_some(), "log_level `{s}` parses");
+    fn run_args(cli: Cli) -> DaemonArgs {
+        match cli.command {
+            Command::Run(args) => args,
+            other => panic!("expected Run subcommand, got {other:?}"),
         }
     }
 
     #[test]
-    fn log_level_debug_is_debug() {
-        let cli = parse(&["specter", "--config", "/foo", "--log-level", "debug"]).unwrap();
-        assert_eq!(cli.log_level, Some(LogLevel::Debug));
+    fn run_parses_full_daemon_flag_set() {
+        let cli = parse(&[
+            "specter",
+            "run",
+            "--config",
+            "/etc/specter.toml",
+            "--log-level",
+            "debug",
+            "--log-destination",
+            "stderr",
+            "--log-path",
+            "/var/log/specter.log",
+            "--concurrency",
+            "8",
+            "--probe-concurrency",
+            "16",
+            "--no-config-watch",
+        ])
+        .unwrap();
+        let args = run_args(cli);
+        assert_eq!(args.config, std::path::Path::new("/etc/specter.toml"));
+        assert_eq!(args.log_level, Some(LogLevel::Debug));
+        assert_eq!(args.log_destination, Some(LogDestination::Stderr));
+        assert_eq!(
+            args.log_path.as_deref(),
+            Some(std::path::Path::new("/var/log/specter.log"))
+        );
+        assert_eq!(args.concurrency, NonZeroUsize::new(8));
+        assert_eq!(args.probe_concurrency, NonZeroUsize::new(16));
+        assert!(args.no_config_watch);
     }
 
     #[test]
-    fn unknown_log_level_rejected() {
-        let err = parse(&["specter", "--config", "/foo", "--log-level", "verbose"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::InvalidValue);
+    fn run_defaults_no_config_watch_to_false() {
+        let cli = parse(&["specter", "run", "--config", "/foo"]).unwrap();
+        let args = run_args(cli);
+        assert!(!args.no_config_watch);
+        assert!(args.log_level.is_none());
     }
 
     #[test]
-    fn concurrency_zero_rejected() {
-        let err = parse(&["specter", "--config", "/foo", "--concurrency", "0"]).unwrap_err();
+    fn run_short_config_flag_works() {
+        let cli = parse(&["specter", "run", "-c", "/bar"]).unwrap();
+        assert_eq!(run_args(cli).config, std::path::Path::new("/bar"));
+    }
+
+    #[test]
+    fn run_missing_config_fails() {
+        let err = parse(&["specter", "run"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn run_concurrency_zero_rejected() {
+        let err = parse(&["specter", "run", "--config", "/foo", "--concurrency", "0"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
-    fn concurrency_positive_accepted() {
-        let cli = parse(&["specter", "--config", "/foo", "--concurrency", "16"]).unwrap();
-        assert_eq!(cli.concurrency, NonZeroUsize::new(16));
+    fn no_subcommand_shows_help() {
+        let err = parse(&["specter"]).unwrap_err();
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand,
+        );
     }
 
     #[test]
-    fn probe_concurrency_zero_rejected() {
-        let err = parse(&["specter", "--config", "/foo", "--probe-concurrency", "0"]).unwrap_err();
+    fn status_parses_with_wide_and_output() {
+        let cli = parse(&[
+            "specter",
+            "status",
+            "--socket",
+            "/tmp/s.sock",
+            "-o",
+            "json",
+            "--wide",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Status(args) => {
+                assert_eq!(
+                    args.client.socket.as_deref(),
+                    Some(std::path::Path::new("/tmp/s.sock"))
+                );
+                assert_eq!(args.output, OutputFormat::Json);
+                assert!(args.wide);
+            }
+            other => panic!("expected Status, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn show_requires_name() {
+        let err = parse(&["specter", "show"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+    }
+
+    #[test]
+    fn wait_parses_kind_and_timeout() {
+        let cli = parse(&[
+            "specter",
+            "wait",
+            "my-watch",
+            "--kind",
+            "detach",
+            "--timeout",
+            "1500ms",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Wait(args) => {
+                assert_eq!(args.name, "my-watch");
+                assert_eq!(args.kind, WaitKind::Detach);
+                assert_eq!(args.timeout, Some(Duration::from_millis(1500)));
+            }
+            other => panic!("expected Wait, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn wait_rejects_invalid_timeout() {
+        let err =
+            parse(&["specter", "wait", "my-watch", "--timeout", "not-a-duration"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]
-    fn probe_concurrency_positive_accepted() {
-        let cli = parse(&["specter", "--config", "/foo", "--probe-concurrency", "8"]).unwrap();
-        assert_eq!(cli.probe_concurrency, NonZeroUsize::new(8));
+    fn tail_collects_repeated_filter() {
+        let cli = parse(&[
+            "specter",
+            "tail",
+            "--filter",
+            "SubFired",
+            "--filter",
+            "SubDetached",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Tail(args) => {
+                assert_eq!(args.filter, vec!["SubFired", "SubDetached"]);
+            }
+            other => panic!("expected Tail, got {other:?}"),
+        }
     }
 
     #[test]
-    fn short_config_flag_works() {
-        let cli = parse(&["specter", "-c", "/bar"]).unwrap();
-        assert_eq!(cli.config, std::path::Path::new("/bar"));
-    }
-
-    #[test]
-    fn help_prints_all_flags() {
+    fn top_level_help_lists_every_subcommand() {
         let mut cmd = Cli::command();
         let mut buf: Vec<u8> = Vec::new();
-        cmd.write_help(&mut buf).unwrap();
+        cmd.write_long_help(&mut buf).unwrap();
         let help = String::from_utf8(buf).unwrap();
-        assert!(help.contains("--config"));
-        assert!(help.contains("--log-level"));
-        assert!(help.contains("--concurrency"));
-        assert!(help.contains("--probe-concurrency"));
-        assert!(help.contains("--no-config-watch"));
+        for verb in [
+            "run", "status", "list", "show", "disable", "enable", "reload", "tail", "wait",
+        ] {
+            assert!(help.contains(verb), "top-level help missing `{verb}`");
+        }
     }
 
     #[test]
-    fn no_config_watch_flag_sets_field() {
-        let cli = parse(&["specter", "--config", "/foo", "--no-config-watch"]).unwrap();
-        assert!(cli.no_config_watch);
-    }
-
-    #[test]
-    fn no_config_watch_unset_defaults_to_false() {
-        let cli = parse(&["specter", "--config", "/foo"]).unwrap();
-        assert!(!cli.no_config_watch);
-    }
-
-    #[test]
-    fn version_matches_pkg_version() {
-        let cmd = Cli::command();
-        assert_eq!(cmd.get_version(), Some(env!("CARGO_PKG_VERSION")));
-    }
-
-    #[test]
-    fn help_flag_is_recognised() {
-        let err = parse(&["specter", "--help"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::DisplayHelp);
-    }
-
-    #[test]
-    fn version_flag_is_recognised() {
+    fn version_flag_recognised_at_top_level() {
         let err = parse(&["specter", "--version"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
     }

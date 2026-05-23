@@ -291,16 +291,21 @@ inherited parent environment:
 ### CLI flags
 
 ```
-specter --config <file>          # required
-        --log-level <lvl>        # override [log] level
-        --log-destination <dst>  # override [log] destination
-        --log-path <path>        # override [log] path
-        --concurrency <n>        # global Effect spawn cap (default 2 × CPUs)
-        --probe-concurrency <n>  # walker pool size (default 4)
+specter run --config <file>          # required
+            --log-level <lvl>        # override [log] level
+            --log-destination <dst>  # override [log] destination
+            --log-path <path>        # override [log] path
+            --concurrency <n>        # global Effect spawn cap (default 2 × CPUs)
+            --probe-concurrency <n>  # walker pool size (default 4)
 ```
 
 CLI > config > defaults at every layer. SIGHUP triggers a reload of
 the config file; CLI overrides survive.
+
+The other `specter` subcommands (`status`, `list`, `show`, `disable`,
+`enable`, `reload`, `tail`, `wait`) are operator clients that connect
+to the running daemon over a UNIX socket. `specter --help` lists the
+full surface; the implementations land in upcoming phases.
 
 ## Subprocess output
 
