@@ -21,8 +21,9 @@
 //!    tick can emit Effects.
 //! 5. **Engine driver** runs on the main thread.
 
-use crate::channels::{Channels, ConfigWatcherSide};
+use crate::channels::{Channels, ConfigWatcherSide, IpcServerSide};
 use crate::driver::EngineDriver;
+use crate::ipc::{server as ipc_server, sockpath};
 use crate::loader::Loader;
 use crate::observability;
 use crate::signals::{register_signal_handlers, spawn_signal_thread};
@@ -38,6 +39,7 @@ use specter_sensor::{
 use std::io;
 use std::num::NonZeroUsize;
 use std::ops::ControlFlow;
+use std::os::unix::net::UnixListener;
 use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -57,8 +59,8 @@ use std::time::Duration;
 /// `50ms` is the top of the historical `[10ms, 50ms]` band — the value
 /// default-`settle` configs already resolved to. The watcher's recency
 /// gate skips the second drain for single touches in quiet periods, so
-/// a quiet-period edit pays none of this. Fixed in v1 per the
-/// project's "minimal config surface" alpha rule.
+/// a quiet-period edit pays none of this. Fixed, not operator-tunable,
+/// under the "minimal config surface" rule.
 ///
 /// Lives next to its sole consumer ([`run`] hands it to
 /// [`default_watcher`] at startup) — `Loader` is bin-side reload state
@@ -263,6 +265,39 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         path: args.log_path,
     };
 
+    // Operator IPC socket — resolve, recover from stale, bind via
+    // atomic-rename + chmod 0600 BEFORE the engine driver constructs
+    // (the driver records the bound path on `DriverState` for the
+    // `status` projection). The `unlink_guard` armed here unlinks
+    // the socket on graceful shutdown (via explicit `disarm` after
+    // ipc-thread join) and on panic (Drop runs unconditionally), so
+    // the next boot never trips over our own residue.
+    //
+    // Path resolution today reads the per-platform default
+    // (`XDG_RUNTIME_DIR/specter.sock` on Linux, `$TMPDIR/specter.sock`
+    // on macOS/BSD); a `--socket` flag + `[control] socket` config
+    // block can plug in here without further changes downstream.
+    let socket_path = sockpath::default_socket_path();
+    if let Err(e) = sockpath::check_stale_or_remove(&socket_path) {
+        tracing::error!(
+            ?e,
+            path = %socket_path.display(),
+            "ipc socket path unusable; daemon refusing to start",
+        );
+        return ExitCode::from(1);
+    }
+    let (listener, unlink_guard) = match sockpath::bind_socket_atomic(&socket_path) {
+        Ok(pair) => pair,
+        Err(e) => {
+            tracing::error!(
+                ?e,
+                path = %socket_path.display(),
+                "ipc bind_socket_atomic failed",
+            );
+            return ExitCode::from(1);
+        }
+    };
+
     // Auto-reload — config-watcher init (default-on; opt-out via
     // `--no-config-watch` / `SPECTER_NO_CONFIG_WATCH`).
     //
@@ -349,26 +384,67 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         Engine::new(),
         loader,
         config_path,
+        socket_path,
         cli_log_overrides,
         obs_handle,
         chans.engine.finalize(config_event_rx),
         prober.clone(),
         wake_handle.clone(),
     );
-    // `chans` is now fully partial-moved (every field consumed); it
-    // drops silently at end-of-scope with no remainder. The per-thread
-    // bundles' clones keep each channel alive across the driver loop.
+    // `chans.engine` and `chans.signal` are now consumed; `chans.watcher`
+    // / `chans.actuator` moved into their threads above; `chans.ipc_server`
+    // moves into the IPC server thread below. After that, `chans` is
+    // fully partial-moved and drops silently at end-of-scope.
+
+    // IPC server handle. `None` ⇒ either initial-attach observed
+    // shutdown before we got here (we never spawned), or the spawn
+    // call itself failed (rare; `EAGAIN` under process-wide thread
+    // pressure). Either way the shutdown sequence below treats the
+    // `Option` uniformly.
+    let mut ipc_handle: Option<JoinHandle<()>> = None;
+    // Wrap the bound listener so the failure path can decide whether
+    // to spawn it into the server thread or drop it (closing the fd
+    // immediately; `unlink_guard` then removes the path on graceful
+    // shutdown or panic).
+    let mut listener_slot: Option<UnixListener> = Some(listener);
 
     if driver.run_initial_attach().is_break() {
         // Shutdown observed during initial attach (operator signal
         // mid-startup or a downstream channel disconnect). The driver
         // has already drained its in-flight probes via
         // `begin_shutdown`, so dropping it below is safe — skip the
-        // main loop and route directly to the shared teardown.
+        // main loop and route directly to the shared teardown. We
+        // never spawn the IPC server, so `ipc_handle` stays `None`
+        // and the listener_slot's `UnixListener` drops at end-of-run.
         tracing::info!("shutdown observed during initial attach; engine drained");
     } else {
-        let exit_reason = driver.run();
-        tracing::info!(?exit_reason, "engine driver exited");
+        // IPC server thread — spawned AFTER `run_initial_attach` so
+        // the engine is in steady state before the first `status`
+        // request lands (otherwise the projection would lie). The
+        // `chans.ipc_server` bundle's `ipc_request_tx` moves in here;
+        // clones per accepted client come off it inside
+        // `ipc_server_run`.
+        let listener = listener_slot
+            .take()
+            .expect("listener_slot is Some at this branch");
+        match spawn_ipc_server_thread(listener, chans.ipc_server, Arc::clone(&shutdown_flag)) {
+            Ok(h) => ipc_handle = Some(h),
+            Err(e) => {
+                // Spawn failure leaves the listener consumed (it
+                // moved into the closure on a successful spawn; on
+                // failure the closure was dropped, taking the
+                // listener with it — kernel reclaims the fd
+                // immediately). The control surface is partial; we
+                // refuse to enter the main loop and fall through to
+                // the shared shutdown so worker threads exit
+                // cleanly.
+                tracing::error!(?e, "failed to spawn ipc server thread");
+            }
+        }
+        if ipc_handle.is_some() {
+            let exit_reason = driver.run();
+            tracing::info!(?exit_reason, "engine driver exited");
+        }
     }
 
     // Shutdown sequence — broadcast intent before tearing the driver
@@ -395,10 +471,32 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //    iteration sees `true` and exits cleanly.
     shutdown_flag.store(true, Ordering::SeqCst);
     drop(driver); // releases driver's clones (engine, prober, wake_handle, txs).
+    // Drop any unused listener (initial-attach-break path) before the
+    // wake fan-out: this closes the bound fd, but the socket file on
+    // disk persists until `unlink_guard` drops (also at end of `run`).
+    drop(listener_slot);
     wake_handle.wake();
     if let Some((_, ref cw_wake)) = config_watcher_handles {
         cw_wake.wake();
     }
+
+    // Join the IPC server thread first — its accept loop exits on
+    // `shutdown_flag.load(true)`; per-conn worker threads are
+    // detached and the OS reaps them on process exit. The accept
+    // loop typically returns within `ACCEPT_IDLE_SLEEP` of the flag
+    // store above.
+    if let Some(h) = ipc_handle
+        && let Err(e) = h.join()
+    {
+        tracing::error!(?e, "ipc server thread panicked");
+    }
+    // Surrender unlink responsibility *after* the IPC server thread
+    // has joined: no surviving thread holds the listener fd. An
+    // operator who reconnects after this point sees ENOENT, which
+    // is structurally correct (the daemon is gone). On panic
+    // anywhere between bind and here, `unlink_guard`'s Drop runs
+    // and cleans up.
+    unlink_guard.disarm();
 
     if let Err(e) = watcher_handle.join() {
         tracing::error!(?e, "watcher thread panicked");
@@ -543,13 +641,13 @@ pub(crate) fn watcher_loop<W: FsWatcher>(
                         }
                         WatcherEvent::Overflow { scope } => {
                             // inotify's `IN_Q_OVERFLOW` lifts here on
-                            // Linux; kqueue never emits Overflow under
-                            // v1 (`EV_CLEAR` coalesces but never
-                            // silently drops). The engine's
-                            // `on_sensor_overflow` handler reseeds every
-                            // in-scope Profile and emits
-                            // `Diagnostic::SensorOverflow`. Engine-gone ⇒
-                            // stop, as in the `Fs` arm above.
+                            // Linux; kqueue never emits Overflow
+                            // (`EV_CLEAR` coalesces but never silently
+                            // drops). The engine's `on_sensor_overflow`
+                            // handler reseeds every in-scope Profile
+                            // and emits `Diagnostic::SensorOverflow`.
+                            // Engine-gone ⇒ stop, as in the `Fs` arm
+                            // above.
                             if sides
                                 .sensor_in_tx
                                 .send(Input::SensorOverflow { scope })
@@ -696,6 +794,47 @@ pub(crate) fn apply_watch_op<W: FsWatcher>(
         WatchOp::Unwatch { resource } => watcher.unwatch(resource),
     }
     ControlFlow::Continue(())
+}
+
+/// Spawn the IPC server thread. Owns the bound [`UnixListener`] for
+/// its lifetime; drop closes the bound fd on exit. Per-connection
+/// worker threads are detached inside the accept loop — they observe
+/// shutdown via their own `shutdown_flag` clone and the per-conn
+/// write timeout, never via this `JoinHandle`.
+///
+/// Mirrors [`spawn_watcher_thread`]'s discipline: the loop body sits
+/// inside a `catch_unwind` so a server-side panic doesn't propagate
+/// into the bin's process abort path.
+///
+/// Returns [`io::Error`] on `thread::Builder::spawn` failure; the
+/// caller falls through to the standard shutdown sequence so worker
+/// threads exit cleanly.
+fn spawn_ipc_server_thread(
+    listener: UnixListener,
+    side: IpcServerSide,
+    shutdown_flag: Arc<AtomicBool>,
+) -> io::Result<JoinHandle<()>> {
+    thread::Builder::new()
+        .name("specter-ipc-server".into())
+        .spawn(move || {
+            // `move ||` on the inner closure transfers ownership of
+            // `listener`, `side`, and `shutdown_flag` into
+            // `ipc_server_run` — the thread-entry shape (by-value
+            // arguments) is what the function expects, and the
+            // `AssertUnwindSafe` wrapper bridges the missing
+            // `UnwindSafe` impls those types carry by default.
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(move || {
+                ipc_server::ipc_server_run(listener, side, shutdown_flag);
+            }));
+            if let Err(payload) = result {
+                tracing::error!(
+                    "ipc server thread panicked; payload size = {}",
+                    std::mem::size_of_val(&payload),
+                );
+            }
+            // `listener` drops inside `ipc_server_run` on return,
+            // closing the bound fd.
+        })
 }
 
 /// Spawn the actuator thread. Constructs [`SubprocessActuator`] with

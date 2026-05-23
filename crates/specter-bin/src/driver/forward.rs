@@ -1,5 +1,6 @@
 //! Downstream dispatch — the terminal-consumer drain of a
-//! [`StepOutput`], and the [`Diagnostic`] → tracing map.
+//! [`StepOutput`], the [`Diagnostic`] → tracing map, and the
+//! diagnostic fan-out to operator-IPC subscribers via the broker.
 //!
 //! [`EngineDriver::forward`] ships every [`StepOutput`] onward:
 //! `watch_ops` → `watch_ops_tx` with a `wake_handle.wake()` per
@@ -7,11 +8,15 @@
 //! `cancel_effects` + `effects` → `effects_tx` (lifted to
 //! [`EffectOp::Cancel`] / [`EffectOp::Submit`], cancels first so a
 //! defensive same-step cancel + submit for one profile would kill
-//! stale before spawn new); `diagnostics` → [`log_diagnostic`].
-//! Every channel send races `shutdown_engine_rx` so a queued shutdown
-//! pulse pre-empts back-pressure (a full bounded channel cannot wedge
-//! the tick on SIGTERM). Per-channel disconnect policy is explicit at
-//! the call site; the rationale lives on the method.
+//! stale before spawn new); `diagnostics` → [`log_diagnostic`] AND
+//! [`super::broker::Broker::dispatch`] (fan-out to live IPC
+//! subscribers, with a single `SystemTime::now()` capture per
+//! `StepOutput` so every subscriber sees byte-identical `at` for
+//! the same emission). Every channel send races `shutdown_engine_rx`
+//! so a queued shutdown pulse pre-empts back-pressure (a full
+//! bounded channel cannot wedge the tick on SIGTERM). Per-channel
+//! disconnect policy is explicit at the call site; the rationale
+//! lives on the method.
 //!
 //! `log_diagnostic` is the per-variant hand-mapping of a [`Diagnostic`]
 //! to a tracing event; its severities are the operator-facing catalogue.
@@ -19,6 +24,7 @@
 use super::EngineDriver;
 use specter_core::{Diagnostic, EffectOp, ProbeOp, StepOutput};
 use std::ops::ControlFlow;
+use std::time::SystemTime;
 
 impl EngineDriver {
     /// Push a [`StepOutput`] to its downstream consumers.
@@ -67,13 +73,24 @@ impl EngineDriver {
     /// engine's — a stale or superseded response folds to
     /// `StaleProbeResponse` at its response gate, never this drain's.
     ///
-    /// Takes `&self` because every downstream send is channel-based or
-    /// trait-object dispatch (`Sender::send`, `Prober::submit`,
-    /// `WakeHandle::wake`, `tracing::*`) — none requires `&mut self`.
-    /// The `select!` macro borrows distinct `self.sides.*` fields
-    /// immutably, so a single shared borrow on `self` carries each
-    /// arm without splitting.
-    pub(super) fn forward(&self, out: StepOutput) -> ControlFlow<()> {
+    /// Takes `&mut self` because the broker fan-out
+    /// ([`super::broker::Broker::dispatch`]) mutates the subscriber
+    /// list (back-pressure marker accumulation, GC on disconnect).
+    /// Every other downstream send is channel-based or trait-object
+    /// dispatch (`Sender::send`, `Prober::submit`, `WakeHandle::wake`,
+    /// `tracing::*`); the disjoint-field split-borrow rules let the
+    /// `select!` macro hold immutable borrows of `self.sides.*` and
+    /// `self.prober` / `self.wake_handle` alongside the `&mut
+    /// self.broker` needed for the diagnostic fan-out.
+    ///
+    /// **Wall-clock capture is once per `StepOutput`.** The
+    /// `wall_now: SystemTime` taken here threads into every
+    /// `broker.dispatch(diag, wall_now)` call — so every subscriber
+    /// sees byte-identical `at` for one engine emission, regardless
+    /// of their per-client delivery cadence. A slow client cannot
+    /// rewrite history; a fast client cannot observe a slower
+    /// client's `at`.
+    pub(super) fn forward(&mut self, out: StepOutput) -> ControlFlow<()> {
         // Terminal-consumer drain: `out` is already resealed (every
         // `StepOutput`-returning entry point sorts before returning), so
         // a single by-value destructure preserves the sort and the
@@ -128,8 +145,17 @@ impl EngineDriver {
             }
         }
 
-        for diag in diagnostics {
-            log_diagnostic(&diag);
+        // Diagnostic fan-out — ONE wall-clock per `StepOutput`. The
+        // broker.dispatch path borrows `&self`'s `broker` field
+        // mutably; the iterator above is `into_iter()` over an owned
+        // `Vec<Diagnostic>` so the borrow checker sees no overlap
+        // with the by-ref `log_diagnostic` call.
+        if !diagnostics.is_empty() {
+            let wall_now = SystemTime::now();
+            for diag in &diagnostics {
+                log_diagnostic(diag);
+                self.broker.dispatch(diag, wall_now);
+            }
         }
 
         ControlFlow::Continue(())

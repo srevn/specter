@@ -1,23 +1,31 @@
-//! Engine driver — the bin's main-thread loop, split across four
+//! Engine driver — the bin's main-thread loop, split across six
 //! focused submodules with the spine here.
 //!
 //! [`EngineDriver`] owns the [`Engine`], the [`Loader`], a
 //! [`state::DriverState`] (process-level facts: start instants +
-//! reload counters), the engine-side channel bundle, the prober
-//! [`Arc`] clone and a wake-handle clone. This module holds the
-//! struct and its lifecycle ([`EngineDriver::new`],
-//! [`EngineDriver::run_initial_attach`], [`EngineDriver::run`]) plus
-//! the cancel-first shutdown drain (`begin_shutdown`). The
-//! load-bearing work is next to it:
+//! reload counters + socket path), a [`broker::Broker`] (operator-IPC
+//! diagnostic fan-out), an operator-runtime disable override set, the
+//! engine-side channel bundle, the prober [`Arc`] clone and a
+//! wake-handle clone. This module holds the struct and its lifecycle
+//! ([`EngineDriver::new`], [`EngineDriver::run_initial_attach`],
+//! [`EngineDriver::run`]) plus the cancel-first shutdown drain
+//! (`begin_shutdown`). The load-bearing work is next to it:
 //!
 //! - [`tick`] — one pass of the drain order (sensor → timers → reload
-//!   → config-settle → effects → block). The hot loop; new
+//!   → config-settle → effects → ipc → block). The hot loop; new
 //!   inbound-path work lands there.
 //! - [`reload`] — the SIGHUP + auto-reload settle pipeline.
-//! - [`forward`] — ships a `StepOutput` downstream and maps a
-//!   `Diagnostic` to tracing.
+//! - [`forward`] — ships a `StepOutput` downstream, maps a
+//!   `Diagnostic` to tracing, and fans diagnostics out to live
+//!   IPC subscribers via [`broker::Broker::dispatch`].
 //! - [`state`] — driver-owned process facts (startup instants,
-//!   reload counters) consumed by the IPC `status` surface.
+//!   reload counters, socket path) consumed by the IPC `status`
+//!   surface.
+//! - [`broker`] — diagnostic fan-out to operator-IPC subscribers.
+//!   Plain struct on this thread; no `Arc<Mutex>`.
+//! - [`ipc`] — drains operator-IPC requests from the bundle's
+//!   `ipc_request_rx` and dispatches them through the broker, the
+//!   reload pipeline, or the `status` projection.
 //!
 //! `run_initial_attach` walks `loader.current_config` in source order,
 //! attaching each Sub / Promoter and forwarding the resulting output
@@ -25,7 +33,9 @@
 //! wraps [`EngineDriver::tick`] until shutdown. All file I/O is on
 //! this thread — no Mutex.
 
+mod broker;
 mod forward;
+mod ipc;
 mod reload;
 mod state;
 mod tick;
@@ -34,14 +44,18 @@ use crate::app::CliLogOverrides;
 use crate::channels::EngineSide;
 use crate::loader::Loader;
 use crate::observability::ObservabilityHandle;
+use broker::Broker;
+use compact_str::CompactString;
 use specter_core::Input;
 use specter_engine::Engine;
 use specter_sensor::{Prober, WakeHandle};
-use state::DriverState;
+use std::collections::BTreeSet;
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
+
+pub(crate) use state::{DriverState, ReloadTrigger};
 
 /// Reason the driver loop exited. Returned from [`EngineDriver::run`].
 ///
@@ -85,11 +99,11 @@ pub struct EngineDriver {
     /// `reopen_file`). Held here so `handle_reload` can fire both on
     /// SIGHUP without going through the loader.
     obs_handle: ObservabilityHandle,
-    /// Process-level facts (startup instants + reload counters).
-    /// Constructed at boot via [`DriverState::new`] and mutated only
-    /// through [`DriverState::record_reload`] — the edge method
-    /// guarantees the counter fields move together. Consumed by the
-    /// IPC `status` surface.
+    /// Process-level facts (startup instants + reload counters +
+    /// socket path). Constructed at boot via [`DriverState::new`] and
+    /// mutated only through [`DriverState::record_reload`] — the edge
+    /// method guarantees the counter fields move together. Consumed
+    /// by the IPC `status` surface.
     driver_state: DriverState,
     sides: EngineSide,
     prober: Arc<dyn Prober>,
@@ -111,6 +125,22 @@ pub struct EngineDriver {
     ///   on `now >= deadline` so the engine thread never lstats
     ///   before the settle window has elapsed.
     config_settle_until: Option<Instant>,
+    /// Operator-IPC runtime disable overrides — names of Subs the
+    /// operator disabled via `specter disable` and has not yet
+    /// re-enabled. Empty at boot — the set is process-local and not
+    /// persisted across restarts. Read by the IPC `status` projection
+    /// (`len()`) and the IPC `list`/`show` projections (set
+    /// membership); mutated by the IPC `disable` / `enable` handlers
+    /// (which also filter the next reload's diff so a runtime-disabled
+    /// Sub is not re-attached).
+    disabled_runtime: BTreeSet<CompactString>,
+    /// Diagnostic fan-out to operator IPC subscribers. Plain struct,
+    /// no `Arc<Mutex>`: every mutation runs on this thread, both
+    /// through `forward()` (dispatch) and the IPC drain's
+    /// `Subscribe` arm (`add_subscriber`). The two access sites
+    /// borrow disjoint `self` fields under the 2024 edition's
+    /// split-borrow rules.
+    broker: Broker,
 }
 
 impl std::fmt::Debug for EngineDriver {
@@ -121,6 +151,7 @@ impl std::fmt::Debug for EngineDriver {
             .field("cli_log_overrides", &self.cli_log_overrides)
             .field("obs_handle", &self.obs_handle)
             .field("driver_state", &self.driver_state)
+            .field("disabled_runtime", &self.disabled_runtime)
             .finish_non_exhaustive()
     }
 }
@@ -131,6 +162,7 @@ impl EngineDriver {
         engine: Engine,
         loader: Loader,
         config_path: PathBuf,
+        socket_path: PathBuf,
         cli_log_overrides: CliLogOverrides,
         obs_handle: ObservabilityHandle,
         sides: EngineSide,
@@ -143,11 +175,13 @@ impl EngineDriver {
             config_path,
             cli_log_overrides,
             obs_handle,
-            driver_state: DriverState::new(),
+            driver_state: DriverState::new(socket_path),
             sides,
             prober,
             wake_handle,
             config_settle_until: None,
+            disabled_runtime: BTreeSet::new(),
+            broker: Broker::new(),
         }
     }
 

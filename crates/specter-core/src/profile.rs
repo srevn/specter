@@ -3337,13 +3337,36 @@ impl ProfileMap {
     pub fn is_empty(&self) -> bool {
         self.profiles.is_empty()
     }
+
+    /// Count of Profiles not in [`ProfileState::Idle`] — the
+    /// operator-facing "in flight" count distinct from [`Self::len`]
+    /// (the total, Idle inclusive). Disjoint from [`Self::nonsteady`]:
+    /// `nonsteady` is the engine's carrier-eligibility predicate
+    /// (`Pending ∨ (Idle ∧ anchor-absent)`), whereas this projection
+    /// is the operator's "doing something right now" predicate
+    /// (`Pending ∨ Active`). A healthy `Idle` with the anchor grafted
+    /// is uncounted by both; a `Pending` is counted by both; an
+    /// `Active` burst is counted here and excluded from `nonsteady`
+    /// (the burst itself is the dispatch authority — no recovery
+    /// channel is needed).
+    ///
+    /// O(N) over [`Self::iter`]. Acceptable for v1: `specter status`
+    /// is operator-paced (single request, human latency tolerance).
+    /// A future cached counter belongs on [`ProfileMap`] itself, not
+    /// on the projection helper that consumes it.
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.iter()
+            .filter(|(_, p)| !matches!(p.state(), ProfileState::Idle))
+            .count()
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        AnchorClassification, ClassSet, Profile, ProfileIdentity, ProfileMap, ProfileState,
-        ScanConfig, SettledState,
+        AnchorClassification, ClassSet, DescentRemaining, DescentState, Profile, ProfileIdentity,
+        ProfileMap, ProfileState, ScanConfig, SettledState,
     };
     use crate::fs_id::FsIdentity;
     use crate::ids::ResourceId;
@@ -3625,6 +3648,57 @@ mod tests {
         );
     }
 
+    /// [`ProfileMap::active_count`] reports the count of Profiles
+    /// **not** in [`ProfileState::Idle`] — the operator-facing
+    /// "in flight" tally surfaced via `specter status`. Empty map,
+    /// fresh attach, and round-trip Idle → Pending → Idle each pin
+    /// one row of the counting contract; other non-Idle variants
+    /// (Active) share the same `!matches!(_, Idle)` predicate, so
+    /// pinning a single non-Idle variant is sufficient.
+    #[test]
+    fn active_count_counts_only_non_idle_profiles() {
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        assert_eq!(profiles.active_count(), 0, "empty ⇒ 0");
+
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let pid = profiles.attach(
+            &mut tree,
+            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+        );
+        // Fresh Profile is `Idle` ⇒ uncounted. Distinguishes the
+        // counter from `len()` (which would report 1 here).
+        assert_eq!(
+            profiles.active_count(),
+            0,
+            "Idle Profile is excluded from active_count",
+        );
+        assert_eq!(profiles.len(), 1, "len() counts every Profile");
+
+        let pending = ProfileState::Pending(DescentState::new(
+            r,
+            DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
+            ProbeSlot::empty(),
+        ));
+        let _prior = profiles
+            .transition_state(pid, pending)
+            .expect("known id transitions");
+        assert_eq!(
+            profiles.active_count(),
+            1,
+            "Pending Profile is counted by active_count",
+        );
+
+        let _prior = profiles
+            .transition_state(pid, ProfileState::Idle)
+            .expect("known id transitions");
+        assert_eq!(
+            profiles.active_count(),
+            0,
+            "transitioning back to Idle excludes the Profile again",
+        );
+    }
+
     // -----------------------------------------------------------------------
     // rebase_baseline / capture_witness_at_loss
     // -----------------------------------------------------------------------
@@ -3877,9 +3951,8 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use super::{
-        ActiveBurst, AwaitVerdict, BurstFinish, BurstIntent, CertifiedPrior, DescentRemaining,
-        DescentState, DirtyProvenance, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase,
-        QuiescenceVerdict, TimerKind,
+        ActiveBurst, AwaitVerdict, BurstFinish, BurstIntent, CertifiedPrior, DirtyProvenance,
+        PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, QuiescenceVerdict, TimerKind,
     };
     use crate::ids::{ProbeCorrelation, TimerId};
     use crate::op::ProofAuthority;

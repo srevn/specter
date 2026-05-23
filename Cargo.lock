@@ -183,6 +183,7 @@ dependencies = [
  "itoa",
  "rustversion",
  "ryu",
+ "serde",
  "static_assertions",
 ]
 
@@ -792,7 +793,10 @@ dependencies = [
  "clap",
  "compact_str",
  "crossbeam",
+ "humantime",
  "nix",
+ "serde",
+ "serde_json",
  "signal-hook",
  "slotmap",
  "specter-actuator",

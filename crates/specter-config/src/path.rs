@@ -336,7 +336,7 @@ mod tests {
         // `io::Error` — which collapses to `Inaccessible`. Exercises the
         // operator-facing F-HIGH-1 arm without root-skip gymnastics.
         // EACCES via `chmod 0` follows the same code path; verified
-        // manually per the plan's §12 gate.
+        // manually (we can't drop privileges inside a test process).
         let td = tempfile::tempdir().unwrap();
         let canon = canon_tempdir(&td);
         let file = canon.join("regular-file");

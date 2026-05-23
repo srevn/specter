@@ -27,17 +27,39 @@
 //! Inbound `sensor_in` + `effect_in` are `unbounded` — the driver's
 //! `drain_sensor` same-tick coalescing owns the recency horizon.
 //!
+//! `bounded([`IPC_REQUEST_QUEUE`])` for `ipc_request` carries the
+//! operator-IPC verb traffic into the engine driver. The IPC server
+//! thread spawns one short-lived worker thread per connection; every
+//! worker thread `Sender::send`s into this single bounded channel and
+//! waits on its own per-request `bounded(1)` reply channel. The cap
+//! sizes to the worst-case in-flight depth — `MAX_IPC_CONNS` (8) —
+//! with generous headroom so a saturated channel is structurally a
+//! "driver wedged or accept loop runaway" signal rather than
+//! steady-state pressure. IPC `Reload` routes through this channel
+//! like every other verb, NOT via a `reload_signal_tx` clone: the
+//! `bounded(1)` reload-pulse channel keeps its single-pulser
+//! property (SignalSide's signal thread), and IPC reload attribution
+//! is set at the driver's call site (`ReloadTrigger::Ipc`).
+//!
 //! There is no `probe_ops` channel — engine driver calls
 //! `Prober::submit/cancel` directly via an `Arc<dyn Prober>` clone.
 
+use crate::ipc::protocol::IpcRequest;
 use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
 use specter_core::{EffectOp, Input, WatchOp};
+
+/// Capacity of the IPC request channel. Worst-case in-flight depth
+/// is [`crate::ipc::server::MAX_IPC_CONNS`] (one queued request per
+/// concurrent connection, each blocked on its own reply); 64 is 8×
+/// headroom so a saturated channel surfaces as a structural signal
+/// (driver wedged, accept loop runaway), not steady-state pressure.
+pub const IPC_REQUEST_QUEUE: usize = 64;
 
 /// All channel handles for the bin, materialized as per-consumer-thread
 /// bundles. [`Channels::new`] allocates every unconditional pair and
 /// distributes halves into the bundles below in one move; each field
-/// partial-moves into its consumer (watcher / actuator / signal
-/// thread) or — for the engine side — first folds through
+/// partial-moves into its consumer (watcher / actuator / signal /
+/// IPC server thread) or — for the engine side — first folds through
 /// [`EnginePieces::finalize`] to attach the conditional auto-reload
 /// receiver.
 #[derive(Debug)]
@@ -47,6 +69,7 @@ pub struct Channels {
     pub watcher: WatcherSide,
     pub actuator: ActuatorSide,
     pub signal: SignalSide,
+    pub ipc_server: IpcServerSide,
 }
 
 /// Engine-bound channel halves yielded by [`Channels::new`].
@@ -70,6 +93,11 @@ pub struct EnginePieces {
     pub shutdown_engine_rx: Receiver<()>,
     pub watch_ops_tx: Sender<WatchOp>,
     pub effects_tx: Sender<EffectOp>,
+    /// Operator-IPC verb traffic — drained on the driver thread, one
+    /// `IpcRequest` per `try_recv`. Producer-side is
+    /// [`IpcServerSide::ipc_request_tx`], cloned per accepted client by
+    /// the IPC server thread.
+    pub ipc_request_rx: Receiver<IpcRequest>,
 }
 
 impl EnginePieces {
@@ -85,6 +113,7 @@ impl EnginePieces {
             shutdown_engine_rx,
             watch_ops_tx,
             effects_tx,
+            ipc_request_rx,
         } = self;
         EngineSide {
             sensor_in_rx,
@@ -94,6 +123,7 @@ impl EnginePieces {
             watch_ops_tx,
             effects_tx,
             config_event_rx,
+            ipc_request_rx,
         }
     }
 }
@@ -117,6 +147,12 @@ pub struct EngineSide {
     /// of the channel is the structural signal that auto-reload is
     /// off.
     pub config_event_rx: Option<Receiver<()>>,
+    /// Operator-IPC drain — the driver's tick `try_recv`s this after
+    /// effects, before the blocking `Select`, so each handler reads
+    /// the freshest engine state for this tick. Unconditional: the
+    /// IPC server thread always spawns successfully (or `App::run`
+    /// fails startup outright; never partial-up).
+    pub ipc_request_rx: Receiver<IpcRequest>,
 }
 
 /// Receivers + sender clones the watcher thread owns.
@@ -178,6 +214,22 @@ pub struct ConfigWatcherSide {
     pub config_event_tx: Sender<()>,
 }
 
+/// Sender clone the IPC server thread owns. Single field — IPC
+/// `Reload` routes through this channel like every other verb, not
+/// via a `reload_signal_tx` clone. The `bounded(1)` reload-pulse
+/// channel's single-pulser property (the signal thread) survives;
+/// IPC reload attribution lands at the driver's call site
+/// (`ReloadTrigger::Ipc`), not inferred from a peer pulse.
+///
+/// `_tx` postfix mirrors [`ConfigWatcherSide`]; the
+/// `struct_field_names` lint is silenced for the same reason.
+#[derive(Debug)]
+#[must_use]
+#[allow(clippy::struct_field_names)]
+pub struct IpcServerSide {
+    pub ipc_request_tx: Sender<IpcRequest>,
+}
+
 impl Channels {
     /// Allocate every unconditional channel pair and distribute halves
     /// into per-thread bundles in one move. The auto-reload
@@ -209,6 +261,9 @@ impl Channels {
         // impact. The signal thread drains via `recv_timeout` only on
         // the hard-exit path.
         let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded(1);
+        // Operator-IPC verb traffic — see module rustdoc for the cap
+        // rationale (`IPC_REQUEST_QUEUE` × `MAX_IPC_CONNS` headroom).
+        let (ipc_request_tx, ipc_request_rx) = bounded(IPC_REQUEST_QUEUE);
 
         Self {
             engine: EnginePieces {
@@ -218,6 +273,7 @@ impl Channels {
                 shutdown_engine_rx,
                 watch_ops_tx,
                 effects_tx,
+                ipc_request_rx,
             },
             watcher: WatcherSide {
                 watch_ops_rx,
@@ -237,6 +293,7 @@ impl Channels {
                 hard_shutdown_actuator_tx,
                 hard_shutdown_done_rx,
             },
+            ipc_server: IpcServerSide { ipc_request_tx },
         }
     }
 }
@@ -244,7 +301,23 @@ impl Channels {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ipc::protocol::{RequestPayload, ResponsePayload};
     use specter_core::ResourceId;
+
+    /// Mint an [`IpcRequest`] whose `payload` is the cheapest variant
+    /// (`Status`) and whose `reply_tx` half is captured but immediately
+    /// dropped — channel-distribution tests don't await the reply, they
+    /// only assert that the envelope crossed the engine ↔ ipc_server
+    /// seam. The dropped reply half guarantees a fresh per-call
+    /// `bounded(1)` slot every time, matching production's per-request
+    /// reply discipline.
+    fn dummy_ipc_request() -> IpcRequest {
+        let (reply_tx, _reply_rx) = bounded::<ResponsePayload>(1);
+        IpcRequest {
+            payload: RequestPayload::Status,
+            reply_tx,
+        }
+    }
 
     #[test]
     fn new_creates_unbounded_inbound() {
@@ -380,7 +453,8 @@ mod tests {
         // asserted that taking the engine side did not invalidate the
         // dispenser's sender clones. Post-refactor the senders distribute
         // directly into the bundles at construction; this test pins the
-        // distribution by sending across the engine ↔ watcher seam.
+        // distribution by sending across the engine ↔ watcher and
+        // engine ↔ ipc_server seams.
         let chans = Channels::new();
         // Engine's `watch_ops_tx` clone reaches the watcher's
         // `watch_ops_rx`.
@@ -409,6 +483,46 @@ mod tests {
         assert!(matches!(
             chans.engine.sensor_in_rx.try_recv(),
             Ok(Input::TimerExpired { .. })
+        ));
+        // IPC server's `ipc_request_tx` clone reaches the engine's
+        // `ipc_request_rx`. Asserts the new bundle ↔ engine seam.
+        chans
+            .ipc_server
+            .ipc_request_tx
+            .try_send(dummy_ipc_request())
+            .expect("ipc_server ⇒ engine send");
+        assert!(matches!(
+            chans.engine.ipc_request_rx.try_recv(),
+            Ok(IpcRequest {
+                payload: RequestPayload::Status,
+                ..
+            })
+        ));
+    }
+
+    /// Pin the `IPC_REQUEST_QUEUE` capacity against accidental change.
+    /// Worst-case in-flight depth is `MAX_IPC_CONNS`; saturating the
+    /// channel from a test confirms the cap is what the module rustdoc
+    /// claims, so a future refactor that intends to relax the cap is
+    /// a conscious decision that updates both the constant and this
+    /// test.
+    #[test]
+    fn new_creates_bounded_ipc_request_at_64() {
+        let chans = Channels::new();
+        for _ in 0..IPC_REQUEST_QUEUE {
+            chans
+                .ipc_server
+                .ipc_request_tx
+                .try_send(dummy_ipc_request())
+                .expect("first IPC_REQUEST_QUEUE fit");
+        }
+        let result = chans
+            .ipc_server
+            .ipc_request_tx
+            .try_send(dummy_ipc_request());
+        assert!(matches!(
+            result,
+            Err(crossbeam::channel::TrySendError::Full(_))
         ));
     }
 

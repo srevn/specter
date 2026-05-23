@@ -72,12 +72,21 @@ const NO_RELOAD_WINDOW: Duration = Duration::from_millis(600);
 /// runner that already exports the env var — every test must control
 /// the auto-reload state via its `extra` argv slice, not via inherited
 /// env.
+///
+/// `TMPDIR` and `XDG_RUNTIME_DIR` are pointed at the sandbox's
+/// parent dir so the daemon's IPC socket lands inside the per-test
+/// tempdir — concurrent integration tests in `cargo nextest` would
+/// otherwise collide on the shared `/tmp/specter.sock` default path
+/// (second binder hits `AddrInUse` and exits 1).
 fn spawn_specter<I, S>(cfg: &Path, log: &Path, extra: I) -> Child
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
     let bin = env!("CARGO_BIN_EXE_specter");
+    let socket_dir = cfg
+        .parent()
+        .expect("config path lives in a sandbox tempdir");
     Command::new(bin)
         .arg("run")
         .arg("--config")
@@ -88,6 +97,8 @@ where
         .args(["--log-level", "info"])
         .args(extra)
         .env_remove("SPECTER_NO_CONFIG_WATCH")
+        .env("TMPDIR", socket_dir)
+        .env("XDG_RUNTIME_DIR", socket_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

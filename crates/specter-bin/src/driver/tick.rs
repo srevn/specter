@@ -4,10 +4,20 @@
 //!
 //! [`EngineDriver::tick`] drains, in order: sensor inputs → expired
 //! timers → reload (SIGHUP) pulses → config-event pulses + settle
-//! expiry → effect completions → then blocks on `Select::ready_timeout`
-//! until any source readies (a timer deadline elapses, or shutdown).
-//! The settle-expiry filter and `handle_reload` itself live in
-//! [`super::reload`]; downstream dispatch in [`super::forward`].
+//! expiry → effect completions → operator-IPC verbs → then blocks on
+//! `Select::ready_timeout` until any source readies (a timer deadline
+//! elapses, or shutdown). The settle-expiry filter and `handle_reload`
+//! itself live in [`super::reload`]; downstream dispatch in
+//! [`super::forward`]; IPC dispatch in [`super::ipc`].
+//!
+//! **IPC drain placement.** IPC sits LAST, immediately before the
+//! block. Every read verb projects engine state, so draining IPC
+//! after sensor / timers / reload / effects guarantees each
+//! projection observes the freshest engine state for this tick —
+//! `status.profile_active` reflects every in-flight burst, including
+//! those that transitioned to/from Idle in this same tick's drains.
+//! Placing it *before* the block (not after) bounds IPC latency by
+//! `engine.step` duration rather than by external event arrival.
 //!
 //! **Drain order rationale.** Sensor inputs (FsEvents) drain *before*
 //! effect completions because the fire-cycle's post-fire tail
@@ -79,11 +89,11 @@ const FOREVER_TIMEOUT: Duration = Duration::from_hours(24);
 /// the lstat-vs-`loader.config_meta` filter (and on drift,
 /// `handle_reload`).
 ///
-/// `100ms` covers the editor patterns the design targets — atomic save
-/// (vim, Helix: write-tmp → rename → fsync; ~10–30ms wall) and
-/// in-place modify (`echo > file` ; ~1–5ms per syscall, sustained
-/// bursts well under 100ms). Fixed in v1; not operator-tunable per the
-/// project's "minimal config surface" alpha rule.
+/// `100ms` covers common editor patterns — atomic save (vim, Helix:
+/// write-tmp → rename → fsync; ~10–30ms wall) and in-place modify
+/// (`echo > file`; ~1–5ms per syscall, sustained bursts well under
+/// 100ms). Fixed, not operator-tunable, under the "minimal config
+/// surface" rule.
 const CONFIG_SETTLE: Duration = Duration::from_millis(100);
 
 impl EngineDriver {
@@ -192,6 +202,17 @@ impl EngineDriver {
             }
         }
 
+        // Operator-IPC verb drain. Sits LAST in the drain order so
+        // every read projection observes the freshest engine state
+        // for this tick. Disconnected: the IPC server thread is the
+        // sole producer; its death means the bin's shutdown path is
+        // in flight (the accept loop only exits on `shutdown_flag`),
+        // so treat disconnect as terminal — same shape every other
+        // inbound drain uses.
+        if self.drain_ipc(now).is_break() {
+            return self.begin_shutdown();
+        }
+
         // Block until any source readies or timer fires. Deadlines come
         // from two independent sources: the engine's internal timer
         // heap, and the auto-reload settle window. Both are
@@ -228,6 +249,12 @@ impl EngineDriver {
             if let Some(rx) = self.sides.config_event_rx.as_ref() {
                 sel.recv(rx);
             }
+            // Operator-IPC arm — registers unconditionally; IPC is
+            // always wired. The per-conn thread's `Sender::send`
+            // into `ipc_request_tx` wakes Select immediately even if
+            // every other input is quiet, so operator requests do
+            // not wait one tick-block on a sleeping daemon.
+            let _i_ipc = sel.recv(&self.sides.ipc_request_rx);
             let i_shutdown = sel.recv(&self.sides.shutdown_engine_rx);
             matches!(sel.ready_timeout(timeout), Ok(idx) if idx == i_shutdown)
         };

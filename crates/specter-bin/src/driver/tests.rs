@@ -70,6 +70,10 @@ struct TestRig {
     /// from the outside use this one. The watcher-side `watch_ops_rx`
     /// stays the sole receiver.
     watch_ops_tx: Sender<WatchOp>,
+    /// Cloned `ipc_request_tx`. The driver holds its own clone via
+    /// `engine_side.ipc_request_rx`; tests that need to drive the
+    /// IPC drain queue an `IpcRequest` through this sender.
+    ipc_request_tx: Sender<crate::ipc::protocol::IpcRequest>,
 }
 
 fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
@@ -82,6 +86,7 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     let reload_tx = chans.signal.reload_signal_tx.clone();
     let shutdown_tx = chans.signal.shutdown_engine_tx.clone();
     let watch_ops_tx = chans.engine.watch_ops_tx.clone();
+    let ipc_request_tx = chans.ipc_server.ipc_request_tx.clone();
 
     // Auto-reload — the rig always exercises the wired-on path,
     // mirroring `App::run`'s inline allocation. Tests that need the
@@ -92,10 +97,10 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     let actuator_side = chans.actuator;
     let watcher_side = chans.watcher;
     let engine_side = chans.engine.finalize(Some(config_event_rx));
-    // `chans.signal`'s only role for the rig was the two clones
-    // captured above (`reload_tx` / `shutdown_tx`); the bundle itself
-    // drops at end-of-scope when `chans` does. Senders surviving
-    // through clones keep each channel alive across the driver loop.
+    // `chans.signal` / `chans.ipc_server`'s only role for the rig
+    // was the clones captured above; the bundles themselves drop at
+    // end-of-scope when `chans` does. Senders surviving through
+    // clones keep each channel alive across the driver loop.
 
     let watcher = MockFsWatcher::new();
     let waker = Arc::clone(&watcher.waker);
@@ -115,10 +120,16 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
         current_log: log_cfg,
         config_meta: dummy_meta(),
     };
+    // Synthetic socket path — the rig never binds a listener, but
+    // `EngineDriver::new` requires the value (load-bearing for the
+    // `status` projection's `socket_path` field). A fixed string
+    // keeps test fixtures deterministic without polluting `/tmp`.
+    let socket_path = PathBuf::from("/tmp/specter-test.sock");
     let driver = EngineDriver::new(
         Engine::new(),
         loader,
         config_path,
+        socket_path,
         CliLogOverrides::default(),
         obs_handle,
         engine_side,
@@ -137,6 +148,7 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
         shutdown_tx,
         config_event_tx,
         watch_ops_tx,
+        ipc_request_tx,
     }
 }
 
@@ -483,7 +495,7 @@ fn forward_wakes_after_each_send_to_break_full_channel_deadlock() {
     let config = Config::from_str("").expect("empty config parses");
     let rig = rig_for(config, cfg_path);
     let TestRig {
-        driver,
+        mut driver,
         watcher_side,
         waker,
         watch_ops_tx,
@@ -1213,8 +1225,8 @@ actions   = [{{ exec = ["true"] }}]
 
 /// A reload whose requested destination/path differs from the
 /// running runtime values MUST NOT rotate the running shape into
-/// `loader.current_log` — the appender doesn't move in v1, so the
-/// rotated value reflects what is *applied* (the running shape),
+/// `loader.current_log` — the appender doesn't move at runtime, so
+/// the rotated value reflects what is *applied* (the running shape),
 /// not what was requested.
 ///
 /// Load-bearing structural invariant behind the phantom-warning
@@ -1944,7 +1956,7 @@ fn forward_shutdown_wins_when_full_channel_signaled() {
     let config = Config::from_str("").expect("empty config parses");
     let rig = rig_for(config, cfg_path);
     let TestRig {
-        driver,
+        mut driver,
         watcher_side,
         shutdown_tx,
         watch_ops_tx,
@@ -2009,7 +2021,7 @@ fn forward_dispatches_cancel_before_submit_on_effects_tx() {
     let config = Config::from_str("").expect("empty config parses");
     let rig = rig_for(config, cfg_path);
     let TestRig {
-        driver,
+        mut driver,
         actuator_side,
         ..
     } = rig;
@@ -2116,4 +2128,880 @@ fn run_initial_attach_break_drains_probes() {
     // armed by the attached Seed is disarmed. Dropping the driver
     // here must not trip the `ProbeSlot::drop` linear-edge tripwire.
     drop(rig.driver);
+}
+
+// ===== IPC drain (driver/ipc.rs) =====
+//
+// Exercises [`super::EngineDriver::drain_ipc`] and `handle_ipc`
+// through the rig's `ipc_request_tx` clone. Validates:
+//
+// - `Status` projection round-trips through the reply channel.
+// - `Subscribe { name: None }` adds an unfiltered subscriber and
+//   acknowledges synchronously.
+// - `Subscribe { name: Some(unknown) }` returns `Err {
+//   ERR_UNKNOWN_SUB }` without touching the broker.
+// - `Subscribe { name: Some(attached) }` resolves the name to a
+//   `SubId`, registers the subscriber with that filter, and acks
+//   carrying the resolved `WireId`.
+// - `Reload` routes through the driver-side pipeline and bumps
+//   `driver_state.reload_count` + `last_reload_via = Ipc`.
+// - Empty IPC queue returns `Continue`; disconnected producer
+//   returns `Break`.
+
+use crate::ipc::protocol::{ERR_UNKNOWN_SUB, IpcRequest, RequestPayload, ResponsePayload, WireId};
+use compact_str::CompactString;
+
+/// Mint a `bounded(1)` reply channel + wrap a payload in an
+/// `IpcRequest`. Mirrors the per-conn thread's `reply_tx`
+/// discipline so the test rig observes the same reply window the
+/// production handler does.
+fn ipc_request_with_reply(
+    payload: RequestPayload,
+) -> (IpcRequest, crossbeam::channel::Receiver<ResponsePayload>) {
+    let (reply_tx, reply_rx) = crossbeam::channel::bounded::<ResponsePayload>(1);
+    (IpcRequest { payload, reply_tx }, reply_rx)
+}
+
+/// Empty queue ⇒ `drain_ipc` returns `Continue` immediately. The
+/// `try_recv` Empty arm is the production fast-path on every tick
+/// with no operator-IPC pressure.
+#[test]
+fn drain_ipc_empty_returns_continue() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(
+        outcome,
+        ControlFlow::Continue(()),
+        "no queued requests ⇒ Continue (drain is a no-op)",
+    );
+}
+
+/// Producer disconnect ⇒ `drain_ipc` returns `Break`. The IPC
+/// server thread is the sole producer; its death means the bin's
+/// shutdown path is in flight.
+#[test]
+fn drain_ipc_disconnect_returns_break() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    // Drop the producer-side sender — the driver's `ipc_request_rx`
+    // observes Disconnected on the next `try_recv`.
+    drop(rig.ipc_request_tx);
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(
+        outcome,
+        ControlFlow::Break(()),
+        "disconnected producer ⇒ Break (shutdown in flight)",
+    );
+}
+
+/// `Status` round-trips through the reply channel. The reply
+/// carries a `ResponsePayload::Status` whose `socket_path`
+/// matches the rig's synthetic path — proves the projection ran
+/// against the driver's actual state, not a hard-coded fixture.
+#[test]
+fn drain_ipc_status_replies_with_projection() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Status);
+    rig.ipc_request_tx.send(req).expect("queue status request");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    let reply = reply_rx.try_recv().expect("status reply present");
+    match reply {
+        ResponsePayload::Status(status) => {
+            assert_eq!(
+                status.socket_path,
+                PathBuf::from("/tmp/specter-test.sock"),
+                "projection read the driver's socket_path",
+            );
+            assert_eq!(status.sub_total, 0, "no subs attached in this fixture");
+        }
+        other => panic!("expected Status, got {other:?}"),
+    }
+}
+
+/// `Subscribe { name: None }` adds an unfiltered subscriber and
+/// replies `SubscribeAck { sub: None }`. The broker is left with
+/// exactly one subscriber after the drain.
+#[test]
+fn drain_ipc_subscribe_unfiltered_adds_subscriber() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let (event_tx, _event_rx) = crossbeam::channel::bounded(16);
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Subscribe {
+        tx: event_tx,
+        name: None,
+    });
+    rig.ipc_request_tx.send(req).expect("queue subscribe");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    let reply = reply_rx.try_recv().expect("subscribe ack present");
+    match reply {
+        ResponsePayload::SubscribeAck { sub: None } => {} // OK
+        other => panic!("expected SubscribeAck(None), got {other:?}"),
+    }
+    // The broker now holds one subscriber — `forward()` would
+    // dispatch every future diagnostic to its channel.
+    assert_eq!(
+        rig.driver.broker.len(),
+        1,
+        "broker holds the new unfiltered subscriber",
+    );
+}
+
+/// `Subscribe { name: Some("nope") }` against an empty engine
+/// returns `Err { ERR_UNKNOWN_SUB }` and DOES NOT register a
+/// subscriber. The race window is closed structurally: the
+/// resolve happens on the driver thread, atomic with
+/// `add_subscriber`, so the client cannot observe an in-between
+/// state.
+#[test]
+fn drain_ipc_subscribe_unknown_name_errors() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let (event_tx, _event_rx) = crossbeam::channel::bounded(16);
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Subscribe {
+        tx: event_tx,
+        name: Some(CompactString::const_new("nope")),
+    });
+    rig.ipc_request_tx.send(req).expect("queue subscribe");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    let reply = reply_rx.try_recv().expect("err reply present");
+    match reply {
+        ResponsePayload::Err { code, error } => {
+            assert_eq!(code, ERR_UNKNOWN_SUB);
+            assert!(
+                error.contains("no watch named nope"),
+                "error carries the resolution detail; got {error:?}",
+            );
+        }
+        other => panic!("expected Err(ERR_UNKNOWN_SUB), got {other:?}"),
+    }
+    assert_eq!(
+        rig.driver.broker.len(),
+        0,
+        "unknown name MUST NOT add a subscriber",
+    );
+}
+
+/// `Subscribe { name: Some("build") }` against a config with a
+/// `build` watch attached resolves the name to a SubId, registers
+/// the subscriber with that filter, and acks carrying the resolved
+/// WireId. The add-before-ack ordering holds structurally: the
+/// `add_subscriber` happens before the ack reaches the reply
+/// channel.
+#[test]
+fn drain_ipc_subscribe_known_name_resolves_and_acks() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_watch(tmp.path());
+    let mut rig = rig_for(config, cfg_path);
+
+    // Attach the static sub.
+    let _ = rig.driver.run_initial_attach();
+    let expected_sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("build")
+        .expect("build attached");
+
+    let (event_tx, _event_rx) = crossbeam::channel::bounded(16);
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Subscribe {
+        tx: event_tx,
+        name: Some(CompactString::const_new("build")),
+    });
+    rig.ipc_request_tx.send(req).expect("queue subscribe");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    let reply = reply_rx.try_recv().expect("subscribe ack present");
+    match reply {
+        ResponsePayload::SubscribeAck { sub: Some(wire_id) } => {
+            assert_eq!(
+                wire_id,
+                WireId::from(expected_sid),
+                "ack carries the resolved WireId",
+            );
+        }
+        other => panic!("expected SubscribeAck(Some), got {other:?}"),
+    }
+    assert_eq!(rig.driver.broker.len(), 1, "filtered subscriber registered");
+
+    // Drain probes before dropping — the attached sub armed a Seed
+    // probe. begin_shutdown drains via cancel_all_in_flight_probes.
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// `Reload` via the IPC drain re-reads the on-disk config, rotates
+/// the loader, bumps `reload_count`, and stamps `last_reload_via =
+/// Ipc`. Empty-diff branch (the on-disk content matches the
+/// initial-loaded content) — still a successful reload that
+/// honours the operator's request.
+#[test]
+fn drain_ipc_reload_via_pipeline_records_ipc_trigger() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    // Write a tiny valid config so the reload's parse succeeds.
+    std::fs::write(&cfg_path, "").expect("write empty config");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Reload);
+    rig.ipc_request_tx.send(req).expect("queue reload");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    // The Reload arm ACKs `Ok` regardless of forward-side shutdown
+    // observation — we got here without breaking, so the reload
+    // applied.
+    let reply = reply_rx.try_recv().expect("ok reply present");
+    assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
+
+    assert_eq!(
+        rig.driver.driver_state.reload_count, 1,
+        "reload_count bumped",
+    );
+    assert!(matches!(
+        rig.driver.driver_state.last_reload_via,
+        Some(ReloadTrigger::Ipc),
+    ));
+}
+
+// ===== IPC Disable / Enable handlers =====
+//
+// Exercises [`super::EngineDriver::handle_disable`] /
+// [`super::EngineDriver::handle_enable`] through the IPC drain.
+// Each test pins one branch of the handlers' precondition gates or
+// happy paths; together they cover every reply variant the operator
+// can observe.
+//
+// Engine state assertions go through `engine.subs().find_by_name`
+// (the static `by_name` index — the same surface the projection
+// helpers query). `disabled_runtime` mutations are asserted against
+// the rig's `driver.disabled_runtime` (accessible from this child
+// module).
+
+use crate::ipc::protocol::{ERR_DYNAMIC_SUB_NO_OP, ERR_NOT_DISABLED, ERR_TOML_DISABLED};
+
+/// Disable happy path: the dynamic-shape gate passes (no `@`), the
+/// engine resolves the name, the precondition passes (not yet
+/// disabled), `disabled_runtime` records the name BEFORE the
+/// engine's [`Input::DetachSub`] step, and the sub leaves
+/// `engine.subs()`.
+#[test]
+fn drain_ipc_disable_static_sub_detaches_and_records_override() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_watch(tmp.path());
+    let mut rig = rig_for(config, cfg_path);
+    let _ = rig.driver.run_initial_attach();
+    assert!(rig.driver.engine.subs().find_by_name("build").is_some());
+
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Disable {
+        name: CompactString::const_new("build"),
+    });
+    rig.ipc_request_tx.send(req).expect("queue disable");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    let reply = reply_rx.try_recv().expect("ok reply present");
+    assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
+    assert!(
+        rig.driver.engine.subs().find_by_name("build").is_none(),
+        "engine detached the sub",
+    );
+    assert!(
+        rig.driver
+            .disabled_runtime
+            .contains(&CompactString::const_new("build")),
+        "runtime override recorded",
+    );
+
+    // Detach reaps the Profile; no probe remains armed. Belt-and-
+    // braces drain in case the Seed-Verifying probe armed on attach
+    // wasn't already disarmed by the detach path.
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// Disable against a name the engine doesn't know returns
+/// [`ERR_UNKNOWN_SUB`] with no state mutation.
+#[test]
+fn drain_ipc_disable_unknown_name_returns_err() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Disable {
+        name: CompactString::const_new("ghost"),
+    });
+    rig.ipc_request_tx.send(req).expect("queue disable");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    match reply_rx.try_recv().expect("err reply present") {
+        ResponsePayload::Err { code, error } => {
+            assert_eq!(code, ERR_UNKNOWN_SUB);
+            assert!(error.contains("no watch named ghost"));
+        }
+        other => panic!("expected Err, got {other:?}"),
+    }
+    assert!(
+        rig.driver.disabled_runtime.is_empty(),
+        "unknown name MUST NOT touch the override set",
+    );
+}
+
+/// Disable against an `@`-bearing name with no registry entry is
+/// refused with [`ERR_UNKNOWN_SUB`] — a typo (operator addressing a
+/// non-existent dynamic-shape name) reports the structural truth
+/// (the name does not resolve), not a misleading dynamic-sub
+/// classification. The dynamic-vs-static discrimination is a
+/// property of the resolved Sub; this case never reaches that gate
+/// because the lookup is empty.
+#[test]
+fn drain_ipc_disable_unknown_dynamic_shape_name_returns_unknown_sub() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Disable {
+        name: CompactString::const_new("promoter@/tmp/x"),
+    });
+    rig.ipc_request_tx.send(req).expect("queue disable");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    match reply_rx.try_recv().expect("err reply present") {
+        ResponsePayload::Err { code, error } => {
+            assert_eq!(code, ERR_UNKNOWN_SUB);
+            assert!(error.contains("no watch named promoter@/tmp/x"));
+        }
+        other => panic!("expected Err, got {other:?}"),
+    }
+    assert!(rig.driver.disabled_runtime.is_empty());
+}
+
+/// Disable against a real dynamic (promoter-spawned) Sub returns
+/// [`ERR_DYNAMIC_SUB_NO_OP`] — the gate reads `source_promoter` off
+/// the resolved Sub, not the lexical shape of the name. The dynamic
+/// Sub stays in the engine; `disabled_runtime` is not touched.
+#[test]
+fn drain_ipc_disable_dynamic_sub_returns_dynamic_no_op() {
+    use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
+    use specter_core::{
+        ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, ProfileIdentity,
+        PromoterId, ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
+    };
+
+    // Build a trivial single-op program inline — the dynamic-Sub
+    // path only needs one exec stub for the SubParams to be valid.
+    fn trivial_program() -> Arc<ActionProgram> {
+        let mut b = ProgramBuilder::new();
+        let h = b.emit(SpawnBody::Exec(ExecAction::new(
+            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
+            None,
+        )));
+        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
+        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
+        Arc::new(b.build().unwrap())
+    }
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    // Inject a dynamic Sub directly — production-side these are
+    // minted by Promoter::try_promote, but the disable handler reads
+    // only `source_promoter` on the resolved Sub, so a synthetic
+    // attach is sufficient to pin the gate.
+    let dynamic_name = "promoter@/tmp/dyn_anchor";
+    let req = SubAttachRequest::from_parts(
+        SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
+        ProfileIdentity {
+            config: ScanConfig::builder().build(),
+            max_settle: Duration::from_hours(1),
+            events: ClassSet::DEFAULT_SUBTREE_ROOT,
+        },
+        SubParams {
+            name: CompactString::const_new(dynamic_name),
+            program: trivial_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: Duration::from_millis(100),
+            log_output: false,
+            source_promoter: Some(PromoterId::default()),
+        },
+    );
+    let _ = rig
+        .driver
+        .engine
+        .step(Input::AttachSub(req), Instant::now());
+    assert!(
+        rig.driver
+            .engine
+            .subs()
+            .find_by_name(dynamic_name)
+            .is_some(),
+        "dynamic Sub indexed under the new contract",
+    );
+
+    let (ipc_req, reply_rx) = ipc_request_with_reply(RequestPayload::Disable {
+        name: CompactString::const_new(dynamic_name),
+    });
+    rig.ipc_request_tx.send(ipc_req).expect("queue disable");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    match reply_rx.try_recv().expect("err reply present") {
+        ResponsePayload::Err { code, .. } => {
+            assert_eq!(code, ERR_DYNAMIC_SUB_NO_OP);
+        }
+        other => panic!("expected Err, got {other:?}"),
+    }
+    assert!(
+        rig.driver.disabled_runtime.is_empty(),
+        "dynamic-sub gate must not pollute disabled_runtime",
+    );
+    assert!(
+        rig.driver
+            .engine
+            .subs()
+            .find_by_name(dynamic_name)
+            .is_some(),
+        "engine state untouched on the dynamic-sub gate",
+    );
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// Second `disable` for a name already in `disabled_runtime`
+/// returns [`ERR_NOT_DISABLED`] (precondition violation) without
+/// re-emitting a detach.
+#[test]
+fn drain_ipc_disable_already_disabled_returns_err() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_watch(tmp.path());
+    let mut rig = rig_for(config, cfg_path);
+    let _ = rig.driver.run_initial_attach();
+
+    // Pre-populate the override set as if a prior disable ran.
+    // Engine still has the sub — the precondition check fires
+    // before the engine state is mutated.
+    rig.driver
+        .disabled_runtime
+        .insert(CompactString::const_new("build"));
+
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Disable {
+        name: CompactString::const_new("build"),
+    });
+    rig.ipc_request_tx.send(req).expect("queue disable");
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    match reply_rx.try_recv().expect("err reply present") {
+        ResponsePayload::Err { code, .. } => assert_eq!(code, ERR_NOT_DISABLED),
+        other => panic!("expected Err, got {other:?}"),
+    }
+    // Engine state untouched — the sub was never detached on this
+    // path (no fresh DetachSub fired).
+    assert!(
+        rig.driver.engine.subs().find_by_name("build").is_some(),
+        "second disable is a precondition-failure no-op on engine state",
+    );
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// Enable happy path: the override is cleared AND
+/// [`Input::AttachSub`] re-attaches the sub the TOML still carries
+/// active.
+#[test]
+fn drain_ipc_enable_clears_override_and_reattaches() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_watch(tmp.path());
+    let mut rig = rig_for(config, cfg_path);
+    let _ = rig.driver.run_initial_attach();
+
+    // Simulate a prior disable: override set + sub detached from
+    // engine. Drive the disable handler so the rig models the
+    // post-disable state faithfully.
+    let (req, _) = ipc_request_with_reply(RequestPayload::Disable {
+        name: CompactString::const_new("build"),
+    });
+    rig.ipc_request_tx.send(req).expect("queue disable");
+    let _ = rig.driver.drain_ipc(Instant::now());
+    assert!(rig.driver.engine.subs().find_by_name("build").is_none());
+    assert_eq!(rig.driver.disabled_runtime.len(), 1);
+
+    // Now enable: clear the override + re-attach.
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Enable {
+        name: CompactString::const_new("build"),
+    });
+    rig.ipc_request_tx.send(req).expect("queue enable");
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    let reply = reply_rx.try_recv().expect("ok reply present");
+    assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
+    assert!(
+        rig.driver.engine.subs().find_by_name("build").is_some(),
+        "engine re-attached the sub",
+    );
+    assert!(
+        rig.driver.disabled_runtime.is_empty(),
+        "runtime override cleared",
+    );
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// Enable against a name not in `disabled_runtime` returns
+/// [`ERR_NOT_DISABLED`] without mutating state (no override to
+/// clear, no engine step to fire).
+#[test]
+fn drain_ipc_enable_not_disabled_returns_err() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Enable {
+        name: CompactString::const_new("nothing"),
+    });
+    rig.ipc_request_tx.send(req).expect("queue enable");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    match reply_rx.try_recv().expect("err reply present") {
+        ResponsePayload::Err { code, .. } => assert_eq!(code, ERR_NOT_DISABLED),
+        other => panic!("expected Err, got {other:?}"),
+    }
+}
+
+/// Enable against a runtime-disabled name whose TOML entry is no
+/// longer active returns [`ERR_TOML_DISABLED`], BUT the runtime
+/// override IS cleared as a side effect — the operator's
+/// "no-longer-suppress" intent is honoured regardless of the
+/// TOML's reattach gate.
+#[test]
+fn drain_ipc_enable_toml_disabled_clears_override_returns_err() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    // Config with NO active watches — the override target has no
+    // TOML anchor.
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+    rig.driver
+        .disabled_runtime
+        .insert(CompactString::const_new("orphan"));
+
+    let (req, reply_rx) = ipc_request_with_reply(RequestPayload::Enable {
+        name: CompactString::const_new("orphan"),
+    });
+    rig.ipc_request_tx.send(req).expect("queue enable");
+
+    let outcome = rig.driver.drain_ipc(Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+
+    match reply_rx.try_recv().expect("err reply present") {
+        ResponsePayload::Err { code, .. } => assert_eq!(code, ERR_TOML_DISABLED),
+        other => panic!("expected Err, got {other:?}"),
+    }
+    assert!(
+        rig.driver.disabled_runtime.is_empty(),
+        "override cleared on the TOML-disabled failure path",
+    );
+}
+
+// ===== disabled_runtime: diff filter + post-apply prune =====
+//
+// The bin keeps an in-memory set of operator-disabled Sub names that
+// must survive every reload. Two driver-side gates carry the
+// discipline:
+//
+// - [`super::EngineDriver::compute_watch_diff`] filters the four Sub
+//   buckets BEFORE the engine sees them — an attach / re-attach /
+//   re-bind / detach for a runtime-disabled Sub would churn the
+//   engine on a Sub the operator already suppressed.
+// - [`super::EngineDriver::prune_disabled_runtime_against_current_config`]
+//   runs AFTER the loader rotation; it retains only those override
+//   names whose `[[watch]]` entry still exists in the freshly-applied
+//   TOML (regardless of `enabled`), so a TOML-disabled entry's
+//   runtime override survives ("off twice") and a TOML-removed entry
+//   evaporates.
+
+/// Filter discipline: every name in `disabled_runtime` is stripped
+/// from each of the four Sub-diff buckets simultaneously. Fixture
+/// places one disabled name in EACH bucket — a regression dropping
+/// any of the four `.retain` calls surfaces here.
+#[test]
+fn compute_watch_diff_filters_disabled_runtime_from_all_four_buckets() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let anchor = tmp.path().display();
+
+    // Old config: three of the four eventually-disabled subs are
+    // present so we can drive `removed` / `modified_identity` /
+    // `modified_params`. The fourth lands as `added` against the new
+    // config.
+    let old_text = format!(
+        r#"
+[[watch]]
+name      = "to_be_removed"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+settle    = "50ms"
+max_settle = "500ms"
+
+[[watch]]
+name      = "to_be_modified_identity"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+settle    = "50ms"
+max_settle = "500ms"
+
+[[watch]]
+name      = "to_be_modified_params"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+settle    = "50ms"
+max_settle = "500ms"
+"#,
+    );
+    let old = Config::from_str(&old_text).expect("old config parses");
+
+    // New config: `to_be_removed` is gone; `to_be_modified_identity`
+    // flips `max_settle` (an identity-partition field per
+    // `requires_new_profile`); `to_be_modified_params` flips `settle`
+    // (a params-only field); `to_be_added` is fresh.
+    let new_text = format!(
+        r#"
+[[watch]]
+name      = "to_be_modified_identity"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+settle    = "50ms"
+max_settle = "1s"
+
+[[watch]]
+name      = "to_be_modified_params"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+settle    = "100ms"
+max_settle = "500ms"
+
+[[watch]]
+name      = "to_be_added"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+settle    = "50ms"
+max_settle = "500ms"
+"#,
+    );
+    let new = Config::from_str(&new_text).expect("new config parses");
+
+    let mut rig = rig_for(old, cfg_path);
+
+    // Sanity: the unfiltered diff populates every bucket. Without
+    // this, a fixture drift could pass a filter test that strips
+    // already-empty buckets.
+    let unfiltered = specter_config::diff(&rig.driver.loader.current_config, &new);
+    assert_eq!(unfiltered.subs.added.len(), 1);
+    assert_eq!(unfiltered.subs.removed.len(), 1);
+    assert_eq!(unfiltered.subs.modified_identity.len(), 1);
+    assert_eq!(unfiltered.subs.modified_params.len(), 1);
+
+    // Disable every name the diff would touch.
+    for name in [
+        "to_be_added",
+        "to_be_removed",
+        "to_be_modified_identity",
+        "to_be_modified_params",
+    ] {
+        rig.driver
+            .disabled_runtime
+            .insert(CompactString::const_new(name));
+    }
+
+    let filtered = rig.driver.compute_watch_diff(&new);
+    assert!(filtered.subs.added.is_empty(), "added bucket filtered");
+    assert!(filtered.subs.removed.is_empty(), "removed bucket filtered");
+    assert!(
+        filtered.subs.modified_identity.is_empty(),
+        "modified_identity bucket filtered",
+    );
+    assert!(
+        filtered.subs.modified_params.is_empty(),
+        "modified_params bucket filtered",
+    );
+}
+
+/// Filter discipline (negative case): names absent from
+/// `disabled_runtime` pass through every bucket unchanged. Confirms
+/// the filter is additive — daemons with an empty
+/// `disabled_runtime` compute the same diff as if the filter were
+/// not applied.
+#[test]
+fn compute_watch_diff_with_empty_disabled_runtime_passes_diff_through() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let initial = Config::from_str("").expect("empty config parses");
+    let new_text = format!(
+        r#"
+[[watch]]
+name      = "added"
+path      = "{}"
+actions   = [{{ exec = ["true"] }}]
+"#,
+        tmp.path().display(),
+    );
+    let new = Config::from_str(&new_text).expect("new config parses");
+
+    let rig = rig_for(initial, cfg_path);
+    let diff = rig.driver.compute_watch_diff(&new);
+    assert_eq!(diff.subs.added.len(), 1, "added survives empty filter");
+    assert_eq!(diff.subs.added[0].params.name, "added");
+}
+
+/// Prune discipline: the post-apply pass over `disabled_runtime`
+/// retains names whose `[[watch]]` entry still exists in TOML
+/// (regardless of `enabled`) and drops names that left the file
+/// entirely. Tests every retention branch under one fixture so a
+/// future refactor that swaps the membership check (e.g., uses
+/// `active_watches` and drops TOML-disabled retention) regresses
+/// here.
+#[test]
+fn prune_disabled_runtime_retains_toml_entries_drops_removed_names() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let anchor = tmp.path().display();
+    let initial_text = format!(
+        r#"
+[[watch]]
+name      = "kept_active"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+
+[[watch]]
+name      = "kept_toml_disabled"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+enabled   = false
+"#,
+    );
+    let initial = Config::from_str(&initial_text).expect("initial parses");
+
+    let mut rig = rig_for(initial, cfg_path);
+
+    // Three runtime overrides: two anchored against TOML rows that
+    // still exist (one active, one disabled), one anchored against a
+    // name the TOML doesn't carry.
+    for name in ["kept_active", "kept_toml_disabled", "gone_from_toml"] {
+        rig.driver
+            .disabled_runtime
+            .insert(CompactString::const_new(name));
+    }
+
+    rig.driver.prune_disabled_runtime_against_current_config();
+
+    assert!(
+        rig.driver
+            .disabled_runtime
+            .contains(&CompactString::const_new("kept_active")),
+        "runtime override over an active TOML row stays",
+    );
+    assert!(
+        rig.driver
+            .disabled_runtime
+            .contains(&CompactString::const_new("kept_toml_disabled")),
+        "runtime override over a TOML-disabled row stays \
+         (operator's 'off twice' preference is preserved)",
+    );
+    assert!(
+        !rig.driver
+            .disabled_runtime
+            .contains(&CompactString::const_new("gone_from_toml")),
+        "runtime override over a TOML-removed name evaporates",
+    );
+    assert_eq!(
+        rig.driver.disabled_runtime.len(),
+        2,
+        "only the two TOML-anchored names survive",
+    );
+}
+
+/// End-to-end pipeline ordering: `handle_reload` runs the prune
+/// AFTER `rotate_apply`, so the helper reads the freshly-applied
+/// `current_config`. Pinning this guards against a refactor that
+/// reorders the prune above the rotation (which would have it read
+/// the old TOML).
+#[test]
+fn handle_reload_runs_prune_against_post_rotation_config() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let anchor = tmp.path().display();
+    let v1_text = format!(
+        r#"
+[[watch]]
+name      = "doomed"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+"#,
+    );
+    std::fs::write(&cfg_path, &v1_text).unwrap();
+    let initial = Config::from_str(&v1_text).expect("v1 parses");
+
+    let mut rig = rig_for(initial, cfg_path.clone());
+    rig.driver
+        .disabled_runtime
+        .insert(CompactString::const_new("doomed"));
+
+    // Rewrite the on-disk config to drop the watch entirely. The
+    // reload's parse picks this up; rotate_apply commits it; prune
+    // observes the post-rotation state.
+    std::fs::write(&cfg_path, "").unwrap();
+    rig.reload_tx.try_send(()).expect("reload send");
+    rig.shutdown_tx.try_send(()).expect("shutdown send");
+    assert_eq!(rig.driver.tick(), TickOutcome::Shutdown);
+
+    assert!(
+        rig.driver.disabled_runtime.is_empty(),
+        "post-reload prune dropped the override whose TOML row vanished",
+    );
 }

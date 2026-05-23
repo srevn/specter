@@ -118,8 +118,8 @@ impl EngineDriver {
     /// overrides re-applied) and applied per-field via
     /// [`Self::apply_log_reload`]: a level change calls
     /// `obs_handle.set_level`; a destination / path change logs an
-    /// `error!` instructing the operator to restart (v1 doesn't
-    /// hot-reload destinations). The actually-applied state rotates
+    /// `error!` instructing the operator to restart — destinations
+    /// are not hot-reloadable. The actually-applied state rotates
     /// into [`crate::loader::Loader::current_log`] — so a destination
     /// flip-back compares runtime-vs-runtime on the next reload and
     /// avoids a phantom "restart to apply" warning.
@@ -155,6 +155,18 @@ impl EngineDriver {
         trigger: ReloadTrigger,
         now: Instant,
     ) -> ControlFlow<()> {
+        // A manual reload (SIGHUP / IPC) supersedes any pending
+        // auto-reload settle deadline: the operator's explicit pulse
+        // pre-empts the debounced pulse, and a deadline left armed
+        // would either fire on a freshly-applied config (no-op via
+        // `config_meta_changed`'s lstat filter) or, worse, race a
+        // mid-window config edit and trigger a second apply. Clearing
+        // the deadline here is idempotent for the
+        // `apply_config_settle_expiry` caller (it cleared the slot
+        // before delegating here) and load-bearing for the other two
+        // entry points (`handle_ipc::P::Reload`, signal-thread SIGHUP).
+        self.config_settle_until = None;
+
         self.reopen_log_file();
 
         let Some((new_config, new_meta)) = self.read_and_parse_config() else {
@@ -177,6 +189,11 @@ impl EngineDriver {
 
         let applied_log = self.apply_log_reload(&new_config);
 
+        // Filter the diff against `disabled_runtime` BEFORE the
+        // engine sees it: any attach / re-attach / re-bind / detach
+        // for a runtime-disabled Sub is suppressed so the engine
+        // stays consistent with the operator's "off" preference
+        // across the apply.
         let diff = self.compute_watch_diff(&new_config);
         let outcome = if diff.is_empty() {
             tracing::info!("config reload: no watch changes");
@@ -214,6 +231,14 @@ impl EngineDriver {
         };
 
         self.loader.rotate_apply(new_config, applied_log, new_meta);
+
+        // Prune `disabled_runtime` AFTER the loader rotation so the
+        // helper reads the freshly-applied TOML. The prune runs on
+        // every successful parse (both empty-diff and apply-diff
+        // branches converge here) — an edit that removes a
+        // runtime-disabled entry must clear the override on the same
+        // pulse, even when no other diff bits moved.
+        self.prune_disabled_runtime_against_current_config();
 
         outcome
     }
@@ -280,7 +305,7 @@ impl EngineDriver {
     ///   runtime, calls `obs_handle.set_level`. On `Ok` the applied
     ///   level is the new one; on `Err` it falls back to the running
     ///   value (with an `error!` log).
-    /// - **destination / path** — NOT hot-reloadable in v1. When the
+    /// - **destination / path** — NOT hot-reloadable. When the
     ///   request differs from runtime, logs an `error!` instructing
     ///   the operator to restart. The applied destination / path are
     ///   always the running values; the appender does not move.
@@ -349,7 +374,7 @@ impl EngineDriver {
             tracing::error!(
                 new_destination = ?requested.destination,
                 new_path = ?requested.path.as_ref().map(|p| p.display().to_string()),
-                "log destination / path change is not hot-reloadable in v1; \
+                "log destination / path change is not hot-reloadable; \
                  restart specter to apply",
             );
         }
@@ -362,12 +387,65 @@ impl EngineDriver {
     }
 
     /// Compute the name-keyed diff between the running and
-    /// freshly-parsed config. Pure delegation to [`specter_config::diff`]
-    /// — no id maps; the engine resolves names to ids at apply time.
+    /// freshly-parsed config, then strip every bucket of any Sub
+    /// whose name lives in [`Self::disabled_runtime`].
+    ///
+    /// The unfiltered diff is the raw `specter_config::diff` output;
+    /// the filter is the negative side of the `disabled_runtime ↔
+    /// engine` invariant — an attach / re-attach / re-bind / detach
+    /// for a runtime-disabled Sub would re-introduce or churn the
+    /// engine on a Sub the operator has suppressed. The four Sub
+    /// buckets (`added`, `removed`, `modified_identity`,
+    /// `modified_params`) are name-disjoint by construction, so
+    /// retaining by name on each is exhaustive. Promoters are not in
+    /// scope for the runtime-disable override and pass through
+    /// unchanged.
     pub(super) fn compute_watch_diff(
         &self,
         new_config: &Config,
     ) -> specter_core::WatchRegistryDiff {
-        specter_config::diff(&self.loader.current_config, new_config)
+        let mut diff = specter_config::diff(&self.loader.current_config, new_config);
+        let disabled = &self.disabled_runtime;
+        diff.subs
+            .added
+            .retain(|r| !disabled.contains(r.params.name.as_str()));
+        diff.subs
+            .modified_identity
+            .retain(|r| !disabled.contains(r.params.name.as_str()));
+        diff.subs
+            .modified_params
+            .retain(|r| !disabled.contains(r.params.name.as_str()));
+        diff.subs.removed.retain(|n| !disabled.contains(n.as_str()));
+        diff
+    }
+
+    /// Retain only those `disabled_runtime` entries whose `[[watch]]`
+    /// entry still exists in the freshly-applied TOML (regardless of
+    /// the per-row `enabled` flag).
+    ///
+    /// A name that left the TOML entirely is structurally invalid as
+    /// a runtime override: the operator's "off" preference cannot
+    /// anchor against a missing entry, and a future re-declaration is
+    /// a fresh operator decision, not a revival. A `enabled = false`
+    /// row stays operator-declared, so the runtime override stacked
+    /// over it is preserved (the operator's "off twice" choice).
+    ///
+    /// Reads through the FULL [`Config::watches`] list so the
+    /// TOML-disabled retention case works correctly — filtering
+    /// through [`Config::active_watches`] would drop those entries.
+    ///
+    /// Sole production caller is [`Self::handle_reload`] *after*
+    /// [`crate::loader::Loader::rotate_apply`] — so `current_config`
+    /// is the newly-applied state. `pub(super)` so the driver's own
+    /// tests can exercise the helper directly without driving the
+    /// full reload pipeline.
+    pub(super) fn prune_disabled_runtime_against_current_config(&mut self) {
+        self.disabled_runtime.retain(|name| {
+            self.loader
+                .current_config
+                .watches
+                .iter()
+                .any(|s| s.name.as_str() == name.as_str())
+        });
     }
 }

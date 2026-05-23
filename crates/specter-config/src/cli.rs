@@ -63,8 +63,7 @@ pub enum Command {
     List(ListArgs),
     /// Show one watch in detail by name.
     Show(ShowArgs),
-    /// Disable one watch by name (runtime override; survives until
-    /// re-enabled or the watch leaves the TOML).
+    /// Disable one watch by name (runtime override).
     Disable(NameTargetArgs),
     /// Enable a watch previously disabled via `specter disable`.
     Enable(NameTargetArgs),
@@ -181,6 +180,12 @@ pub struct ListArgs {
     /// Output format.
     #[arg(long, short = 'o', value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
+
+    /// Include rarely-needed columns (profile/sub ids, dedup count,
+    /// settle ms). Only affects `-o human`; `-o json` is always
+    /// lossless.
+    #[arg(long)]
+    pub wide: bool,
 }
 
 /// `specter show <name>` arguments.
@@ -222,6 +227,12 @@ pub struct TailArgs {
     /// sensitive. Empty (the default) streams every variant.
     #[arg(long)]
     pub filter: Vec<String>,
+
+    /// Output format. `human` pretty-prints one event per line; `json`
+    /// emits the lossless wire shape (one JSON object per line,
+    /// symmetric with the daemon's emission).
+    #[arg(long, short = 'o', value_enum, default_value_t = OutputFormat::Human)]
+    pub output: OutputFormat,
 }
 
 /// `specter wait <name>` arguments.
@@ -381,6 +392,31 @@ mod tests {
     }
 
     #[test]
+    fn list_parses_with_wide_and_output() {
+        let cli = parse(&[
+            "specter",
+            "list",
+            "--socket",
+            "/tmp/s.sock",
+            "-o",
+            "json",
+            "--wide",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::List(args) => {
+                assert_eq!(
+                    args.client.socket.as_deref(),
+                    Some(std::path::Path::new("/tmp/s.sock"))
+                );
+                assert_eq!(args.output, OutputFormat::Json);
+                assert!(args.wide);
+            }
+            other => panic!("expected List, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn show_requires_name() {
         let err = parse(&["specter", "show"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
@@ -430,6 +466,27 @@ mod tests {
             Command::Tail(args) => {
                 assert_eq!(args.filter, vec!["SubFired", "SubDetached"]);
             }
+            other => panic!("expected Tail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tail_output_defaults_to_human() {
+        let cli = parse(&["specter", "tail"]).unwrap();
+        match cli.command {
+            Command::Tail(args) => {
+                assert_eq!(args.output, OutputFormat::Human);
+                assert!(args.filter.is_empty(), "default filter is empty");
+            }
+            other => panic!("expected Tail, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tail_parses_output_format() {
+        let cli = parse(&["specter", "tail", "-o", "json"]).unwrap();
+        match cli.command {
+            Command::Tail(args) => assert_eq!(args.output, OutputFormat::Json),
             other => panic!("expected Tail, got {other:?}"),
         }
     }

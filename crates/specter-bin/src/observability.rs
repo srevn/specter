@@ -25,7 +25,7 @@
 //!   `EnvFilter`. The bin re-applies the level via
 //!   [`ObservabilityHandle::set_level`] when SIGHUP brings a new
 //!   `[log] level`. Path / destination changes are *not* hot-reloaded
-//!   in v1 (an explicit `error!` instructs the operator to restart).
+//!   (an explicit `error!` instructs the operator to restart).
 //!
 //! - **Reopen-on-SIGHUP** — when destination = `file`, the underlying
 //!   `Arc<Mutex<File>>` is swappable. The bin calls
@@ -56,7 +56,7 @@ use tracing_subscriber::{
 /// don't exercise the SIGHUP API.
 pub(crate) struct ObservabilityHandle {
     /// Reload handle for the level filter. `None` for noop handles
-    /// (tests). Path / destination changes are not hot-reloaded in v1.
+    /// (tests). Path / destination changes are not hot-reloaded.
     level_reload: Option<reload::Handle<EnvFilter, Registry>>,
     /// `Some` iff destination = `file`. Reopens the configured path
     /// on demand (logrotate `copytruncate`-style rotation needs this).

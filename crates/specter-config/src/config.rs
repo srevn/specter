@@ -380,6 +380,22 @@ impl Config {
         self.watches.iter().filter(|s| s.enabled)
     }
 
+    /// Resolve an operator-facing watch name to its [`SubSpec`] when
+    /// the entry is enabled — the name-keyed inverse of
+    /// [`Self::active_watches`].
+    ///
+    /// Returns `None` when the name is absent OR when its entry
+    /// carries `enabled = false`; callers needing to distinguish the
+    /// two cases inspect [`Self::watches`] directly.
+    ///
+    /// O(N) linear scan over [`Self::watches`]; static-name uniqueness
+    /// (enforced upstream by [`validate`]) guarantees at most one
+    /// match.
+    #[must_use]
+    pub fn find_active_watch(&self, name: &str) -> Option<&SubSpec> {
+        self.active_watches().find(|s| s.name == name)
+    }
+
     /// Iterator over enabled dynamic watches in source order — the
     /// Promoter analogue of [`Self::active_watches`]. Same discipline.
     pub fn active_promoters(&self) -> impl Iterator<Item = &PromoterSpec> + '_ {
@@ -1815,6 +1831,31 @@ mod tests {
         let promoters: Vec<&str> = cfg.active_promoters().map(|p| p.name.as_str()).collect();
         assert_eq!(watches, vec!["a", "c"]);
         assert_eq!(promoters, vec!["f"]);
+    }
+
+    /// `find_active_watch` returns the SubSpec for an enabled name,
+    /// `None` for a `enabled = false` entry, and `None` for an absent
+    /// name. The disabled / absent collapse is by design: the operator
+    /// IPC layer treats both as "not active right now".
+    #[test]
+    fn find_active_watch_resolves_enabled_only() {
+        let toml = format!(
+            "[[watch]]\nname = \"on\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n\
+             [[watch]]\nname = \"off\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\nenabled = false\n",
+        );
+        let cfg = Config::from_str(&toml).unwrap();
+        assert_eq!(
+            cfg.find_active_watch("on").map(|s| s.name.as_str()),
+            Some("on"),
+        );
+        assert!(
+            cfg.find_active_watch("off").is_none(),
+            "disabled entry hidden"
+        );
+        assert!(
+            cfg.find_active_watch("ghost").is_none(),
+            "absent name hidden"
+        );
     }
 
     #[test]
