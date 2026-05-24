@@ -5,15 +5,17 @@
 //!   both the `kevent`-side primitives and the path → `OwnedFd` /
 //!   `fstat`-kind helpers.
 //! - [`normalize`]: kqueue flags → `FsEvent`.
-//! - [`wake`]: cross-thread interruption via `EVFILT_USER`.
 //! - [`watcher`]: state-bearing `FsWatcher` impl (engine-side).
 //! - [`config_watch`]: state-bearing `ConfigWatcher` impl (auto-reload).
 //!
 //! The two watchers share the FFI surface but own *separate* kqueue
-//! fds — independent kernel queues, independent wake idents, no
-//! cross-talk. They are deliberately decoupled so the engine watcher's
-//! per-resource bookkeeping (slotmap, kind cache, drain window) stays
-//! out of the config watcher's tight blocking loop and vice versa.
+//! fds — independent kernel queues, no cross-talk. They are
+//! deliberately decoupled so the engine watcher's per-resource
+//! bookkeeping (slotmap, kind cache) stays out of the config
+//! watcher's drain path and vice versa. Each kqueue fd is exposed
+//! through the watcher's [`std::os::fd::AsFd`] supertrait so the
+//! reactor can multiplex both with a single `mio::Poll` (or
+//! equivalent).
 //!
 //! 32-bit BSD support is gated out at compile time — the engine
 //! watcher's `udata` round-trip from `ResourceId.as_ffi() : u64` to
@@ -31,7 +33,6 @@ mod config_watch;
 mod ffi;
 mod normalize;
 mod translate;
-mod wake;
 mod watcher;
 
 pub use config_watch::KqueueConfigWatcher;

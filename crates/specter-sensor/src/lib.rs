@@ -20,8 +20,8 @@
 
 use specter_core::{ClassSet, FsEvent, ProbeOwner, ProbeRequest, ResourceId, ResourceKind};
 use std::io;
+use std::os::fd::AsFd;
 use std::path::Path;
-use std::time::Instant;
 
 // Re-exported alongside the trait so the bin can name `WatcherEvent` and
 // its variant payloads (`OverflowScope`, `WatchFailure`) via one crate
@@ -48,10 +48,10 @@ pub trait WatchFailureExt: Sized {
     ///
     /// # Preconditions
     ///
-    /// Classifies errors from **watch-install and watcher-poll
+    /// Classifies errors from **watch-install and watcher-drain
     /// syscalls only** (`inotify_add_watch` / `open(O_EVTONLY)` /
-    /// `kevent` / `epoll_wait`). `ENOSPC` is interpreted as inotify
-    /// watch-limit (`max_user_watches`) exhaustion and maps to
+    /// `kevent` / `read(inotify_fd)`). `ENOSPC` is interpreted as
+    /// inotify watch-limit (`max_user_watches`) exhaustion and maps to
     /// [`WatchFailure::Pressure`]; passing an `io::Error` from a
     /// data-path syscall (where `ENOSPC` means "disk full") would
     /// misclassify a real I/O fault as watch-pressure. Every backend
@@ -71,7 +71,7 @@ impl WatchFailureExt for WatchFailure {
     }
 }
 
-/// One observation produced by [`FsWatcher::poll_until`].
+/// One observation produced by [`FsWatcher::drain_ready`].
 ///
 /// Two variants:
 ///
@@ -100,59 +100,46 @@ pub enum WatcherEvent {
 
 /// Single-threaded filesystem watcher.
 ///
-/// One thread blocks in [`poll_until`](FsWatcher::poll_until); the
-/// mutators ([`watch`](FsWatcher::watch) /
-/// [`unwatch`](FsWatcher::unwatch)) run on the same thread between
-/// `poll_until` calls. Cross-thread coordination — fresh `WatchOp`s
-/// arriving on a channel — is the bin's responsibility: it pushes into
-/// the channel and calls [`WakeHandle::wake`] on a handle captured before
-/// spawning the watcher thread, which interrupts the watcher's in-flight
-/// `poll_until` so it can drain the channel and reblock.
+/// `Send + AsFd`. One thread owns the watcher and drives every
+/// [`watch`](FsWatcher::watch) / [`unwatch`](FsWatcher::unwatch) /
+/// [`drain_ready`](FsWatcher::drain_ready) call. Blocking is the
+/// caller's responsibility: a reactor (mio::Poll, libc::poll, etc.)
+/// registers [`AsFd::as_fd`] in edge-triggered mode and invokes
+/// `drain_ready` only when the reactor reports the fd readable. The
+/// trait itself is non-blocking — there is no wake mechanism, no
+/// deadline, no internal block; cross-thread coordination lives in the
+/// reactor (e.g. `mio::Waker`), not on the watcher.
 ///
-/// The trait is `Send` (one thread owns the watcher) but not `Sync`
-/// (mutators take `&mut self`). The wake handle ([`WakeHandle`]) is the
-/// only cross-thread surface.
-///
-/// # Bin loop pattern
+/// # Caller pattern (illustrative — production reactor lands in Phase 2)
 ///
 /// ```ignore
 /// let mut events: Vec<WatcherEvent> = Vec::with_capacity(64);
+/// poll.registry().register(
+///     &mut SourceFd(&watcher.as_fd().as_raw_fd()),
+///     WATCHER_TOKEN,
+///     Interest::READABLE,
+/// )?;
 /// loop {
-///     // 1. Apply pending WatchOps from the channel.
-///     while let Ok(op) = ops_rx.try_recv() {
-///         match op {
-///             WatchOp::Watch { resource, path, kind, events } => {
-///                 if let Err(failure) = watcher.watch(resource, &path, kind, events) {
-///                     // Pressure / Resource / Invariant — engine demuxes via
-///                     // `Input::WatchOpRejected`.
-///                     engine_inbound.send(/* … failure … */);
-///                 }
-///             }
-///             WatchOp::Unwatch { resource } => watcher.unwatch(resource),
-///         }
-///     }
-///     // 2. Block until the deadline, an event, or a wake.
-///     events.clear();
-///     watcher.poll_until(engine_deadline, &mut events)?;
-///     for ev in events.drain(..) {
-///         match ev {
-///             WatcherEvent::Fs { resource, event } => {
-///                 engine_inbound.send(Input::FsEvent { resource, event });
-///             }
-///             WatcherEvent::Overflow { scope } => {
-///                 // Surfaced as `Input::SensorOverflow`.
-///                 engine_inbound.send(/* … scope … */);
+///     poll.poll(&mut mio_events, Some(timeout))?;
+///     for ev in &mio_events {
+///         if ev.token() == WATCHER_TOKEN {
+///             events.clear();
+///             watcher.drain_ready(&mut events)?;
+///             for w in events.drain(..) {
+///                 // dispatch into engine_inbound (FsEvent / SensorOverflow)
 ///             }
 ///         }
 ///     }
+///     // Apply pending WatchOps between drains — same thread.
 /// }
 /// ```
 ///
 /// Coalescing under `EV_CLEAR`: multiple writes between drains are
-/// reported as one event. The engine's `Settling` state already debounces
-/// by rescheduling on every event, so callers must not assume per-write
-/// delivery — only "at least one event when something changed."
-pub trait FsWatcher: Send {
+/// reported as one event. The engine's `Settling` state already
+/// debounces by rescheduling on every event, so callers must not
+/// assume per-write delivery — only "at least one event when
+/// something changed."
+pub trait FsWatcher: Send + AsFd {
     /// Install (or re-register) a watch. Returns a typed
     /// [`WatchFailure`] on rejection: backends classify their kernel
     /// errno set (e.g. via [`WatchFailureExt::from_io`]) at the trait
@@ -192,11 +179,17 @@ pub trait FsWatcher: Send {
     /// the trait boundary.
     fn unwatch(&mut self, r: ResourceId);
 
-    /// Block until the next event(s), the deadline, or a wake. Pushes
-    /// normalized [`WatcherEvent`]s into `out` and returns the count
-    /// pushed *this call*.
+    /// Drain every record currently queued on the underlying kqueue /
+    /// inotify fd into `out`, looping internally until the kernel
+    /// reports `EAGAIN` (or `EAGAIN`-equivalent: a `kevent(2)` call
+    /// with a zero `timespec` returning `n == 0`). Returns the count
+    /// of [`WatcherEvent`]s pushed *this call*.
     ///
-    /// Two variants ride the same channel:
+    /// Non-blocking by contract. The caller owns blocking via a
+    /// reactor on [`AsFd::as_fd`]; this method translates "kernel
+    /// says fd readable" into "here are the events."
+    ///
+    /// Two variants ride `out`:
     ///
     /// - [`Fs`](WatcherEvent::Fs) — per-resource filesystem event;
     ///   the dominant variant.
@@ -205,15 +198,16 @@ pub trait FsWatcher: Send {
     ///   emits `Global` on `IN_Q_OVERFLOW`; FSEvents would emit
     ///   per-stream; kqueue never emits this under v1.
     ///
-    /// `deadline = None` means "no deadline; block until event or wake."
-    /// A returned count of zero is normal: either the deadline arrived
-    /// or only a wake fired.
+    /// # Why drain-to-empty internally
     ///
-    /// `EINTR` is retried internally. Syscall errors are classified
-    /// via [`WatchFailureExt::from_io`] into a typed [`WatchFailure`]
-    /// — symmetric with [`watch`](Self::watch). The bin treats a
-    /// `poll_until` failure as terminal for the watcher thread (no
-    /// recovery path).
+    /// Edge-triggered readiness REQUIRES drain-to-empty: a partial
+    /// drain leaves residual kernel-side records, and the next
+    /// event must transition the fd from "not readable" to
+    /// "readable" to fire an edge. If the kernel queue is still
+    /// non-empty when the next record arrives, the edge does not
+    /// fire and the new record is silently stranded. Pinning the
+    /// loop *inside* the watcher makes the invariant a structural
+    /// property of the trait, not a caller discipline.
     ///
     /// # Lifecycle invariants the implementor must honour
     ///
@@ -221,146 +215,99 @@ pub trait FsWatcher: Send {
     ///   span a single drained batch (e.g., the post-loop reopen
     ///   after an atomic-save coalesces terminal + parent records
     ///   into one drain) must be made *after* the per-record loop,
-    ///   against the batch's final state. The kernel's record order
-    ///   within one drain is unspecified across both backends; per-
-    ///   arm decisions that read intermediate state are order-
-    ///   sensitive bugs.
+    ///   against the batch's final state. The kernel's record
+    ///   order within one drain is unspecified across both
+    ///   backends; per-arm decisions that read intermediate state
+    ///   are order-sensitive bugs. The drain-to-empty loop further
+    ///   widens this guarantee across multiple syscall batches
+    ///   within a single invocation — the decision still belongs
+    ///   *after* the outer loop, not per inner batch.
     ///
-    /// - **Deadline honoured across `EINTR`.** A `Some(deadline)`
-    ///   is *total wall-clock budget*, not a per-syscall budget.
-    ///   The implementor's `EINTR` retry loop must recompute the
-    ///   remaining budget on every iteration; a re-armed full
-    ///   original budget would multiply the effective deadline by
-    ///   the number of interruptions.
-    fn poll_until(
-        &mut self,
-        deadline: Option<Instant>,
-        out: &mut Vec<WatcherEvent>,
-    ) -> Result<usize, WatchFailure>;
-
-    /// Capture a wake handle for cross-thread interruption of
-    /// `poll_until`. Cloneable via [`WakeHandle::clone_box`]; concurrent
-    /// wakes coalesce in the kernel. Idempotent.
-    fn wake_handle(&self) -> Box<dyn WakeHandle>;
-}
-
-/// Cross-thread wake-up signal for an in-flight
-/// [`FsWatcher::poll_until`].
-///
-/// Implementations must be cheap to clone (the kqueue impl is two
-/// pointer-sized fields wrapping `Arc<OwnedFd> + usize`) and tolerate
-/// `wake()` after the watcher's lifecycle has ended — a stale wake is a
-/// no-op-equivalent, never UB.
-pub trait WakeHandle: Send + Sync {
-    /// Issue a wake. The next (or in-flight) `poll_until` returns
-    /// promptly; no event is delivered to `out`. Idempotent on the
-    /// kernel side — concurrent wakes coalesce into one returned event.
-    fn wake(&self);
-
-    /// Clone the handle into a fresh `Box<dyn WakeHandle>`. Keeps the
-    /// trait object cloneable without forcing the implementor to be
-    /// `Sized`.
-    fn clone_box(&self) -> Box<dyn WakeHandle>;
-}
-
-impl Clone for Box<dyn WakeHandle> {
-    fn clone(&self) -> Self {
-        self.clone_box()
-    }
+    /// # Errors
+    ///
+    /// `EINTR` is retried inside the FFI helpers. Any other syscall
+    /// error classifies through [`WatchFailureExt::from_io`] and
+    /// terminates the drain mid-stream; `out` may be partially
+    /// populated on `Err`. The caller treats any `Err` as terminal
+    /// for the watcher.
+    fn drain_ready(&mut self, out: &mut Vec<WatcherEvent>) -> Result<usize, WatchFailure>;
 }
 
 /// Single-threaded watcher for the daemon's own config file.
 ///
-/// Distinct from [`FsWatcher`]: that trait is the engine's per-Resource
-/// surface, with `watch` / `unwatch` mutators and a vector
-/// drain. The config watcher has exactly one watch target (the running
-/// process's config path) and no engine vocabulary at the boundary —
-/// just "kernel said something happened" or "wake / deadline arrived."
+/// Distinct from [`FsWatcher`]: that trait is the engine's per-
+/// Resource surface, with `watch` / `unwatch` mutators and a vector
+/// drain. The config watcher has exactly one watch target (the
+/// running process's config path) and no engine vocabulary at the
+/// boundary — just "kernel said something happened (substantively)"
+/// or "nothing yet."
 ///
-/// One thread owns the watcher and calls [`wait`](Self::wait) in a loop;
-/// the bin's wrapper thread translates `Ok(true)` into a pulse on the
-/// `config_event` channel, leaving the lstat-vs-meta filter and settle
-/// debounce to the engine driver. The wake handle ([`WakeHandle`]) is
-/// the only cross-thread surface — same discipline as [`FsWatcher`].
+/// `Send + AsFd`: same discipline as [`FsWatcher`]. One thread owns
+/// the watcher and drives [`drain_ready`](Self::drain_ready); a
+/// reactor blocks on [`AsFd::as_fd`] and invokes `drain_ready` only
+/// when the reactor reports the fd readable. The trait itself is
+/// non-blocking and owns no wake mechanism.
 ///
 /// **Why no engine vocabulary?** The kqueue parent-dir filter cannot
 /// see basename, so every dir-contents change in the config's parent
 /// becomes a pulse — the watcher cannot pre-classify "this was about
-/// the config file" without a syscall. The driver's lstat-vs-`FileMeta`
-/// filter is the natural place to suppress noise *and* the place that
-/// owns the prior-meta-known state, so the watcher stays a minimal
-/// kernel-event pump.
+/// the config file" without a syscall. The driver's lstat-vs-
+/// `FileMeta` filter is the natural place to suppress noise *and*
+/// the place that owns the prior-meta-known state, so the watcher
+/// stays a minimal kernel-event pump.
 ///
-/// # Caller loop pattern
+/// # Caller pattern (illustrative — production reactor lands in Phase 2)
 ///
 /// ```ignore
+/// poll.registry().register(
+///     &mut SourceFd(&watcher.as_fd().as_raw_fd()),
+///     CONFIG_TOKEN,
+///     Interest::READABLE,
+/// )?;
 /// loop {
-///     if should_exit() { return; }
-///     match watcher.wait(None) {
-///         Ok(true)  => { let _ = config_event_tx.try_send(()); }
-///         Ok(false) => { /* wake; loop and re-check exit condition */ }
-///         Err(e)    => { tracing::error!(?e, "config-watcher exit"); return; }
+///     poll.poll(&mut events, None)?;
+///     for ev in &events {
+///         if ev.token() == CONFIG_TOKEN {
+///             match watcher.drain_ready() {
+///                 Ok(true)  => { let _ = config_event_tx.try_send(()); }
+///                 Ok(false) => { /* spurious wake / non-substantive */ }
+///                 Err(e)    => { tracing::error!(?e, "config-watcher exit"); return; }
+///             }
+///         }
 ///     }
 /// }
 /// ```
-///
-/// The exit condition is the caller's choice (an `AtomicBool` flag,
-/// a separate shutdown channel, a poisoned mutex — whatever the
-/// caller's shutdown primitive is); the trait surface does not
-/// prescribe one.
-pub trait ConfigWatcher: Send {
-    /// Block until: (a) a kernel event fires on the config file or its
-    /// parent directory (returns `Ok(true)`), (b) `deadline` elapses
-    /// (returns `Ok(false)`), (c) a wake fires (returns `Ok(false)`),
-    /// or (d) a syscall error occurs (returns `Err`).
+pub trait ConfigWatcher: Send + AsFd {
+    /// Drain every record currently queued on the underlying inotify
+    /// / kqueue fd, looping internally to the EAGAIN-equivalent.
+    /// Returns `true` iff at least one substantive event was observed
+    /// (file-side record, or a basename-matched parent record on
+    /// inotify; any parent pulse on kqueue since the watcher cannot
+    /// pre-classify by basename without an extra syscall).
     ///
-    /// Production passes `None` — block forever; the watcher has no
-    /// timers of its own. A `Some(deadline)` threads through to the
-    /// backend's wait primitive (`kevent` / `epoll_wait`), which owns
-    /// the per-iteration remaining-budget recompute across `EINTR`;
-    /// tests use it as a watchdog without spawning a wake-thread.
-    /// Settle and lstat-vs-meta filtering are driver-side concerns
-    /// regardless.
-    ///
-    /// `Ok(true)` is a *raw* pulse — the watcher doesn't decide whether
-    /// the change was substantive. Drivers debounce and lstat-filter.
-    ///
-    /// `EINTR` is retried internally. Other syscall errors propagate;
-    /// the bin's wrapper logs at `error!` and exits the watcher thread.
-    /// SIGHUP-only operation continues to work.
+    /// Same non-blocking + drain-to-empty discipline as
+    /// [`FsWatcher::drain_ready`]. `Ok(true)` is a *raw* pulse — the
+    /// watcher does not decide whether the change is substantive at
+    /// any deeper level than the basename match. Drivers debounce
+    /// and lstat-filter.
     ///
     /// # Lifecycle invariants the implementor must honour
     ///
     /// - **Intra-batch order independence.** File-loss recovery
     ///   decisions (the post-loop reopen after an atomic-save's
     ///   coalesced parent + file-terminal records) must be made
-    ///   *after* the per-record loop, against the batch's final
-    ///   state. The kernel's record order within one drain is
-    ///   unspecified across both backends; per-arm decisions reading
+    ///   *after* every batch drained in this invocation, against
+    ///   the invocation's final state. The kernel's record order
+    ///   within one drain is unspecified across both backends, and
+    ///   the drain-to-empty loop may span multiple syscall batches
+    ///   within one invocation; per-arm decisions reading
     ///   intermediate state would strand the watcher under one
-    ///   batch ordering and recover under the other.
+    ///   ordering and recover under the other.
     ///
-    /// - **Wake produces `Ok(false)`.** A wake-only drain reports
-    ///   "nothing substantive observed"; the bin's wrapper loops
-    ///   and re-checks shutdown. Mixing the wake into the truthy
-    ///   pulse would force an unnecessary engine-side settle cycle.
-    ///
-    /// - **Deadline honoured across `EINTR`.** A `Some(deadline)`
-    ///   is *total wall-clock budget*, not a per-syscall budget.
-    ///   The implementor's `EINTR` retry loop must recompute the
-    ///   remaining budget on every iteration; a re-armed full
-    ///   original budget would multiply the effective deadline by
-    ///   the number of interruptions.
-    fn wait(&mut self, deadline: Option<Instant>) -> io::Result<bool>;
-
-    /// Capture a wake handle for cross-thread interruption of an
-    /// in-flight `wait`. Cloneable via [`WakeHandle::clone_box`];
-    /// concurrent wakes coalesce in the kernel. Idempotent.
-    ///
-    /// Reuses [`WakeHandle`] so the bin's shutdown path can wake either
-    /// the engine watcher or the config watcher through one trait
-    /// object — uniform discipline.
-    fn wake_handle(&self) -> Box<dyn WakeHandle>;
+    /// `EINTR` is retried internally. Other syscall errors
+    /// propagate; the caller logs at `error!` and exits the watcher
+    /// loop. SIGHUP-only operation continues to work.
+    fn drain_ready(&mut self) -> io::Result<bool>;
 }
 
 /// Multi-threaded probe worker pool.
@@ -491,9 +438,9 @@ pub type DefaultWatcher = InotifyWatcher;
 ///
 /// Returns the same concrete type as [`DefaultWatcher`] — no
 /// trait-object overhead. See module docs on [`FsWatcher`] for the
-/// invariants the returned watcher must uphold (`Send`, single-threaded
-/// `poll_until` consumer, cross-thread mutation only via the bin's
-/// channel + [`WakeHandle`] discipline).
+/// invariants the returned watcher must uphold (`Send + AsFd`,
+/// single-threaded `drain_ready` consumer driven by a reactor
+/// blocking on [`AsFd::as_fd`]).
 pub fn default_watcher() -> io::Result<DefaultWatcher> {
     DefaultWatcher::new()
 }

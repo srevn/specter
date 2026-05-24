@@ -1,22 +1,21 @@
 //! `KqueueWatcher` — kqueue-backed `FsWatcher` impl.
 //!
-//! Single-threaded: one thread owns the `KqueueWatcher` value and drives
-//! `watch` / `unwatch` between `poll_until` calls. The wake handle
-//! ([`KqueueWakeHandle`]) is the only cross-thread surface — see
-//! [`crate::kqueue::wake`] for the lifecycle discipline.
+//! Single-threaded: one thread owns the `KqueueWatcher` value and
+//! drives every `watch` / `unwatch` / `drain_ready` call. The kqueue
+//! fd is exposed via [`AsFd`] so a reactor can register it for
+//! edge-triggered readiness; `drain_ready` is non-blocking and
+//! drains the kqueue to empty on every call (satisfying the
+//! edge-triggered contract without caller discipline).
 //!
 //! # Drop semantics
 //!
 //! Default field-order drop:
 //! - `by_resource` drops every [`KqueueEntry`] — the contained
-//!   [`OwnedFd`] closes and the kernel removes its vnode registration
-//!   on close; the `fflags` and `kind` bookkeeping drops alongside.
-//! - `kq` (Arc) decrements; if last, the kqueue fd closes,
-//!   kernel-reaping the `EVFILT_USER` ident and any queued events.
-//!
-//! Wake handles holding Arc clones keep the kqueue fd alive past the
-//! watcher's drop — `wake()` from those becomes a no-op-equivalent (no
-//! consumer drains the resulting event), with no UB.
+//!   [`OwnedFd`] closes and the kernel removes its vnode
+//!   registration on close; the `fflags` and `kind` bookkeeping
+//!   drops alongside.
+//! - `kq` ([`OwnedFd`]) closes, kernel-reaping any remaining queued
+//!   events.
 //!
 //! # Per-resource entry cache
 //!
@@ -37,27 +36,18 @@
 //! sourced from `sub_watch`'s non-empty → empty edge or
 //! `Tree::vacate`'s terminus emission).
 
-use crate::kqueue::wake::KqueueWakeHandle;
 use crate::kqueue::{ffi, normalize, translate};
-use crate::{FsWatcher, WakeHandle, WatchFailure, WatchFailureExt, WatcherEvent};
+use crate::{FsWatcher, WatchFailure, WatchFailureExt, WatcherEvent};
 use slotmap::{Key, KeyData, SecondaryMap};
 use specter_core::{ClassSet, ResourceId, ResourceKind};
 use std::io;
-use std::os::fd::OwnedFd;
+use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
-use std::sync::Arc;
-use std::time::Instant;
-
-/// Wake-up ident reserved on the kqueue's `EVFILT_USER` filter. The
-/// value is arbitrary — kqueue keys events by `(ident, filter)` and
-/// `EVFILT_USER` lives in a different namespace from `EVFILT_VNODE`
-/// (where idents are fds), so any non-zero `usize` works. `0xDEAD_BEEF`
-/// is a recognizable sentinel in debug output.
-const WAKE_IDENT: usize = 0xDEAD_BEEF;
 
 /// Maximum events drained per `kevent` syscall. Excess sit in the
-/// kernel queue until the next `poll_until`. 64 mirrors notify-rs and
-/// is well above the per-iteration burst the engine produces.
+/// kernel queue until the next iteration of the drain-to-empty loop
+/// inside `drain_ready`. 64 mirrors notify-rs and is well above the
+/// per-iteration burst the engine produces.
 const EVENT_BATCH: usize = 64;
 
 #[derive(Debug)]
@@ -69,10 +59,10 @@ pub struct KqueueWatcher {
     /// `normalize::kevent_to_fs_event` for File-vs-Dir disambiguation.
     /// See [`KqueueEntry`] for the field-level lifecycle.
     by_resource: SecondaryMap<ResourceId, KqueueEntry>,
-    /// `Arc` so wake handles can hold their own clones without
-    /// borrowing from the watcher; drop of the last clone closes the
-    /// kqueue fd.
-    kq: Arc<OwnedFd>,
+    /// The kqueue fd. Exposed through [`AsFd`] so a reactor can
+    /// register it for edge-triggered readiness; drop closes the fd
+    /// and kernel-reaps any queued events.
+    kq: OwnedFd,
 }
 
 /// Per-resource cached install state — the `(fd, fflags, kind)` triple
@@ -116,13 +106,11 @@ struct KqueueEntry {
 }
 
 impl KqueueWatcher {
-    /// Create a fresh kqueue and register the wake-up `EVFILT_USER`
-    /// ident. Returns the syscall error on `kqueue()` failure (`EMFILE`,
-    /// `ENOMEM` are the only cases — the bin should treat startup
-    /// failures as fatal).
+    /// Create a fresh kqueue. Returns the syscall error on `kqueue()`
+    /// failure (`EMFILE`, `ENOMEM` are the only cases — the bin
+    /// should treat startup failures as fatal).
     pub fn new() -> io::Result<Self> {
-        let kq = Arc::new(ffi::kqueue_new()?);
-        ffi::register_user_event(&kq, WAKE_IDENT)?;
+        let kq = ffi::kqueue_new()?;
         Ok(Self {
             by_resource: SecondaryMap::new(),
             kq,
@@ -271,84 +259,6 @@ impl KqueueWatcher {
         );
         Ok(())
     }
-
-    /// One blocking drain of the kqueue: returns when `kevent` reports
-    /// activity, the deadline elapses, or a wake fires. Excess events
-    /// past [`EVENT_BATCH`] stay queued in the kernel until the next
-    /// call.
-    ///
-    /// Wake events (`EVFILT_USER` carrying [`WAKE_IDENT`]) are
-    /// filtered silently before the per-record normalize loop — a
-    /// wake-only return surfaces as `Ok(0)`. Real events normalise via
-    /// [`normalize::kevent_to_fs_event`] and push as
-    /// [`WatcherEvent::Fs`]; kqueue never emits
-    /// [`WatcherEvent::Overflow`] (EV_CLEAR coalesces but never silently
-    /// drops — overflow is an inotify-only concept).
-    ///
-    /// `EINTR` retry + per-iteration remaining-budget recompute live
-    /// inside [`ffi::kevent_drain`]; the caller's deadline is the
-    /// total wall-clock budget.
-    ///
-    /// `&self` rather than `&mut self`: the watcher's mutable state
-    /// (the `(fd, fflags, kind)` per-resource cache) is read here but
-    /// only mutated by `watch` / `unwatch`. The kernel queue belongs to
-    /// the kq fd, which the watcher holds behind an `Arc`; the syscall
-    /// implicitly mutates kernel-side state without requiring
-    /// userspace `&mut`. `FsWatcher::poll_until`'s `&mut self`
-    /// reborrows as `&self` here trivially.
-    fn poll_once(
-        &self,
-        deadline: Option<Instant>,
-        out: &mut Vec<WatcherEvent>,
-    ) -> Result<usize, WatchFailure> {
-        let mut events = [ffi::Kevent::zeroed(); EVENT_BATCH];
-        // `kevent` may itself signal pressure (`EMFILE` from a full
-        // kernel queue) in addition to the per-syscall errno set; route
-        // every error through the typed boundary so the bin can demux on
-        // the variant rather than re-classifying `io::Error` upstream.
-        // Deadline tracking (including `EINTR`-retry remaining-budget
-        // recompute) lives inside `kevent_drain`.
-        let n = ffi::kevent_drain(&self.kq, &mut events, deadline)
-            .map_err(|e| WatchFailure::from_io(&e))?;
-
-        tracing::trace!(n, "kqueue drained");
-
-        let mut emitted = 0usize;
-        for ev in &events[..n] {
-            // Wake events carry the EVFILT_USER ident and no ResourceId
-            // payload — filter them silently before normalization.
-            if ev.is_user_event(WAKE_IDENT) {
-                continue;
-            }
-            let raw = ev.udata();
-            if raw == 0 {
-                tracing::trace!(?ev, "kevent with zero udata; dropped");
-                continue;
-            }
-            let r = ResourceId::from(KeyData::from_ffi(raw));
-            // Kind cache miss is possible if the resource was unwatched
-            // between the kernel's queue-add and our drain; default to
-            // `Unknown` and let `normalize` apply its defensive map.
-            let kind = self
-                .by_resource
-                .get(r)
-                .map_or(ResourceKind::Unknown, |e| e.kind);
-            let Some(fs_event) = normalize::kevent_to_fs_event(ev.flags(), ev.fflags(), kind)
-            else {
-                continue;
-            };
-            // Stale-event passthrough: `r` may already have been removed
-            // from `by_resource` between kernel queue-up and our drain.
-            // Emit anyway — engine's `EventOnUnwatchedResource` Diagnostic
-            // handles the race.
-            out.push(WatcherEvent::Fs {
-                resource: r,
-                event: fs_event,
-            });
-            emitted += 1;
-        }
-        Ok(emitted)
-    }
 }
 
 impl FsWatcher for KqueueWatcher {
@@ -376,20 +286,74 @@ impl FsWatcher for KqueueWatcher {
         tracing::debug!(?r, removed, "kqueue unwatch");
     }
 
-    /// One blocking drain to the engine's deadline; see
-    /// [`Self::poll_once`] for the per-call mechanics. The watcher does
-    /// no event coalescing of its own — kqueue's `EV_CLEAR` already
-    /// merges duplicate writes at the kernel level, and the engine's
-    /// settle-timer reschedule debounces above the trait boundary.
-    fn poll_until(
-        &mut self,
-        deadline: Option<Instant>,
-        out: &mut Vec<WatcherEvent>,
-    ) -> Result<usize, WatchFailure> {
-        self.poll_once(deadline, out)
+    /// Non-blocking drain-to-empty of the kqueue queue. Loops on
+    /// [`ffi::kevent_drain`] (zero `timespec`) until the kernel
+    /// returns `0`, normalising each event to [`WatcherEvent::Fs`]
+    /// in the process. kqueue never emits
+    /// [`WatcherEvent::Overflow`] — `EV_CLEAR` coalesces but never
+    /// silently drops; overflow is an inotify-only concept.
+    ///
+    /// The drain-to-empty loop is the structural enforcement of the
+    /// edge-triggered contract: with the kqueue fd registered in
+    /// the reactor's edge-triggered mode, residual records would
+    /// strand future events until the next edge transition.
+    /// Excess events past [`EVENT_BATCH`] sit in the kernel queue
+    /// across loop iterations; the loop terminates only when the
+    /// kernel returns `0`, guaranteeing the queue is empty.
+    ///
+    /// `EINTR` retry lives inside [`ffi::kevent_drain`]. Any other
+    /// syscall error classifies through [`WatchFailureExt::from_io`]
+    /// and terminates the drain mid-stream; `out` may be partially
+    /// populated on `Err`.
+    fn drain_ready(&mut self, out: &mut Vec<WatcherEvent>) -> Result<usize, WatchFailure> {
+        let mut events = [ffi::Kevent::zeroed(); EVENT_BATCH];
+        let mut total_emitted = 0usize;
+        loop {
+            let n =
+                ffi::kevent_drain(&self.kq, &mut events).map_err(|e| WatchFailure::from_io(&e))?;
+            if n == 0 {
+                // Kernel queue drained; edge-triggered contract
+                // satisfied. One log per drain_ready call — per-
+                // iteration logging would explode on bursts.
+                tracing::trace!(total = total_emitted, "kqueue drain complete");
+                return Ok(total_emitted);
+            }
+            for ev in &events[..n] {
+                let raw = ev.udata();
+                if raw == 0 {
+                    tracing::trace!(?ev, "kevent with zero udata; dropped");
+                    continue;
+                }
+                let r = ResourceId::from(KeyData::from_ffi(raw));
+                // Kind cache miss is possible if the resource was
+                // unwatched between the kernel's queue-add and our
+                // drain; default to `Unknown` and let `normalize`
+                // apply its defensive map.
+                let kind = self
+                    .by_resource
+                    .get(r)
+                    .map_or(ResourceKind::Unknown, |e| e.kind);
+                let Some(fs_event) = normalize::kevent_to_fs_event(ev.flags(), ev.fflags(), kind)
+                else {
+                    continue;
+                };
+                // Stale-event passthrough: `r` may already have been
+                // removed from `by_resource` between kernel queue-up
+                // and our drain. Emit anyway — engine's
+                // `EventOnUnwatchedResource` Diagnostic handles the
+                // race.
+                out.push(WatcherEvent::Fs {
+                    resource: r,
+                    event: fs_event,
+                });
+                total_emitted += 1;
+            }
+        }
     }
+}
 
-    fn wake_handle(&self) -> Box<dyn WakeHandle> {
-        Box::new(KqueueWakeHandle::new(Arc::clone(&self.kq), WAKE_IDENT))
+impl AsFd for KqueueWatcher {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.kq.as_fd()
     }
 }
