@@ -20,10 +20,10 @@
 //! ## `IN_IGNORED`
 //!
 //! `IN_IGNORED` is sensor-internal — the watcher's
-//! [`super::watcher::InotifyWatcher::poll_until`] consumes it before
-//! invoking this translator. The defensive guard returning `None`
-//! is kept so a slipped record (impossible under healthy invariants) is
-//! silently dropped rather than mis-routed.
+//! [`super::watcher::InotifyWatcher`]'s `drain_ready` consumes it
+//! before invoking this translator. The defensive guard returning
+//! `None` is kept so a slipped record (impossible under healthy
+//! invariants) is silently dropped rather than mis-routed.
 //!
 //! ## kqueue parity
 //!

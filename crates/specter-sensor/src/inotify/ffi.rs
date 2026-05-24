@@ -1,43 +1,29 @@
-//! Thin libc wrappers over the inotify / eventfd / epoll syscalls — the
-//! lone `unsafe` surface in this module. Each function below is a direct
-//! syscall; module-level `#[allow(unsafe_code)]` keeps the audit boundary
-//! at the file edge, mirroring [`crate::kqueue::ffi`].
+//! Thin libc wrappers over the inotify syscalls — the lone `unsafe`
+//! surface in this module. Each function below is a direct syscall;
+//! module-level `#[allow(unsafe_code)]` keeps the audit boundary at
+//! the file edge, mirroring [`crate::kqueue::ffi`].
 //!
 //! ## CLOEXEC discipline
 //!
-//! Every fd opened here carries `CLOEXEC`. The actuator's spawn path uses
-//! fork+exec ([`crate::FsWatcher`] coexists in the same process); any fd
-//! without `CLOEXEC` would leak into every spawned command. A leaked
-//! `inotify_fd` would prevent kernel-side cleanup at watcher drop; a
-//! leaked `eventfd` would make wakes nondeterministic across child
-//! lifetimes; a leaked `epoll_fd` would inflate the watcher's
-//! kernel-resource footprint per spawn.
+//! The inotify fd opened here carries `IN_CLOEXEC`. The actuator's
+//! spawn path uses fork+exec ([`crate::FsWatcher`] coexists in the
+//! same process); a leaked `inotify_fd` would prevent kernel-side
+//! cleanup at watcher drop (per `inotify(7)`, every per-watch
+//! descriptor is reaped only when the last fd reference closes).
 //!
-//! ## NONBLOCK discipline
+//! ## Non-blocking discipline
 //!
-//! `inotify_init1(IN_NONBLOCK)` and `eventfd(EFD_NONBLOCK)` arm the read
-//! side as non-blocking so the watcher's drain loop never wedges between
-//! `epoll_wait` (which says "data ready") and the actual read (which the
-//! kernel may have drained on a prior iteration in concurrent corner
-//! cases). The `EAGAIN` short-circuit returns `Ok(0)` rather than
-//! propagating an error — empty drain on a wake is a normal outcome.
-//!
-//! ## Deadline tracking
-//!
-//! The wait primitive ([`epoll_wait`]) takes an `Option<Instant>` — not
-//! a pre-computed millisecond timeout — and owns deadline tracking
-//! across `EINTR` retries. The remaining budget is recomputed inside
-//! the retry loop on every iteration so wall-clock progress between
-//! syscall re-entries is preserved. This is the only layer that *can*
-//! re-derive the remaining budget, so deadline math belongs here
-//! rather than at every caller (mirror of [`crate::kqueue::ffi`]).
+//! `inotify_init1(IN_NONBLOCK)` arms the inotify fd as non-blocking
+//! so [`read_inotify`] returns `Ok(0)` on `EAGAIN` (empty queue) and
+//! never wedges the calling thread. The trait surface
+//! ([`crate::FsWatcher::drain_ready`]) wraps this in a drain-to-
+//! empty loop that terminates on `Ok(0)`; callers block at the
+//! reactor level on [`std::os::fd::AsFd::as_fd`] of the watcher,
+//! never inside the FFI.
 
 #![allow(unsafe_code)]
 
-use libc::{
-    self, EFD_CLOEXEC, EFD_NONBLOCK, EPOLL_CLOEXEC, EPOLL_CTL_ADD, EPOLLIN, IN_CLOEXEC,
-    IN_NONBLOCK, c_int, c_void, epoll_event,
-};
+use libc::{self, IN_CLOEXEC, IN_NONBLOCK, c_int, c_void};
 use specter_core::ResourceKind;
 use std::ffi::{CStr, CString};
 use std::io::{self, Error};
@@ -45,7 +31,6 @@ use std::mem::MaybeUninit;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::time::{Duration, Instant};
 
 /// Convert a `Path` into a NUL-terminated C string for syscalls. Embedded
 /// NULs (impossible from a real Linux path component but defensible from
@@ -61,9 +46,10 @@ fn path_to_cstring(path: &Path) -> io::Result<CString> {
 
 /// Create an inotify instance with `IN_NONBLOCK | IN_CLOEXEC`.
 ///
-/// `IN_NONBLOCK` lets the watcher's drain loop short-circuit `EAGAIN` to
-/// `Ok(0)` between `epoll_wait` notifications; `IN_CLOEXEC` plugs the
-/// fork+exec leak (see module docs).
+/// `IN_NONBLOCK` lets the watcher's drain-to-empty loop terminate on
+/// `Ok(0)` (kernel reports `EAGAIN` on an empty queue) instead of
+/// blocking the calling thread; `IN_CLOEXEC` plugs the fork+exec leak
+/// (see module docs).
 pub(super) fn inotify_init() -> io::Result<OwnedFd> {
     // SAFETY: `inotify_init1` returns a fresh non-negative fd or -1.
     // The flag set is a valid bit-or of two libc constants. No memory or
@@ -296,182 +282,12 @@ pub(super) fn fstat_kind(fd: &OwnedFd) -> io::Result<ResourceKind> {
     })
 }
 
-/// Create an eventfd with `EFD_NONBLOCK | EFD_CLOEXEC`.
-///
-/// The wake channel for cross-thread `poll_until` interruption: any
-/// number of [`crate::WakeHandle::wake`] callers bump the kernel-side
-/// counter; the watcher's `epoll_wait` fires; the watcher drains the
-/// counter atomically (a single `read` consumes the entire accumulated
-/// value).
-pub(super) fn eventfd_create() -> io::Result<OwnedFd> {
-    // SAFETY: `eventfd` returns a fresh non-negative fd or -1. The flag
-    // set is a valid bit-or of two libc constants; the initial value
-    // (zero) is a valid `c_uint`.
-    let raw = unsafe { libc::eventfd(0, EFD_NONBLOCK | EFD_CLOEXEC) };
-    if raw < 0 {
-        return Err(Error::last_os_error());
-    }
-    // SAFETY: `raw >= 0` ⇒ the kernel handed us a fresh owned fd.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
-}
-
-/// Bump the eventfd counter by `value`.
-///
-/// Concurrent writes accumulate kernel-side; a single
-/// [`eventfd_drain`] consumes the entire counter in one shot. Callers
-/// pass `1` for a single wake — the actual numeric value is
-/// observationally irrelevant under the watcher's semantics ("any
-/// non-zero counter ⇒ drained ⇒ wake delivered").
-pub(super) fn eventfd_write(fd: &OwnedFd, value: u64) -> io::Result<()> {
-    // SAFETY: `fd` is a valid open eventfd. `eventfd_write` performs a
-    // single 8-byte write; libc handles the byte-order plumbing the
-    // kernel's eventfd driver expects.
-    let n = unsafe { libc::eventfd_write(fd.as_raw_fd(), value) };
-    if n < 0 {
-        return Err(Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Drain the eventfd counter atomically. Returns the consumed value, or
-/// `0` if the eventfd was empty (`EAGAIN` on `EFD_NONBLOCK`).
-///
-/// `EINTR` retries internally; otherwise mirrors [`read_inotify`]'s
-/// failure shape.
-pub(super) fn eventfd_drain(fd: &OwnedFd) -> io::Result<u64> {
-    let mut value: u64 = 0;
-    loop {
-        // SAFETY: `fd` is a valid open eventfd; `&raw mut value` is a
-        // writable `*mut u64`. `eventfd_read` writes the consumed counter
-        // into `value` on success.
-        let n = unsafe { libc::eventfd_read(fd.as_raw_fd(), &raw mut value) };
-        if n == 0 {
-            return Ok(value);
-        }
-        let e = Error::last_os_error();
-        match e.raw_os_error() {
-            Some(libc::EAGAIN) => return Ok(0),
-            Some(libc::EINTR) => {}
-            _ => return Err(e),
-        }
-    }
-}
-
-/// Create an epoll instance with `EPOLL_CLOEXEC`.
-pub(super) fn epoll_create() -> io::Result<OwnedFd> {
-    // SAFETY: `epoll_create1` returns a fresh non-negative fd or -1.
-    let raw = unsafe { libc::epoll_create1(EPOLL_CLOEXEC) };
-    if raw < 0 {
-        return Err(Error::last_os_error());
-    }
-    // SAFETY: `raw >= 0` ⇒ the kernel handed us a fresh owned fd.
-    Ok(unsafe { OwnedFd::from_raw_fd(raw) })
-}
-
-/// Register `fd` on `epoll` for `EPOLLIN`, tagging events with `token`.
-/// `token` is echoed back in the [`epoll_event`] `u64` field on each
-/// `epoll_wait` return; the watcher uses distinct tokens to discriminate
-/// `inotify_fd`-readable from `wake_fd`-readable.
-pub(super) fn epoll_register(epoll: &OwnedFd, fd: &OwnedFd, token: u64) -> io::Result<()> {
-    // `EPOLLIN` is `c_int` in libc; `epoll_event.events` is `u32`.
-    // `EPOLLIN`'s value (`0x1`) fits trivially; the cast is bound-safe.
-    #[allow(clippy::cast_sign_loss)]
-    let mut ev = epoll_event {
-        events: EPOLLIN as u32,
-        u64: token,
-    };
-    // SAFETY: `epoll`, `fd` are valid open fds. `&raw mut ev` is a
-    // writable `*mut epoll_event`; the kernel reads the events/u64
-    // fields and does not retain the pointer past the syscall.
-    let n = unsafe {
-        libc::epoll_ctl(
-            epoll.as_raw_fd(),
-            EPOLL_CTL_ADD,
-            fd.as_raw_fd(),
-            &raw mut ev,
-        )
-    };
-    if n < 0 {
-        return Err(Error::last_os_error());
-    }
-    Ok(())
-}
-
-/// Block on `epoll_wait` until at least one fd is ready or the
-/// deadline elapses. Returns the count of populated slots in `out`.
-/// `EINTR` retries internally so signal delivery during the wait is
-/// invisible to the watcher.
-///
-/// `deadline = None` blocks indefinitely (`timeout_ms = -1`); `Some(d)`
-/// arms the kernel-side wait at a per-iteration millisecond timeout
-/// re-derived from `d.saturating_duration_since(Instant::now())`. The
-/// remaining budget is recomputed inside the retry loop so an
-/// `EINTR` re-entry does not re-arm the full original budget — the
-/// caller's deadline is total wall-clock budget, not per-syscall.
-///
-/// A `Some(d)` with `d <= Instant::now()` collapses to a zero timeout
-/// (non-blocking poll); `epoll_wait(2)` returns immediately with `0`
-/// fds ready if none are.
-pub(super) fn epoll_wait(
-    epoll: &OwnedFd,
-    out: &mut [epoll_event],
-    deadline: Option<Instant>,
-) -> io::Result<usize> {
-    let maxevents = c_int::try_from(out.len()).unwrap_or(c_int::MAX);
-    loop {
-        // Re-derive the remaining budget on every iteration so an
-        // `EINTR` retry resumes against wall-clock progress, not the
-        // original deadline budget. `None` keeps the indefinite block
-        // (`-1` per `epoll_wait(2)`).
-        let timeout_ms = match deadline {
-            None => -1,
-            Some(d) => duration_to_ms(d.saturating_duration_since(Instant::now())),
-        };
-        // SAFETY: `out` is a mutable slice of `epoll_event`; the kernel
-        // writes whole `epoll_event` values into the first `n` (returned)
-        // slots and treats the rest as undefined. The slice's start
-        // pointer is correctly aligned (epoll_event is `repr(packed)` on
-        // x86_64 but Vec/slice storage honours the type's layout).
-        let n =
-            unsafe { libc::epoll_wait(epoll.as_raw_fd(), out.as_mut_ptr(), maxevents, timeout_ms) };
-        if n >= 0 {
-            return Ok(usize::try_from(n).unwrap_or(0));
-        }
-        let e = Error::last_os_error();
-        if e.raw_os_error() == Some(libc::EINTR) {
-            continue;
-        }
-        return Err(e);
-    }
-}
-
-/// Convert a `Duration` to a millisecond timeout suitable for
-/// `epoll_wait`. Saturates at `c_int::MAX` (~24 days) — well above any
-/// engine-supplied deadline; saturation here is documentary, not
-/// load-bearing.
-fn duration_to_ms(d: Duration) -> c_int {
-    let ms = d.as_millis().min(c_int::MAX as u128);
-    c_int::try_from(ms).unwrap_or(c_int::MAX)
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        PROC_FD_PATH_BUF, duration_to_ms, epoll_create, epoll_wait, format_proc_fd_path,
-        write_decimal_u32,
+        PROC_FD_PATH_BUF, format_proc_fd_path, inotify_init, read_inotify, write_decimal_u32,
     };
     use std::time::{Duration, Instant};
-
-    #[test]
-    fn duration_to_ms_zero_yields_zero() {
-        assert_eq!(duration_to_ms(Duration::ZERO), 0);
-    }
-
-    #[test]
-    fn duration_to_ms_one_ms_rounds_down() {
-        assert_eq!(duration_to_ms(Duration::from_millis(1)), 1);
-        assert_eq!(duration_to_ms(Duration::from_micros(999)), 0);
-    }
 
     /// `u32::MAX = 4_294_967_295` is 10 digits — the boundary the
     /// scratch buffer in `write_decimal_u32` is sized for, and the
@@ -517,62 +333,24 @@ mod tests {
         let _ = super::inotify_rm_watch(&inotify_fd, wd);
     }
 
-    /// `epoll_wait` with a past deadline must non-blocking-poll: the
-    /// per-iteration `saturating_duration_since` inside the retry
-    /// loop clamps the elapsed budget to `Duration::ZERO`, which
-    /// `duration_to_ms` encodes as `0`. Empty epoll instance ⇒
-    /// kernel returns `0` ready fds immediately.
-    ///
-    /// Pins the deadline-honoured-across-`EINTR` conversion path. We
-    /// cannot reliably inject `EINTR` in a portable test; the
-    /// past-deadline + empty-instance path exercises the same
-    /// conversion every retry iteration uses, so any regression in
-    /// the per-iter recompute surfaces as a long block here.
+    /// [`read_inotify`] on an empty queue must return promptly: the
+    /// `IN_NONBLOCK` flag armed at [`inotify_init`] makes `read(2)`
+    /// return `EAGAIN` immediately, which the helper folds into
+    /// `Ok(0)`. Pins the non-blocking contract the trait surface
+    /// ([`crate::FsWatcher::drain_ready`]) relies on for the drain-
+    /// to-empty loop's termination — a regression that dropped
+    /// `IN_NONBLOCK` would deadlock here on a fresh inotify fd.
     #[test]
-    fn epoll_wait_past_deadline_returns_promptly() {
-        let epoll = epoll_create().expect("epoll");
-        let mut out = [libc::epoll_event { events: 0, u64: 0 }; 2];
-        let past = Instant::now()
-            .checked_sub(Duration::from_secs(1))
-            .expect("1s before Instant::now() is representable");
+    fn read_inotify_empty_queue_returns_promptly() {
+        let fd = inotify_init().expect("inotify_init");
+        let mut buf = [0u8; 1024];
         let start = Instant::now();
-        let n = epoll_wait(&epoll, &mut out, Some(past)).expect("wait ok");
+        let n = read_inotify(&fd, &mut buf).expect("read ok");
         let elapsed = start.elapsed();
-        assert_eq!(n, 0, "no fds were registered");
+        assert_eq!(n, 0, "no events were registered");
         assert!(
             elapsed < Duration::from_millis(100),
-            "past deadline must non-blocking-poll; took {elapsed:?}"
-        );
-    }
-
-    /// `epoll_wait` with a finite future deadline must honour it on
-    /// an empty instance: the wait blocks ≈ `deadline - now`, then
-    /// returns `0` ready fds. Companion to
-    /// `epoll_wait_past_deadline_returns_promptly` — exercises the
-    /// `Some(d)` branch with a non-zero remaining budget.
-    #[test]
-    fn epoll_wait_honours_future_deadline() {
-        let epoll = epoll_create().expect("epoll");
-        let mut out = [libc::epoll_event { events: 0, u64: 0 }; 2];
-        let budget = Duration::from_millis(60);
-        let start = Instant::now();
-        let n = epoll_wait(&epoll, &mut out, Some(start + budget)).expect("wait ok");
-        let elapsed = start.elapsed();
-        assert_eq!(n, 0, "no fds were registered");
-        // Lower bound is loose: `epoll_wait` rounds the budget down to
-        // whole milliseconds; the kernel may also return slightly
-        // early on some hosts, so we allow ~10ms slack.
-        assert!(
-            elapsed >= budget.saturating_sub(Duration::from_millis(10)),
-            "wait should approach deadline; took {elapsed:?} for {budget:?}"
-        );
-        // Upper bound: the wait must not significantly exceed the
-        // deadline. A regression in the per-iteration recompute (e.g.
-        // re-arming the original budget on `EINTR`) would show up as
-        // a multi-window overrun here.
-        assert!(
-            elapsed < budget + Duration::from_millis(150),
-            "wait should not significantly exceed deadline; took {elapsed:?} for {budget:?}"
+            "non-blocking read must return promptly; took {elapsed:?}"
         );
     }
 }
