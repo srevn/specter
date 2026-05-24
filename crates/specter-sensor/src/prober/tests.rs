@@ -8,18 +8,18 @@
 
 use super::pool::{ExpectedMap, WorkerProber, lock_expected, run_probe, run_worker};
 use super::walk::{probe_anchor_file, probe_descent, probe_subtree};
-use crate::Prober;
+use crate::{Prober, ProberResponseSender, SendError};
 use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, GlobPattern, Input,
-    LeafEntry, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProfileId,
+    LeafEntry, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileId,
     ProofObligation, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tempfile::TempDir;
@@ -32,6 +32,23 @@ fn seed(map: &ExpectedMap, p: ProfileId, c: u64) {
     map.lock()
         .unwrap()
         .insert(ProbeOwner::Profile(p), ProbeCorrelation::from(c));
+}
+
+/// Test-side [`ProberResponseSender`] — wraps a single `Sender<Input>`
+/// clone and forwards each `ProbeResponse` wrapped in
+/// `Input::ProbeResponse(_)`, mirroring the bin's `DriverProberSender`.
+/// Sender refcount is identical to production: one clone per sink, no
+/// per-worker fan-out.
+struct TestProberSink {
+    tx: Sender<Input>,
+}
+
+impl ProberResponseSender for TestProberSink {
+    fn send(&self, response: ProbeResponse) -> Result<(), SendError> {
+        self.tx
+            .send(Input::ProbeResponse(response))
+            .map_err(|_| SendError::Disconnected)
+    }
 }
 
 // ---------------------------------------------------------------- helpers
@@ -1353,26 +1370,24 @@ fn probe_descent_uses_hardcoded_override_config() {
 // ---------------------------------------------------------------- pool: run_worker
 
 /// Drive a synchronous run of `run_worker` until `rx` disconnects;
-/// returns every `ProbeResponse` written to `out`.
-///
-/// `shutdown_flag` is threaded explicitly so each test acknowledges
-/// the worker's new dependency. Tests that don't exercise the
-/// `out.send`-failure branch pass `&AtomicBool::new(false)`; the
-/// flag is never read on the happy path (`out.send` succeeds while
-/// `out_rx` is alive).
+/// returns every `ProbeResponse` shipped through the sink. The helper
+/// moves `out_tx` into a [`TestProberSink`] that survives `run_worker`,
+/// then explicitly drops the sink before draining `out_rx` so the
+/// receive loop terminates on `Disconnected` rather than blocking on
+/// a still-live sender.
 fn drain_worker_with<F>(
     rx: &Receiver<ProbeRequest>,
     out_tx: Sender<Input>,
     out_rx: &Receiver<Input>,
     expected: &ExpectedMap,
-    shutdown_flag: &AtomicBool,
     probe: F,
-) -> Vec<specter_core::ProbeResponse>
+) -> Vec<ProbeResponse>
 where
     F: Fn(&ProbeRequest) -> ProbeOutcome,
 {
-    run_worker(rx, &out_tx, expected, shutdown_flag, probe);
-    drop(out_tx);
+    let sink = TestProberSink { tx: out_tx };
+    run_worker(rx, &sink, expected, probe);
+    drop(sink);
     let mut responses = Vec::new();
     while let Ok(input) = out_rx.recv() {
         if let Input::ProbeResponse(r) = input {
@@ -1400,8 +1415,7 @@ fn run_worker_skips_when_correlation_does_not_match() {
 
     let probe_calls = Arc::new(AtomicUsize::new(0));
     let probe_calls_clone = Arc::clone(&probe_calls);
-    let flag = AtomicBool::new(false);
-    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, &flag, move |_req| {
+    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, move |_req| {
         probe_calls_clone.fetch_add(1, Ordering::SeqCst);
         ProbeOutcome::Vanished
     });
@@ -1427,8 +1441,7 @@ fn run_worker_runs_when_correlation_matches() {
     in_tx.send(req_anchor(p, 7)).unwrap();
     drop(in_tx);
 
-    let flag = AtomicBool::new(false);
-    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, &flag, |_| {
+    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, |_| {
         ProbeOutcome::Vanished
     });
     assert_eq!(responses.len(), 1);
@@ -1450,8 +1463,7 @@ fn run_worker_panic_in_probe_emits_failed_eio() {
     in_tx.send(req_anchor(p, 1)).unwrap();
     drop(in_tx);
 
-    let flag = AtomicBool::new(false);
-    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, &flag, |_| {
+    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, |_| {
         panic!("simulated probe panic");
     });
     assert_eq!(responses.len(), 1);
@@ -1476,8 +1488,7 @@ fn run_worker_panic_does_not_kill_loop() {
     drop(in_tx);
 
     let panic_for = ProbeOwner::Profile(pids[0]);
-    let flag = AtomicBool::new(false);
-    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, &flag, move |req| {
+    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, move |req| {
         assert!(req.owner() != panic_for, "simulated panic on first request");
         ProbeOutcome::Vanished
     });
@@ -1505,8 +1516,7 @@ fn run_worker_post_run_cleanup_removes_entry() {
     drop(in_tx);
 
     let inner = Arc::clone(&expected);
-    let flag = AtomicBool::new(false);
-    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, &flag, |_| {
+    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, |_| {
         ProbeOutcome::Vanished
     });
     assert_eq!(responses.len(), 1);
@@ -1529,10 +1539,9 @@ fn run_worker_post_run_cleanup_preserves_resubmit() {
 
     let inner = Arc::clone(&expected);
     let inner_for_probe = Arc::clone(&inner);
-    let flag = AtomicBool::new(false);
     // Inside the probe, simulate a fresh `submit(c2)` that overwrites
     // the expectation. Post-run cleanup must NOT clobber c2.
-    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, &flag, move |_req| {
+    let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, move |_req| {
         inner_for_probe
             .lock()
             .unwrap()
@@ -1546,19 +1555,16 @@ fn run_worker_post_run_cleanup_preserves_resubmit() {
     );
 }
 
-// ---------------------------------------------------------------- pool: run_worker shutdown branch
+// ---------------------------------------------------------------- pool: run_worker sink disconnect
 //
-// The `out.send` failure branch splits on `shutdown_flag`: `true` ⇒
-// `debug!` (clean teardown), `false` ⇒ `warn!` (mid-runtime engine
-// loss). Tracing isn't captured here, so the assertions cover the
-// *behavioural* contract — the worker exits cleanly under either
-// flag value — and the branch decision is exercised in both arms.
-// The bin's `App::run` shutdown sequence stores `true` before
-// dropping the driver; that ordering is asserted by the comment
-// block at the store site, not here.
+// The `out.send` failure path is a single branch — log at `debug!` and
+// unwind the worker loop. The bin owns whatever shutdown-cause logging
+// the operator needs (signal, panic, IPC error) at the appropriate
+// severity, on its own thread; the prober's exit is a structural
+// consequence, not a place that decides severity.
 
 #[test]
-fn run_worker_exits_cleanly_when_out_closed_and_flag_set() {
+fn run_worker_exits_cleanly_when_sink_disconnects() {
     let pids = fresh_profile_ids(1);
     let p = pids[0];
     let (in_tx, in_rx) = unbounded::<ProbeRequest>();
@@ -1571,35 +1577,10 @@ fn run_worker_exits_cleanly_when_out_closed_and_flag_set() {
     // Close the receiver before the worker tries to ship its response.
     drop(out_rx);
 
-    let flag = AtomicBool::new(true);
-    run_worker(&in_rx, &out_tx, &expected, &flag, |_| {
-        ProbeOutcome::Vanished
-    });
+    let sink = TestProberSink { tx: out_tx };
+    run_worker(&in_rx, &sink, &expected, |_| ProbeOutcome::Vanished);
     // Clean return from `run_worker` is the assertion — the worker
-    // observed `out.send` failure, took the shutdown branch, and exited.
-}
-
-#[test]
-fn run_worker_exits_cleanly_when_out_closed_and_flag_clear() {
-    // Mirror of the above with `flag = false`: the worker takes the
-    // mid-runtime branch (warn!) but still exits. Asserts the branch
-    // decision is symmetric — exit behaviour does not depend on the
-    // flag value, only the log severity does.
-    let pids = fresh_profile_ids(1);
-    let p = pids[0];
-    let (in_tx, in_rx) = unbounded::<ProbeRequest>();
-    let (out_tx, out_rx) = unbounded::<Input>();
-    let expected = fresh_expected();
-    seed(&expected, p, 1);
-
-    in_tx.send(req_anchor(p, 1)).unwrap();
-    drop(in_tx);
-    drop(out_rx);
-
-    let flag = AtomicBool::new(false);
-    run_worker(&in_rx, &out_tx, &expected, &flag, |_| {
-        ProbeOutcome::Vanished
-    });
+    // observed sink disconnect and exited.
 }
 
 // ---------------------------------------------------------------- pool: lock_expected
@@ -1641,18 +1622,19 @@ fn lock_expected_recovers_from_poisoned_mutex() {
 
 // ---------------------------------------------------------------- pool: WorkerProber
 
-/// Fresh shutdown flag for sibling tests that drive `WorkerProber`
-/// without exercising the bin's shutdown sequence — the flag never
-/// flips, so the worker exit logs are unobservable but the closure
-/// captures a real Arc, exactly as production does.
-fn fresh_shutdown_flag() -> Arc<AtomicBool> {
-    Arc::new(AtomicBool::new(false))
+/// One-call wrapper that builds the production-shaped sink the
+/// `WorkerProber` constructor expects. Sibling tests instantiate it
+/// inline (the bin's `DriverProberSender` is the structural twin), so
+/// keeping the helper local to the test module avoids a testkit-feature
+/// dependency for one type.
+fn sink(tx: Sender<Input>) -> Box<dyn ProberResponseSender> {
+    Box::new(TestProberSink { tx })
 }
 
 #[test]
 fn worker_prober_concurrency_zero_clamps_to_one() {
     let (out_tx, _out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&out_tx, 0, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(out_tx), 0).unwrap();
     let _ = prober.shutdown();
 }
 
@@ -1664,7 +1646,7 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
     std::fs::write(&path, b"x").unwrap();
 
     let (out_tx, out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&out_tx, 1, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(out_tx), 1).unwrap();
 
     let request = ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(pids[0]),
@@ -1694,7 +1676,7 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
 fn worker_prober_cancel_removes_expectation() {
     let pids = fresh_profile_ids(1);
     let (out_tx, _out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&out_tx, 1, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(out_tx), 1).unwrap();
 
     // Cancel without submit is a no-op — verify no panic.
     prober.cancel(ProbeOwner::Profile(pids[0]));
@@ -1706,7 +1688,7 @@ fn worker_prober_cancel_removes_expectation() {
 #[test]
 fn worker_prober_shutdown_returns_indexed_join_results() {
     let (out_tx, _out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&out_tx, 4, &fresh_shutdown_flag()).expect("spawn 4 workers");
+    let prober = WorkerProber::new(sink(out_tx), 4).expect("spawn 4 workers");
     let results = prober.shutdown();
     assert_eq!(results.len(), 4);
     let indices: Vec<usize> = results.iter().map(|(i, _)| *i).collect();
@@ -1730,7 +1712,7 @@ fn worker_prober_resubmit_after_cancel_runs() {
     std::fs::write(&path, b"x").unwrap();
 
     let (out_tx, out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&out_tx, 1, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(out_tx), 1).unwrap();
 
     // Submit c1, cancel, submit c2. Expect: c1 either runs or skips
     // (race), c2 runs deterministically (its expectation is fresh and
@@ -1763,7 +1745,7 @@ fn worker_prober_resubmit_after_cancel_runs() {
 #[test]
 fn worker_prober_concurrent_submit_is_safe() {
     let (out_tx, out_rx) = unbounded::<Input>();
-    let prober = Arc::new(WorkerProber::new(&out_tx, 2, &fresh_shutdown_flag()).unwrap());
+    let prober = Arc::new(WorkerProber::new(sink(out_tx), 2).unwrap());
     let tmp = Arc::new(TempDir::new().unwrap());
     let path = tmp.path().join("f.c");
     std::fs::write(&path, b"x").unwrap();

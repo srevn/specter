@@ -3,14 +3,13 @@
 //!
 //! # Lifecycle
 //!
-//! 1. [`WorkerProber::new(out, concurrency, shutdown_flag)`](WorkerProber::new)
+//! 1. [`WorkerProber::new(out, concurrency)`](WorkerProber::new)
 //!    spawns `concurrency.max(1)` threads named `sp-prober-{i}`. The
 //!    prefix is abbreviated (not the full `specter-prober-`) so the
 //!    name fits Linux's `TASK_COMM_LEN` (15 visible bytes + null) at
 //!    every legal `--probe-concurrency` value — preserving the index
 //!    in `/proc/<pid>/task/<tid>/comm`. Each worker holds clones of the
-//!    queue receiver, the `engine_inbound` sender, the expectation map,
-//!    and the bin's shutdown flag.
+//!    queue receiver, the response sender, and the expectation map.
 //! 2. The bin maps each `ProbeOp::Probe` from the engine to
 //!    [`Prober::submit`]; each `ProbeOp::Cancel` to
 //!    [`Prober::cancel`].
@@ -22,21 +21,13 @@
 //!
 //! # Shutdown observability
 //!
-//! The bin sets `shutdown_flag = true` before dropping the engine
-//! driver (see `App::run`'s shutdown sequence). The driver's drop
-//! releases `sensor_in_rx`, which makes the worker's `out.send`
-//! fail the next time it tries to ship a response. The worker reads
-//! `shutdown_flag` on that failure path to discriminate clean
-//! teardown (`debug!`) from a mid-runtime engine loss (`warn!`).
-//!
-//! The load uses `Ordering::Relaxed`: the flag is a log-severity
-//! hint, not a synchronisation barrier. Happens-before is already
-//! established by the channel's internal acquire-release on the
-//! send-failure path against the bin thread's `drop(driver)`, and
-//! the bin's `SeqCst` store on the flag is sequenced before that
-//! drop. Other bin readers (watcher, signal, config-watcher) use
-//! `SeqCst` because the flag gates a subsequent syscall; the
-//! prober's read gates nothing.
+//! The bin drops the engine driver as part of its shutdown sequence
+//! (see `App::run`). The drop releases the engine-side receiver, so
+//! the next [`ProberResponseSender::send`] from a worker returns
+//! [`SendError::Disconnected`]. The worker logs that exit at
+//! `debug!` and unwinds its loop — the bin owns whatever shutdown
+//! cause logging the operator needs, at the right severity, on its
+//! own thread.
 //!
 //! # Cancellation discipline
 //!
@@ -77,16 +68,13 @@
 //! `out.send` (which returns `SendError`, never panics) and the
 //! channel-disconnect path (the clean-shutdown signal).
 
-use crate::Prober;
 use crate::prober::walk::{probe_anchor_file, probe_descent, probe_subtree};
+use crate::{Prober, ProberResponseSender};
 use crossbeam::channel::{Receiver, Sender};
-use specter_core::{
-    Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse,
-};
+use specter_core::{ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse};
 use std::collections::BTreeMap;
 use std::io;
 use std::panic::AssertUnwindSafe;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
@@ -148,39 +136,36 @@ impl WorkerProber {
     /// Spawn the worker pool. `concurrency.max(1)` workers — a
     /// zero-worker pool would queue requests forever.
     ///
-    /// `shutdown_flag` is borrowed from the bin's shared
-    /// `Arc<AtomicBool>`; the constructor `Arc::clone`s once per
-    /// worker into the closure capture. The flag is read on the
-    /// `out.send` failure path to pick the log severity (see the
-    /// module's *Shutdown observability* section). Taking the Arc
-    /// by reference signals at the call site that the constructor
-    /// does not move the caller's handle — it only clones from it,
-    /// the same way `out` is taken by reference and cloned per
-    /// worker.
+    /// `out` is `Box<dyn>`-in / `Arc<dyn>`-internal: the constructor
+    /// owns the sink, converts it into an `Arc` once, and then
+    /// `Arc::clone`s per worker. The Box-shaped boundary makes the
+    /// ownership transfer truthful (no by-value-but-only-cloned
+    /// smell) while the trait-object form keeps the pool non-generic
+    /// at the type level — symmetric with the `Arc<dyn Prober>`
+    /// handle the bin clones onto its driver — and lets the
+    /// underlying transport (a crossbeam `Sender<Input>` in
+    /// production; a test wrapper in unit tests) stay invisible to
+    /// the worker loop.
     ///
     /// On any worker spawn failure (typically `EAGAIN` from the
     /// process-wide thread limit), drops the queue sender so
     /// already-spawned workers exit on `Disconnected`, joins them, and
     /// returns the underlying `io::Error`.
-    pub fn new(
-        out: &Sender<Input>,
-        concurrency: usize,
-        shutdown_flag: &Arc<AtomicBool>,
-    ) -> io::Result<Self> {
+    pub fn new(out: Box<dyn ProberResponseSender>, concurrency: usize) -> io::Result<Self> {
         let concurrency = concurrency.max(1);
         let (queue_tx, queue_rx) = crossbeam::channel::unbounded::<ProbeRequest>();
         let expected: ExpectedMap = Arc::new(Mutex::new(BTreeMap::new()));
+        let out: Arc<dyn ProberResponseSender> = Arc::from(out);
 
         let mut workers = Vec::with_capacity(concurrency);
         for i in 0..concurrency {
             let rx = queue_rx.clone();
-            let out_clone = out.clone();
+            let out_clone = Arc::clone(&out);
             let expected_clone = Arc::clone(&expected);
-            let shutdown_clone = Arc::clone(shutdown_flag);
             let spawned = thread::Builder::new()
                 .name(format!("sp-prober-{i}"))
                 .spawn(move || {
-                    run_worker(&rx, &out_clone, &expected_clone, &shutdown_clone, run_probe);
+                    run_worker(&rx, &*out_clone, &expected_clone, run_probe);
                 });
             match spawned {
                 Ok(h) => workers.push(h),
@@ -301,15 +286,10 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
 /// concurrent expectation-map writes, etc. The closure is invoked from
 /// inside `catch_unwind(AssertUnwindSafe(...))`, so a test-injected
 /// panic is recovered exactly as a production panic would be.
-///
-/// `shutdown_flag` is read on the `out.send` failure path only — see
-/// the module's *Shutdown observability* section for the asymmetric
-/// `Ordering::Relaxed` choice.
 pub(super) fn run_worker<F>(
     rx: &Receiver<ProbeRequest>,
-    out: &Sender<Input>,
+    out: &dyn ProberResponseSender,
     expected: &ExpectedMap,
-    shutdown_flag: &AtomicBool,
     probe: F,
 ) where
     F: Fn(&ProbeRequest) -> ProbeOutcome,
@@ -355,12 +335,8 @@ pub(super) fn run_worker<F>(
             correlation,
             outcome,
         };
-        if out.send(Input::ProbeResponse(response)).is_err() {
-            if shutdown_flag.load(Ordering::Relaxed) {
-                tracing::debug!("prober out channel closed during shutdown; worker exiting");
-            } else {
-                tracing::warn!("prober out channel closed mid-runtime; worker exiting");
-            }
+        if out.send(response).is_err() {
+            tracing::debug!("prober response sink disconnected; worker exiting");
             return;
         }
     }

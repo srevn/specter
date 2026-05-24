@@ -33,8 +33,8 @@ use specter_config::{Config, DaemonArgs, FileMeta};
 use specter_core::{Input, WatchOp};
 use specter_engine::Engine;
 use specter_sensor::{
-    ConfigWatcher, FsWatcher, WakeHandle, WatcherEvent, WorkerProber, default_config_watcher,
-    default_watcher,
+    ConfigWatcher, FsWatcher, ProbeResponse, ProberResponseSender, SendError, WakeHandle,
+    WatcherEvent, WorkerProber, default_config_watcher, default_watcher,
 };
 use std::io;
 use std::num::NonZeroUsize;
@@ -170,17 +170,19 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     let shutdown_flag = Arc::new(AtomicBool::new(false));
 
     // Prober (workers spawn inside `WorkerProber::new`). The constructor
-    // borrows the watcher bundle's `sensor_in_tx` and clones it once
-    // per worker internally; the borrow ends here, leaving the bundle
-    // free to move into the watcher thread below.
+    // owns the [`DriverProberSender`] — a `Box<dyn ProberResponseSender>`
+    // that wraps a single `sensor_in_tx` clone and routes responses into
+    // the engine's `Input::ProbeResponse(_)` channel. The Box becomes
+    // the pool's internal `Arc<dyn>` (one fan-out point for every
+    // worker), leaving the channel's sender refcount at 2 (bin's wrapper
+    // + watcher thread) and shrinking the disconnect surface.
     let probe_concurrency = args
         .probe_concurrency
         .map_or(specter_sensor::DEFAULT_CONCURRENCY, NonZeroUsize::get);
-    let prober = match WorkerProber::new(
-        &chans.watcher.sensor_in_tx,
-        probe_concurrency,
-        &shutdown_flag,
-    ) {
+    let prober_sink: Box<dyn ProberResponseSender> = Box::new(DriverProberSender {
+        tx: chans.watcher.sensor_in_tx.clone(),
+    });
+    let prober = match WorkerProber::new(prober_sink, probe_concurrency) {
         Ok(p) => Arc::new(p),
         Err(e) => {
             tracing::error!(?e, "prober init failed");
@@ -429,25 +431,16 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     // Shutdown sequence — broadcast intent before tearing the driver
     // down, so every consumer of `shutdown_flag` observes `true`
     // synchronously with the channel disconnects that drive its exit.
-    // The wake handles held by `App` are still the linchpin for the
-    // watchers' blocking syscalls; the flag is the load-bearing hint
-    // for the prober workers' `out.send`-failure log severity.
+    // The flag now gates the watcher / config-watcher / IPC server /
+    // per-conn worker loops only; the prober no longer reads it (its
+    // workers exit on the `Disconnected` they observe from
+    // `drop(driver)` directly).
     //
-    // Order is load-bearing on two edges:
-    //
-    // 1. **Flag before `drop(driver)`.** `drop(driver)` releases
-    //    `sensor_in_rx`; the next `out.send` from a worker mid-probe
-    //    fails synchronously. The worker reads `shutdown_flag` on
-    //    that path to discriminate clean teardown (`debug!`) from
-    //    mid-runtime engine loss (`warn!`). Publishing the flag
-    //    first means the channel-internal acquire on the worker side
-    //    observes a flag already set to `true`.
-    //
-    // 2. **Flag before wake.** The watcher / config-watcher loops
-    //    check `shutdown_flag` at the *top* of their bodies. A wake
-    //    before the store would race the loop's flag read against
-    //    the `wait`-return path; flag-first guarantees the next
-    //    iteration sees `true` and exits cleanly.
+    // **Flag before wake.** The watcher / config-watcher loops check
+    // `shutdown_flag` at the *top* of their bodies. A wake before
+    // the store would race the loop's flag read against the
+    // `wait`-return path; flag-first guarantees the next iteration
+    // sees `true` and exits cleanly.
     shutdown_flag.store(true, Ordering::SeqCst);
     drop(driver); // releases driver's clones (engine, prober, wake_handle, txs).
     // Drop any unused listener (initial-attach-break path) before the
@@ -531,6 +524,29 @@ pub(crate) struct CliLogOverrides {
     pub level: Option<specter_config::LogLevel>,
     pub destination: Option<specter_config::LogDestination>,
     pub path: Option<std::path::PathBuf>,
+}
+
+/// Bin's [`ProberResponseSender`] impl — wraps a single
+/// `Sender<Input>` clone and routes [`ProbeResponse`]s into the
+/// engine's `Input::ProbeResponse(_)` channel. The sensor crate does
+/// not name [`Input`] (it would couple worker code to the engine's
+/// inbound vocabulary); the wrap happens here, the one place the
+/// channel's transport identity is known.
+///
+/// One instance per process — boxed inside an `Arc` so every prober
+/// worker shares the single underlying transport. Drops when the
+/// pool's last worker exits (the workers' `Arc<dyn>` clones are the
+/// only refs once `App::run` returns).
+struct DriverProberSender {
+    tx: crossbeam::channel::Sender<Input>,
+}
+
+impl ProberResponseSender for DriverProberSender {
+    fn send(&self, response: ProbeResponse) -> Result<(), SendError> {
+        self.tx
+            .send(Input::ProbeResponse(response))
+            .map_err(|_| SendError::Disconnected)
+    }
 }
 
 /// Spawn the watcher thread. Owns the [`DefaultWatcher`] for its

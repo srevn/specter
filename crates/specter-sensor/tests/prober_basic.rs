@@ -3,17 +3,16 @@
 
 #![cfg(unix)]
 
-use crossbeam::channel::unbounded;
+use crossbeam::channel::{Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
     EntryKind, Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProfileId,
     ProofObligation, ScanConfig,
 };
-use specter_sensor::{Prober, WorkerProber};
+use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -22,13 +21,23 @@ fn fresh_profile_id() -> ProfileId {
     sm.insert(())
 }
 
-/// Fresh shutdown flag for integration tests that don't exercise the
-/// bin's shutdown sequence — the flag stays `false` for the duration
-/// of the test, so the worker's `out.send`-failure branch reads it as
-/// the mid-runtime path. Behavioural assertions don't depend on the
-/// flag value.
-fn fresh_shutdown_flag() -> Arc<AtomicBool> {
-    Arc::new(AtomicBool::new(false))
+/// Mirror of the bin's `DriverProberSender` — wraps a single
+/// `Sender<Input>` clone and rewraps each `ProbeResponse` as
+/// `Input::ProbeResponse(_)` on the wire.
+struct TestProberSink {
+    tx: Sender<Input>,
+}
+
+impl ProberResponseSender for TestProberSink {
+    fn send(&self, response: ProbeResponse) -> Result<(), SendError> {
+        self.tx
+            .send(Input::ProbeResponse(response))
+            .map_err(|_| SendError::Disconnected)
+    }
+}
+
+fn sink(tx: Sender<Input>) -> Box<dyn ProberResponseSender> {
+    Box::new(TestProberSink { tx })
 }
 
 fn anchor_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
@@ -69,7 +78,7 @@ fn anchor_file_round_trip_emits_anchor_ok_with_leaf() {
     std::fs::write(&path, b"hello").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 1, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(tx), 1).unwrap();
 
     let p = fresh_profile_id();
     prober.submit(anchor_request(p, path, 1));
@@ -94,7 +103,7 @@ fn subtree_round_trip_emits_subtree_ok_with_children() {
     std::fs::write(tmp.path().join("sub/b.c"), b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 1, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(tx), 1).unwrap();
 
     let p = fresh_profile_id();
     prober.submit(subtree_request(p, tmp.path().to_path_buf(), 7));
@@ -125,7 +134,7 @@ fn anchor_file_missing_yields_vanished() {
     let path = tmp.path().join("nope");
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 1, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(tx), 1).unwrap();
     let p = fresh_profile_id();
     prober.submit(anchor_request(p, path, 1));
 
@@ -141,7 +150,7 @@ fn subtree_missing_yields_vanished() {
     let path = tmp.path().join("nope");
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 1, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(tx), 1).unwrap();
     let p = fresh_profile_id();
     prober.submit(subtree_request(p, path, 1));
 
@@ -156,7 +165,7 @@ fn anchor_file_on_directory_yields_vanished() {
     let tmp = TempDir::new().unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 1, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(tx), 1).unwrap();
     let p = fresh_profile_id();
     prober.submit(anchor_request(p, tmp.path().to_path_buf(), 1));
 
@@ -173,7 +182,7 @@ fn subtree_on_file_yields_vanished() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 1, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(tx), 1).unwrap();
     let p = fresh_profile_id();
     prober.submit(subtree_request(p, path, 1));
 
@@ -190,7 +199,7 @@ fn correlation_is_echoed_unchanged() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 1, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(tx), 1).unwrap();
     let p = fresh_profile_id();
     prober.submit(anchor_request(p, path, 99));
 

@@ -6,13 +6,12 @@
 
 #![cfg(unix)]
 
-use crossbeam::channel::unbounded;
+use crossbeam::channel::{Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{Input, ProbeCorrelation, ProbeOwner, ProbeRequest, ProfileId};
-use specter_sensor::{Prober, WorkerProber};
+use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 use tempfile::TempDir;
 
@@ -21,11 +20,23 @@ fn fresh_profile_id() -> ProfileId {
     sm.insert(())
 }
 
-/// Fresh shutdown flag for tests that don't drive the bin's shutdown
-/// sequence — the flag stays `false`; behavioural assertions don't
-/// depend on the value.
-fn fresh_shutdown_flag() -> Arc<AtomicBool> {
-    Arc::new(AtomicBool::new(false))
+/// Mirror of the bin's `DriverProberSender` — wraps a single
+/// `Sender<Input>` clone and rewraps each `ProbeResponse` as
+/// `Input::ProbeResponse(_)` on the wire.
+struct TestProberSink {
+    tx: Sender<Input>,
+}
+
+impl ProberResponseSender for TestProberSink {
+    fn send(&self, response: ProbeResponse) -> Result<(), SendError> {
+        self.tx
+            .send(Input::ProbeResponse(response))
+            .map_err(|_| SendError::Disconnected)
+    }
+}
+
+fn sink(tx: Sender<Input>) -> Box<dyn ProberResponseSender> {
+    Box::new(TestProberSink { tx })
 }
 
 fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
@@ -39,7 +50,7 @@ fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> Pro
 #[test]
 fn shutdown_with_no_pending_probes_returns_ok_per_worker() {
     let (tx, _rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 4, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(tx), 4).unwrap();
     let results = prober.shutdown();
     assert_eq!(results.len(), 4);
     for (i, r) in results {
@@ -54,7 +65,7 @@ fn shutdown_after_completed_probe_returns_ok() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(&tx, 2, &fresh_shutdown_flag()).unwrap();
+    let prober = WorkerProber::new(sink(tx), 2).unwrap();
     let p = fresh_profile_id();
     prober.submit(mk_request(p, path, 1));
     let _ = rx.recv_timeout(Duration::from_secs(2)).expect("response");
@@ -73,7 +84,7 @@ fn drop_without_shutdown_terminates_workers_via_channel_disconnect() {
 
     let (tx, rx) = unbounded::<Input>();
     {
-        let prober = WorkerProber::new(&tx, 1, &fresh_shutdown_flag()).unwrap();
+        let prober = WorkerProber::new(sink(tx), 1).unwrap();
         let p = fresh_profile_id();
         prober.submit(mk_request(p, path, 1));
         // Wait for response before dropping — workers process the
@@ -83,9 +94,9 @@ fn drop_without_shutdown_terminates_workers_via_channel_disconnect() {
         // see Disconnected on next recv → exit on their own. We don't
         // observe their JoinHandle (detached).
     }
-    // After drop, any further sends to the engine_inbound channel
-    // (via cloned Senders held by detached workers) won't happen —
-    // workers have exited. The receiver should see no pending
-    // messages.
+    // After drop, the prober's `Arc<dyn ProberResponseSender>` clones
+    // have all dropped (workers exited), releasing the only
+    // `Sender<Input>` clone inside the sink. The receiver observes
+    // `Disconnected`; either way, no spurious post-drop messages.
     assert!(rx.try_recv().is_err(), "no spurious post-drop messages");
 }

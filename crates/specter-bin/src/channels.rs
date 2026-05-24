@@ -157,9 +157,11 @@ pub struct EngineSide {
 
 /// Receivers + sender clones the watcher thread owns.
 ///
-/// `sensor_in_tx` is also borrowed by `WorkerProber::new` at startup;
-/// the prober pool clones it internally per worker, so the borrow
-/// ends before this bundle moves into the watcher thread.
+/// `sensor_in_tx` is also cloned at startup into the bin's
+/// `DriverProberSender` wrapper — the single transport the prober
+/// pool's `Arc<dyn ProberResponseSender>` boxes. That clone ends
+/// before this bundle moves into the watcher thread, leaving the
+/// channel's sender refcount at 2 in steady state (wrapper + watcher).
 #[derive(Debug)]
 #[must_use]
 pub struct WatcherSide {

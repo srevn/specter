@@ -28,8 +28,11 @@ use std::time::Instant;
 // path. `OverflowScope` lives in `core` because the engine consumes it
 // as `Input::SensorOverflow.scope`, but the sensor → bin call site never
 // touches `core` directly. The `pub use` doubles as the in-module import
-// the trait + `WatcherEvent` definitions below need.
-pub use specter_core::{OverflowScope, WatchFailure};
+// the trait + `WatcherEvent` definitions below need. `ProbeResponse` is
+// the payload [`ProberResponseSender::send`] carries — re-exported so
+// implementors don't have to reach across the `specter_core` crate
+// boundary to name the type.
+pub use specter_core::{OverflowScope, ProbeResponse, WatchFailure};
 
 /// Sensor-side extension on [`WatchFailure`] that classifies an
 /// `io::Error` from a watch-install syscall.
@@ -288,18 +291,23 @@ impl Clone for Box<dyn WakeHandle> {
 /// owns the prior-meta-known state, so the watcher stays a minimal
 /// kernel-event pump.
 ///
-/// # Bin loop pattern
+/// # Caller loop pattern
 ///
 /// ```ignore
 /// loop {
-///     if shutdown_flag.load(SeqCst) { return; }
+///     if should_exit() { return; }
 ///     match watcher.wait(None) {
 ///         Ok(true)  => { let _ = config_event_tx.try_send(()); }
-///         Ok(false) => { /* wake; loop and re-check shutdown */ }
+///         Ok(false) => { /* wake; loop and re-check exit condition */ }
 ///         Err(e)    => { tracing::error!(?e, "config-watcher exit"); return; }
 ///     }
 /// }
 /// ```
+///
+/// The exit condition is the caller's choice (an `AtomicBool` flag,
+/// a separate shutdown channel, a poisoned mutex — whatever the
+/// caller's shutdown primitive is); the trait surface does not
+/// prescribe one.
 pub trait ConfigWatcher: Send {
     /// Block until: (a) a kernel event fires on the config file or its
     /// parent directory (returns `Ok(true)`), (b) `deadline` elapses
@@ -379,8 +387,8 @@ pub trait ConfigWatcher: Send {
 /// loses the cancel and runs the stale correlation).
 pub trait Prober: Send + Sync {
     /// Queue a probe request. Returns immediately. The work item runs
-    /// on a worker thread; the response is delivered via the
-    /// `Sender<Input>` captured at constructor time.
+    /// on a worker thread; the resulting [`ProbeResponse`] ships to the
+    /// [`ProberResponseSender`] wired in at constructor time.
     fn submit(&self, req: ProbeRequest);
 
     /// Best-effort cancel of any *queued* probe for `owner`. In-flight
@@ -390,6 +398,61 @@ pub trait Prober: Send + Sync {
     /// per-correlation, not per-owner.
     fn cancel(&self, owner: ProbeOwner);
 }
+
+/// Sink for probe responses produced by a [`Prober`] implementation.
+///
+/// The sensor crate owns *what* it delivers ([`ProbeResponse`]); the
+/// bin owns *where* it lands (the engine's `Input::ProbeResponse(_)`
+/// channel). This trait is the seam: implementors translate the
+/// sensor's response vocabulary into whatever transport the bin holds.
+///
+/// # Threading
+///
+/// `Send + Sync + 'static` so the pool can hold a single
+/// `Arc<dyn ProberResponseSender>` and share it across every worker
+/// thread without re-cloning the underlying transport per worker. The
+/// inner transport (a crossbeam `Sender`, an in-memory queue, a
+/// channel-multiplexer) is the implementor's choice; the trait
+/// constrains only the wire vocabulary.
+///
+/// # Semantics
+///
+/// Fire-and-forget. A successful [`send`](Self::send) leaves no further
+/// obligation on the caller; an [`Err`](SendError) means the consumer
+/// is gone (the engine driver dropped its receiver) and the calling
+/// worker should exit its loop. The trait does not carry the rejected
+/// payload back on error — workers do not retry, the bin owns
+/// shutdown-cause logging at the appropriate severity, and dropping
+/// the response on the floor is the documented contract once the
+/// receiver disappears.
+pub trait ProberResponseSender: Send + Sync + 'static {
+    /// Deliver one probe response. Returns `Ok(())` on enqueue;
+    /// `Err(SendError::Disconnected)` if the consumer is gone — at
+    /// which point the caller (a worker) exits its loop.
+    fn send(&self, response: ProbeResponse) -> Result<(), SendError>;
+}
+
+/// Sender-side error vocabulary for [`ProberResponseSender::send`].
+///
+/// One variant today; reserved as an `enum` rather than `()` so future
+/// transports (bounded backpressure, batch submit) can extend the
+/// vocabulary without churning every worker call site.
+#[derive(Debug)]
+pub enum SendError {
+    /// The consumer dropped its receiver. No further `send` will
+    /// succeed on this sender; the calling worker should exit.
+    Disconnected,
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disconnected => f.write_str("prober response consumer disconnected"),
+        }
+    }
+}
+
+impl std::error::Error for SendError {}
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 mod kqueue;
