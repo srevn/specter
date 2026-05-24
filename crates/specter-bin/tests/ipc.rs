@@ -1004,6 +1004,120 @@ fn tail_json_output_round_trips_via_serde() {
     assert!(exit.success(), "clean daemon exit; got {exit:?}");
 }
 
+// ---------- ack-ordering: subscribe_ack precedes every diagnostic ----
+
+/// `subscribe_ack` MUST be the first JSON line on the wire after a
+/// Subscribe verb, even when a fire-triggering touch races
+/// concurrently with the subscribe write. Pins the
+/// add-before-ack ordering in the driver's Subscribe arm
+/// (`driver/ipc.rs` calls `broker.add_subscriber` *before*
+/// `try_send`ing the `ResponsePayload::SubscribeAck`, so the
+/// broker holds the subscriber by the time the per-conn thread
+/// receives the ack on `reply_rx` and writes it to the client —
+/// no diagnostic emitted between the add and the client's first
+/// read can leak past registration).
+///
+/// **Fence, not fuzzer.** Today the pipeline's settle window plus
+/// the per-conn thread's blocking `reply_rx.recv_timeout` make the
+/// ack-first property hold trivially: the per-conn thread writes
+/// the ack before entering its event-streaming loop, so dispatch
+/// cannot push diag bytes ahead of the ack. The *structural*
+/// invariant is what this test fences for: a future refactor that
+/// reversed the add/ack order, or one that let per-subscriber
+/// dispatch run ahead of the ack write, would break this fence.
+/// The post-D5 reshape (mio migration Phase 3) dissolves the
+/// per-conn thread into the driver's reactor; the load-bearing
+/// property reverses from "thread serializes ack-then-stream" to
+/// "ack bytes enqueue into `write_queue` before the conn's role
+/// flips `Reqs → Sub`, so per-subscriber dispatch cannot push diag
+/// bytes ahead of the ack." This test bounds both shapes.
+///
+/// Per-Sub Subscribe (`name = "orderwatch"`) so the post-ack wire
+/// carries only events naming that Sub: ambient Profile-keyed
+/// diagnostics (e.g. teardown `ProfileReaped`) cannot pollute the
+/// assertion.
+///
+/// **Settle sized for parallel-test load.** The settle window
+/// (300ms) is comfortably larger than the worst-case subscribe
+/// handshake under heavy `nextest` parallelism. A smaller window
+/// (e.g. the 50ms used by the per-touch happy-path tests) lets
+/// the touch's burst fire before the broker has registered the
+/// subscriber under contention — the diagnostic is then
+/// dispatched to no one and the post-ack assertion below would
+/// fail, masking the B3 fence the test is meant to express.
+#[test]
+fn subscribe_ack_precedes_first_diagnostic_on_wire() {
+    let sb = Sandbox::new();
+    let anchor = watched_anchor(&sb);
+    fs::write(&sb.cfg, one_watch_config("orderwatch", &anchor, 300)).expect("write config");
+    let daemon = spawn_specter(&sb, std::iter::empty::<&str>());
+    assert!(
+        wait_for_socket(&sb.socket, STARTUP_DEADLINE),
+        "daemon never bound its socket",
+    );
+    assert!(
+        wait_for_log(&sb.log, |s| s.contains("sub attached"), STARTUP_DEADLINE).is_some(),
+        "daemon never logged the initial attach",
+    );
+
+    let stream = UnixStream::connect(&sb.socket).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(8)))
+        .expect("set_read_timeout");
+    let mut writer = stream.try_clone().expect("try_clone for writer");
+    let mut reader = BufReader::new(stream);
+
+    // Spawn the race-window toucher BEFORE the subscribe write. The
+    // thread is scheduled concurrently; the OS may run it before
+    // the subscribe lands on the daemon, during its processing, or
+    // after the ack returns. B3 says the ack must reach the wire
+    // first in every case.
+    let toucher = thread::spawn(move || touch_unique(&anchor, "race"));
+
+    writer
+        .write_all(br#"{"op":"subscribe","name":"orderwatch"}"#)
+        .expect("write subscribe");
+    writer.write_all(b"\n").expect("write newline");
+
+    let mut first = String::new();
+    reader.read_line(&mut first).expect("read first line");
+    let first_v: serde_json::Value =
+        serde_json::from_str(first.trim_end()).expect("first line is valid JSON");
+    assert_eq!(
+        first_v.get("kind").and_then(serde_json::Value::as_str),
+        Some("subscribe_ack"),
+        "B3 ack-ordering: first line on the wire MUST be subscribe_ack; got {first}",
+    );
+
+    // Next line MUST be SubFired. The per-Sub name filter on the
+    // broker drops every other variant (Profile-keyed diagnostics
+    // never match a name filter), and our setup emits no other
+    // per-Sub event in the post-ack window (SubAttached fired
+    // pre-connect; no detach/rebind/effect-complete races are in
+    // play). A back-pressure `_missed` cannot appear either: the
+    // channel is drained synchronously line-by-line.
+    let mut second = String::new();
+    reader
+        .read_line(&mut second)
+        .expect("read second line (SubFired from racing touch)");
+    let second_v: serde_json::Value =
+        serde_json::from_str(second.trim_end()).expect("second line is valid JSON");
+    assert_eq!(
+        second_v.get("diag").and_then(serde_json::Value::as_str),
+        Some("SubFired"),
+        "second wire line must be SubFired (proves the subscriber \
+         was registered ahead of the burst's emission — the \
+         observable shadow of the B3 fence); got {second}",
+    );
+
+    let _ = toucher.join();
+    drop(reader);
+    drop(writer);
+
+    let exit = terminate(daemon);
+    assert!(exit.success(), "clean daemon exit; got {exit:?}");
+}
+
 // ---------- wait --kind fire happy path ------------------------------
 
 /// `wait <name> --kind fire` against an attached watch + an
