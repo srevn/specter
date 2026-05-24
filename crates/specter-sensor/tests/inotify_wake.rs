@@ -1,117 +1,90 @@
-//! Cross-thread wake-handle correctness — `wake()` interrupts an
-//! in-flight `poll_until`, concurrent wakes coalesce in the eventfd
-//! counter, and a wake after the watcher has been dropped is a no-op
-//! (Arc keeps the eventfd alive). Mirror of `kqueue_wake.rs`. Linux
-//! only.
+//! Non-blocking-drain semantics on the post-Phase-1 inotify watcher.
+//!
+//! The trait contract: [`FsWatcher::drain_ready`] is non-blocking,
+//! [`AsFd::as_fd`] is the readiness substrate, and the caller blocks
+//! via a reactor (mio::Poll) on the fd. Linux twin of
+//! `kqueue_wake.rs` — pins the same contract against the
+//! kernel-backed inotify fd.
 
+// `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a
+// `Vec` while preserving its allocation across drain-loop iterations.
+#![allow(clippy::iter_with_drain)]
 #![cfg(target_os = "linux")]
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
+use slotmap::SlotMap;
+use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, InotifyWatcher, WatcherEvent};
+use std::os::fd::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
+use tempfile::TempDir;
 
+/// `drain_ready` on a watcher with no pending kernel records returns
+/// `Ok(0)` promptly without blocking. The trait's non-blocking
+/// contract: the caller blocks via a reactor on `AsFd::as_fd`, not
+/// inside the watcher.
 #[test]
-fn wake_interrupts_long_poll_until() {
+fn drain_ready_returns_promptly_on_empty_queue() {
     let mut w = InotifyWatcher::new().unwrap();
-    let wake = w.wake_handle();
-
-    // Spawn the wake-issuing thread first; the main thread blocks in
-    // `poll_until` and gets interrupted.
-    let waker = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(80));
-        wake.wake();
-    });
-
-    let mut events: Vec<WatcherEvent> = Vec::new();
+    let mut buf: Vec<WatcherEvent> = Vec::new();
     let start = Instant::now();
-    let n = w
-        .poll_until(Some(Instant::now() + Duration::from_secs(10)), &mut events)
-        .unwrap();
+    let n = w.drain_ready(&mut buf).expect("drain ok");
     let elapsed = start.elapsed();
-
-    waker.join().unwrap();
-
-    assert_eq!(n, 0, "wake produces no fs events");
+    assert_eq!(n, 0, "empty queue must produce no events");
+    assert!(buf.is_empty());
     assert!(
-        elapsed < Duration::from_secs(2),
-        "wake should interrupt within ~80ms; took {elapsed:?}"
+        elapsed < Duration::from_millis(50),
+        "drain_ready must not block; took {elapsed:?}",
     );
-
     drop(w);
 }
 
+/// A `mio::Poll` registered on the watcher's `AsFd::as_fd()` observes
+/// the canonical "register → poll → drain → idle" sequence the
+/// production driver exercises against a real inotify fd. Linux twin of
+/// `kqueue_wake::poll_then_drain_returns_kernel_events`.
 #[test]
-fn multiple_concurrent_wakes_coalesce() {
+fn poll_then_drain_returns_kernel_events() {
+    let tmp = TempDir::new().unwrap();
     let mut w = InotifyWatcher::new().unwrap();
-    let wake = w.wake_handle();
+    let mut sm = SlotMap::<ResourceId, ()>::with_key();
+    let r = sm.insert(());
+    w.watch(r, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
+        .expect("watch dir ok");
 
-    let mut threads = Vec::new();
-    for _ in 0..4 {
-        let h = wake.clone();
-        threads.push(std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(60));
-            h.wake();
-        }));
+    let mut poll = Poll::new().unwrap();
+    let raw = w.as_fd().as_raw_fd();
+    poll.registry()
+        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
+        .expect("register");
+
+    // Trigger a kernel event.
+    std::fs::write(tmp.path().join("a"), "x").unwrap();
+
+    // Block on the reactor; drain on every readable edge until the
+    // expected event lands or the deadline elapses.
+    let mut events = Events::with_capacity(4);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut saw_event = false;
+    let mut buf: Vec<WatcherEvent> = Vec::new();
+    while Instant::now() < deadline && !saw_event {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(100));
+        poll.poll(&mut events, Some(timeout)).expect("poll");
+        buf.clear();
+        w.drain_ready(&mut buf).expect("drain");
+        for ev in buf.drain(..) {
+            if let WatcherEvent::Fs { resource, event } = ev
+                && resource == r
+                && event == FsEvent::StructureChanged
+            {
+                saw_event = true;
+            }
+        }
     }
-
-    let mut events: Vec<WatcherEvent> = Vec::new();
-    let n = w
-        .poll_until(Some(Instant::now() + Duration::from_secs(2)), &mut events)
-        .unwrap();
-
-    for t in threads {
-        t.join().unwrap();
-    }
-
-    // The eventfd counter accumulates concurrent writes; a single
-    // `eventfd_read` consumes the entire counter atomically. The
-    // watcher emits no fs events on a wake-only return; `n == 0`.
-    assert_eq!(n, 0, "concurrent wakes coalesce → 0 fs events");
-
-    drop(w);
-}
-
-#[test]
-fn wake_after_drop_does_not_panic() {
-    let watcher = InotifyWatcher::new().unwrap();
-    let wake = watcher.wake_handle();
-
-    // Drop the watcher; the wake handle's `Arc<OwnedFd>` keeps the
-    // eventfd alive, so `wake()` still succeeds at the syscall level.
-    // No consumer drains the resulting counter — kernel reaps when the
-    // last Arc clone drops below.
-    drop(watcher);
-    wake.wake();
-    wake.wake(); // Idempotent at the kernel level.
-
-    drop(wake); // Final Arc drop reaps the eventfd.
-}
-
-#[test]
-fn wake_handle_clone_box_is_independent() {
-    let w = InotifyWatcher::new().unwrap();
-    let h1 = w.wake_handle();
-    let h2 = h1.clone();
-    drop(h1);
-    h2.wake(); // Still alive — h2 holds its own Arc clone.
-}
-
-#[test]
-fn poll_until_returns_promptly_with_zero_deadline() {
-    let mut w = InotifyWatcher::new().unwrap();
-    let mut events: Vec<WatcherEvent> = Vec::new();
-
-    let start = Instant::now();
-    // Past deadline → non-blocking poll.
-    let past = start
-        .checked_sub(Duration::from_secs(1))
-        .expect("1s before Instant::now() is representable");
-    let _ = w.poll_until(Some(past), &mut events);
-    let elapsed = start.elapsed();
     assert!(
-        elapsed < Duration::from_millis(100),
-        "past deadline should yield non-blocking poll; took {elapsed:?}"
+        saw_event,
+        "registered reactor must observe StructureChanged"
     );
-    assert_eq!(events.len(), 0);
-
     drop(w);
 }

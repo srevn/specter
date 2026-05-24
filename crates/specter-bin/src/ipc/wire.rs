@@ -14,12 +14,13 @@
 //! # Deserialize policy
 //!
 //! [`WireDiagnostic`] is **two-way**: the daemon serializes for the
-//! broker fan-out (the [`From<(&Diagnostic, SystemTime)>`] projection
-//! at write time), and operator clients (`specter tail`, `specter
-//! wait`) deserialize the streamed JSON lines back into the typed
-//! enum. Every wire enum it transitively reaches carries both
-//! `Serialize` and `Deserialize`; round-trip is structural over the
-//! `#[serde]` tags.
+//! per-conn fan-out (the [`From<(&Diagnostic, SystemTime)>`] projection
+//! at write time, called once per dispatch from
+//! [`crate::driver::hub::DriverHub::dispatch_to_subscribers`]), and
+//! operator clients (`specter tail`, `specter wait`) deserialize the
+//! streamed JSON lines back into the typed enum. Every wire enum it
+//! transitively reaches carries both `Serialize` and `Deserialize`;
+//! round-trip is structural over the `#[serde]` tags.
 //!
 //! Adding a [`WireDiagnostic`] variant is a paired edit: declare it,
 //! write its [`From<(&Diagnostic, SystemTime)>`] arm, add the matching
@@ -108,40 +109,8 @@ impl std::fmt::Display for WireTime {
     }
 }
 
-/// Broker-to-subscriber envelope.
-///
-/// Not [`Serialize`]: the per-connection thread projects
-/// `&BrokerEvent → WireDiagnostic` at write time, so wire-string
-/// allocation never blocks the broker's dispatch lock.
-///
-/// - [`Self::Diag`] carries a cloned [`Diagnostic`] paired with the
-///   wall-clock instant captured once per `forward()` fanout.
-///   The same `at` reaches every subscriber for one engine
-///   emission — operators correlating events across `tail` clients
-///   see identical timestamps for the same underlying event.
-/// - [`Self::Missed`] is the broker's back-pressure marker, flushed
-///   lazily on the next successful send after one or more dropped
-///   `try_send`s.
-#[derive(Clone, Debug)]
-pub(crate) enum BrokerEvent {
-    Diag { diag: Diagnostic, at: SystemTime },
-    Missed { count: u32, at: SystemTime },
-}
-
-impl From<&BrokerEvent> for WireDiagnostic {
-    fn from(ev: &BrokerEvent) -> Self {
-        match ev {
-            BrokerEvent::Diag { diag, at } => Self::from((diag, *at)),
-            BrokerEvent::Missed { count, at } => Self::Missed {
-                at: WireTime::from(*at),
-                count: *count,
-            },
-        }
-    }
-}
-
 /// JSON-line projection of `specter_core::Diagnostic` plus the
-/// broker's `_missed` back-pressure marker.
+/// fan-out path's `_missed` back-pressure marker.
 ///
 /// Internally tagged on `diag`; every variant's `at` field
 /// serializes immediately after the tag.
@@ -411,11 +380,15 @@ pub(crate) enum WireDiagnostic {
         helper: WireBurstHelper,
         observed: WireProfileStateDiscriminant,
     },
-    /// Broker back-pressure marker — not derived from any
-    /// `specter_core::Diagnostic`. The underscore-prefix protects
-    /// against collision with any future core variant named
-    /// `Missed`; `#[serde(rename = "_missed")]` overrides the
-    /// PascalCase default.
+    /// Fan-out back-pressure marker — not derived from any
+    /// `specter_core::Diagnostic`. Emitted by
+    /// [`crate::driver::hub::DriverHub::dispatch_to_subscribers`]
+    /// when a wedged subscriber's queue overflowed and the dispatch
+    /// loop had to drop diag lines; the marker tells the operator
+    /// how many were skipped before the next reachable line. The
+    /// underscore-prefix protects against collision with any future
+    /// core variant named `Missed`; `#[serde(rename = "_missed")]`
+    /// overrides the PascalCase default.
     #[serde(rename = "_missed")]
     Missed {
         at: WireTime,
@@ -1244,13 +1217,17 @@ impl From<EffectScope> for WireEffectScope {
 ///
 /// `AutoReload` projects to operator-facing `auto` — the engine-internal
 /// `AutoReload` name carries the "settle-expiry observed drift"
-/// mechanism that doesn't belong in the operator vocabulary.
+/// mechanism that doesn't belong in the operator vocabulary. `Startup`
+/// projects verbatim and surfaces when boot-time TOCTOU drift drove the
+/// reload (the daemon's first config-handling action was an apply on
+/// freshly-detected drift, not a steady-state operator pulse).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireReloadTrigger {
     Sighup,
     Auto,
     Ipc,
+    Startup,
 }
 
 impl From<crate::driver::ReloadTrigger> for WireReloadTrigger {
@@ -1260,6 +1237,7 @@ impl From<crate::driver::ReloadTrigger> for WireReloadTrigger {
             R::Sighup => Self::Sighup,
             R::AutoReload => Self::Auto,
             R::Ipc => Self::Ipc,
+            R::Startup => Self::Startup,
         }
     }
 }

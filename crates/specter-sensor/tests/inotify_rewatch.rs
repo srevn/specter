@@ -15,12 +15,28 @@
 #![allow(clippy::iter_with_drain)]
 #![cfg(target_os = "linux")]
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, InotifyWatcher, WatcherEvent};
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// Build a `mio::Poll` registered on the watcher's inotify fd. The
+/// helper centralises the "register `as_fd()` for READABLE" boilerplate
+/// the drain loops below share — `drain_ready` is non-blocking by
+/// trait, so the caller blocks via the reactor.
+fn poll_for(w: &InotifyWatcher) -> Poll {
+    let poll = Poll::new().expect("mio Poll");
+    let raw = w.as_fd().as_raw_fd();
+    poll.registry()
+        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
+        .expect("register inotify fd");
+    poll
+}
 
 /// Push every [`WatcherEvent::Fs`] in `buf` into `out`. Inotify can emit
 /// [`WatcherEvent::Overflow`]; ignore it for these tests (we never push
@@ -40,11 +56,19 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
     let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
         buf.clear();
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
         collect_fs(&mut buf, &mut out);
         if out.iter().any(&pred) {
             return out;
@@ -54,10 +78,22 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
 }
 
 fn drain_for(w: &mut InotifyWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)> {
+    let deadline = Instant::now() + dur;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
-    let _ = w.poll_until(Some(Instant::now() + dur), &mut buf);
-    let mut out = Vec::with_capacity(buf.len());
-    collect_fs(&mut buf, &mut out);
+    let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
+    while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
+        buf.clear();
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
+        collect_fs(&mut buf, &mut out);
+    }
     out
 }
 
@@ -283,9 +319,9 @@ fn rewatch_after_unknown_cache_with_kind_flip_installs_observed_mask() {
     // inode (kernel queues IN_DELETE_SELF + IN_IGNORED on the prior
     // wd); `create_dir` installs a fresh Dir inode at `anchor`.
     //
-    // No `poll_until` between these steps and the rewatch below —
+    // No `drain_ready` between these steps and the rewatch below —
     // draining would consume the IN_IGNORED, the `IN_IGNORED` arm in
-    // `poll_once` would clear `by_resource[r]`, and the next watch
+    // `drain_ready` would clear `by_resource[r]`, and the next watch
     // would route through fresh-watch (not rewatch). The bug only
     // bites when rewatch re-enters with the Unknown cache intact.
     drop(listener);

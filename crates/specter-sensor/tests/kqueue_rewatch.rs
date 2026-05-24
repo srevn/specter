@@ -9,12 +9,27 @@
 
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// Build a `mio::Poll` registered on the watcher's kqueue fd. The
+/// drain helpers block via the reactor; `drain_ready` is non-blocking
+/// by trait.
+fn poll_for(w: &KqueueWatcher) -> Poll {
+    let poll = Poll::new().expect("mio Poll");
+    let raw = w.as_fd().as_raw_fd();
+    poll.registry()
+        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
+        .expect("register kqueue fd");
+    poll
+}
 
 /// Push every [`WatcherEvent::Fs`] in `buf` into `out`; `panic!` on
 /// [`WatcherEvent::Overflow`] (kqueue must not emit it under v1).
@@ -30,17 +45,27 @@ fn collect_fs(buf: &mut Vec<WatcherEvent>, out: &mut Vec<(ResourceId, FsEvent)>)
 }
 
 /// Drain at least one event matching `pred` or hit `overall` deadline.
+/// Spurious wakes drain to `Ok(0)` and the loop re-blocks on the next
+/// `poll`.
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     w: &mut KqueueWatcher,
     pred: F,
     overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
     let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
         buf.clear();
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
         collect_fs(&mut buf, &mut out);
         if out.iter().any(&pred) {
             return out;
@@ -49,11 +74,27 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     out
 }
 
+/// Drain every `Fs` event the watcher emits over the next `dur`.
+/// Bounded-time drain — the negative-assertion tests below rely on
+/// returning the full window's events so callers can `assert!(!.iter()
+/// .any(...))`.
 fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)> {
+    let deadline = Instant::now() + dur;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
-    let _ = w.poll_until(Some(Instant::now() + dur), &mut buf);
-    let mut out = Vec::with_capacity(buf.len());
-    collect_fs(&mut buf, &mut out);
+    let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
+    while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
+        buf.clear();
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
+        collect_fs(&mut buf, &mut out);
+    }
     out
 }
 

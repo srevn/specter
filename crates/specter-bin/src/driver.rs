@@ -1,31 +1,34 @@
-//! Engine driver — the bin's main-thread loop, split across six
-//! focused submodules with the spine here.
+//! Engine driver — the bin's main-thread loop, split across focused
+//! submodules with the spine here.
 //!
 //! [`EngineDriver`] owns the [`Engine`], the [`Loader`], a
 //! [`state::DriverState`] (process-level facts: start instants +
-//! reload counters + socket path), a [`broker::Broker`] (operator-IPC
-//! diagnostic fan-out), an operator-runtime disable override set, the
-//! engine-side channel bundle, the prober [`Arc`] clone and a
-//! wake-handle clone. This module holds the struct and its lifecycle
-//! ([`EngineDriver::new`], [`EngineDriver::run_initial_attach`],
-//! [`EngineDriver::run`]) plus the cancel-first shutdown drain
-//! (`begin_shutdown`). The load-bearing work is next to it:
+//! reload counters + socket path), an operator-runtime disable
+//! override set, the actuator-coordination channels, the prober
+//! [`Arc`] clone, the deferred-input queue, and the
+//! [`hub::DriverHub`] that owns the mio reactor surface. This module
+//! holds the struct and its lifecycle ([`EngineDriver::new`],
+//! [`EngineDriver::run_initial_attach`], [`EngineDriver::run`]) plus
+//! the cancel-first shutdown drain (`begin_shutdown`). The
+//! load-bearing work lives next to it:
 //!
 //! - [`tick`] — one pass of the drain order (sensor → timers → reload
 //!   → config-settle → effects → ipc → block). The hot loop; new
 //!   inbound-path work lands there.
 //! - [`reload`] — the SIGHUP + auto-reload settle pipeline.
 //! - [`forward`] — ships a `StepOutput` downstream, maps a
-//!   `Diagnostic` to tracing, and fans diagnostics out to live
-//!   IPC subscribers via [`broker::Broker::dispatch`].
+//!   `Diagnostic` to tracing, and fans diagnostics out to live IPC
+//!   subscribers via [`hub::DriverHub::dispatch_to_subscribers`].
 //! - [`state`] — driver-owned process facts (startup instants,
 //!   reload counters, socket path) consumed by the IPC `status`
 //!   surface.
-//! - [`broker`] — diagnostic fan-out to operator-IPC subscribers.
-//!   Plain struct on this thread; no `Arc<Mutex>`.
-//! - [`ipc`] — drains operator-IPC requests from the bundle's
-//!   `ipc_request_rx` and dispatches them through the broker, the
-//!   reload pipeline, or the `status` projection.
+//! - [`hub`] — owner of the mio reactor surface (watcher,
+//!   config-watcher, signal pipe, waker, listener, per-conn map).
+//! - [`conns`] — per-conn state (`ConnState` + `ConnRole`) stored in
+//!   the hub's conn map.
+//! - [`ipc`] — drains operator-IPC requests off accepted conns and
+//!   dispatches them through the hub fan-out, the reload pipeline,
+//!   or the `status` projection.
 //!
 //! `run_initial_attach` walks `loader.current_config` in source order,
 //! attaching each Sub / Promoter and forwarding the resulting output
@@ -33,28 +36,29 @@
 //! wraps [`EngineDriver::tick`] until shutdown. All file I/O is on
 //! this thread — no Mutex.
 
-mod broker;
+mod conns;
 mod forward;
+mod hub;
 mod ipc;
 mod reload;
 mod state;
 mod tick;
 
 use crate::app::CliLogOverrides;
-use crate::channels::EngineSide;
+use crate::channels::ActuatorIO;
 use crate::loader::Loader;
 use crate::observability::ObservabilityHandle;
-use broker::Broker;
 use compact_str::CompactString;
 use specter_core::Input;
 use specter_engine::Engine;
-use specter_sensor::{Prober, WakeHandle};
-use std::collections::BTreeSet;
+use specter_sensor::{DefaultWatcher, FsWatcher, Prober};
+use std::collections::{BTreeSet, VecDeque};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
+pub(crate) use hub::DriverHub;
 pub(crate) use state::{DriverState, ReloadTrigger};
 
 /// Reason the driver loop exited. Returned from [`EngineDriver::run`].
@@ -66,8 +70,8 @@ pub(crate) use state::{DriverState, ReloadTrigger};
 /// without breaking the [`EngineDriver::run`] return type.
 #[derive(Debug, Eq, PartialEq)]
 pub enum ExitReason {
-    /// `shutdown_engine_rx` fired (operator-driven, normal path), OR
-    /// every input channel disconnected (upstream thread crash; v1
+    /// SIGINT / SIGTERM dispatched (operator-driven, normal path), OR
+    /// a downstream channel disconnected (actuator thread crash; v1
     /// treats both as terminal-graceful).
     Shutdown,
 }
@@ -87,7 +91,21 @@ pub enum TickOutcome {
 }
 
 /// Engine driver — see module rustdoc.
-pub struct EngineDriver {
+///
+/// **Generic over `W: FsWatcher`** so tests can substitute the
+/// sensor crate's `MockFsWatcher` (whose socketpair-backed `AsFd`
+/// surface lets reactor-integration tests run against a real
+/// `mio::Poll`). Production uses the platform [`DefaultWatcher`];
+/// the type-parameter default keeps `app.rs` and call sites free of
+/// `<DefaultWatcher>` boilerplate (inference fills the type from the
+/// `DriverHub<W>` passed to [`Self::new`]).
+///
+/// **Field order is the drop order.** [`Engine`] FIRST so the probe
+/// tripwire (`specter_core::probe`) runs against a fully-armed
+/// engine until [`Self::begin_shutdown`] has drained it; [`hub::DriverHub`]
+/// LAST so the mio reactor fds (watcher, listener, signal pipe,
+/// waker) outlive every channel-sender clone the driver holds.
+pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     engine: Engine,
     loader: Loader,
     config_path: PathBuf,
@@ -96,7 +114,7 @@ pub struct EngineDriver {
     /// the process lifetime (`CLI > config > default`).
     cli_log_overrides: CliLogOverrides,
     /// Subscriber handle for runtime updates (`set_level`,
-    /// `reopen_file`). Held here so `handle_reload` can fire both on
+    /// `reopen_file`). Held here so `dispatch_reload` can fire both on
     /// SIGHUP without going through the loader.
     obs_handle: ObservabilityHandle,
     /// Process-level facts (startup instants + reload counters +
@@ -105,22 +123,18 @@ pub struct EngineDriver {
     /// method guarantees the counter fields move together. Consumed
     /// by the IPC `status` surface.
     driver_state: DriverState,
-    sides: EngineSide,
     prober: Arc<dyn Prober>,
-    wake_handle: Box<dyn WakeHandle>,
-    /// Auto-reload settle deadline — armed by the config-event drain
-    /// (the watcher thread's `try_send` or a test rig's manual
-    /// `try_send`), expires after [`CONFIG_SETTLE`] of quiet, at
-    /// which point the driver runs the
-    /// lstat-vs-`loader.config_meta` filter and (on drift) calls
-    /// [`Self::handle_reload`]. Reset to `None` on expiry and
-    /// re-armed per pulse (settle resets, so sustained bursts defer
-    /// the reload until the edits actually settle).
+    /// Auto-reload settle deadline — armed by the config-event drain,
+    /// expires after [`CONFIG_SETTLE`] of quiet, at which point the
+    /// driver runs the lstat-vs-`loader.config_meta` filter and (on
+    /// drift) calls [`Self::dispatch_reload`]. Reset to `None` on
+    /// expiry and re-armed per pulse (settle resets, so sustained
+    /// bursts defer the reload until the edits actually settle).
     ///
     /// Two consumers:
-    /// - The [`Self::tick`] timeout math feeds the deadline into
-    ///   `Select::ready_timeout` so the driver wakes precisely when
-    ///   the window expires, not on the next sensor / effect pulse.
+    /// - The [`Self::tick`] block-timeout math feeds the deadline into
+    ///   `mio::Poll::poll`'s timeout so the driver wakes precisely
+    ///   when the window expires.
     /// - [`Self::apply_config_settle_expiry`] gates the lstat call
     ///   on `now >= deadline` so the engine thread never lstats
     ///   before the settle window has elapsed.
@@ -134,16 +148,55 @@ pub struct EngineDriver {
     /// (which also filter the next reload's diff so a runtime-disabled
     /// Sub is not re-attached).
     disabled_runtime: BTreeSet<CompactString>,
-    /// Diagnostic fan-out to operator IPC subscribers. Plain struct,
-    /// no `Arc<Mutex>`: every mutation runs on this thread, both
-    /// through `forward()` (dispatch) and the IPC drain's
-    /// `Subscribe` arm (`add_subscriber`). The two access sites
-    /// borrow disjoint `self` fields under the 2024 edition's
-    /// split-borrow rules.
-    broker: Broker,
+    /// Driver-side actuator-coordination channels — effects pipe +
+    /// the three shutdown handshake legs. Wired in by [`Self::new`]
+    /// from `App::run`'s [`ActuatorIO::pair`] allocation;
+    /// [`Self::dispatch_signal_with_exit_fn`] pulses
+    /// `shutdown_actuator_tx` / `hard_shutdown_actuator_tx` and
+    /// waits on `hard_shutdown_done_rx`. [`Self::forward`] dispatches
+    /// every emitted `EffectOp` through `effects_tx`.
+    actuator_io: ActuatorIO,
+    /// Timestamp of the first SIGINT / SIGTERM the driver observed.
+    /// `None` until the first signal lands; the next SIGINT / SIGTERM
+    /// within [`crate::signals::HARD_EXIT_WINDOW`] escalates to
+    /// the hard-exit path. Outside the window, the field re-arms
+    /// with the new timestamp.
+    first_term: Option<Instant>,
+    /// Replay queue for engine [`Input`]s the driver wants the next
+    /// tick to process *before* the mio Poll re-blocks.
+    ///
+    /// Lifecycle: `forward()`'s inline `apply_watch_ops` returns the
+    /// rejected ops; each is queued here as
+    /// `Input::WatchOpRejected { resource, failure }`. The next
+    /// tick's `replay_deferred_inputs` (called at the top of `tick`,
+    /// before any fresh mio drain) runs `engine.step` on each in
+    /// FIFO order. When the queue is non-empty the block timeout
+    /// collapses to `Duration::ZERO` so the replay isn't deferred
+    /// behind a long wait.
+    ///
+    /// The queue is unbounded by type but soft-capped in
+    /// `replay_deferred_inputs` (debug-asserted against a sane
+    /// upper bound) so pathological engine emission shape that
+    /// produced unbounded rejections would fail loud rather than
+    /// silently grow.
+    deferred_inputs: VecDeque<Input>,
+    /// The mio reactor surface — kqueue/inotify watcher,
+    /// config-watcher, signal pipe, listener, per-conn map, and
+    /// the `Arc<Waker>` shared with the prober + actuator
+    /// wake-bearing senders. Owned by the driver for the lifetime
+    /// of the daemon; constructed once in `App::run` and threaded
+    /// through [`Self::new`].
+    ///
+    /// Field-order LAST so the listener / signal pipe / watcher fd
+    /// drops fire after every channel-sender clone the driver holds
+    /// has released — a stray send-to-disconnected from a midway
+    /// drop can't fire on a partially-torn-down Hub. See
+    /// [`hub::DriverHub`]'s module rustdoc for the Hub-internal
+    /// field drop order.
+    hub: DriverHub<W>,
 }
 
-impl std::fmt::Debug for EngineDriver {
+impl<W: FsWatcher> std::fmt::Debug for EngineDriver<W> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EngineDriver")
             .field("loader", &self.loader)
@@ -152,22 +205,30 @@ impl std::fmt::Debug for EngineDriver {
             .field("obs_handle", &self.obs_handle)
             .field("driver_state", &self.driver_state)
             .field("disabled_runtime", &self.disabled_runtime)
+            .field("hub", &self.hub)
             .finish_non_exhaustive()
     }
 }
 
-impl EngineDriver {
+impl<W: FsWatcher> EngineDriver<W> {
+    /// Build the driver from preconstructed pieces. The [`DriverHub`] is
+    /// constructed in `App::run` because it must own the [`mio::Waker`]
+    /// the prober + actuator wrappers clone before the driver gets
+    /// built; passing it in here keeps the construction order honest
+    /// (Hub fixes the Waker identity → wrappers clone it → wrappers
+    /// thread into the prober pool + actuator thread → driver holds
+    /// the Hub).
     #[must_use]
-    pub fn new(
+    pub(crate) fn new(
         engine: Engine,
         loader: Loader,
         config_path: PathBuf,
         socket_path: PathBuf,
         cli_log_overrides: CliLogOverrides,
         obs_handle: ObservabilityHandle,
-        sides: EngineSide,
         prober: Arc<dyn Prober>,
-        wake_handle: Box<dyn WakeHandle>,
+        actuator_io: ActuatorIO,
+        hub: DriverHub<W>,
     ) -> Self {
         Self {
             engine,
@@ -176,12 +237,13 @@ impl EngineDriver {
             cli_log_overrides,
             obs_handle,
             driver_state: DriverState::new(socket_path),
-            sides,
             prober,
-            wake_handle,
             config_settle_until: None,
             disabled_runtime: BTreeSet::new(),
-            broker: Broker::new(),
+            actuator_io,
+            first_term: None,
+            deferred_inputs: VecDeque::new(),
+            hub,
         }
     }
 
@@ -268,6 +330,70 @@ impl EngineDriver {
         }
     }
 
+    /// Inline dispatch for a single signal value drained off the
+    /// Hub's `TOKEN_SIGNAL` arm.
+    ///
+    /// Production wrapper: delegates to
+    /// [`Self::dispatch_signal_with_exit_fn`] with the real
+    /// `std::process::exit` as the escalation closure. Tests call the
+    /// `_with_exit_fn` variant directly with a recording closure so
+    /// the test process survives the assertion.
+    ///
+    /// Returns [`ControlFlow::Continue`] for SIGHUP (the reload either
+    /// applies or fails — both are non-terminal); [`ControlFlow::Break`]
+    /// for the first SIGINT/SIGTERM (shutdown initiated) and the
+    /// second-within-window (hard-exit escalation, only reachable
+    /// from tests since production's `exit_fn` does not return).
+    ///
+    /// Called from [`tick`]'s signal-drain pass: the Hub's
+    /// `TOKEN_SIGNAL` arm hands every queued signum to this method in
+    /// arrival order. No cross-thread coordination, no global-handler
+    /// racing — the dispatch runs on the same thread that owns the
+    /// engine.
+    pub(crate) fn dispatch_signal(&mut self, sig: i32, now: Instant) -> ControlFlow<()> {
+        self.dispatch_signal_with_exit_fn(sig, now, |code| std::process::exit(code))
+    }
+
+    /// Test-friendly variant of [`Self::dispatch_signal`] that takes
+    /// an injectable `exit_fn` closure in place of
+    /// [`std::process::exit`]. Production calls this with
+    /// `|code| std::process::exit(code)`; tests pass a closure that
+    /// records the requested exit code so the test runner survives
+    /// the hard-exit branch.
+    ///
+    /// The pure signal-classification work runs in
+    /// [`dispatch_signal_inner`] against `&mut self.first_term` and
+    /// `&self.actuator_io`; this method then resolves the action's
+    /// outer effect (the SIGHUP arm calls
+    /// [`Self::dispatch_reload`]; the SIGINT/SIGTERM arms return
+    /// `Break`). Splitting the work this way lets the inner function
+    /// take field references that don't conflict with the `&mut self`
+    /// the reload arm needs — the borrow checker is satisfied
+    /// because the two borrows are disjoint in time.
+    pub(crate) fn dispatch_signal_with_exit_fn<F: FnOnce(i32)>(
+        &mut self,
+        sig: i32,
+        now: Instant,
+        exit_fn: F,
+    ) -> ControlFlow<()> {
+        let action =
+            dispatch_signal_inner(sig, now, &mut self.first_term, &self.actuator_io, exit_fn);
+        match action {
+            SignalAction::None => ControlFlow::Continue(()),
+            SignalAction::Reload => {
+                // SIGHUP routes through the same shared apply path
+                // every other reload source uses. `dispatch_reload`'s
+                // own error handling logs and continues; the only way
+                // out of `Continue` here is the post-apply `forward`
+                // observing shutdown mid-stream — the `Break` is
+                // propagated through this method's return so the
+                // outer tick can resolve to `Shutdown`.
+                self.dispatch_reload(state::ReloadTrigger::Sighup, now)
+            }
+            SignalAction::Shutdown | SignalAction::HardExit => ControlFlow::Break(()),
+        }
+    }
+
     /// Cancel-first shutdown teardown, run once when [`Self::tick`]
     /// resolves to shutdown (operator signal or sensor disconnect).
     ///
@@ -304,5 +430,323 @@ impl EngineDriver {
     }
 }
 
+/// Outcome of [`dispatch_signal_inner`]: what side effect the caller
+/// owes the engine driver after the inner function's classification
+/// + actuator-coord pulse has run.
+///
+/// The pure inner function returns this discriminator; the wrapping
+/// method ([`EngineDriver::dispatch_signal_with_exit_fn`]) then runs
+/// the lifecycle effect tied to each arm. This split keeps the inner
+/// function pure (only touches `first_term` + `actuator_io`) so unit
+/// tests can exercise every branch without constructing a full
+/// [`EngineDriver`].
+#[derive(Debug, Eq, PartialEq)]
+enum SignalAction {
+    /// Unknown signal. The dispatch caller returns
+    /// [`ControlFlow::Continue`].
+    None,
+    /// SIGHUP. The dispatch caller runs `dispatch_reload` with
+    /// [`state::ReloadTrigger::Sighup`].
+    Reload,
+    /// First SIGINT/SIGTERM observed (or first after the
+    /// [`crate::signals::HARD_EXIT_WINDOW`] expired). The inner
+    /// function has already armed `first_term`, logged the
+    /// observation, and pulsed `shutdown_actuator_tx`. The dispatch
+    /// caller returns [`ControlFlow::Break`].
+    Shutdown,
+    /// Second SIGINT/SIGTERM within
+    /// [`crate::signals::HARD_EXIT_WINDOW`]. The inner function
+    /// pre-empted the actuator's grace, waited on the confirm pulse,
+    /// and called `exit_fn(HARD_EXIT_CODE)`. Production's `exit_fn`
+    /// does not return; this variant is only reachable from tests
+    /// passing a recording closure. The dispatch caller returns
+    /// [`ControlFlow::Break`] so the test's outer loop can observe
+    /// the shutdown intent.
+    HardExit,
+}
+
+/// Pure dispatch core for [`EngineDriver::dispatch_signal_with_exit_fn`].
+///
+/// Separated from the method so the borrow checker can hold
+/// `&mut first_term` + `&io` simultaneously without conflicting with
+/// the `&mut self` that the SIGHUP arm's outer effect
+/// ([`EngineDriver::dispatch_reload`]) needs — the inner function
+/// returns its action discriminator, then drops every borrow before
+/// the caller takes the `&mut self` it needs for the reload step.
+fn dispatch_signal_inner<F: FnOnce(i32)>(
+    sig: i32,
+    now: Instant,
+    first_term: &mut Option<Instant>,
+    io: &ActuatorIO,
+    exit_fn: F,
+) -> SignalAction {
+    use crate::signals::{HARD_EXIT_CODE, HARD_EXIT_WINDOW, HARD_SHUTDOWN_CONFIRM_TIMEOUT};
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM};
+    match sig {
+        SIGHUP => {
+            tracing::info!("SIGHUP — config reload");
+            SignalAction::Reload
+        }
+        SIGINT | SIGTERM => {
+            if let Some(prev) = *first_term
+                && now.duration_since(prev) < HARD_EXIT_WINDOW
+            {
+                // Synchronous stderr: `exit_fn` typically calls
+                // `std::process::exit`, which skips destructors —
+                // the tracing-appender's worker thread dies with the
+                // process. `eprintln!` lands the line before exit; a
+                // `tracing::*` event might be silently dropped on a
+                // stalled appender.
+                eprintln!(
+                    "specter: second termination within {}s — exiting hard",
+                    HARD_EXIT_WINDOW.as_secs(),
+                );
+                // Pre-empt the actuator's SIGTERM grace so it
+                // SIGKILLs running children before we abort the
+                // process — otherwise stubborn children survive as
+                // PID-1 orphans.
+                let _ = io.hard_shutdown_actuator_tx.try_send(());
+                // Wait for the actuator's "phase 3 SIGKILL fanout
+                // complete" pulse. Three terminal paths, all OK:
+                //   - `Ok(())` — confirmation received; the kernel
+                //     has been told to kill every running child.
+                //   - `Err(Disconnected)` — actuator thread already
+                //     exited (sender dropped); kernel reap pending,
+                //     parent safe to die.
+                //   - `Err(Timeout)` — fallback bound for a wedged
+                //     actuator; parent dies, kernel reaps on exit.
+                let _ = io
+                    .hard_shutdown_done_rx
+                    .recv_timeout(HARD_SHUTDOWN_CONFIRM_TIMEOUT);
+                exit_fn(HARD_EXIT_CODE);
+                SignalAction::HardExit
+            } else {
+                *first_term = Some(now);
+                tracing::info!(signal = sig, "termination signal — shutdown initiated");
+                let _ = io.shutdown_actuator_tx.try_send(());
+                SignalAction::Shutdown
+            }
+        }
+        _ => SignalAction::None,
+    }
+}
+
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod dispatch_signal_inner_tests {
+    use super::*;
+    use crossbeam::channel::{Receiver, Sender, bounded};
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
+    use specter_core::EffectOp;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// Fixture: fresh [`ActuatorIO`] paired with the receiver halves
+    /// the test asserts against. The actuator-thread side is held by
+    /// the test rather than a real actuator so each pulse the inner
+    /// function fires is locally observable.
+    struct ActuatorFixture {
+        io: ActuatorIO,
+        // Held so the sender side stays connected; tests don't read
+        // it (no test sends an effect), but its receiver lifetime
+        // anchors the channel.
+        _effects_rx: Receiver<EffectOp>,
+        shutdown_actuator_rx: Receiver<()>,
+        hard_shutdown_actuator_rx: Receiver<()>,
+        // Held so the receiver clone on the ActuatorIO can observe
+        // `Ok(())` when the test plants a pulse. The actuator-side
+        // sender lives here so the test stays in control of pulse
+        // delivery.
+        hard_shutdown_done_tx: Sender<()>,
+    }
+
+    fn fixture() -> ActuatorFixture {
+        let (effects_tx, effects_rx) = bounded::<EffectOp>(1024);
+        let (shutdown_actuator_tx, shutdown_actuator_rx) = bounded::<()>(1);
+        let (hard_shutdown_actuator_tx, hard_shutdown_actuator_rx) = bounded::<()>(1);
+        let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded::<()>(1);
+        ActuatorFixture {
+            io: ActuatorIO {
+                effects_tx,
+                shutdown_actuator_tx,
+                hard_shutdown_actuator_tx,
+                hard_shutdown_done_rx,
+            },
+            _effects_rx: effects_rx,
+            shutdown_actuator_rx,
+            hard_shutdown_actuator_rx,
+            hard_shutdown_done_tx,
+        }
+    }
+
+    /// Recording closure for the injectable `exit_fn` — the test
+    /// asserts the code recorded here matches `HARD_EXIT_CODE`. The
+    /// `Mutex` guards against multi-threaded tests; the
+    /// inner function runs synchronously so there is no contention.
+    struct ExitRecorder {
+        code: Mutex<Option<i32>>,
+    }
+
+    impl ExitRecorder {
+        fn new() -> Self {
+            Self {
+                code: Mutex::new(None),
+            }
+        }
+        fn record(&self, code: i32) {
+            *self.code.lock().expect("ExitRecorder mutex poisoned") = Some(code);
+        }
+        fn taken(&self) -> Option<i32> {
+            *self.code.lock().expect("ExitRecorder mutex poisoned")
+        }
+    }
+
+    /// SIGHUP returns `Reload` without touching the actuator-coord
+    /// channels — the inner function defers the apply effect to the
+    /// caller; the only side effect inside the inner function is the
+    /// `tracing::info!` log.
+    #[test]
+    fn sighup_returns_reload_without_pulsing_actuator() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        let mut first_term: Option<Instant> = None;
+        let action =
+            dispatch_signal_inner(SIGHUP, Instant::now(), &mut first_term, &fixture.io, |c| {
+                recorder.record(c);
+            });
+        assert_eq!(action, SignalAction::Reload);
+        assert!(first_term.is_none(), "SIGHUP must not arm first_term");
+        assert!(fixture.shutdown_actuator_rx.is_empty());
+        assert!(fixture.hard_shutdown_actuator_rx.is_empty());
+        assert_eq!(recorder.taken(), None, "exit_fn not invoked on SIGHUP");
+    }
+
+    /// First SIGTERM: arms `first_term`, pulses
+    /// `shutdown_actuator_tx`, returns `Shutdown`. Does NOT pulse
+    /// `hard_shutdown_actuator_tx` or invoke `exit_fn`.
+    #[test]
+    fn first_sigterm_arms_first_term_and_pulses_shutdown() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        let mut first_term: Option<Instant> = None;
+        let now = Instant::now();
+        let action = dispatch_signal_inner(SIGTERM, now, &mut first_term, &fixture.io, |c| {
+            recorder.record(c);
+        });
+        assert_eq!(action, SignalAction::Shutdown);
+        assert_eq!(first_term, Some(now));
+        assert!(
+            !fixture.shutdown_actuator_rx.is_empty(),
+            "shutdown pulse queued",
+        );
+        assert!(
+            fixture.hard_shutdown_actuator_rx.is_empty(),
+            "hard-shutdown must NOT fire on first observation",
+        );
+        assert_eq!(recorder.taken(), None);
+    }
+
+    /// First SIGINT mirrors first SIGTERM — pinned separately because
+    /// the dispatch branches on both signums identically; a future
+    /// refactor that accidentally limited the arm to SIGTERM would
+    /// fail this test.
+    #[test]
+    fn first_sigint_arms_first_term_and_pulses_shutdown() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        let mut first_term: Option<Instant> = None;
+        let action =
+            dispatch_signal_inner(SIGINT, Instant::now(), &mut first_term, &fixture.io, |c| {
+                recorder.record(c);
+            });
+        assert_eq!(action, SignalAction::Shutdown);
+        assert!(first_term.is_some());
+        assert!(!fixture.shutdown_actuator_rx.is_empty());
+    }
+
+    /// Second SIGINT within the hard-exit window: pulses
+    /// `hard_shutdown_actuator_tx`, waits for the planted confirm
+    /// pulse, and invokes `exit_fn(HARD_EXIT_CODE)`. Returns
+    /// `HardExit`.
+    #[test]
+    fn second_sigint_within_window_triggers_hard_exit() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        // Plant the actuator's "phase 3 done" pulse so the inner
+        // function's `recv_timeout` returns `Ok(())` immediately
+        // rather than waiting the full HARD_SHUTDOWN_CONFIRM_TIMEOUT.
+        fixture
+            .hard_shutdown_done_tx
+            .try_send(())
+            .expect("plant confirm pulse");
+        let mut first_term: Option<Instant> = None;
+
+        let t0 = Instant::now();
+        let _ = dispatch_signal_inner(SIGINT, t0, &mut first_term, &fixture.io, |c| {
+            recorder.record(c);
+        });
+        assert_eq!(recorder.taken(), None, "first SIGINT does not escalate");
+
+        let t1 = t0 + Duration::from_millis(100);
+        let action = dispatch_signal_inner(SIGINT, t1, &mut first_term, &fixture.io, |c| {
+            recorder.record(c);
+        });
+        assert_eq!(action, SignalAction::HardExit);
+        assert_eq!(recorder.taken(), Some(crate::signals::HARD_EXIT_CODE),);
+        assert!(
+            !fixture.hard_shutdown_actuator_rx.is_empty(),
+            "second SIGINT must fire hard-shutdown pulse",
+        );
+    }
+
+    /// Second SIGTERM *outside* the hard-exit window does NOT
+    /// escalate — it re-arms `first_term` as if it were the first
+    /// observation, and pulses `shutdown_actuator_tx` again.
+    #[test]
+    fn second_sigterm_outside_window_does_not_escalate() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        let mut first_term: Option<Instant> = None;
+
+        let t0 = Instant::now();
+        let _ = dispatch_signal_inner(SIGTERM, t0, &mut first_term, &fixture.io, |c| {
+            recorder.record(c);
+        });
+        // Drain the first shutdown pulse so the channel has room for
+        // the second (bounded(1)).
+        let _ = fixture.shutdown_actuator_rx.try_recv();
+
+        // 3s later — outside the 2s HARD_EXIT_WINDOW.
+        let t1 = t0 + Duration::from_secs(3);
+        let action = dispatch_signal_inner(SIGTERM, t1, &mut first_term, &fixture.io, |c| {
+            recorder.record(c);
+        });
+        assert_eq!(action, SignalAction::Shutdown);
+        assert_eq!(first_term, Some(t1), "first_term re-armed to t1");
+        assert!(!fixture.shutdown_actuator_rx.is_empty());
+        assert!(fixture.hard_shutdown_actuator_rx.is_empty());
+        assert_eq!(recorder.taken(), None);
+    }
+
+    /// An unknown signal value returns `None` without side effects —
+    /// the production signal-hook handler only registers
+    /// `HANDLED_SIGNALS`, but the inner function defends against a
+    /// future addition that wires through an unexpected signum.
+    #[test]
+    fn unknown_signum_returns_none() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        let mut first_term: Option<Instant> = None;
+        let action =
+            dispatch_signal_inner(SIGUSR1, Instant::now(), &mut first_term, &fixture.io, |c| {
+                recorder.record(c);
+            });
+        assert_eq!(action, SignalAction::None);
+        assert!(first_term.is_none());
+        assert!(fixture.shutdown_actuator_rx.is_empty());
+        assert!(fixture.hard_shutdown_actuator_rx.is_empty());
+        assert_eq!(recorder.taken(), None);
+    }
+}

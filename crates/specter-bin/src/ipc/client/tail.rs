@@ -8,9 +8,9 @@
 //!
 //! # Exit codes
 //!
-//! - `0` — graceful EOF (the daemon's broker GC closes the
-//!   subscriber channel on shutdown ⇒ the next read returns EOF) or
-//!   a downstream pipe consumer closed (`BrokenPipe`).
+//! - `0` — graceful EOF (the daemon closed the per-conn socket on
+//!   shutdown ⇒ the next read returns EOF) or a downstream pipe
+//!   consumer closed (`BrokenPipe`).
 //! - `1` — connect / subscribe / read I/O failure (a parse failure
 //!   on one streamed line is logged to stderr but the loop
 //!   continues).
@@ -42,6 +42,7 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use crate::ipc::client::subscribe;
+use crate::ipc::framing::serialize_line;
 use crate::ipc::render::diag_human;
 use crate::ipc::wire::{KNOWN_WIRE_VARIANTS, WireDiagnostic};
 
@@ -57,7 +58,8 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
     };
 
     // Indefinite tail: clear the connect-time 5s deadline so the
-    // read blocks until the next event arrives (or EOF on broker GC).
+    // read blocks until the next event arrives (or EOF when the
+    // daemon closes the conn on shutdown).
     if let Err(e) = sub.set_read_timeout(None) {
         eprintln!("specter tail: clear read deadline failed: {e}");
         return ExitCode::from(1);
@@ -136,8 +138,7 @@ fn emit<W: Write>(out: &mut W, wire: &WireDiagnostic, output: OutputFormat) -> i
             out.write_all(diag_human::render(wire).as_bytes())?;
         }
         OutputFormat::Json => {
-            let mut bytes = serde_json::to_vec(wire).expect("WireDiagnostic always serializes");
-            bytes.push(b'\n');
+            let bytes = serialize_line(wire).expect("WireDiagnostic always serializes");
             out.write_all(&bytes)?;
         }
     }

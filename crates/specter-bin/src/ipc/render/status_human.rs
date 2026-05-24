@@ -129,6 +129,7 @@ const fn trigger_label(t: WireReloadTrigger) -> &'static str {
         WireReloadTrigger::Sighup => "sighup",
         WireReloadTrigger::Auto => "auto",
         WireReloadTrigger::Ipc => "ipc",
+        WireReloadTrigger::Startup => "startup",
     }
 }
 

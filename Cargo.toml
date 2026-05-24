@@ -27,6 +27,7 @@ siphasher   = "1"
 
 # sensor / actuator
 nix       = { version = "0.31", features = ["fs", "process", "resource", "signal"] }
+mio       = { version = "1", features = ["net", "os-ext", "os-poll"] }
 libc      = "0.2"
 crossbeam = "0.8"
 

@@ -1,21 +1,29 @@
 //! Pure-Rust `FsWatcher` test fixture.
 //!
 //! Records every mutator call into a `Vec<WatcherCall>`; tests inject
-//! events for `poll_until` to deliver synchronously; the wake handle
-//! increments a shared counter so cross-thread wake patterns are
-//! observable.
+//! events for `drain_ready` to deliver synchronously. The mock owns a
+//! `UnixStream::pair()` readiness substrate: every `inject` /
+//! `inject_overflow` writes one byte to the write side, making the
+//! read side (the `AsFd` surface) readable; `drain_ready` reads the
+//! substrate to empty before draining the queued events. This pins
+//! the edge-triggered readiness contract `FsWatcher` requires — a
+//! reactor (mio::Poll, libc::poll, etc.) registering [`AsFd::as_fd`]
+//! observes the same drain-or-stall semantics as a real kqueue /
+//! inotify fd.
 //!
-//! No FFI, no kqueue, no platform gates — compiles on every target
-//! (Linux CI, macOS dev, FreeBSD prod). Production builds opt out via
-//! the `testkit` Cargo feature; consumers attach it under
+//! No FFI, no kqueue, no platform gates — compiles on every Unix
+//! target (Linux CI, macOS dev, FreeBSD prod). Production builds opt
+//! out via the `testkit` Cargo feature; consumers attach it under
 //! `[dev-dependencies]`.
 
-use crate::{FsWatcher, OverflowScope, Prober, WakeHandle, WatchFailure, WatcherEvent};
+use crate::{FsWatcher, OverflowScope, Prober, WatchFailure, WatcherEvent};
 use slotmap::SecondaryMap;
 use specter_core::{ClassSet, FsEvent, ProbeOwner, ProbeRequest, ResourceId, ResourceKind};
+use std::io::{self, Read, Write};
+use std::os::fd::{AsFd, BorrowedFd};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::sync::Mutex;
 
 /// One recorded call into the watcher's mutator surface.
 #[derive(Debug, Clone)]
@@ -42,7 +50,7 @@ pub struct MockEntry {
     pub events: ClassSet,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct MockFsWatcher {
     /// Append-only log of every mutator call. Ordering is the order of
     /// invocation — useful for asserting cross-step sequences.
@@ -50,12 +58,12 @@ pub struct MockFsWatcher {
     /// Current installed-watch state: `r ∈ installed` ⇔ last `watch(r)`
     /// succeeded and no subsequent `unwatch(r)` cleared it.
     pub installed: SecondaryMap<ResourceId, MockEntry>,
-    /// Per-resource events queued for delivery on the next `poll_until`
-    /// call. Drained into [`WatcherEvent::Fs`] before any queued
-    /// overflow scopes (preserves the natural "events first, kernel
-    /// signals last" ordering the bin's loop expects).
+    /// Per-resource events queued for delivery on the next
+    /// `drain_ready` call. Drained into [`WatcherEvent::Fs`] before any
+    /// queued overflow scopes (preserves the natural "events first,
+    /// kernel signals last" ordering the bin's loop expects).
     pub queued_events: Vec<(ResourceId, FsEvent)>,
-    /// Overflow scopes queued for delivery on the next `poll_until`
+    /// Overflow scopes queued for delivery on the next `drain_ready`
     /// call. Drained into [`WatcherEvent::Overflow`] **after** the
     /// per-resource events. Tests use this to exercise the bin's
     /// overflow-routing path without wiring a real inotify backend.
@@ -64,43 +72,73 @@ pub struct MockFsWatcher {
     /// mismatch / programmer error — the **next** `watch()` call returns
     /// `Err(failure)` without modifying state. One-shot; consumed on read.
     pub next_watch_failure: Option<WatchFailure>,
-    /// Wake-counter shared with every cloned `MockWakeHandle`.
-    pub waker: Arc<MockWaker>,
-}
-
-/// Shared counter for cross-thread wake observation. Cloned wake
-/// handles all bump the same `Mutex<u32>`; tests assert the running
-/// total after spawning their wakers.
-#[derive(Debug, Default)]
-pub struct MockWaker {
-    pub woken: Mutex<u32>,
+    /// Read side of the readiness substrate, set non-blocking. A
+    /// reactor (mio::Poll, libc::poll) registering [`AsFd::as_fd`] sees
+    /// this fd; it becomes readable when `inject` / `inject_overflow`
+    /// has written to `write_fd` and `drain_ready` has not yet drained
+    /// it. Edge-triggered semantics require `drain_ready` to read to
+    /// empty before returning — otherwise the next inject would not
+    /// trigger a fresh edge.
+    read_fd: UnixStream,
+    /// Write side of the readiness substrate. Bumped one byte per
+    /// `inject` / `inject_overflow` to drive a readability edge on
+    /// `read_fd`. Set non-blocking so a runaway test doesn't deadlock
+    /// the writer on a full socket buffer; at test scale (single-digit
+    /// bytes between drains, socket buffer ≥ 4 KiB) the path is
+    /// unreachable.
+    write_fd: UnixStream,
 }
 
 impl MockFsWatcher {
+    /// Construct a fresh mock. Allocates a `socketpair(AF_UNIX,
+    /// SOCK_STREAM)` for the readiness substrate; panics on any
+    /// syscall failure — testkit code is test-only, and an unrecoverable
+    /// kernel error here is properly fatal.
     #[must_use]
     pub fn new() -> Self {
-        Self::default()
+        let (read_fd, write_fd) =
+            UnixStream::pair().expect("MockFsWatcher: socketpair must succeed in tests");
+        read_fd
+            .set_nonblocking(true)
+            .expect("MockFsWatcher: O_NONBLOCK on read side");
+        write_fd
+            .set_nonblocking(true)
+            .expect("MockFsWatcher: O_NONBLOCK on write side");
+        Self {
+            calls: Vec::new(),
+            installed: SecondaryMap::new(),
+            queued_events: Vec::new(),
+            queued_overflow: Vec::new(),
+            next_watch_failure: None,
+            read_fd,
+            write_fd,
+        }
     }
 
-    /// Queue a per-resource event for delivery on the next `poll_until`
-    /// call. The queue drains entirely on poll — caller is responsible
-    /// for re-injecting between successive polls.
+    /// Queue a per-resource event for delivery on the next
+    /// `drain_ready` call. The queue drains entirely on drain — caller
+    /// is responsible for re-injecting between successive drains.
+    /// Bumps the readiness substrate so a reactor on
+    /// [`AsFd::as_fd`] sees the fd transition to readable.
     pub fn inject(&mut self, r: ResourceId, ev: FsEvent) {
         self.queued_events.push((r, ev));
+        self.bump_fd();
     }
 
-    /// Queue an overflow signal for delivery on the next `poll_until`
+    /// Queue an overflow signal for delivery on the next `drain_ready`
     /// call. Drained into [`WatcherEvent::Overflow`] **after** any
-    /// queued per-resource events on the same poll, mirroring the
+    /// queued per-resource events on the same drain, mirroring the
     /// inotify backend's natural ordering (`Fs` events for the records
     /// preceding the overflow marker; `Overflow` once the kernel signals
-    /// the queue ran dry).
+    /// the queue ran dry). Bumps the readiness substrate so a reactor
+    /// on [`AsFd::as_fd`] sees the fd transition to readable.
     ///
     /// Useful for engine / bin tests that need to assert the `Overflow`
     /// routing path without spinning up a real inotify instance and
     /// stressing it past `max_queued_events`.
     pub fn inject_overflow(&mut self, scope: OverflowScope) {
         self.queued_overflow.push(scope);
+        self.bump_fd();
     }
 
     /// Cause the next `watch` call to fail with `failure`. Consumed on
@@ -135,6 +173,22 @@ impl MockFsWatcher {
             }
         }
         None
+    }
+
+    /// Write one byte to `write_fd` to drive a readability edge on
+    /// `read_fd`. Best-effort: a saturated socket buffer would surface
+    /// as `WouldBlock`, but at test scale (single-digit bytes between
+    /// drains, socket buffer ≥ 4 KiB) the path is unreachable. Failure
+    /// is silently ignored — the test would then never see a readiness
+    /// edge and watchdog out, which is the right failure mode.
+    fn bump_fd(&self) {
+        let _ = (&self.write_fd).write(&[0x01]);
+    }
+}
+
+impl Default for MockFsWatcher {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -171,11 +225,32 @@ impl FsWatcher for MockFsWatcher {
         self.installed.remove(r);
     }
 
-    fn poll_until(
-        &mut self,
-        _deadline: Option<Instant>,
-        out: &mut Vec<WatcherEvent>,
-    ) -> Result<usize, WatchFailure> {
+    fn drain_ready(&mut self, out: &mut Vec<WatcherEvent>) -> Result<usize, WatchFailure> {
+        // 1. Drain the readiness substrate to empty. Edge-triggered
+        //    reactors require this: leaving residual bytes strands the
+        //    next event behind a missing not-readable→readable edge.
+        let mut sink = [0u8; 64];
+        loop {
+            match (&self.read_fd).read(&mut sink) {
+                // Got bytes — re-loop to drain more.
+                Ok(n) if n > 0 => {}
+                // `Ok(0)` is socket EOF — unreachable here because we
+                // own `write_fd` and it lives as long as `self`. Treat
+                // as drained anyway to keep the loop terminal under
+                // any future refactor.
+                Ok(_) => break,
+                // EAGAIN under O_NONBLOCK: substrate is empty.
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                // Spurious EINTR — re-loop. Highly improbable on a
+                // non-blocking socket (the kernel returns before any
+                // signal can preempt), but cheap defence-in-depth.
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+                // Mock — swallow any other error rather than fail the
+                // drain; the queued-events path below still delivers.
+                Err(_) => break,
+            }
+        }
+        // 2. Drain queued events.
         let fs = std::mem::take(&mut self.queued_events);
         let overflow = std::mem::take(&mut self.queued_overflow);
         let emitted = fs.len() + overflow.len();
@@ -190,27 +265,11 @@ impl FsWatcher for MockFsWatcher {
         );
         Ok(emitted)
     }
-
-    fn wake_handle(&self) -> Box<dyn WakeHandle> {
-        Box::new(MockWakeHandle {
-            waker: Arc::clone(&self.waker),
-        })
-    }
 }
 
-#[derive(Debug, Clone)]
-struct MockWakeHandle {
-    waker: Arc<MockWaker>,
-}
-
-impl WakeHandle for MockWakeHandle {
-    fn wake(&self) {
-        let mut count = self.waker.woken.lock().expect("MockWaker poisoned");
-        *count += 1;
-    }
-
-    fn clone_box(&self) -> Box<dyn WakeHandle> {
-        Box::new(self.clone())
+impl AsFd for MockFsWatcher {
+    fn as_fd(&self) -> BorrowedFd<'_> {
+        self.read_fd.as_fd()
     }
 }
 
@@ -269,12 +328,13 @@ impl Prober for MockProber {
 #[cfg(test)]
 mod tests {
     use super::{MockFsWatcher, MockProber, WatcherCall};
-    use crate::{FsWatcher, OverflowScope, Prober, WakeHandle, WatchFailure, WatcherEvent};
+    use crate::{FsWatcher, OverflowScope, Prober, WatchFailure, WatcherEvent};
     use slotmap::SlotMap;
     use specter_core::{
         ClassSet, FsEvent, ProbeCorrelation, ProbeOwner, ProbeRequest, ProfileId, ResourceId,
         ResourceKind,
     };
+    use std::os::fd::AsFd;
     use std::path::PathBuf;
     use std::sync::Arc;
 
@@ -361,7 +421,7 @@ mod tests {
     }
 
     #[test]
-    fn poll_until_drains_queued_events_as_fs_variant() {
+    fn drain_ready_drains_queued_events_as_fs_variant() {
         let ids = fresh_resource_ids(2);
         let mut w = MockFsWatcher::new();
 
@@ -369,7 +429,7 @@ mod tests {
         w.inject(ids[1], FsEvent::Renamed);
 
         let mut out: Vec<WatcherEvent> = Vec::new();
-        let n = w.poll_until(None, &mut out).unwrap();
+        let n = w.drain_ready(&mut out).unwrap();
         assert_eq!(n, 2);
         assert_eq!(out.len(), 2);
         assert!(w.queued_events.is_empty());
@@ -382,17 +442,17 @@ mod tests {
             WatcherEvent::Fs { resource, event } if *resource == ids[1] && *event == FsEvent::Renamed
         ));
 
-        // Second poll: nothing queued.
+        // Second drain: nothing queued.
         out.clear();
-        let n = w.poll_until(None, &mut out).unwrap();
+        let n = w.drain_ready(&mut out).unwrap();
         assert_eq!(n, 0);
         assert!(out.is_empty());
     }
 
     #[test]
-    fn poll_until_drains_queued_overflow_after_fs_events() {
+    fn drain_ready_drains_queued_overflow_after_fs_events() {
         // Ordering invariant: any per-resource events queued before the
-        // poll surface as `Fs` records first, then the queued overflow
+        // drain surface as `Fs` records first, then the queued overflow
         // scopes as `Overflow` records. This mirrors the inotify
         // backend's natural drain order — events for records preceding
         // the overflow marker come first, then `IN_Q_OVERFLOW`.
@@ -404,7 +464,7 @@ mod tests {
         w.inject_overflow(OverflowScope::Resource(ids[0]));
 
         let mut out: Vec<WatcherEvent> = Vec::new();
-        let n = w.poll_until(None, &mut out).unwrap();
+        let n = w.drain_ready(&mut out).unwrap();
         assert_eq!(n, 3);
         assert!(matches!(
             &out[0],
@@ -427,14 +487,14 @@ mod tests {
     }
 
     #[test]
-    fn poll_until_with_only_overflow_drains_overflow() {
-        // No `Fs` events queued — `poll_until` still drains the
+    fn drain_ready_with_only_overflow_drains_overflow() {
+        // No `Fs` events queued — `drain_ready` still drains the
         // overflow queue and reports a non-zero count.
         let mut w = MockFsWatcher::new();
         w.inject_overflow(OverflowScope::Global);
 
         let mut out: Vec<WatcherEvent> = Vec::new();
-        let n = w.poll_until(None, &mut out).unwrap();
+        let n = w.drain_ready(&mut out).unwrap();
         assert_eq!(n, 1);
         assert!(matches!(
             &out[0],
@@ -444,22 +504,44 @@ mod tests {
         ));
     }
 
+    /// `as_fd()` is the edge-triggered readiness contract the bin's
+    /// mio reactor relies on: the fd is not readable on a fresh mock,
+    /// becomes readable after `inject` / `inject_overflow`, and is
+    /// drained back to "not readable" by `drain_ready`. Pins the
+    /// substrate so the bin's mio-registered drain loop sees the same
+    /// readiness transitions a real kqueue / inotify fd would produce.
+    ///
+    /// Event-count assertions live in the `drain_ready_*` tests; this
+    /// test asserts only on the fd's readability state.
     #[test]
-    fn wake_handle_increments_counter_across_threads() {
-        let w = MockFsWatcher::new();
-        let handle = w.wake_handle();
-        let waker = Arc::clone(&w.waker);
+    fn as_fd_becomes_readable_after_inject() {
+        let ids = fresh_resource_ids(1);
+        let mut w = MockFsWatcher::new();
 
-        let mut threads = Vec::new();
-        for _ in 0..3 {
-            let h: Box<dyn WakeHandle> = handle.clone();
-            threads.push(std::thread::spawn(move || h.wake()));
-        }
-        for t in threads {
-            t.join().unwrap();
-        }
+        // Before inject: read side is not readable.
+        let mut sink = [0u8; 8];
+        let n = nix::unistd::read(w.as_fd(), &mut sink);
+        assert!(
+            matches!(n, Err(nix::errno::Errno::EAGAIN)),
+            "fresh mock has no pending readability; got {n:?}"
+        );
 
-        assert_eq!(*waker.woken.lock().unwrap(), 3);
+        // After inject: read side is readable.
+        w.inject(ids[0], FsEvent::Modified);
+        let n = nix::unistd::read(w.as_fd(), &mut sink)
+            .expect("read side must be readable after inject");
+        assert!(n >= 1, "inject must push at least one byte");
+
+        // After drain_ready: substrate is drained even when the
+        // inject re-armed the readability after the previous read.
+        w.inject(ids[0], FsEvent::Modified);
+        let mut out = Vec::new();
+        w.drain_ready(&mut out).unwrap();
+        let n = nix::unistd::read(w.as_fd(), &mut sink);
+        assert!(
+            matches!(n, Err(nix::errno::Errno::EAGAIN)),
+            "drain_ready must drain the readiness substrate; got {n:?}"
+        );
     }
 
     // ---------------------------------------------------------------- registered_events

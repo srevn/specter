@@ -20,11 +20,26 @@
 #![allow(clippy::iter_with_drain, clippy::missing_const_for_fn)]
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
+use std::os::fd::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// Build a `mio::Poll` registered on the watcher's kqueue fd. The
+/// drain loops below block via the reactor; `drain_ready` is
+/// non-blocking by trait.
+fn poll_for(w: &KqueueWatcher) -> Poll {
+    let poll = Poll::new().expect("mio Poll");
+    let raw = w.as_fd().as_raw_fd();
+    poll.registry()
+        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
+        .expect("register kqueue fd");
+    poll
+}
 
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     w: &mut KqueueWatcher,
@@ -32,11 +47,19 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
     let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
         buf.clear();
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
         for ev in buf.drain(..) {
             match ev {
                 WatcherEvent::Fs { resource, event } => out.push((resource, event)),
@@ -47,6 +70,26 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
         }
         if out.iter().any(&pred) {
             return out;
+        }
+    }
+    out
+}
+
+/// Drain whatever the watcher emits over the next `dur`. Used by the
+/// negative test below to confirm the absence of an event over a
+/// bounded interval.
+fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<WatcherEvent> {
+    let deadline = Instant::now() + dur;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
+    let mut out: Vec<WatcherEvent> = Vec::new();
+    while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
+        if w.drain_ready(&mut out).is_err() {
+            break;
         }
     }
     out
@@ -127,17 +170,12 @@ fn in_place_edit_does_not_fire_on_dir_watch_alone() {
         .expect("watch dir");
 
     // Drain any registration ack noise so the post-edit drain is clean.
-    let mut warmup: Vec<WatcherEvent> = Vec::new();
-    let _ = w.poll_until(
-        Some(Instant::now() + Duration::from_millis(100)),
-        &mut warmup,
-    );
+    let _ = drain_for(&mut w, Duration::from_millis(100));
 
     // In-place edit (the symptom case).
     std::fs::write(&file_path, "v2 with more bytes").unwrap();
 
-    let mut out: Vec<WatcherEvent> = Vec::new();
-    let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(300)), &mut out);
+    let out = drain_for(&mut w, Duration::from_millis(300));
 
     // The dir's STRUCTURE watch must NOT fire on an in-place edit. If
     // it does, the documented design assumption (APFS/HFS+ doesn't bump

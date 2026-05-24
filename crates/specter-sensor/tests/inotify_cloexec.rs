@@ -1,32 +1,23 @@
 //! CLOEXEC discipline.
 //!
 //! The actuator's spawn path uses fork+exec; any fd without `CLOEXEC`
-//! leaks into every spawned command. The watcher's three persistent
-//! fds — `inotify_fd`, `wake_fd` (eventfd), `epoll_fd` — must all carry
-//! the flag:
-//!
-//! - `inotify_fd`: leaked → child holds an unrelated inotify instance
-//!   that prevents kernel-side cleanup at watcher drop.
-//! - `wake_fd`: leaked → child can issue wakes (or block our wakes)
-//!   nondeterministically; eventfd lifetime escapes the supervisor.
-//! - `epoll_fd`: leaked → child inherits an epoll instance referencing
-//!   the parent's inotify_fd / wake_fd; kernel-resource bloat per spawn.
+//! leaks into every spawned command. The watcher's single persistent fd
+//! — `inotify_fd` — must carry the flag: if leaked, the child holds an
+//! unrelated inotify instance that prevents kernel-side cleanup at
+//! watcher drop. (Wake / reactor fds live on the caller's side under
+//! the post-Phase-1 mio integration and are not the watcher's
+//! responsibility.)
 //!
 //! This test forks a child via `Command::new` with the actuator's
 //! `pre_exec`-driven discipline (forces fork+exec on Linux), then reads
 //! `/proc/<child_pid>/fd/` and asserts no symlink target matches the
-//! `anon_inode:inotify` / `anon_inode:[eventfd]` /
-//! `anon_inode:[eventpoll]` magic strings — the kernel-side proc class
-//! for the watcher's three fds. (The kernel emits `inotify` without
-//! brackets but `[eventfd]` / `[eventpoll]` with brackets; both shapes
-//! are stable across modern kernels.)
-//!
-//! The child execs `/bin/sleep` with a brief argument so the
-//! introspection window is stable.
+//! `anon_inode:inotify` magic string — the kernel-side proc class for
+//! the watcher's fd. The child execs `/bin/sleep` with a brief argument
+//! so the introspection window is stable.
 
 #![cfg(target_os = "linux")]
 
-use specter_sensor::{FsWatcher, InotifyWatcher};
+use specter_sensor::InotifyWatcher;
 use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::thread;
@@ -50,20 +41,14 @@ fn child_fd_targets(pid: u32) -> Option<Vec<String>> {
 fn watcher_fds_are_cloexec() {
     let watcher = InotifyWatcher::new().expect("InotifyWatcher::new");
 
-    // Sanity: the parent itself must hold the watcher's three fd
-    // classes right now (otherwise the test premise is broken).
+    // Sanity: the parent itself must hold an `anon_inode:inotify` fd
+    // right now (otherwise the test premise is broken).
     let parent_targets = child_fd_targets(std::process::id()).expect("read /proc/self/fd");
-    for marker in [
-        "anon_inode:inotify",
-        "anon_inode:[eventfd]",
-        "anon_inode:[eventpoll]",
-    ] {
-        assert!(
-            parent_targets.iter().any(|t| t == marker),
-            "parent must hold an `{marker}` fd from InotifyWatcher; \
-             got parent fds: {parent_targets:?}"
-        );
-    }
+    assert!(
+        parent_targets.iter().any(|t| t == "anon_inode:inotify"),
+        "parent must hold an `anon_inode:inotify` fd from InotifyWatcher; \
+         got parent fds: {parent_targets:?}"
+    );
 
     // Spawn-and-introspect a long-running child. The pre_exec hook
     // mirrors `OsSpawner::spawn` so the spawn path is fork+exec rather
@@ -91,47 +76,18 @@ fn watcher_fds_are_cloexec() {
     let child_targets =
         child_fd_targets(child_pid).expect("read /proc/<child>/fd; child should still be alive");
 
-    // Assert no inherited anon-inode fd of the watcher's classes.
-    for marker in [
-        "anon_inode:inotify",
-        "anon_inode:[eventfd]",
-        "anon_inode:[eventpoll]",
-    ] {
-        assert!(
-            !child_targets.iter().any(|t| t == marker),
-            "child inherited an `{marker}` fd; CLOEXEC discipline broken — \
-             leak in InotifyWatcher's fd open path. child fds: {child_targets:?}"
-        );
-    }
+    // Assert no inherited inotify fd. The watcher's `inotify_fd` is the
+    // only persistent kernel resource it owns under the post-Phase-1
+    // mio integration; if it leaks, the actuator's spawn discipline is
+    // broken at `inotify_init1`'s CLOEXEC argument.
+    assert!(
+        !child_targets.iter().any(|t| t == "anon_inode:inotify"),
+        "child inherited an `anon_inode:inotify` fd; CLOEXEC discipline broken — \
+         leak in InotifyWatcher's fd open path. child fds: {child_targets:?}"
+    );
 
     // Reap the child cleanly (avoid zombies in CI).
     let _ = child.kill();
     let _ = child.wait();
-    drop(watcher);
-}
-
-/// Sanity check: the watcher's wake handle survives an actuator-style
-/// fork+exec without UB. The watcher's fds must not leak into the
-/// child (covered by the previous test); the wake handle's `Arc` must
-/// continue to function in the parent afterwards.
-#[test]
-fn wake_handle_survives_actuator_style_spawn() {
-    let watcher = InotifyWatcher::new().unwrap();
-    let wake = watcher.wake_handle();
-
-    let mut cmd = Command::new("/bin/true");
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    // SAFETY: see `watcher_fds_are_cloexec`.
-    #[allow(unsafe_code)]
-    unsafe {
-        cmd.pre_exec(|| Ok(()));
-    }
-    let _ = cmd.spawn().unwrap().wait();
-
-    // Wake the watcher post-spawn. No panic, no UB.
-    wake.wake();
-
     drop(watcher);
 }

@@ -70,7 +70,7 @@ impl FsEvent {
 /// coalesces but never silently drops at the kernel level).
 ///
 /// Carried on the sensor → engine path in two places: in the
-/// per-`poll_until` drain (`specter-sensor::WatcherEvent::Overflow`)
+/// per-`drain_ready` drain (`specter-sensor::WatcherEvent::Overflow`)
 /// and in the engine input variant the bin lifts it into
 /// ([`Input::SensorOverflow`]).
 ///

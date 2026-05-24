@@ -9,11 +9,12 @@
 //! # Framing
 //!
 //! Requests and responses are line-delimited JSON, one object per
-//! line. [`write_request`] serialises + appends LF + writes in one
-//! `write_all`. [`read_response`] reads through a [`BufReader`] until
-//! a newline, then deserialises.
+//! line — the shared framing contract owned by
+//! [`crate::ipc::framing::serialize_line`]. [`write_request`]
+//! serialises + appends LF + writes in one `write_all`.
+//! [`read_response`] reads through a [`BufReader`] until a newline,
+//! then deserialises.
 
-use serde::Serialize;
 use specter_config::ClientArgs;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -21,19 +22,22 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
+use crate::ipc::framing::serialize_line;
 use crate::ipc::protocol::{ResponsePayload, WireRequest};
 use crate::ipc::sockpath;
 
-/// Read deadline mirrors the server's [`crate::ipc::server::REPLY_TIMEOUT`]
-/// — the daemon promises a response within that window; the client
-/// surfaces the same horizon to the operator.
+/// Read deadline — the daemon's mio-reactor tick runs in sub-ms to
+/// ms under healthy load; 5s covers pathological deferred-attach
+/// contention without becoming an operator-visible "hung" feel. The
+/// daemon answers inline on the reactor thread, so every operator
+/// verb has the same horizon regardless of server load.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// Write deadline mirrors the server's
-/// [`crate::ipc::server::PER_CONN_WRITE_TIMEOUT`]. The client's
-/// outgoing request is small (sub-KB), so the timeout's primary role
-/// is symmetry — a daemon that refuses to drain its accept queue
-/// surfaces as a write timeout rather than a hung `write_all`.
+/// Write deadline — the client's outgoing request is small (sub-KB),
+/// so the timeout's primary role is symmetry: a daemon that refuses
+/// to drain its accept queue surfaces as a write timeout rather than
+/// a hung `write_all`. 2s rides out scheduler contention on a busy
+/// reactor without masking a hung socket.
 const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Connect to the daemon's IPC socket and apply read/write
@@ -49,11 +53,20 @@ pub(crate) fn open(socket: &Path) -> io::Result<UnixStream> {
     Ok(stream)
 }
 
-/// Serialise a [`WireRequest`] to a single line and write it
-/// atomically (one `write_all`). Serializer failure is mapped to
-/// `io::ErrorKind::InvalidData` so callers handle one error type.
+/// Serialise a [`WireRequest`] to a single LF-delimited line and
+/// write it in one [`Write::write_all`] call.
+///
+/// The atomic single-write matters for framing correctness: a
+/// partial write would leave the daemon parsing half a JSON object
+/// next time the conn is readable, and serde's compact serializer
+/// (used by [`serialize_line`]) emits the object without internal
+/// newlines so the daemon's LF-splitter only ever sees the trailing
+/// frame delimiter. Serializer failure surfaces as
+/// [`io::ErrorKind::InvalidData`] (the contract
+/// [`serialize_line`] pins) so callers branch on one error kind
+/// across send paths.
 pub(crate) fn write_request(stream: &mut UnixStream, req: &WireRequest) -> io::Result<()> {
-    write_json_line(stream, req)
+    stream.write_all(&serialize_line(req)?)
 }
 
 /// Read the daemon's next JSON line and parse it as a
@@ -165,16 +178,4 @@ pub(crate) fn one_shot_unit(
             ExitCode::from(1)
         }
     }
-}
-
-/// Internal framing helper shared by every request writer. Builds
-/// the line in memory, then writes in one `write_all` — a partial
-/// write would leave the daemon parsing half a JSON object, and a
-/// pretty-printed object would inject internal newlines that break
-/// line framing.
-fn write_json_line<T: Serialize>(stream: &mut UnixStream, val: &T) -> io::Result<()> {
-    let mut buf =
-        serde_json::to_vec(val).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    buf.push(b'\n');
-    stream.write_all(&buf)
 }

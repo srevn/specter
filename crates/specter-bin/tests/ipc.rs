@@ -1008,29 +1008,20 @@ fn tail_json_output_round_trips_via_serde() {
 
 /// `subscribe_ack` MUST be the first JSON line on the wire after a
 /// Subscribe verb, even when a fire-triggering touch races
-/// concurrently with the subscribe write. Pins the
-/// add-before-ack ordering in the driver's Subscribe arm
-/// (`driver/ipc.rs` calls `broker.add_subscriber` *before*
-/// `try_send`ing the `ResponsePayload::SubscribeAck`, so the
-/// broker holds the subscriber by the time the per-conn thread
-/// receives the ack on `reply_rx` and writes it to the client —
-/// no diagnostic emitted between the add and the client's first
-/// read can leak past registration).
+/// concurrently with the subscribe write. Pins the ack-before-fanout
+/// ordering in the driver's Subscribe arm: the ack bytes are pushed
+/// into the conn's `write_queue` while the conn is still in
+/// [`ConnRole::Reqs`], and only then does
+/// [`ConnState::transition_to_sub`] flip the role to `Sub`. The
+/// diagnostic fan-out (`DriverHub::dispatch_to_subscribers`) skips
+/// `Reqs` conns, so no diag can interleave between the ack enqueue
+/// and the role flip.
 ///
-/// **Fence, not fuzzer.** Today the pipeline's settle window plus
-/// the per-conn thread's blocking `reply_rx.recv_timeout` make the
-/// ack-first property hold trivially: the per-conn thread writes
-/// the ack before entering its event-streaming loop, so dispatch
-/// cannot push diag bytes ahead of the ack. The *structural*
-/// invariant is what this test fences for: a future refactor that
-/// reversed the add/ack order, or one that let per-subscriber
-/// dispatch run ahead of the ack write, would break this fence.
-/// The post-D5 reshape (mio migration Phase 3) dissolves the
-/// per-conn thread into the driver's reactor; the load-bearing
-/// property reverses from "thread serializes ack-then-stream" to
-/// "ack bytes enqueue into `write_queue` before the conn's role
-/// flips `Reqs → Sub`, so per-subscriber dispatch cannot push diag
-/// bytes ahead of the ack." This test bounds both shapes.
+/// **Fence, not fuzzer.** The invariant holds structurally — the
+/// fan-out's `Reqs`-skip gate is the proof — but this test bounds it
+/// against any future refactor that reorders the ack push and the
+/// role flip, or that lets the fan-out path observe a partially-
+/// transitioned conn.
 ///
 /// Per-Sub Subscribe (`name = "orderwatch"`) so the post-ack wire
 /// carries only events naming that Sub: ambient Profile-keyed
@@ -1040,11 +1031,11 @@ fn tail_json_output_round_trips_via_serde() {
 /// **Settle sized for parallel-test load.** The settle window
 /// (300ms) is comfortably larger than the worst-case subscribe
 /// handshake under heavy `nextest` parallelism. A smaller window
-/// (e.g. the 50ms used by the per-touch happy-path tests) lets
-/// the touch's burst fire before the broker has registered the
-/// subscriber under contention — the diagnostic is then
-/// dispatched to no one and the post-ack assertion below would
-/// fail, masking the B3 fence the test is meant to express.
+/// (e.g. the 50ms used by the per-touch happy-path tests) lets the
+/// touch's burst fire before the conn has flipped role under
+/// contention — the diagnostic is then dispatched to no one and the
+/// post-ack assertion below would fail, masking the ack-ordering
+/// fence the test is meant to express.
 #[test]
 fn subscribe_ack_precedes_first_diagnostic_on_wire() {
     let sb = Sandbox::new();

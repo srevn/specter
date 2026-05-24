@@ -32,9 +32,11 @@ use crate::ipc::wire::WireDiagnostic;
 /// Live subscription over a daemon connection: post-ack, ready for
 /// streamed [`WireDiagnostic`] reads.
 ///
-/// Drops the underlying [`UnixStream`] on `drop`, which signals the
-/// broker (via the bounded channel's disconnect) to GC the subscriber
-/// on its next dispatch. No explicit "unsubscribe" verb is required.
+/// Drops the underlying [`UnixStream`] on `drop`. The daemon's mio
+/// reactor observes the peer-side close on the next read drain and
+/// terminates the corresponding per-conn entry, dropping the
+/// subscriber from the fan-out map on the same tick. No explicit
+/// "unsubscribe" verb is required.
 pub(crate) struct Subscription {
     reader: BufReader<UnixStream>,
 }
@@ -49,7 +51,7 @@ pub(crate) struct Subscription {
 ///
 /// `name = None` ⇒ unfiltered subscription (the `tail` shape).
 /// `name = Some(_)` ⇒ per-Sub filter, server-resolved atomically
-/// with the broker's `add_subscriber` (closes the historical
+/// inside the Subscribe handler (closes the historical
 /// resolve-then-subscribe race window — `disable` either lands
 /// before, producing `ERR_UNKNOWN_SUB`, or after, surfacing as
 /// `SubDetached` on the stream).
@@ -127,8 +129,8 @@ impl Subscription {
     /// Read the next streamed line, parse to [`WireDiagnostic`].
     ///
     /// - `Ok(Some(wire))` — a complete line parsed cleanly.
-    /// - `Ok(None)` — EOF; the daemon closed the connection (broker
-    ///   GC on driver shutdown, channel close).
+    /// - `Ok(None)` — EOF; the daemon closed the connection (per-conn
+    ///   teardown on driver shutdown, or peer-initiated close).
     /// - `Err(io::Error)` — any other failure. A JSON parse failure
     ///   maps to `ErrorKind::InvalidData`, mirroring
     ///   [`connect::read_response`]'s discipline so callers can

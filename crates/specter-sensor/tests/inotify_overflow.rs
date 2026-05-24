@@ -23,9 +23,12 @@
 #![allow(clippy::iter_with_drain)]
 #![cfg(target_os = "linux")]
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, OverflowScope, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, InotifyWatcher, WatcherEvent};
+use std::os::fd::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -92,18 +95,32 @@ fn massive_event_burst_emits_overflow() {
         }
     }
 
+    // Register the watcher's inotify fd with mio so the drain loop
+    // blocks via the reactor.
+    let mut poll = Poll::new().expect("mio Poll");
+    let raw = w.as_fd().as_raw_fd();
+    poll.registry()
+        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
+        .expect("register inotify fd");
+
     // Drain everything; expect at least one `WatcherEvent::Overflow`.
     let deadline = Instant::now() + Duration::from_secs(5);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
     let mut overflow_seen = false;
     let mut total_events = 0usize;
     while Instant::now() < deadline && !overflow_seen {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
         buf.clear();
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
         if buf.is_empty() {
-            // No more events ready. The drain may still be empty for
-            // up to `max_queued_events` records — keep trying until
-            // the deadline.
+            // No records this edge — keep blocking on the reactor
+            // until the deadline.
             continue;
         }
         for ev in buf.drain(..) {

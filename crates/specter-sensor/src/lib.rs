@@ -110,7 +110,37 @@ pub enum WatcherEvent {
 /// deadline, no internal block; cross-thread coordination lives in the
 /// reactor (e.g. `mio::Waker`), not on the watcher.
 ///
-/// # Caller pattern (illustrative — production reactor lands in Phase 2)
+/// # `AsFd` contract
+///
+/// `as_fd()` is the load-bearing surface for reactor integration. The
+/// implementor's obligations:
+///
+/// - **Long-lived FD.** Return a [`std::os::fd::BorrowedFd`] backed
+///   by an owned kernel resource (kqueue / inotify_init1 / equivalent)
+///   acquired in the watcher's constructor and held until drop.
+///   Re-acquiring the resource per call would invalidate any external
+///   mio / epoll registration the reactor took out against the returned
+///   RawFd.
+/// - **Readability ⇒ events queued.** The kernel must mark the fd
+///   readable iff at least one record is queued for delivery via
+///   [`drain_ready`](FsWatcher::drain_ready). A spurious wake (readable,
+///   drain returns no events) is permitted but should be rare; a missed
+///   wake (events queued, fd stays non-readable) silently strands the
+///   records.
+/// - **Edge-triggered support.** Reactors register with edge semantics
+///   (`Interest::READABLE`); the fd must transition from "drained" to
+///   "non-drained" via the kernel's internal queue state on every fresh
+///   event arrival. [`drain_ready`](FsWatcher::drain_ready)'s
+///   drain-to-empty discipline (see below) is the implementor's
+///   complement to this contract — partial drains leave the queue
+///   non-empty, the next arrival can't fire an edge, and the record is
+///   silently stranded.
+/// - **`BorrowedFd` lifetime.** The returned borrow is the call
+///   expression's scope; reactors capture the underlying RawFd
+///   (`as_fd().as_raw_fd()` is `Copy`) before the borrow ends. Holding
+///   the BorrowedFd across `&mut self` calls is unnecessary.
+///
+/// # Caller pattern (illustrative)
 ///
 /// ```ignore
 /// let mut events: Vec<WatcherEvent> = Vec::with_capacity(64);
@@ -248,6 +278,12 @@ pub trait FsWatcher: Send + AsFd {
 /// when the reactor reports the fd readable. The trait itself is
 /// non-blocking and owns no wake mechanism.
 ///
+/// The `AsFd` contract is the same as [`FsWatcher`]'s: a long-lived
+/// kernel-resource-backed [`std::os::fd::BorrowedFd`], kernel marks
+/// readable iff at least one record is queued for
+/// [`drain_ready`](Self::drain_ready), edge-triggered transitions on
+/// every fresh event, borrow lifetime is the call expression's scope.
+///
 /// **Why no engine vocabulary?** The kqueue parent-dir filter cannot
 /// see basename, so every dir-contents change in the config's parent
 /// becomes a pulse — the watcher cannot pre-classify "this was about
@@ -256,7 +292,7 @@ pub trait FsWatcher: Send + AsFd {
 /// the place that owns the prior-meta-known state, so the watcher
 /// stays a minimal kernel-event pump.
 ///
-/// # Caller pattern (illustrative — production reactor lands in Phase 2)
+/// # Caller pattern (illustrative)
 ///
 /// ```ignore
 /// poll.registry().register(

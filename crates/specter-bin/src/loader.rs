@@ -39,14 +39,14 @@ pub(crate) struct Loader {
     /// file still updates the stored identity. Without that rotation,
     /// the auto-reload settle-expiry filter would observe a fresh
     /// lstat that differs from the stored value forever, looping
-    /// `handle_reload` against the same content.
+    /// `dispatch_reload` against the same content.
     pub(crate) config_meta: FileMeta,
 }
 
 impl Loader {
     /// Atomic rotation across all three fields on a successful reload —
     /// both the apply-diff and empty-diff branches of
-    /// `EngineDriver::handle_reload` converge here. The empty-diff
+    /// `EngineDriver::dispatch_reload` converge here. The empty-diff
     /// branch passes `config == self.current_config` and an identical
     /// log shape; rotation is still required because `meta` must
     /// advance to the fresh lstat so the auto-reload settle filter
@@ -68,7 +68,7 @@ impl Loader {
     /// breaking auto-recovery (see [`FileMeta`]'s rustdoc on
     /// mode/uid/gid as the access-side fingerprint). The post-fail
     /// lstat captures the locked-out state instead, so the recovery
-    /// chmod's lstat differs and re-fires `handle_reload`.
+    /// chmod's lstat differs and re-fires `dispatch_reload`.
     pub(crate) const fn rotate_meta_only(&mut self, meta: FileMeta) {
         self.config_meta = meta;
     }

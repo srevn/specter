@@ -1,7 +1,7 @@
 //! The reload pipeline — SIGHUP and auto-reload, both on the engine
 //! thread (no Mutex).
 //!
-//! [`EngineDriver::handle_reload`] is the shared apply path:
+//! [`EngineDriver::dispatch_reload`] is the shared apply path:
 //! `obs_handle.reopen_file()` fires first (so logrotate cadence is
 //! independent of the config-parse outcome), then the file is read
 //! with an atomic [`FileMeta`] capture, the name-keyed diff is
@@ -11,23 +11,24 @@
 //! re-resolved (CLI overrides re-applied) and `obs_handle` updated
 //! in the same pass.
 //!
-//! Two entry points converge here. SIGHUP calls `handle_reload`
+//! Two entry points converge here. SIGHUP calls `dispatch_reload`
 //! directly. Auto-reload is settle-debounced: [`super::tick`] arms
 //! `config_settle_until` per config-event pulse;
 //! [`EngineDriver::apply_config_settle_expiry`] fires on quiet,
 //! filters phantom pulses with a single `lstat`
 //! ([`EngineDriver::config_meta_changed`]) and calls the same
-//! `handle_reload` on confirmed [`FileMeta`] drift — so the
+//! `dispatch_reload` on confirmed [`FileMeta`] drift — so the
 //! meta-rotation discipline converges across both pulse sources.
 
 use super::EngineDriver;
 use super::state::ReloadTrigger;
 use specter_config::{Config, FileMeta, LogConfig};
 use specter_core::Input;
+use specter_sensor::FsWatcher;
 use std::ops::ControlFlow;
 use std::time::Instant;
 
-impl EngineDriver {
+impl<W: FsWatcher> EngineDriver<W> {
     /// Drive the auto-reload settle deadline forward by one tick.
     ///
     /// Called from [`Self::tick`] after the config-event drain. Three
@@ -39,7 +40,7 @@ impl EngineDriver {
     ///   will reach `now >= deadline` if the burst goes quiet).
     /// - `now >= deadline`: clear the deadline, run the lstat filter
     ///   ([`Self::config_meta_changed`]), and call
-    ///   [`Self::handle_reload`] on drift. The lstat filter is what
+    ///   [`Self::dispatch_reload`] on drift. The lstat filter is what
     ///   suppresses no-op pulses — a kqueue parent-dir spillover from
     ///   a sibling write fires a pulse but doesn't move
     ///   `loader.config_meta`, so the lstat compares equal and we
@@ -50,7 +51,7 @@ impl EngineDriver {
     /// across the settle window. Production callers go through
     /// `tick`, which always passes `Instant::now()`.
     ///
-    /// Returns [`ControlFlow::Break`] iff [`Self::handle_reload`]
+    /// Returns [`ControlFlow::Break`] iff [`Self::dispatch_reload`]
     /// observed shutdown (its `forward` raced the
     /// `shutdown_engine_rx` arm, or `watch_ops_tx` disconnected
     /// mid-apply). The caller is responsible for the probe drain —
@@ -65,7 +66,7 @@ impl EngineDriver {
         }
         self.config_settle_until = None;
         if self.config_meta_changed() {
-            self.handle_reload(ReloadTrigger::AutoReload, now)
+            self.dispatch_reload(ReloadTrigger::AutoReload, now)
         } else {
             ControlFlow::Continue(())
         }
@@ -80,7 +81,7 @@ impl EngineDriver {
     ///
     /// 1. **Recovery semantics.** An ENOENT / EACCES that recovers
     ///    (operator un-deletes / chmods 644) flips the lstat from `Err`
-    ///    to `Ok`, which is structurally a transition — handle_reload
+    ///    to `Ok`, which is structurally a transition — dispatch_reload
     ///    runs on the next pulse and either succeeds (rotation) or
     ///    fails again (parse-fail; meta NOT rotated; retry on next
     ///    pulse).
@@ -150,7 +151,7 @@ impl EngineDriver {
     /// has the diff applied, so the loader matches the engine on the
     /// way out, and the driver is about to shut down anyway — keeping
     /// the rotation in front of the return is the clearer invariant.
-    pub(super) fn handle_reload(
+    pub(crate) fn dispatch_reload(
         &mut self,
         trigger: ReloadTrigger,
         now: Instant,
@@ -249,7 +250,7 @@ impl EngineDriver {
     /// `warn!` — the rotator may have raced us to the path, in which
     /// case the existing fd is still usable.
     ///
-    /// Sole call site is the top of [`Self::handle_reload`]; every
+    /// Sole call site is the top of [`Self::dispatch_reload`]; every
     /// branch below it is structurally downstream, so a broken-TOML
     /// edit landing during a `logrotate` cycle still rotates the log
     /// file — the reopen does not depend on the parse outcome.
@@ -434,7 +435,7 @@ impl EngineDriver {
     /// TOML-disabled retention case works correctly — filtering
     /// through [`Config::active_watches`] would drop those entries.
     ///
-    /// Sole production caller is [`Self::handle_reload`] *after*
+    /// Sole production caller is [`Self::dispatch_reload`] *after*
     /// [`crate::loader::Loader::rotate_apply`] — so `current_config`
     /// is the newly-applied state. `pub(super)` so the driver's own
     /// tests can exercise the helper directly without driving the

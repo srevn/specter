@@ -19,6 +19,7 @@ libc.workspace = true
 
 [dev-dependencies]
 specter-core       = { path = "../specter-core", features = ["testkit"] }
+mio.workspace      = true
 nix.workspace      = true
 tempfile.workspace = true
 

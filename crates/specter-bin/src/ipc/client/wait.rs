@@ -18,7 +18,8 @@
 //!   for an event that will never arrive.
 //! - `124` — deadline elapsed (POSIX `timeout(1)` convention).
 //! - other non-zero ([`ExitCode::FAILURE`]) — stream ended without a
-//!   match (daemon shutdown, broker GC, etc.).
+//!   match (daemon shutdown closed the conn, peer terminated mid-
+//!   stream, etc.).
 //!
 //! # Deadline mechanics
 //!
@@ -137,9 +138,9 @@ enum Match {
 /// The per-Sub server-side filter guarantees every reachable event
 /// names the resolved Sub, so this match only branches on the
 /// variant tag. A new per-Sub diagnostic variant (added to both
-/// [`specter_core::Diagnostic`] and the broker's
-/// `diag_sub_id`) reaches the `Skip` arm by default; that's the
-/// right behaviour — only Fire/Detach are wait-actionable.
+/// [`specter_core::Diagnostic`] and `crate::driver::forward`'s
+/// `diag_sub_id` projection) reaches the `Skip` arm by default;
+/// that's the right behaviour — only Fire/Detach are wait-actionable.
 const fn classify(kind: WaitKind, wire: &WireDiagnostic) -> Match {
     match (kind, wire) {
         (WaitKind::Fire, WireDiagnostic::SubFired { .. })

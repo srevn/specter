@@ -22,19 +22,47 @@
 #![allow(clippy::iter_with_drain)]
 #![cfg(target_os = "linux")]
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, InotifyWatcher, WatcherEvent};
+use std::os::fd::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+/// Build a `mio::Poll` registered on the watcher's inotify fd. The
+/// helper centralises the "register `as_fd()` for READABLE" boilerplate
+/// the drain loops below share — `drain_ready` is non-blocking by
+/// trait, so the caller blocks via the reactor.
+fn poll_for(w: &InotifyWatcher) -> Poll {
+    let poll = Poll::new().expect("mio Poll");
+    let raw = w.as_fd().as_raw_fd();
+    poll.registry()
+        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
+        .expect("register inotify fd");
+    poll
+}
+
 fn drain_for(w: &mut InotifyWatcher, dur: Duration) -> Vec<(ResourceId, FsEvent)> {
+    let deadline = Instant::now() + dur;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
-    let _ = w.poll_until(Some(Instant::now() + dur), &mut buf);
-    let mut out = Vec::with_capacity(buf.len());
-    for ev in buf.drain(..) {
-        if let WatcherEvent::Fs { resource, event } = ev {
-            out.push((resource, event));
+    let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
+    while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
+        buf.clear();
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
+        for ev in buf.drain(..) {
+            if let WatcherEvent::Fs { resource, event } = ev {
+                out.push((resource, event));
+            }
         }
     }
     out

@@ -22,11 +22,27 @@
 #![allow(clippy::iter_with_drain, clippy::missing_const_for_fn)]
 #![cfg(target_os = "linux")]
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, InotifyWatcher, WatcherEvent};
+use std::os::fd::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// Build a `mio::Poll` registered on the watcher's inotify fd. The
+/// helper centralises the "register `as_fd()` for READABLE" boilerplate
+/// the drain loops below share — `drain_ready` is non-blocking by
+/// trait, so the caller blocks via the reactor.
+fn poll_for(w: &InotifyWatcher) -> Poll {
+    let poll = Poll::new().expect("mio Poll");
+    let raw = w.as_fd().as_raw_fd();
+    poll.registry()
+        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
+        .expect("register inotify fd");
+    poll
+}
 
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     w: &mut InotifyWatcher,
@@ -34,11 +50,19 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
     let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
         buf.clear();
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
         for ev in buf.drain(..) {
             if let WatcherEvent::Fs { resource, event } = ev {
                 out.push((resource, event));
@@ -49,6 +73,24 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
         }
     }
     out
+}
+
+/// Drain whatever the watcher emits for `dur` into `out`, without
+/// asserting on a specific event. Used by tests that want to collect
+/// the raw `WatcherEvent` stream (incl. overflow) over a window.
+fn drain_raw_for(w: &mut InotifyWatcher, dur: Duration, out: &mut Vec<WatcherEvent>) {
+    let deadline = Instant::now() + dur;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
+    while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
+        if w.drain_ready(out).is_err() {
+            break;
+        }
+    }
 }
 
 /// E2E #3 closure: an in-place file edit (`>` redirect, no rename) fires
@@ -129,16 +171,13 @@ fn in_place_edit_does_not_fire_on_structure_only_dir_watch() {
 
     // Drain any registration noise.
     let mut warmup: Vec<WatcherEvent> = Vec::new();
-    let _ = w.poll_until(
-        Some(Instant::now() + Duration::from_millis(100)),
-        &mut warmup,
-    );
+    drain_raw_for(&mut w, Duration::from_millis(100), &mut warmup);
 
     // In-place edit (the symptom case).
     std::fs::write(&file_path, "v2 with more bytes").unwrap();
 
     let mut out: Vec<WatcherEvent> = Vec::new();
-    let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(300)), &mut out);
+    drain_raw_for(&mut w, Duration::from_millis(300), &mut out);
 
     // The dir's STRUCTURE-only watch must not fire on a child's
     // in-place edit. STRUCTURE on Dir installs only

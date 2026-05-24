@@ -1,68 +1,60 @@
 //! Downstream dispatch — the terminal-consumer drain of a
 //! [`StepOutput`], the [`Diagnostic`] → tracing map, and the
-//! diagnostic fan-out to operator-IPC subscribers via the broker.
+//! diagnostic fan-out to operator-IPC subscribers.
 //!
 //! [`EngineDriver::forward`] ships every [`StepOutput`] onward:
-//! `watch_ops` → `watch_ops_tx` with a `wake_handle.wake()` per
-//! successful send; `probe_ops` → `prober.submit` / `cancel`;
-//! `cancel_effects` + `effects` → `effects_tx` (lifted to
+//! `watch_ops` → [`crate::driver::hub::DriverHub::apply_watch_ops`]
+//! (inline against the owned watcher; rejected ops queue as
+//! [`Input::WatchOpRejected`] in the deferred-input replay queue);
+//! `probe_ops` → `prober.submit` / `cancel`; `cancel_effects` +
+//! `effects` → `actuator_io.effects_tx` (lifted to
 //! [`EffectOp::Cancel`] / [`EffectOp::Submit`], cancels first so a
 //! defensive same-step cancel + submit for one profile would kill
 //! stale before spawn new); `diagnostics` → [`log_diagnostic`] AND
-//! [`super::broker::Broker::dispatch`] (fan-out to live IPC
-//! subscribers, with a single `SystemTime::now()` capture per
-//! `StepOutput` so every subscriber sees byte-identical `at` for
-//! the same emission). Every channel send races `shutdown_engine_rx`
-//! so a queued shutdown pulse pre-empts back-pressure (a full
-//! bounded channel cannot wedge the tick on SIGTERM). Per-channel
-//! disconnect policy is explicit at the call site; the rationale
-//! lives on the method.
+//! [`crate::driver::hub::DriverHub::dispatch_to_subscribers`] (fan-out
+//! to live IPC subscribers, with a single `SystemTime::now()` capture
+//! per `StepOutput` so every subscriber sees byte-identical `at` for
+//! the same emission).
+//!
+//! **No `shutdown_engine_rx` arm.** The bridge-thread shape is gone:
+//! signals dispatch inline on the reactor thread via
+//! [`super::EngineDriver::dispatch_signal`], and a wedged effects
+//! channel surfaces through `try_send` rather than blocking the
+//! reactor mid-tick. Per-channel disconnect policy is explicit at the
+//! call site; the rationale lives on the method.
 //!
 //! `log_diagnostic` is the per-variant hand-mapping of a [`Diagnostic`]
 //! to a tracing event; its severities are the operator-facing catalogue.
 
 use super::EngineDriver;
-use specter_core::{Diagnostic, EffectOp, ProbeOp, StepOutput};
+use crossbeam::channel::TrySendError;
+use specter_core::{Diagnostic, EffectOp, Input, ProbeOp, StepOutput, SubId};
+use specter_sensor::FsWatcher;
 use std::ops::ControlFlow;
 use std::time::SystemTime;
 
-impl EngineDriver {
+impl<W: FsWatcher> EngineDriver<W> {
     /// Push a [`StepOutput`] to its downstream consumers.
     ///
-    /// **Per-channel policy.** The two outbound channels carry
-    /// different failure modes, so they get different disconnect
-    /// responses:
+    /// **`watch_ops` dispatch inline against the owned watcher.** The
+    /// driver thread owns [`crate::driver::hub::DriverHub`]'s watcher
+    /// directly — no channel, no consumer-side disconnect to race.
+    /// Rejected ops surface as `(resource, failure)` pairs which we
+    /// queue into [`super::EngineDriver::deferred_inputs`] as
+    /// [`Input::WatchOpRejected`]; the next tick's
+    /// `replay_deferred_inputs` runs each rejection through
+    /// `engine.step` BEFORE the mio Poll re-blocks, so the engine's
+    /// claim-purge fires this tick's cycle.
     ///
-    /// - `watch_ops_tx` is **terminal** on disconnect. Engine state
-    ///   diverging from the kernel's view is a correctness break —
-    ///   bursts would wedge in `Verifying` against stale baselines.
-    ///   We log at `error!` and return [`ControlFlow::Break`] so the
-    ///   tick routes through `begin_shutdown` (probe drain) on its way
-    ///   out.
-    /// - `effects_tx` is **degradable** on disconnect. The engine's
-    ///   state machine remains coherent against `gate_deadline`
-    ///   recovery (a hung actuator force-transitions
-    ///   `Awaiting → Rebasing`); advisory loss of a single effect is
-    ///   acceptable. We log at `warn!` and drop the effect, and the
-    ///   forward continues.
-    ///
-    /// **Shutdown-races-block on every send.** Each send is wrapped in
-    /// a `crossbeam::select!` against `shutdown_engine_rx`. A queued
-    /// shutdown pulse therefore pre-empts a `bounded(1024)` channel
-    /// even when its consumer is wedged — the back-pressure deadlock
-    /// on SIGTERM cannot recur. A worst-case shutdown observed
-    /// mid-stream loses **one** op (the value moved into the
-    /// unselected `send` arm is dropped): `WatchOp::{Watch, Unwatch}`
-    /// loss is benign (the kernel reclaims fds at process exit); an
-    /// `Effect` loss falls under the same advisory-drop policy as the
-    /// disconnect arm above.
-    ///
-    /// **Wake-per-send survives.** The wake fires only on the `Ok`
-    /// branch of the `watch_ops_tx` send arm — the contract the
-    /// `forward_wakes_after_each_send_to_break_full_channel_deadlock`
-    /// regression test pins. The shutdown-arm-wins path does not wake,
-    /// because the driver is exiting and a kqueue wake on a closing
-    /// watcher is at best wasted, at worst racing the join.
+    /// **`effects_tx` is `try_send` with advisory drop on `Full`.**
+    /// The engine's `gate_deadline` recovery contract covers a missed
+    /// Submit identically to "actuator wedged" — both produce a
+    /// `EffectComplete` that never arrives, so the burst force-
+    /// transitions `Awaiting → Rebasing` on the same timer. Advisory
+    /// drop on `Full` is therefore safe; the cost is a single missed
+    /// effect, recovered through the same path operators already
+    /// observe under actuator pressure. `Disconnected` remains terminal
+    /// (actuator thread is gone — no recovery possible).
     ///
     /// **Probe ops dispatch directly.** [`StepOutput::into_parts`]
     /// yields an owner-keyed map (at most one op per owner by
@@ -72,16 +64,6 @@ impl EngineDriver {
     /// collapses it before the wire. Probe *correctness* is the
     /// engine's — a stale or superseded response folds to
     /// `StaleProbeResponse` at its response gate, never this drain's.
-    ///
-    /// Takes `&mut self` because the broker fan-out
-    /// ([`super::broker::Broker::dispatch`]) mutates the subscriber
-    /// list (back-pressure marker accumulation, GC on disconnect).
-    /// Every other downstream send is channel-based or trait-object
-    /// dispatch (`Sender::send`, `Prober::submit`, `WakeHandle::wake`,
-    /// `tracing::*`); the disjoint-field split-borrow rules let the
-    /// `select!` macro hold immutable borrows of `self.sides.*` and
-    /// `self.prober` / `self.wake_handle` alongside the `&mut
-    /// self.broker` needed for the diagnostic fan-out.
     ///
     /// **Diagnostic fan-out lives on [`Self::forward_diagnostics`].**
     /// The wall-clock + per-subscriber byte-identical `at` contract
@@ -94,17 +76,15 @@ impl EngineDriver {
         // dispatch order below without one clone per Effect.
         let (watch_ops, probe_ops, effects, cancel_effects, diagnostics) = out.into_parts();
 
-        for op in watch_ops {
-            crossbeam::select! {
-                send(self.sides.watch_ops_tx, op) -> res => match res {
-                    Ok(()) => self.wake_handle.wake(),
-                    Err(_) => {
-                        tracing::error!("watch_ops disconnected; shutting down");
-                        return ControlFlow::Break(());
-                    }
-                },
-                recv(self.sides.shutdown_engine_rx) -> _ => return ControlFlow::Break(()),
-            }
+        // Apply watch ops inline against the Hub-owned watcher. The
+        // rejected list is the producer side of the
+        // `Input::WatchOpRejected` replay queue — every rejection runs
+        // through `engine.step` on the next tick's
+        // `replay_deferred_inputs` pass, so the engine's claim-purge
+        // dispatch fires within one tick of the failure.
+        for (resource, failure) in self.hub.apply_watch_ops(&watch_ops) {
+            self.deferred_inputs
+                .push_back(Input::WatchOpRejected { resource, failure });
         }
 
         for op in probe_ops.into_values() {
@@ -114,31 +94,51 @@ impl EngineDriver {
             }
         }
 
-        // Cancel-effects dispatch BEFORE submits over the same `effects_tx`.
-        // Defense in depth: by construction a same-step cancel + submit
-        // for one profile cannot occur (`handle_gate_deadline` emits no
-        // Effects; the post-fire stable verdict path emits no cancel),
-        // but if a future emission site ever introduced the cross-stream
-        // race, "kill stale before spawn new" is the right ordering and
-        // is structural here, not a documented convention. Same
+        // Cancel-effects dispatch BEFORE submits over the same
+        // `effects_tx`. Defense in depth: by construction a same-step
+        // cancel + submit for one profile cannot occur
+        // (`handle_gate_deadline` emits no Effects; the post-fire
+        // stable verdict path emits no cancel), but if a future
+        // emission site ever introduced the cross-stream race, "kill
+        // stale before spawn new" is the right ordering and is
+        // structural here, not a documented convention. The single
         // `effects_tx` channel keeps the engine→actuator FIFO single,
         // so causal order between same-profile cancel and a later
         // submit (in a later step) is preserved automatically.
         for profile in cancel_effects {
-            crossbeam::select! {
-                send(self.sides.effects_tx, EffectOp::Cancel { profile }) -> res => if res.is_err() {
-                    tracing::warn!(?profile, "effects disconnected; dropping cancel");
-                },
-                recv(self.sides.shutdown_engine_rx) -> _ => return ControlFlow::Break(()),
+            match self
+                .actuator_io
+                .effects_tx
+                .try_send(EffectOp::Cancel { profile })
+            {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        ?profile,
+                        "effects channel saturated; dropping cancel \
+                         (engine gate_deadline recovers on the same path)",
+                    );
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    tracing::error!("actuator disconnected; shutting down");
+                    return ControlFlow::Break(());
+                }
             }
         }
 
         for eff in effects {
-            crossbeam::select! {
-                send(self.sides.effects_tx, EffectOp::Submit(eff)) -> res => if res.is_err() {
-                    tracing::warn!("effects disconnected; dropping effect");
-                },
-                recv(self.sides.shutdown_engine_rx) -> _ => return ControlFlow::Break(()),
+            match self.actuator_io.effects_tx.try_send(EffectOp::Submit(eff)) {
+                Ok(()) => {}
+                Err(TrySendError::Full(_)) => {
+                    tracing::warn!(
+                        "effects channel saturated; dropping submit \
+                         (engine gate_deadline recovers on the same path)",
+                    );
+                }
+                Err(TrySendError::Disconnected(_)) => {
+                    tracing::error!("actuator disconnected; shutting down");
+                    return ControlFlow::Break(());
+                }
             }
         }
 
@@ -148,14 +148,15 @@ impl EngineDriver {
     }
 
     /// Log each [`Diagnostic`] via tracing AND fan it out to live
-    /// IPC subscribers through [`super::broker::Broker::dispatch`].
+    /// IPC subscribers through
+    /// [`crate::driver::hub::DriverHub::dispatch_to_subscribers`].
     ///
     /// **Wall-clock capture is once per call.** A single
-    /// [`SystemTime::now`] threads into every `broker.dispatch(diag,
-    /// wall_now)` call — every subscriber sees byte-identical `at`
-    /// for one engine emission, regardless of per-client delivery
-    /// cadence. A slow client cannot rewrite history; a fast client
-    /// cannot observe a slower client's `at`.
+    /// [`SystemTime::now`] threads into every `dispatch_to_subscribers`
+    /// call — every subscriber sees byte-identical `at` for one engine
+    /// emission, regardless of per-client delivery cadence. A slow
+    /// client cannot rewrite history; a fast client cannot observe a
+    /// slower client's `at`.
     ///
     /// **Empty-slice short-circuit.** Most ticks emit zero
     /// diagnostics; the early return keeps the [`SystemTime::now`]
@@ -167,7 +168,8 @@ impl EngineDriver {
         let wall_now = SystemTime::now();
         for diag in diagnostics {
             log_diagnostic(diag);
-            self.broker.dispatch(diag, wall_now);
+            let diag_sub = diag_sub_id(diag);
+            self.hub.dispatch_to_subscribers(diag, wall_now, diag_sub);
         }
     }
 }
@@ -531,5 +533,189 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?observed,
             "burst lifecycle helper precondition failed (state-machine routing breach)",
         ),
+    }
+}
+
+/// Project a [`Diagnostic`] to the [`SubId`] it names, if any.
+///
+/// Called by [`EngineDriver::forward`] once per emitted diagnostic to
+/// resolve the `diag_sub` filter argument
+/// [`super::hub::DriverHub::dispatch_to_subscribers`] consumes — the
+/// projection lives on the engine-output side of the boundary, the
+/// reactor module never names [`Diagnostic`] internals.
+///
+/// Total over the [`Diagnostic`] enum — a new core variant is a
+/// compile error here (the exhaustive `match` is the structural
+/// wall, same discipline as
+/// [`crate::ipc::wire::WireDiagnostic::from`]).
+///
+/// Per-Sub variants project to their `sub`. Profile-keyed variants
+/// (`ProfileReaped`, `ReapPendingCancelled`, etc.) return `None`
+/// and reach unfiltered subscribers only.
+///
+/// The verbose `None`-arm enumeration is deliberate: a future
+/// [`Diagnostic`] variant carrying a [`SubId`] that this function
+/// silently projects to `None` would be a per-Sub `wait` bug; the
+/// exhaustive `match` forces the author to pick a side at the point
+/// of variant introduction.
+pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
+    use Diagnostic as D;
+    match d {
+        D::SubAttached { sub, .. }
+        | D::SubFired { sub, .. }
+        | D::SubDetached { sub, .. }
+        | D::SubRebound { sub }
+        | D::DetachUnknownSub { sub }
+        | D::RebindUnknownSub { sub }
+        | D::EffectCompleteForUnknownSub { sub }
+        | D::EffectCompleteOutsideAwaiting { sub, .. } => Some(*sub),
+
+        D::StaleProbeResponse { .. }
+        | D::StaleTimer { .. }
+        | D::ConfigDiffUnknownSub { .. }
+        | D::ConfigDiffUnknownPromoter { .. }
+        | D::ConfigDiffRebindFallbackAttach { .. }
+        | D::ProbeVanished { .. }
+        | D::ProbeFailed { .. }
+        | D::EventClassDropped { .. }
+        | D::EventOnUnwatchedResource { .. }
+        | D::EventNoConsumer { .. }
+        | D::WatchOpRejected { .. }
+        | D::PendingPathProbeVanished { .. }
+        | D::PendingPathProbeFailed { .. }
+        | D::ReapPendingCancelled { .. }
+        | D::ProfileReaped { .. }
+        | D::ProfileClaimPurged { .. }
+        | D::PromoterClaimPurged { .. }
+        | D::AttachPathInvalid { .. }
+        | D::AttachResourceStale { .. }
+        | D::AnchorKindMismatch { .. }
+        | D::SpliceCrossedUncovered { .. }
+        | D::EventAbsorbedByFireTail { .. }
+        | D::AwaitGateDeadlineForceRebasing { .. }
+        | D::AwaitGateDeadlineReap { .. }
+        | D::QuiescenceCeilingUnreadable { .. }
+        | D::RebaseCeilingStillChanging { .. }
+        | D::RebaseCeilingUnreadable { .. }
+        | D::SensorOverflow { .. }
+        | D::PromoterReseededForOverflow { .. }
+        | D::PerFileDriftDroppedOnRecovery { .. }
+        | D::PerFileFireSkippedOnFreshSeed { .. }
+        | D::PromoterAttached { .. }
+        | D::PromoterReaped { .. }
+        | D::PromoterDescentVanished { .. }
+        | D::PromoterDescentFailed { .. }
+        | D::PromotionKindObserved { .. }
+        | D::PromoterFanoutThreshold { .. }
+        | D::PromoterProxyStaleEvent { .. }
+        | D::PromoterEnumerationVanished { .. }
+        | D::PromoterEnumerationFailed { .. }
+        | D::DynamicSubReaped { .. }
+        | D::InvalidBurstTransition { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::diag_sub_id;
+    use compact_str::CompactString;
+    use slotmap::KeyData;
+    use specter_core::{
+        BurstIntent, DetachReason, Diagnostic, ProbeCorrelation, ProbeOwner, ProfileId, SubId,
+    };
+
+    /// Mint a non-default [`SubId`] from a raw FFI value — the
+    /// fan-out filter keys on `Some(sid)` vs `None`, so a slotmap
+    /// default would be indistinguishable from an absent id.
+    fn sid(raw: u64) -> SubId {
+        SubId::from(KeyData::from_ffi(raw))
+    }
+
+    fn pid(raw: u64) -> ProfileId {
+        ProfileId::from(KeyData::from_ffi(raw))
+    }
+
+    /// Every per-Sub [`Diagnostic`] variant projects to its `sub`.
+    /// Pins the load-bearing arms of [`diag_sub_id`]; a regression
+    /// here is a `wait <name>` bug.
+    #[test]
+    fn diag_sub_id_per_sub_variants() {
+        let s = sid(1);
+        let p = pid(0xAA);
+        assert_eq!(
+            diag_sub_id(&Diagnostic::SubAttached {
+                sub: s,
+                name: CompactString::const_new("x"),
+                source_promoter: None,
+            }),
+            Some(s)
+        );
+        assert_eq!(
+            diag_sub_id(&Diagnostic::SubFired {
+                sub: s,
+                profile: p,
+                count: 1
+            }),
+            Some(s)
+        );
+        assert_eq!(
+            diag_sub_id(&Diagnostic::SubDetached {
+                sub: s,
+                profile: p,
+                reason: DetachReason::IpcDisabled,
+            }),
+            Some(s)
+        );
+        assert_eq!(diag_sub_id(&Diagnostic::SubRebound { sub: s }), Some(s));
+        assert_eq!(
+            diag_sub_id(&Diagnostic::DetachUnknownSub { sub: s }),
+            Some(s)
+        );
+        assert_eq!(
+            diag_sub_id(&Diagnostic::RebindUnknownSub { sub: s }),
+            Some(s)
+        );
+        assert_eq!(
+            diag_sub_id(&Diagnostic::EffectCompleteForUnknownSub { sub: s }),
+            Some(s)
+        );
+        assert_eq!(
+            diag_sub_id(&Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p }),
+            Some(s)
+        );
+    }
+
+    /// Profile-keyed and metadata-only variants project to `None` —
+    /// they reach unfiltered subscribers, never per-Sub filtered
+    /// ones. Catches a future variant that carries a [`SubId`] but
+    /// lands in the wrong arm.
+    #[test]
+    fn diag_sub_id_profile_keyed_returns_none() {
+        let p = pid(0xAA);
+        assert_eq!(
+            diag_sub_id(&Diagnostic::ProfileReaped {
+                profile: p,
+                via: specter_core::ReapTrigger::Immediate,
+            }),
+            None
+        );
+        assert_eq!(
+            diag_sub_id(&Diagnostic::ReapPendingCancelled { profile: p }),
+            None
+        );
+        assert_eq!(
+            diag_sub_id(&Diagnostic::ProbeVanished {
+                profile: p,
+                intent: BurstIntent::Standard,
+            }),
+            None
+        );
+        assert_eq!(
+            diag_sub_id(&Diagnostic::StaleProbeResponse {
+                owner: ProbeOwner::Profile(p),
+                correlation: ProbeCorrelation::from(7),
+            }),
+            None
+        );
     }
 }

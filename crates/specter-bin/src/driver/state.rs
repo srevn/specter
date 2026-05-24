@@ -99,7 +99,7 @@ impl DriverState {
     /// with `trigger`. `saturating_add` guards the (practically
     /// unreachable) `u64`-overflow case.
     ///
-    /// Sole call site is `EngineDriver::handle_reload`, immediately
+    /// Sole call site is `EngineDriver::dispatch_reload`, immediately
     /// after `read_and_parse_config` returns `Some`. Both the
     /// empty-diff branch (operator re-saved unchanged bytes; pulse
     /// still honoured) and the apply-diff branch reach the bump.
@@ -114,7 +114,7 @@ impl DriverState {
 }
 
 /// What drove a reload. Three sources converge on the same
-/// `EngineDriver::handle_reload` body; this enum carries the
+/// `EngineDriver::dispatch_reload` body; this enum carries the
 /// per-caller attribution into [`DriverState::record_reload`].
 ///
 /// `pub(crate)` so the IPC layer (`crate::ipc::project`) can project
@@ -131,13 +131,20 @@ pub(crate) enum ReloadTrigger {
     Sighup,
     /// Auto-reload settle expiry observed `FileMeta` drift against
     /// `loader.config_meta` (config-watcher pulse → settle window →
-    /// lstat diff → `handle_reload`).
+    /// lstat diff → `dispatch_reload`).
     AutoReload,
     /// IPC `Reload` request arrived through the driver's IPC drain
-    /// (`crate::ipc::server` → `ipc_request_rx` → driver). Single-
+    /// (per-conn `WireRequest::Reload` line → driver). Single-
     /// source attribution: constructed at the IPC drain's `Reload`
     /// arm, not inferred from a peer pulse — operators reading
     /// `status.last_reload_via` after a `specter reload` round-trip
     /// see the exact trigger that drove the reload they observed.
     Ipc,
+    /// Startup-TOCTOU drift detected by `App::run`: the on-disk
+    /// `FileMeta` changed between the initial config read and the
+    /// config-watcher's registration window. The driver runs the same
+    /// reload pipeline as SIGHUP, with `Startup` attribution so
+    /// operators can distinguish "boot-time drift caught and applied"
+    /// from a subsequent operator-driven reload.
+    Startup,
 }

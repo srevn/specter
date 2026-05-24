@@ -8,7 +8,7 @@
 //! lifecycle in-process via this entry point, and production `main`
 //! is a thin wrapper over `clap::Parser::parse` + [`run`].
 
-// Bin is wiring: channels, signals, the driver loop. Any FFI need
+// Bin is wiring: channels, signal pipeline, the driver loop. Any FFI need
 // lives in the actor crates it composes (`sensor`, `actuator`), never
 // here; `forbid` is the strictest level (cannot be locally overridden
 // by `#[allow]`), matching the discipline of `core` / `engine` /

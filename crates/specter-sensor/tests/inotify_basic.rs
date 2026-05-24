@@ -1,6 +1,6 @@
 //! Real-fs round-trip on Linux inotify. Each test installs one watch,
 //! performs one filesystem operation, and asserts that the corresponding
-//! [`FsEvent`] arrives at [`FsWatcher::poll_until`]. Mirror of
+//! [`FsEvent`] arrives at [`FsWatcher::drain_ready`]. Mirror of
 //! `kqueue_basic.rs`.
 //!
 //! Each test passes the minimum [`ClassSet`] needed to fire the event it
@@ -19,14 +19,30 @@
 #![allow(clippy::iter_with_drain)]
 #![cfg(target_os = "linux")]
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, InotifyWatcher, WatchFailure, WatcherEvent};
 use std::ffi::OsStr;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// Build a `mio::Poll` registered on the watcher's inotify fd. The
+/// helper centralises the "register `as_fd()` for READABLE" boilerplate
+/// the drain loops below share — `drain_ready` is non-blocking by
+/// trait, so the caller blocks via the reactor.
+fn poll_for(w: &InotifyWatcher) -> Poll {
+    let poll = Poll::new().expect("mio Poll");
+    let raw = w.as_fd().as_raw_fd();
+    poll.registry()
+        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
+        .expect("register inotify fd");
+    poll
+}
 
 /// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator until
 /// at least one matches `pred` or the deadline elapses. Returns the
@@ -38,11 +54,19 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
     let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
         buf.clear();
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
         for ev in buf.drain(..) {
             if let WatcherEvent::Fs { resource, event } = ev {
                 out.push((resource, event));
@@ -267,7 +291,18 @@ fn unwatch_after_event_does_not_panic_on_subsequent_poll() {
     // now in `draining_wds`. Watcher drops the event silently; the
     // `IN_IGNORED` consumption clears the flag. Test contract is "no
     // panic / no error".
+    let mut poll = poll_for(&w);
+    let mut events = Events::with_capacity(8);
     let mut out: Vec<WatcherEvent> = Vec::new();
-    let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(200)), &mut out);
+    let deadline = Instant::now() + Duration::from_millis(200);
+    while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
+        if w.drain_ready(&mut out).is_err() {
+            break;
+        }
+    }
     drop(w);
 }

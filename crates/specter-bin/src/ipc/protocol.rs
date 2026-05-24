@@ -1,25 +1,21 @@
-//! Operator IPC protocol — request layering, response carriers,
+//! Operator IPC protocol — wire-side request shape, response carriers,
 //! wire-id newtype, and error-code constants.
 //!
-//! # Three-type request layering
+//! # Single-type request shape
 //!
 //! ```text
-//!                        ┌─ JSON line ─┐    ┌─ channel ─┐
-//! client ──write──> [WireRequest]  ───────> [RequestPayload]
-//!                                            + [IpcRequest { reply_tx }]
-//!                                            ────send────> driver
+//!                        ┌─ JSON line ─┐
+//! client ──write──> [WireRequest] ────────> driver (parses + dispatches inline)
 //! ```
 //!
-//! - [`WireRequest`] is the only type the daemon parses from the
-//!   socket. Deserialize-only: operators address by name, not by id,
-//!   so the daemon refuses to admit `WireId` values from clients.
-//! - [`RequestPayload`] is the channel-bound shape the driver
-//!   receives. Its [`RequestPayload::Subscribe`] arm carries the
-//!   `Sender<BrokerEvent>` the broker fans into — a routing identity
-//!   with no wire representation, so the type derives neither
-//!   `Serialize` nor `Deserialize` by construction.
-//! - [`IpcRequest`] is the envelope: payload + a `bounded(1)` reply
-//!   channel. One verb, one response.
+//! [`WireRequest`] is the only request type the daemon ever sees: the
+//! mio-reactor driver reads bytes off each per-conn stream, parses one
+//! `WireRequest` per line, and dispatches inline on the same thread —
+//! no channel envelope, no per-request reply channel, no per-conn
+//! worker thread.
+//!
+//! Deserialize-only: operators address by name, not by id, so the
+//! daemon refuses to admit `WireId` values from clients.
 //!
 //! # Response shape
 //!
@@ -30,19 +26,18 @@
 //!
 //! # Visibility
 //!
-//! Every export is `pub(crate)`. The driver IPC drain, server thread,
-//! projection helpers, and client verbs consume each type at its
-//! own point of use.
+//! Every export is `pub(crate)`. The driver IPC drain, projection
+//! helpers, and client verbs consume each type at its own point of
+//! use.
 
 use compact_str::CompactString;
-use crossbeam::channel::Sender;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
 use std::borrow::Cow;
 use std::path::PathBuf;
 
-use super::wire::{BrokerEvent, WireEffectScope, WireReloadTrigger, WireStateLabel, WireTime};
+use super::wire::{WireEffectScope, WireReloadTrigger, WireStateLabel, WireTime};
 
 /// Operator-facing wire request — the shape the daemon parses from
 /// the socket and the client constructs at write time.
@@ -81,65 +76,6 @@ pub(crate) enum WireRequest {
         #[serde(default)]
         name: Option<CompactString>,
     },
-}
-
-/// Channel-bound request payload — the shape the driver receives on
-/// its IPC arm.
-///
-/// Distinct from [`WireRequest`] only by the [`RequestPayload::Subscribe`]
-/// variant: subscribing carries a `Sender<BrokerEvent>` clone for the
-/// broker to fan diagnostics into. The sender is a routing identity,
-/// not a wire value, which is why the two-type split exists.
-pub(crate) enum RequestPayload {
-    Status,
-    List,
-    Show {
-        name: CompactString,
-    },
-    Disable {
-        name: CompactString,
-    },
-    Enable {
-        name: CompactString,
-    },
-    Reload,
-    Subscribe {
-        tx: Sender<BrokerEvent>,
-        name: Option<CompactString>,
-    },
-}
-
-impl std::fmt::Debug for RequestPayload {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Status => f.write_str("Status"),
-            Self::List => f.write_str("List"),
-            Self::Show { name } => f.debug_struct("Show").field("name", name).finish(),
-            Self::Disable { name } => f.debug_struct("Disable").field("name", name).finish(),
-            Self::Enable { name } => f.debug_struct("Enable").field("name", name).finish(),
-            Self::Reload => f.write_str("Reload"),
-            Self::Subscribe { name, tx: _ } => f
-                .debug_struct("Subscribe")
-                .field("name", name)
-                .finish_non_exhaustive(),
-        }
-    }
-}
-
-/// Channel envelope — pairs a payload with the per-request reply
-/// channel. The reply channel is constructed `bounded(1)` by the
-/// server thread: one verb, one response, no queueing.
-pub(crate) struct IpcRequest {
-    pub(crate) payload: RequestPayload,
-    pub(crate) reply_tx: Sender<ResponsePayload>,
-}
-
-impl std::fmt::Debug for IpcRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("IpcRequest")
-            .field("payload", &self.payload)
-            .finish_non_exhaustive()
-    }
 }
 
 /// Operator-facing response.
@@ -472,15 +408,28 @@ pub(crate) const ERR_TOML_DISABLED: &str = "toml_disabled";
 /// Connection cap reached — too many concurrent operator clients.
 pub(crate) const ERR_BUSY: &str = "busy";
 
-/// Daemon is in the shutdown path; no further requests served.
-pub(crate) const ERR_SHUTDOWN: &str = "shutdown";
-
 /// Request line failed JSON parse, or carries an unknown `op`.
 pub(crate) const ERR_MALFORMED: &str = "malformed";
 
+/// `Subscribe` invoked on a conn that already flipped to subscriber
+/// role. Subscribe is one-shot per conn — a repeat call would
+/// silently overwrite the prior `name` filter and drop any pending
+/// back-pressure accounting. The handler refuses with this structured
+/// error so the operator sees a deterministic failure instead of an
+/// invisible state mutation.
+///
+/// The wire-vocabulary value is pinned by
+/// [`tests::err_already_subscribed_round_trips_through_serde`]; the
+/// handler-side gate that reaches this constant lives on
+/// [`crate::driver::EngineDriver`]'s Subscribe arm.
+pub(crate) const ERR_ALREADY_SUBSCRIBED: &str = "already_subscribed";
+
 #[cfg(test)]
 mod tests {
-    use super::{DisabledSource, ERR_UNKNOWN_SUB, ResponsePayload, WireId, WireRequest};
+    use super::{
+        DisabledSource, ERR_ALREADY_SUBSCRIBED, ERR_UNKNOWN_SUB, ResponsePayload, WireId,
+        WireRequest,
+    };
     use slotmap::KeyData;
     use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
     use std::borrow::Cow;
@@ -601,5 +550,37 @@ mod tests {
 
         let disabled = serde_json::to_string(&DisabledSource::Runtime).unwrap();
         assert_eq!(disabled, r#""runtime""#);
+    }
+
+    /// `ERR_ALREADY_SUBSCRIBED` exposes the `"already_subscribed"`
+    /// wire vocabulary and round-trips through the
+    /// [`ResponsePayload::Err::code`] adapter without losing its
+    /// value. Mirrors the cross-cutting witness pattern the
+    /// [`ERR_UNKNOWN_SUB`] arm of
+    /// [`response_payload_round_trips_internal_tag`] establishes —
+    /// a hand-edit to the constant body would silently change the
+    /// wire shape clients branch on, and this test catches it.
+    #[test]
+    fn err_already_subscribed_round_trips_through_serde() {
+        assert_eq!(ERR_ALREADY_SUBSCRIBED, "already_subscribed");
+
+        let err = serde_json::to_string(&ResponsePayload::Err {
+            code: Cow::Borrowed(ERR_ALREADY_SUBSCRIBED),
+            error: "conn already in subscribe mode".into(),
+        })
+        .unwrap();
+        assert_eq!(
+            err,
+            r#"{"kind":"err","code":"already_subscribed","error":"conn already in subscribe mode"}"#,
+        );
+
+        let round_trip: ResponsePayload = serde_json::from_str(&err).unwrap();
+        match round_trip {
+            ResponsePayload::Err { code, error } => {
+                assert_eq!(code.as_ref(), ERR_ALREADY_SUBSCRIBED);
+                assert_eq!(error, "conn already in subscribe mode");
+            }
+            other => panic!("expected Err, got {other:?}"),
+        }
     }
 }

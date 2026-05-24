@@ -23,6 +23,7 @@ clap.workspace               = true
 crossbeam.workspace          = true
 compact_str.workspace        = true
 humantime.workspace          = true
+mio.workspace                = true
 serde.workspace              = true
 serde_json.workspace         = true
 signal-hook.workspace        = true

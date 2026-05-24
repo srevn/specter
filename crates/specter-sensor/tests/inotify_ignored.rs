@@ -1,7 +1,7 @@
 //! `IN_IGNORED` cleanup — the kernel's per-wd reap signal.
 //!
 //! Two paths reach the cleanup branch in
-//! [`InotifyWatcher::poll_until`]:
+//! [`InotifyWatcher::drain_ready`]:
 //!
 //! 1. **Watcher-initiated** — `unwatch(r)` calls `inotify_rm_watch(wd)`,
 //!    the kernel queues `IN_IGNORED` synchronously, and the watcher
@@ -28,11 +28,27 @@
 #![allow(clippy::iter_with_drain)]
 #![cfg(target_os = "linux")]
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, InotifyWatcher, WatcherEvent};
+use std::os::fd::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
+
+/// Build a `mio::Poll` registered on the watcher's inotify fd. The
+/// helper centralises the "register `as_fd()` for READABLE" boilerplate
+/// the drain loops below share — `drain_ready` is non-blocking by
+/// trait, so the caller blocks via the reactor.
+fn poll_for(w: &InotifyWatcher) -> Poll {
+    let poll = Poll::new().expect("mio Poll");
+    let raw = w.as_fd().as_raw_fd();
+    poll.registry()
+        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
+        .expect("register inotify fd");
+    poll
+}
 
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     w: &mut InotifyWatcher,
@@ -40,11 +56,19 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
     let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
         buf.clear();
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
         for ev in buf.drain(..) {
             if let WatcherEvent::Fs { resource, event } = ev {
                 out.push((resource, event));
@@ -55,6 +79,25 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
         }
     }
     out
+}
+
+/// Drain whatever the watcher emits for `dur`. Used by tests that want
+/// to flush the queue without asserting on a specific event.
+fn drain_for(w: &mut InotifyWatcher, dur: Duration) {
+    let deadline = Instant::now() + dur;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
+    let mut buf: Vec<WatcherEvent> = Vec::new();
+    while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
+        buf.clear();
+    }
 }
 
 #[test]
@@ -76,7 +119,7 @@ fn delete_self_then_in_ignored_clears_per_resource_state() {
     std::fs::remove_file(&path).unwrap();
 
     // Drain the `Removed` event. The drain loop also consumes the
-    // `IN_IGNORED` (case 2 in `poll_until`), which clears the
+    // `IN_IGNORED` (case 2 in `drain_ready`), which clears the
     // `by_resource[r]` entry and removes the wd from `by_wd`.
     let out = drain_until(
         &mut w,
@@ -138,8 +181,7 @@ fn unwatch_then_redrain_clears_draining_flag() {
     // Allow the drain loop to consume the `IN_IGNORED` for the prior
     // wd. A small deadline is enough; the kernel queues `IN_IGNORED`
     // synchronously at `rm_watch`.
-    let mut buf: Vec<WatcherEvent> = Vec::new();
-    let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(100)), &mut buf);
+    drain_for(&mut w, Duration::from_millis(100));
 
     // Fresh watch on a different path. If draining state had leaked,
     // the new wd would land in `draining_wds` (silently dropping its

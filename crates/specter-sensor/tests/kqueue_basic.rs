@@ -1,6 +1,7 @@
 //! Real-fs round-trip. Each test sets up a watcher, runs one filesystem
-//! operation, and asserts that the corresponding `FsEvent` arrives at
-//! `poll_until`. macOS / FreeBSD only — kqueue is BSD-only.
+//! operation, and asserts that the corresponding `FsEvent` arrives via
+//! `drain_ready` driven by a `mio::Poll` registered on the watcher's
+//! `AsFd::as_fd`. macOS / FreeBSD only — kqueue is BSD-only.
 //!
 //! Each test passes the minimum [`ClassSet`] needed to fire the event it
 //! asserts on (identity floor + class-aware mapping):
@@ -17,21 +18,38 @@
 #![allow(clippy::iter_with_drain)]
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
+use mio::unix::SourceFd;
+use mio::{Events, Interest, Poll, Token};
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
 use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
 use std::ffi::OsStr;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
+/// Build a `mio::Poll` registered on the watcher's kqueue fd. The
+/// helper centralises the "register `as_fd()` for READABLE" boilerplate
+/// the drain loops below share — `drain_ready` is non-blocking by
+/// trait, so the caller blocks via the reactor.
+fn poll_for(w: &KqueueWatcher) -> Poll {
+    let poll = Poll::new().expect("mio Poll");
+    let raw = w.as_fd().as_raw_fd();
+    poll.registry()
+        .register(&mut SourceFd(&raw), Token(0), Interest::READABLE)
+        .expect("register kqueue fd");
+    poll
+}
+
 /// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator
 /// until at least one matches `pred` or the deadline elapses. Returns
 /// the accumulated events.
 ///
-/// Loops with short inner deadlines because kqueue may need a couple of
-/// round-trips on some systems before delivering the post-fs-op event.
+/// Blocks via `mio::Poll` on the watcher's `AsFd::as_fd`; pumps every
+/// readable edge through `drain_ready`. Spurious wakes are harmless —
+/// `drain_ready` is idempotent on an empty queue (`Ok(0)`).
 ///
 /// kqueue must not emit [`WatcherEvent::Overflow`] under v1 (`EV_CLEAR`
 /// coalesces but never silently drops at the kernel level); the helper
@@ -43,11 +61,19 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     overall: Duration,
 ) -> Vec<(ResourceId, FsEvent)> {
     let deadline = Instant::now() + overall;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
     let mut buf: Vec<WatcherEvent> = Vec::new();
     let mut out: Vec<(ResourceId, FsEvent)> = Vec::new();
     while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
         buf.clear();
-        let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(50)), &mut buf);
+        if w.drain_ready(&mut buf).is_err() {
+            break;
+        }
         for ev in buf.drain(..) {
             match ev {
                 WatcherEvent::Fs { resource, event } => out.push((resource, event)),
@@ -58,6 +84,26 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
         }
         if out.iter().any(&pred) {
             return out;
+        }
+    }
+    out
+}
+
+/// Drain whatever the watcher emits for `dur`. Returns the raw
+/// [`WatcherEvent`] sequence (no `Overflow` panic — late-event tests
+/// inspect both variants in `out`).
+fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<WatcherEvent> {
+    let deadline = Instant::now() + dur;
+    let mut poll = poll_for(w);
+    let mut events = Events::with_capacity(8);
+    let mut out: Vec<WatcherEvent> = Vec::new();
+    while Instant::now() < deadline {
+        let timeout = (deadline - Instant::now()).min(Duration::from_millis(50));
+        if poll.poll(&mut events, Some(timeout)).is_err() {
+            break;
+        }
+        if w.drain_ready(&mut out).is_err() {
+            break;
         }
     }
     out
@@ -268,7 +314,6 @@ fn unwatch_after_event_does_not_panic_on_subsequent_poll() {
     // Late event drain — kernel may still deliver an event for the
     // unwatched fd. Watcher emits anyway; the test's contract is
     // "no panic / no error."
-    let mut out: Vec<WatcherEvent> = Vec::new();
-    let _ = w.poll_until(Some(Instant::now() + Duration::from_millis(200)), &mut out);
+    let _ = drain_for(&mut w, Duration::from_millis(200));
     drop(w);
 }
