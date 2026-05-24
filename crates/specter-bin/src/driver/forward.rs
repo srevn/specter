@@ -83,13 +83,10 @@ impl EngineDriver {
     /// `self.prober` / `self.wake_handle` alongside the `&mut
     /// self.broker` needed for the diagnostic fan-out.
     ///
-    /// **Wall-clock capture is once per `StepOutput`.** The
-    /// `wall_now: SystemTime` taken here threads into every
-    /// `broker.dispatch(diag, wall_now)` call — so every subscriber
-    /// sees byte-identical `at` for one engine emission, regardless
-    /// of their per-client delivery cadence. A slow client cannot
-    /// rewrite history; a fast client cannot observe a slower
-    /// client's `at`.
+    /// **Diagnostic fan-out lives on [`Self::forward_diagnostics`].**
+    /// The wall-clock + per-subscriber byte-identical `at` contract
+    /// is documented there; the call site below is one line so the
+    /// terminal-drain ordering above is unobstructed by it.
     pub(super) fn forward(&mut self, out: StepOutput) -> ControlFlow<()> {
         // Terminal-consumer drain: `out` is already resealed (every
         // `StepOutput`-returning entry point sorts before returning), so
@@ -145,20 +142,33 @@ impl EngineDriver {
             }
         }
 
-        // Diagnostic fan-out — ONE wall-clock per `StepOutput`. The
-        // broker.dispatch path borrows `&self`'s `broker` field
-        // mutably; the iterator above is `into_iter()` over an owned
-        // `Vec<Diagnostic>` so the borrow checker sees no overlap
-        // with the by-ref `log_diagnostic` call.
-        if !diagnostics.is_empty() {
-            let wall_now = SystemTime::now();
-            for diag in &diagnostics {
-                log_diagnostic(diag);
-                self.broker.dispatch(diag, wall_now);
-            }
-        }
+        self.forward_diagnostics(&diagnostics);
 
         ControlFlow::Continue(())
+    }
+
+    /// Log each [`Diagnostic`] via tracing AND fan it out to live
+    /// IPC subscribers through [`super::broker::Broker::dispatch`].
+    ///
+    /// **Wall-clock capture is once per call.** A single
+    /// [`SystemTime::now`] threads into every `broker.dispatch(diag,
+    /// wall_now)` call — every subscriber sees byte-identical `at`
+    /// for one engine emission, regardless of per-client delivery
+    /// cadence. A slow client cannot rewrite history; a fast client
+    /// cannot observe a slower client's `at`.
+    ///
+    /// **Empty-slice short-circuit.** Most ticks emit zero
+    /// diagnostics; the early return keeps the [`SystemTime::now`]
+    /// syscall off the common path.
+    fn forward_diagnostics(&mut self, diagnostics: &[Diagnostic]) {
+        if diagnostics.is_empty() {
+            return;
+        }
+        let wall_now = SystemTime::now();
+        for diag in diagnostics {
+            log_diagnostic(diag);
+            self.broker.dispatch(diag, wall_now);
+        }
     }
 }
 
