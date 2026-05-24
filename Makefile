@@ -2,6 +2,8 @@
 #
 # Targets:
 #   build / install / uninstall / clean        core
+#   lint / fmt-check / deny / test             CI-gate mirrors (run
+#                                              the same checks CI runs)
 #   install-config / uninstall-config          specter.toml example +
 #                                              first-install seed
 #   install-systemd / install-launchd /
@@ -50,6 +52,7 @@ SUBST = sed -e 's|@SPECTER_BIN@|$(BINDIR)/specter|g' \
             -e 's|@SPECTER_GROUP@|$(SPECTER_GROUP)|g'
 
 .PHONY: build install uninstall clean help \
+        lint fmt-check deny test \
         install-all uninstall-all \
         install-config uninstall-config \
         install-systemd install-launchd install-freebsd \
@@ -58,6 +61,10 @@ SUBST = sed -e 's|@SPECTER_BIN@|$(BINDIR)/specter|g' \
 help:
 	@echo "Targets:"
 	@echo "  build              cargo build --release"
+	@echo "  lint               cargo clippy --workspace -D warnings"
+	@echo "  fmt-check          cargo fmt --all -- --check"
+	@echo "  deny               cargo deny check"
+	@echo "  test               cargo nextest run --workspace --all-features"
 	@echo "  install            install binary to \$$(BINDIR)"
 	@echo "  install-config     install specter.toml to \$$(SYSCONFDIR)"
 	@echo "                     (preserves any existing file)"
@@ -75,6 +82,18 @@ help:
 
 build:
 	@$(CARGO) build --release
+
+lint:
+	@$(CARGO) clippy --workspace --all-targets --all-features -- -D warnings
+
+fmt-check:
+	@$(CARGO) fmt --all -- --check
+
+deny:
+	@$(CARGO) deny check
+
+test:
+	@$(CARGO) nextest run --workspace --all-features
 
 install: build
 	@echo "Installing specter to $(DESTDIR)$(BINDIR)/"

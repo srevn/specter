@@ -29,37 +29,34 @@
 // looser-than-workspace setting, with per-call-site allows at FFI sites.
 #![warn(unsafe_code)]
 
-#[cfg(unix)]
+// The actuator's production surface (fork+exec, pipe(2), waitpid,
+// signal delivery) is unix-only; every internal module would otherwise
+// carry `#[cfg(unix)]`. A single crate-root gate is the honest
+// expression of the target constraint and removes drift: a new module
+// added later cannot silently lose its `#[cfg(unix)]` marker, because
+// the crate fails to compile on non-unix outright. The `bin` already
+// fails to link on non-unix (it calls `default_spawner`), so this is a
+// transparent failure shift — not a new constraint.
+#[cfg(not(unix))]
+compile_error!("specter-actuator requires a unix target (linux / macOS / freebsd)");
+
 mod env;
-#[cfg(unix)]
 mod lifecycle;
-#[cfg(unix)]
 mod os;
-#[cfg(unix)]
 mod permits;
-#[cfg(unix)]
 mod pipe;
-#[cfg(unix)]
 mod pool;
-#[cfg(unix)]
 mod resolve;
-#[cfg(unix)]
 mod spawner;
-#[cfg(unix)]
 mod timer;
-#[cfg(unix)]
 mod tmp;
 
-#[cfg(all(unix, feature = "testkit"))]
+#[cfg(feature = "testkit")]
 pub mod testkit;
 
-#[cfg(unix)]
 pub use os::OsSpawner;
-#[cfg(unix)]
 pub use permits::{Permit, Permits};
-#[cfg(unix)]
 pub use pool::{DEFAULT_CONCURRENCY, Reaped, SubprocessActuator};
-#[cfg(unix)]
 pub use spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
 
 /// Construct the platform's default spawner as a `Box<dyn Spawner>`.
@@ -67,8 +64,7 @@ pub use spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
 /// `Box<dyn>` matches the existing `&dyn Spawner` calling convention in
 /// the actuator's state machine — one vtable hop per spawn, on a rare
 /// (op/sec scale) hot path. A future non-Unix backend slots in by
-/// gating `OsSpawner` on the relevant `cfg`.
-#[cfg(unix)]
+/// providing an alternative spawner constructor here.
 #[must_use]
 pub fn default_spawner() -> Box<dyn Spawner> {
     Box::new(OsSpawner::new())

@@ -65,11 +65,11 @@ slotmap::new_key_type! {
 /// in-flight token). `Ord`/`PartialOrd` backs total-order
 /// participation: a timer token is the final tie-breaker in the timer
 /// heap's `(deadline, profile, id)` order. `Hash` is deliberately
-/// **not** derived — nothing keys a `HashMap`/`HashSet` by these ids
-/// (and both are `cargo-deny`-banned in `core`/`engine` regardless),
-/// so a `Hash` impl would be dead surface. `Copy`/`Clone` give cheap
-/// value semantics; `Debug` serves diagnostics; `Default` is the
-/// never-minted sentinel below.
+/// **not** derived — every engine-side map keyed by these ids is a
+/// `slotmap` or a `BTreeMap` (deterministic iteration is the floor for
+/// replay), so a `Hash` impl would be dead surface. `Copy`/`Clone`
+/// give cheap value semantics; `Debug` serves diagnostics; `Default`
+/// is the never-minted sentinel below.
 ///
 /// **Default's contract.** `$name::default()` returns `$name(0)`. The
 /// engine's `MonotonicCounter::next` pre-increments before constructing,

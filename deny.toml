@@ -13,6 +13,7 @@ deny = [
   { name = "polling" },
   { name = "smol" },
   { name = "futures-util" },
+  { name = "hashbrown" },
   { name = "libc", wrappers = [
     "specter-actuator",
     "specter-sensor",
@@ -26,6 +27,7 @@ deny = [
   { name = "specter-engine",   wrappers = ["specter-bin"] },
   { name = "specter-sensor",   wrappers = ["specter-bin"] },
   { name = "specter-actuator", wrappers = ["specter-bin"] },
+  { name = "specter-config",   wrappers = ["specter-bin"] },
 ]
 
 [licenses]

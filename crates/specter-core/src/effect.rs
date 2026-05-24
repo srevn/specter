@@ -233,9 +233,10 @@ impl Effect {
 ///
 /// `Ord` drives the actuator's `BTreeMap<DedupKey, Slot>`. The engine's
 /// fire-history is per-Sub ([`crate::Sub::has_fired`]) — not this type
-/// nor any projection of it. `Hash` is intentionally not derived — no
-/// `HashMap`/`HashSet` keys on this type and `core` bans `hashbrown`
-/// outright.
+/// nor any projection of it. `Hash` is intentionally not derived — the
+/// total order above is the load-bearing key shape (sorted iteration is
+/// the contract for replay), so a `HashMap`-shaped lookup would be a
+/// strictly weaker substitute that nothing in the engine asks for.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub enum DedupKey {
     PerFile {
@@ -292,8 +293,10 @@ impl Default for DedupKey {
 /// drives the actuator's internal pipe re-aggregation; it is not a
 /// routing input.
 ///
-/// `Hash` is intentionally not derived — no `HashMap`/`HashSet` keys on
-/// this type and `core` bans `hashbrown` outright.
+/// `Hash` is intentionally not derived — outcomes are consumed by name
+/// (`Ok` vs `Failed`) at the engine's effect-completion dispatcher; no
+/// caller keys a map by an outcome, so a `Hash` impl would be dead
+/// surface.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub enum EffectOutcome {
     #[default]
@@ -305,8 +308,9 @@ pub enum EffectOutcome {
 /// the four reachable `(exit_code, signal)` shapes — a total, named
 /// encoding, not a state-space change.
 ///
-/// `Hash` is intentionally not derived — no `HashMap`/`HashSet` keys on
-/// this type and `core` bans `hashbrown` outright.
+/// `Hash` is intentionally not derived — variants are consumed by name
+/// for diagnostic formatting; no caller keys a map by a termination
+/// payload, so a `Hash` impl would be dead surface.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Termination {
     /// Resolver/spawn failure, waiter panic, or a synthesised plan

@@ -1,11 +1,21 @@
-//! `specter-sensor` — kqueue Watcher + Prober pool. The traits are
-//! platform-agnostic; the kqueue implementation is BSD-only and lives in
-//! a `#[cfg]`-gated module.
+//! `specter-sensor` — dual-backend Watcher (kqueue / inotify) + Prober
+//! pool. The traits are platform-agnostic; the backend implementations
+//! are `#[cfg]`-gated modules (kqueue on BSD / macOS, inotify on Linux).
 
-// Sensor legitimately needs `unsafe` for kqueue FFI; `warn` is looser
-// than the workspace `deny`. Per-call-site `#[allow(unsafe_code)]` then
-// silences the warning at the FFI boundary itself, keeping the audit
-// surface narrow.
+// Sensor legitimately needs `unsafe` for kqueue / inotify / epoll /
+// eventfd FFI; `warn` is the looser-than-workspace setting that lets
+// individual sites opt in to silenced unsafe at the audit boundary.
+//
+// The two FFI-only modules (`kqueue/ffi.rs`, `inotify/ffi.rs`) carry a
+// module-level `#![allow(unsafe_code)]`: every `unsafe` block in those
+// files is a syscall wrapper, and pinning the audit boundary at the
+// file edge scales to ~30 blocks without per-block ceremony. Adding a
+// non-FFI helper to either file would inherit the silence — so don't.
+//
+// Per-call-site `#[allow(unsafe_code)]` is reserved for the rare
+// isolated `unsafe` block that lives outside an FFI-only module
+// (currently none in sensor; see `actuator/src/os.rs:325` for the
+// pattern in another crate).
 #![warn(unsafe_code)]
 
 use specter_core::{ClassSet, FsEvent, ProbeOwner, ProbeRequest, ResourceId, ResourceKind};
