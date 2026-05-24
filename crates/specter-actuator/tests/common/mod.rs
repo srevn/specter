@@ -14,18 +14,35 @@
 
 use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
-use specter_actuator::{OsSpawner, SubprocessActuator};
+use specter_actuator::{
+    EffectCompleteSender, OsSpawner, SendError as ActSendError, SubprocessActuator,
+};
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon, EffectOp,
-    ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
+    ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Diff, Effect, EffectCommon,
+    EffectOp, EffectOutcome, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// Test adapter that lifts the actuator's `(sub, key, outcome)` triple
+/// into the engine-side `Input::EffectComplete` envelope so the test's
+/// `Receiver<Input>` continues to observe completions in the
+/// pre-trait shape. Mirrors the bin's `DriverEffectSender` without
+/// dragging in the bin's transport identity.
+struct TestEngineIn(Sender<Input>);
+
+impl EffectCompleteSender for TestEngineIn {
+    fn send(&self, sub: SubId, key: DedupKey, result: EffectOutcome) -> Result<(), ActSendError> {
+        self.0
+            .send(Input::EffectComplete { sub, key, result })
+            .map_err(|_| ActSendError::Disconnected)
+    }
+}
 
 /// Process-wide monotonic correlation counter for tests. Production
 /// correlations come from the engine; tests need their own unique
@@ -68,6 +85,7 @@ impl Harness {
         let (hard_shutdown_tx, hard_shutdown_rx) = bounded::<()>(1);
         let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded::<()>(1);
         let (engine_tx, engine_rx) = unbounded::<Input>();
+        let engine_in: Box<dyn EffectCompleteSender> = Box::new(TestEngineIn(engine_tx));
         let join = thread::Builder::new()
             .name("test-actuator-controller".into())
             .spawn(move || {
@@ -77,7 +95,7 @@ impl Harness {
                     effects_rx,
                     shutdown_rx,
                     hard_shutdown_rx,
-                    engine_tx,
+                    engine_in,
                     spawner.as_ref(),
                     hard_shutdown_done_tx,
                 );

@@ -5,19 +5,26 @@
 //!
 //! ```text
 //! bin --(effects, bounded(1024))--> Controller
-//! Controller --(engine_inbound, unbounded)--> Engine
+//! Controller --(EffectCompleteSender)--> Engine
 //! Controller <--(reap_rx, bounded(N))-- WaitThread × N
 //! bin --(shutdown, bounded(1) broadcast)--> Controller
 //! ```
+//!
+//! The engine-bound completion edge is a trait
+//! ([`crate::EffectCompleteSender`]) rather than a concrete channel —
+//! the actuator does not name the engine's `Input` vocabulary. The bin
+//! owns the wrapper that lifts `(sub, key, outcome)` into the
+//! engine-facing envelope; this crate only ships the triple.
 //!
 //! Shutdown sequence: SIGTERM all running, drain reaps for 5s,
 //! SIGKILL stragglers, drain remaining reaps.
 
 mod state;
+use crate::EffectCompleteSender;
 use crate::env::EnvSnapshot;
 use crate::spawner::Spawner;
 use crossbeam::channel::{Receiver, Sender};
-use specter_core::{DedupKey, EffectOp, EffectOutcome, Input, SubId};
+use specter_core::{DedupKey, EffectOp, EffectOutcome, SubId};
 use state::ActuatorState;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -176,8 +183,8 @@ impl SubprocessActuator {
 
     /// Block until shutdown. Drains [`EffectOp`]s (submit + cancel)
     /// off `effects_rx`, dispatches to spawner / cancel handler, reaps
-    /// wait threads, propagates [`Input::EffectComplete`]. Returns
-    /// when `effects_rx` disconnects or `shutdown_rx` signals;
+    /// wait threads, propagates effect completions through `engine_in`.
+    /// Returns when `effects_rx` disconnects or `shutdown_rx` signals;
     /// performs the SIGTERM → 5s grace → SIGKILL sequence on the
     /// way out. If `hard_shutdown_rx` fires (operator pressed Ctrl-C
     /// twice within `HARD_EXIT_WINDOW`), the grace is pre-empted: the
@@ -194,25 +201,38 @@ impl SubprocessActuator {
     /// that follows thread exit) before `process::exit(130)`, so the
     /// parent never aborts mid-fanout and leaves orphans on PID 1.
     ///
-    /// Channels are taken by value: the controller owns them for the
-    /// lifetime of [`Self::run`], so the caller hands off and is freed
-    /// from any borrow-tracking.
+    /// `engine_in` is `Box<dyn>`-in / `&dyn`-internal: the controller
+    /// owns the sink for the duration of [`Self::run`], dereferences
+    /// it once into a `&dyn` local, and threads that reference into
+    /// every state-machine call. The Box-shaped boundary makes the
+    /// ownership transfer truthful (no by-value-but-only-borrowed
+    /// smell) while the trait-object form keeps the controller
+    /// non-generic at the type level — symmetric with the
+    /// `&dyn Spawner` calling convention this function already uses.
+    /// Wait threads send `Reaped` events through `reap_tx` (held on
+    /// `self`); only the controller calls `engine_in.send(...)`, so a
+    /// single-threaded `&dyn` is sufficient.
+    ///
+    /// Other channels are taken by value: the controller owns them
+    /// for the lifetime of [`Self::run`], so the caller hands off and
+    /// is freed from any borrow-tracking.
     #[allow(clippy::needless_pass_by_value)]
     pub fn run(
         &mut self,
         effects_rx: Receiver<EffectOp>,
         shutdown_rx: Receiver<()>,
         hard_shutdown_rx: Receiver<()>,
-        engine_in: Sender<Input>,
+        engine_in: Box<dyn EffectCompleteSender>,
         spawner: &dyn Spawner,
         hard_shutdown_done_tx: Sender<()>,
     ) {
+        let engine_in: &dyn EffectCompleteSender = &*engine_in;
         let mut hard = false;
         loop {
             crossbeam::select! {
                 recv(effects_rx) -> msg => match msg {
                     Ok(EffectOp::Submit(effect)) => {
-                        self.state.handle_submit(effect, spawner, &self.reap_tx, &engine_in);
+                        self.state.handle_submit(effect, spawner, &self.reap_tx, engine_in);
                     }
                     Ok(EffectOp::Cancel { profile }) => {
                         // Engine-driven abandon: SIGTERM in-flight effects
@@ -226,7 +246,7 @@ impl SubprocessActuator {
                     Err(_) => break, // bin closed channel
                 },
                 recv(self.reap_rx) -> msg => match msg {
-                    Ok(r)  => self.state.handle_reap(r, &engine_in, spawner, &self.reap_tx),
+                    Ok(r)  => self.state.handle_reap(r, engine_in, spawner, &self.reap_tx),
                     Err(_) => {
                         // Controller holds reap_tx, so the rx cannot disconnect under
                         // current invariants. Logged break preserves orderly shutdown
@@ -239,12 +259,12 @@ impl SubprocessActuator {
                 recv(hard_shutdown_rx) -> _ => { hard = true; break; }
             }
         }
-        self.shutdown(&engine_in, hard, &hard_shutdown_rx, &hard_shutdown_done_tx);
+        self.shutdown(engine_in, hard, &hard_shutdown_rx, &hard_shutdown_done_tx);
     }
 
     fn shutdown(
         &mut self,
-        engine_in: &Sender<Input>,
+        engine_in: &dyn EffectCompleteSender,
         hard: bool,
         hard_shutdown_rx: &Receiver<()>,
         hard_shutdown_done_tx: &Sender<()>,
@@ -338,22 +358,36 @@ impl SubprocessActuator {
     clippy::too_many_lines
 )]
 mod tests {
-    use crate::SubprocessActuator;
     use crate::env::EnvSnapshot;
     use crate::testkit::{MockSpawner, SignalRecord};
+    use crate::{EffectCompleteSender, SendError, SubprocessActuator};
     use compact_str::CompactString;
     use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
     use specter_core::program::{BranchTarget, MultiStage, ProgramBuilder, SpawnBody};
     use specter_core::testkit::{predicate_then_program, single_exec_program};
     use specter_core::{
-        ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon, EffectOp,
-        EffectOutcome, EffectTarget, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
-        Termination,
+        ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Diff, Effect, EffectCommon,
+        EffectOp, EffectOutcome, EffectTarget, ExecAction, Input, ProfileId, ResourceId,
+        ResourceKind, SubId, Termination,
     };
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    /// Test adapter that lifts the actuator's `(sub, key, outcome)`
+    /// triple into the engine-side `Input::EffectComplete` envelope so
+    /// the harness's `Receiver<Input>` continues to observe completions
+    /// in the pre-trait shape. Mirrors the bin's `DriverEffectSender`
+    /// without dragging in the bin's transport identity.
+    struct TestEngineIn(Sender<Input>);
+    impl EffectCompleteSender for TestEngineIn {
+        fn send(&self, sub: SubId, key: DedupKey, result: EffectOutcome) -> Result<(), SendError> {
+            self.0
+                .send(Input::EffectComplete { sub, key, result })
+                .map_err(|_| SendError::Disconnected)
+        }
+    }
 
     // ---------- helpers ----------
 
@@ -526,6 +560,7 @@ mod tests {
             let (hard_shutdown_tx, hard_shutdown_rx) = bounded::<()>(1);
             let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded::<()>(1);
             let (engine_tx, engine_rx) = unbounded::<Input>();
+            let engine_in: Box<dyn EffectCompleteSender> = Box::new(TestEngineIn(engine_tx));
             let spawner = Arc::new(MockSpawner::new());
             let spawner_clone = Arc::clone(&spawner);
             let join = thread::Builder::new()
@@ -536,7 +571,7 @@ mod tests {
                         effects_rx,
                         shutdown_rx,
                         hard_shutdown_rx,
-                        engine_tx,
+                        engine_in,
                         spawner_clone.as_ref(),
                         hard_shutdown_done_tx,
                     );

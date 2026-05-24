@@ -27,12 +27,12 @@
 //! - **Per-op** state (permit, OS process, wait thread) is owned by
 //!   [`ActuatorState::spawn_step_with_permit`]: each op acquires a
 //!   fresh permit, the wait thread releases it on reap.
-//! - **One [`Input::EffectComplete`] per Effect**: emitted exactly once
-//!   at plan terminus (any [`BranchTarget::Terminate`] or
-//!   [`BranchTarget::Escape`], or any reap under shutdown's `Drop`
-//!   policy). The engine's `outstanding` accounting is unchanged under
-//!   multi-op programs — the engine doesn't know programs have multiple
-//!   ops.
+//! - **One completion per Effect**: emitted exactly once via
+//!   [`EffectCompleteSender::send`] at plan terminus (any
+//!   [`BranchTarget::Terminate`] or [`BranchTarget::Escape`], or any
+//!   reap under shutdown's `Drop` policy). The engine's `outstanding`
+//!   accounting is unchanged under multi-op programs — the engine
+//!   doesn't know programs have multiple ops.
 //!
 //! Between two adjacent ops the slot may be in an intermediate state
 //! ([`Slot::plan_continue`]) when the wait-thread has reaped op N but no
@@ -41,6 +41,7 @@
 //! gate (it's the same program, already admitted) but still respects the
 //! global permit cap.
 
+use crate::EffectCompleteSender;
 use crate::env::EnvSnapshot;
 use crate::permits::{Permit, Permits};
 use crate::resolve::{self, CommandResolved};
@@ -49,7 +50,7 @@ use crate::timer;
 use crate::tmp::DiffTmpFile;
 use crossbeam::channel::Sender;
 use specter_core::program::{BranchTarget, ExecAction, SpawnBody};
-use specter_core::{DedupKey, Effect, EffectOutcome, Input, ProfileId, SubId, Termination};
+use specter_core::{DedupKey, Effect, EffectOutcome, ProfileId, SubId, Termination};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -159,9 +160,9 @@ enum SpawnFailureCause {
 /// **Engine-side twin.** Every `Effect` the actuator runs corresponds
 /// to a `+1` on the engine's `PostFirePhase::Awaiting { outstanding }`
 /// counter for the owning Profile. The slot retires the plan
-/// (or drops the pending Effect on shutdown) and emits exactly one
-/// `Input::EffectComplete` per Effect — multi-instruction programs
-/// don't change the engine's accounting.
+/// (or drops the pending Effect on shutdown) and calls
+/// [`EffectCompleteSender::send`] exactly once per Effect —
+/// multi-instruction programs don't change the engine's accounting.
 #[derive(Debug, Default)]
 pub(crate) struct Slot {
     pub running: Option<RunningJob>,
@@ -334,7 +335,7 @@ impl ActuatorState {
         effect: Effect,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
-        engine_in: &Sender<Input>,
+        engine_in: &dyn EffectCompleteSender,
     ) {
         let key = effect.key();
         tracing::trace!(?key, "submit");
@@ -361,7 +362,7 @@ impl ActuatorState {
     pub fn handle_reap(
         &mut self,
         reaped: super::Reaped,
-        engine_in: &Sender<Input>,
+        engine_in: &dyn EffectCompleteSender,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
     ) {
@@ -391,8 +392,8 @@ impl ActuatorState {
     /// 4. Leave `slot.running` in place. The wait thread will deliver
     ///    [`Reaped`](super::Reaped) through the existing pipeline;
     ///    [`Self::handle_reap`] will run [`Self::terminate_plan`] and
-    ///    emit [`Input::EffectComplete`] to the engine, which routes
-    ///    that late completion to `EffectCompleteOutsideAwaiting` (the
+    ///    emit one completion via [`EffectCompleteSender::send`], which
+    ///    the engine routes to `EffectCompleteOutsideAwaiting` (the
     ///    Profile has left `Awaiting` by then).
     ///
     /// **Ready-queue cleanup is load-bearing.** The pump's spawn arm
@@ -476,7 +477,11 @@ impl ActuatorState {
     ///
     /// No `spawner` / `reap_tx` parameter: the Drop branch never
     /// spawns, so the shutdown caller threads neither.
-    pub fn handle_reap_drop(&mut self, reaped: super::Reaped, engine_in: &Sender<Input>) {
+    pub fn handle_reap_drop(
+        &mut self,
+        reaped: super::Reaped,
+        engine_in: &dyn EffectCompleteSender,
+    ) {
         tracing::trace!(?reaped.key, ?reaped.outcome, "reap drop");
         let super::Reaped { key, sub, outcome } = reaped;
         // Consume the running job (if present). The signaler / effect
@@ -526,7 +531,7 @@ impl ActuatorState {
     fn reap_pump(
         &mut self,
         reaped: super::Reaped,
-        engine_in: &Sender<Input>,
+        engine_in: &dyn EffectCompleteSender,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
     ) {
@@ -601,7 +606,7 @@ impl ActuatorState {
         mut outcome: EffectOutcome,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
-        engine_in: &Sender<Input>,
+        engine_in: &dyn EffectCompleteSender,
     ) {
         loop {
             let op = &effect.program.ops()[cursor as usize];
@@ -732,7 +737,7 @@ impl ActuatorState {
         sub: SubId,
         outcome: EffectOutcome,
         policy: ReapPolicy,
-        engine_in: &Sender<Input>,
+        engine_in: &dyn EffectCompleteSender,
     ) {
         // `let _` deliberately drops the `SendError`: a closed
         // `engine_in` means the engine has been torn down. The
@@ -744,11 +749,7 @@ impl ActuatorState {
         // policy in `specter-bin`'s `forward.rs`: both directions of
         // the engine ↔ actuator channel degrade rather than escalate,
         // and the actuator cannot persist with the engine dead.
-        let _ = engine_in.send(Input::EffectComplete {
-            sub,
-            key,
-            result: outcome,
-        });
+        let _ = engine_in.send(sub, key, outcome);
         // Live-plan teardown: every reachable call site has a paired
         // `start_plan` insert for this Sub. `BTreeSet::remove` returns
         // `false` only on an unpaired remove — a controller accounting
@@ -822,16 +823,12 @@ impl ActuatorState {
         key: DedupKey,
         sub: SubId,
         outcome: EffectOutcome,
-        engine_in: &Sender<Input>,
+        engine_in: &dyn EffectCompleteSender,
     ) {
         // Same drop-on-disconnect policy as [`Self::terminate_plan`]
         // — see that site's rustdoc for the cross-actor symmetry
         // rationale.
-        let _ = engine_in.send(Input::EffectComplete {
-            sub,
-            key,
-            result: outcome,
-        });
+        let _ = engine_in.send(sub, key, outcome);
         self.slots.remove(&key);
     }
 
@@ -856,7 +853,7 @@ impl ActuatorState {
         &mut self,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
-        engine_in: &Sender<Input>,
+        engine_in: &dyn EffectCompleteSender,
     ) {
         debug_assert!(
             self.blocked_scratch.is_empty(),
@@ -965,7 +962,7 @@ impl ActuatorState {
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
-        engine_in: &Sender<Input>,
+        engine_in: &dyn EffectCompleteSender,
     ) {
         // Materialise the diff tmp file before the first instruction's
         // spawn so the resolver can slot SPECTER_DIFF_PATH into its
@@ -1060,7 +1057,7 @@ impl ActuatorState {
         permit: Permit,
         spawner: &dyn Spawner,
         reap_tx: &Sender<super::Reaped>,
-        engine_in: &Sender<Input>,
+        engine_in: &dyn EffectCompleteSender,
     ) {
         let PlanContinuation {
             effect,
@@ -1743,6 +1740,7 @@ mod tests {
     use super::{ActuatorState, PlanContinuation, RunningJob, Slot};
     use crate::env::EnvSnapshot;
     use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
+    use crate::{EffectCompleteSender, SendError};
     use compact_str::CompactString;
     use crossbeam::channel::{Sender, unbounded};
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
@@ -1758,6 +1756,20 @@ mod tests {
 
     fn nz(n: usize) -> NonZeroUsize {
         NonZeroUsize::new(n).expect("test setup: n must be non-zero")
+    }
+
+    /// Test adapter that lifts the actuator's `(sub, key, outcome)`
+    /// triple into the engine-side `Input::EffectComplete` envelope so
+    /// the test's `Receiver<Input>` continues to observe completions
+    /// in the pre-trait shape. Mirrors the bin's `DriverEffectSender`
+    /// without dragging in the bin's transport identity.
+    struct TestEngineIn(Sender<Input>);
+    impl EffectCompleteSender for TestEngineIn {
+        fn send(&self, sub: SubId, key: DedupKey, result: EffectOutcome) -> Result<(), SendError> {
+            self.0
+                .send(Input::EffectComplete { sub, key, result })
+                .map_err(|_| SendError::Disconnected)
+        }
     }
 
     /// Construct an [`ActuatorState`] with an empty env snapshot and the
@@ -2163,6 +2175,7 @@ mod tests {
         let sub = unique_sub_id(1);
         state.slots.insert(key, Slot::default());
         let (tx, rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
 
@@ -2172,7 +2185,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Failed(Termination::Internal),
             },
-            &tx,
+            &engine_in,
             &spawner,
             &reap_tx,
         );
@@ -2222,6 +2235,7 @@ mod tests {
         state.running_subs.insert(sub);
         state.slots.insert(stale_key, Slot::default());
         let (tx, rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
 
@@ -2231,7 +2245,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Failed(Termination::Internal),
             },
-            &tx,
+            &engine_in,
             &spawner,
             &reap_tx,
         );
@@ -2277,6 +2291,7 @@ mod tests {
         state.slots.insert(key, slot);
         state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
 
@@ -2286,7 +2301,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Failed(Termination::Internal),
             },
-            &tx,
+            &engine_in,
             &spawner,
             &reap_tx,
         );
@@ -2325,6 +2340,7 @@ mod tests {
         state.slots.insert(key, slot);
         state.running_subs.insert(sub);
         let (tx, _rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
 
@@ -2334,7 +2350,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Ok,
             },
-            &tx,
+            &engine_in,
             &spawner,
             &reap_tx,
         );
@@ -2373,6 +2389,7 @@ mod tests {
         state.slots.insert(key, slot);
         state.running_subs.insert(sub);
         let (tx, _rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
 
         state.handle_reap_drop(
             Reaped {
@@ -2380,7 +2397,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Failed(Termination::Internal),
             },
-            &tx,
+            &engine_in,
         );
 
         assert!(state.slots.is_empty(), "slot removed under Drop policy");
@@ -2416,6 +2433,7 @@ mod tests {
         state.slots.insert(key, slot);
         state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = ScriptedSpawner::new();
 
@@ -2425,7 +2443,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Ok,
             },
-            &tx,
+            &engine_in,
             &spawner,
             &reap_tx,
         );
@@ -2470,6 +2488,7 @@ mod tests {
         state.slots.insert(key, slot);
         state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
 
@@ -2479,7 +2498,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Failed(Termination::Exit(2)),
             },
-            &tx,
+            &engine_in,
             &spawner,
             &reap_tx,
         );
@@ -2518,6 +2537,7 @@ mod tests {
         state.slots.insert(key, slot);
         state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
 
@@ -2527,7 +2547,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Ok,
             },
-            &tx,
+            &engine_in,
             &spawner,
             &reap_tx,
         );
@@ -2572,6 +2592,7 @@ mod tests {
         state.slots.insert(key, slot);
         state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
 
@@ -2581,7 +2602,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Ok,
             },
-            &tx,
+            &engine_in,
             &spawner,
             &reap_tx,
         );
@@ -2625,12 +2646,13 @@ mod tests {
         state.ready_queue.push_back(key);
         state.running_subs.insert(sub);
         let (tx, _rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = UnusedSpawner;
 
         // Submit a new effect for the same key.
         let new_effect = dummy_effect(key, res, 99);
-        state.handle_submit(new_effect, &spawner, &reap_tx, &tx);
+        state.handle_submit(new_effect, &spawner, &reap_tx, &engine_in);
 
         let slot_after = state.slots.get(&key).expect("slot preserved");
         let cont = slot_after
@@ -2670,6 +2692,7 @@ mod tests {
         state.slots.insert(key, slot);
         state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
 
         state.handle_reap_drop(
             Reaped {
@@ -2677,7 +2700,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Ok,
             },
-            &tx,
+            &engine_in,
         );
 
         assert!(state.slots.is_empty(), "slot removed under Drop");
@@ -2714,6 +2737,7 @@ mod tests {
         state.slots.insert(key, slot);
         state.running_subs.insert(sub);
         let (tx, rx) = unbounded::<Input>();
+        let engine_in = TestEngineIn(tx);
         let (reap_tx, _reap_rx) = reap_channel();
         let spawner = ScriptedSpawner::new();
         spawner.inject_spawn_error(io::ErrorKind::NotFound);
@@ -2724,7 +2748,7 @@ mod tests {
                 sub,
                 outcome: EffectOutcome::Ok,
             },
-            &tx,
+            &engine_in,
             &spawner,
             &reap_tx,
         );

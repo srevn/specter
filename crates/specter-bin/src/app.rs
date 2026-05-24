@@ -28,9 +28,11 @@ use crate::loader::Loader;
 use crate::observability;
 use crate::signals::{register_signal_handlers, spawn_signal_thread};
 use crossbeam::channel::bounded;
-use specter_actuator::{SubprocessActuator, default_spawner};
+use specter_actuator::{
+    EffectCompleteSender, SendError as ActSendError, SubprocessActuator, default_spawner,
+};
 use specter_config::{Config, DaemonArgs, FileMeta};
-use specter_core::{Input, WatchOp};
+use specter_core::{DedupKey, EffectOutcome, Input, SubId, WatchOp};
 use specter_engine::Engine;
 use specter_sensor::{
     ConfigWatcher, FsWatcher, ProbeResponse, ProberResponseSender, SendError, WakeHandle,
@@ -549,6 +551,28 @@ impl ProberResponseSender for DriverProberSender {
     }
 }
 
+/// Bin's [`EffectCompleteSender`] impl — wraps a single `Sender<Input>`
+/// clone and routes the actuator's `(sub, key, outcome)` triple into
+/// the engine's `Input::EffectComplete { .. }` envelope. The actuator
+/// crate does not name [`Input`] (it would couple controller code to
+/// the engine's inbound vocabulary); the wrap happens here, the one
+/// place the channel's transport identity is known.
+///
+/// One instance per actuator-thread spawn — boxed into the
+/// actuator's `Box<dyn EffectCompleteSender>` constructor argument.
+/// Drops when the actuator's `run` returns at shutdown.
+struct DriverEffectSender {
+    tx: crossbeam::channel::Sender<Input>,
+}
+
+impl EffectCompleteSender for DriverEffectSender {
+    fn send(&self, sub: SubId, key: DedupKey, result: EffectOutcome) -> Result<(), ActSendError> {
+        self.tx
+            .send(Input::EffectComplete { sub, key, result })
+            .map_err(|_| ActSendError::Disconnected)
+    }
+}
+
 /// Spawn the watcher thread. Owns the [`DefaultWatcher`] for its
 /// lifetime; drop closes the underlying fd(s) on exit.
 ///
@@ -848,6 +872,15 @@ fn spawn_actuator_thread(
     concurrency: usize,
     sides: crate::channels::ActuatorSide,
 ) -> io::Result<JoinHandle<()>> {
+    // Construct the [`DriverEffectSender`] wrapper outside the
+    // controller thread so the actuator never names the engine's
+    // `Input` vocabulary on its own thread either. The Box transfers
+    // ownership into the actuator; on `act.run` return the wrapper
+    // drops, releasing its `effect_in_tx` clone — symmetric with the
+    // prober pool's `Box<dyn ProberResponseSender>` lifecycle.
+    let engine_in: Box<dyn EffectCompleteSender> = Box::new(DriverEffectSender {
+        tx: sides.effect_in_tx,
+    });
     thread::Builder::new()
         .name("specter-actuator".into())
         .spawn(move || {
@@ -858,7 +891,7 @@ fn spawn_actuator_thread(
                     sides.effects_rx,
                     sides.shutdown_actuator_rx,
                     sides.hard_shutdown_actuator_rx,
-                    sides.effect_in_tx,
+                    engine_in,
                     spawner.as_ref(),
                     sides.hard_shutdown_done_tx,
                 );
