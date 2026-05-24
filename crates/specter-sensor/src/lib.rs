@@ -21,9 +21,7 @@
 use specter_core::{ClassSet, FsEvent, ProbeOwner, ProbeRequest, ResourceId, ResourceKind};
 use std::io;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 // Re-exported alongside the trait so the bin can name `WatcherEvent` and
 // its variant payloads (`OverflowScope`, `WatchFailure`) via one crate
@@ -32,99 +30,6 @@ use std::time::{Duration, Instant};
 // touches `core` directly. The `pub use` doubles as the in-module import
 // the trait + `WatcherEvent` definitions below need.
 pub use specter_core::{OverflowScope, WatchFailure};
-
-/// Cross-thread, fixed drain window for the watcher's deferred-drain
-/// phase.
-///
-/// The bin constructs one [`DrainWindow`] at startup and hands it to
-/// the watcher; clones are cheap (`Arc` bump). The value is written
-/// once at construction and only ever read afterwards — the watcher
-/// thread reads it on every `poll_until` iteration. There is no
-/// runtime mutation: the `AtomicU64` is the cross-thread surface
-/// (no lock, no channel), not a tunable.
-///
-/// **Not an inbound-volume lever.** Inbound volume is owned by driver
-/// same-tick coalescing (accumulate regime) and per-event engine cost
-/// (keeps-up regime); a single watcher-side scalar provably cannot
-/// serve a per-Profile volume constraint. This window is purely the
-/// trailing-latency budget the watcher trades for batch granularity on
-/// its second drain pass — it does not, and is not meant to, dampen an
-/// inbound storm.
-///
-/// **Construction is a decision, never a default.** There is no
-/// `Default` and no zero-argument constructor. [`Self::new`] takes the
-/// fixed window (the bin's `WATCHER_DRAIN_WINDOW`); [`Self::disabled`]
-/// is the *named*, deliberate opt-out. This makes "constructed but
-/// never configured" a compile error rather than a silent run with
-/// deferred drain off.
-///
-/// **Production cannot disable drain.** Production constructs via
-/// [`Self::new`] with the fixed in-band constant (`>= 10ms`). With no
-/// `Default` and no implicit constructor, the only path to a disabled
-/// window is an explicit [`Self::disabled`] call, which only test
-/// fixtures take. The disabled state is structurally unreachable from
-/// the production wiring — do not reintroduce `Default` "for
-/// convenience"; it would re-arm exactly that footgun.
-///
-/// **Semantics.**
-/// - A value of `Duration::ZERO` ([`Self::disabled`]) disables deferred
-///   drain entirely. The watcher returns from `poll_until` as soon as
-///   the first `kevent_drain` / `epoll_wait` returns events.
-/// - A non-zero value arms a second drain pass after the first returns
-///   real events, **subject to the recency check** documented at each
-///   backend's `poll_until`. The check ensures W_edit single touches in
-///   quiet periods skip the second drain (zero latency cost) while
-///   sustained bursts catch it from the second drain onwards.
-///
-/// **Ordering.** [`Self::get`] uses `Ordering::Relaxed`. The
-/// construction store happens-before the watcher thread is spawned, so
-/// the watcher always observes the constructed value; engine
-/// correctness does not depend on the window anyway (settle deadlines
-/// are engine-timer driven; the window only shapes batch granularity),
-/// so the cheaper memory order is correct.
-#[derive(Debug, Clone)]
-pub struct DrainWindow(Arc<AtomicU64>);
-
-impl DrainWindow {
-    /// Saturating `Duration → nanos` encoding for the atomic surface.
-    /// Caps at `u64::MAX` nanoseconds (`~584 years`) for pathologically
-    /// large `Duration`s — well past any reasonable window value. The
-    /// single home for the `Duration → u64` encoding, used by
-    /// [`Self::new`].
-    fn nanos(d: Duration) -> u64 {
-        u64::try_from(d.as_nanos()).unwrap_or(u64::MAX)
-    }
-
-    /// Construct a handle armed with `initial`. The bin passes the
-    /// fixed trailing-latency window (its `WATCHER_DRAIN_WINDOW`, in
-    /// the `[10ms, 50ms]` band) so the watcher reads the real value on
-    /// its very first `poll_until` — there is no unconfigured window to
-    /// forget, and no later write to race.
-    #[must_use]
-    pub fn new(initial: Duration) -> Self {
-        Self(Arc::new(AtomicU64::new(Self::nanos(initial))))
-    }
-
-    /// The deliberate, self-documenting disabled state (`Duration::ZERO`
-    /// ⇒ deferred drain off). Production never reaches this — it
-    /// constructs via [`Self::new`] with the fixed in-band constant
-    /// (`>= 10ms`); this exists for test fixtures that exercise the
-    /// immediate-return path and for a future explicit operator
-    /// opt-out. Reading `DrainWindow::disabled()` at a call site states
-    /// that intent loudly, where the old `default()` hid it.
-    #[must_use]
-    pub fn disabled() -> Self {
-        Self::new(Duration::ZERO)
-    }
-
-    /// Read the current window. `Duration::ZERO` iff constructed via
-    /// [`Self::disabled`] — the disabled state. The watcher's
-    /// hot path; see the type rustdoc for the relaxed-ordering rationale.
-    #[must_use]
-    pub fn get(&self) -> Duration {
-        Duration::from_nanos(self.0.load(Ordering::Relaxed))
-    }
-}
 
 /// Sensor-side extension on [`WatchFailure`] that classifies an
 /// `io::Error` from a watch-install syscall.
@@ -317,14 +222,6 @@ pub trait FsWatcher: Send {
     ///   within one drain is unspecified across both backends; per-
     ///   arm decisions that read intermediate state are order-
     ///   sensitive bugs.
-    ///
-    /// - **Wake suppresses deferred drain.** When a
-    ///   [`WakeHandle::wake`] fires concurrently with real events in
-    ///   the same drain, the watcher must return promptly without
-    ///   arming a second deferred drain. A wake means "control-plane
-    ///   work pending in the bin's channel"; deferring it would
-    ///   delay the bin's loop iteration for up to the full drain
-    ///   window.
     ///
     /// - **Deadline honoured across `EINTR`.** A `Some(deadline)`
     ///   is *total wall-clock budget*, not a per-syscall budget.
@@ -527,19 +424,15 @@ pub type DefaultWatcher = KqueueWatcher;
 #[cfg(target_os = "linux")]
 pub type DefaultWatcher = InotifyWatcher;
 
-/// Construct the platform's default watcher with the supplied drain
-/// window.
+/// Construct the platform's default watcher.
 ///
 /// Returns the same concrete type as [`DefaultWatcher`] — no
 /// trait-object overhead. See module docs on [`FsWatcher`] for the
 /// invariants the returned watcher must uphold (`Send`, single-threaded
 /// `poll_until` consumer, cross-thread mutation only via the bin's
 /// channel + [`WakeHandle`] discipline).
-///
-/// `drain_window` is consumed by reference cheaply via `Arc` clone;
-/// the bin keeps its own clone for hot-reload writes.
-pub fn default_watcher(drain_window: DrainWindow) -> io::Result<DefaultWatcher> {
-    DefaultWatcher::new(drain_window)
+pub fn default_watcher() -> io::Result<DefaultWatcher> {
+    DefaultWatcher::new()
 }
 
 /// Concrete platform config-watcher type — chosen at compile time so

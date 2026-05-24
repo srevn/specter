@@ -33,8 +33,8 @@ use specter_config::{Config, DaemonArgs, FileMeta};
 use specter_core::{Input, WatchOp};
 use specter_engine::Engine;
 use specter_sensor::{
-    ConfigWatcher, DrainWindow, FsWatcher, WakeHandle, WatcherEvent, WorkerProber,
-    default_config_watcher, default_watcher,
+    ConfigWatcher, FsWatcher, WakeHandle, WatcherEvent, WorkerProber, default_config_watcher,
+    default_watcher,
 };
 use std::io;
 use std::num::NonZeroUsize;
@@ -44,29 +44,6 @@ use std::process::ExitCode;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
-use std::time::Duration;
-
-/// Fixed trailing-latency window for the watcher's deferred-drain pass.
-///
-/// **Not an inbound-volume lever.** Inbound volume is owned by driver
-/// same-tick coalescing (accumulate regime) and per-event engine cost
-/// (keeps-up regime); one watcher-side scalar provably cannot serve a
-/// per-Profile volume constraint, so this knob no longer scales with
-/// `settle`. It is purely the latency budget the watcher trades for
-/// batch granularity on its second drain pass — see
-/// [`specter_sensor::DrainWindow`] for the deferred-drain semantics.
-///
-/// `50ms` is the top of the historical `[10ms, 50ms]` band — the value
-/// default-`settle` configs already resolved to. The watcher's recency
-/// gate skips the second drain for single touches in quiet periods, so
-/// a quiet-period edit pays none of this. Fixed, not operator-tunable,
-/// under the "minimal config surface" rule.
-///
-/// Lives next to its sole consumer ([`run`] hands it to
-/// [`default_watcher`] at startup) — `Loader` is bin-side reload state
-/// and never reads this constant, so colocation with the watcher
-/// initialisation is the clearer home.
-const WATCHER_DRAIN_WINDOW: Duration = Duration::from_millis(50);
 
 /// Run the bin against the parsed daemon arguments.
 ///
@@ -169,8 +146,10 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         config_meta: initial_meta,
     };
 
-    // Kqueue (or Linux inotify, when that backend lands) + wake handle.
-    let watcher = match default_watcher(DrainWindow::new(WATCHER_DRAIN_WINDOW)) {
+    // Kqueue on macOS / FreeBSD, inotify on Linux, plus a captured wake
+    // handle for cross-thread interruption from the signal / config-
+    // watcher threads.
+    let watcher = match default_watcher() {
         Ok(w) => w,
         Err(e) => {
             tracing::error!(?e, "watcher init failed");
@@ -1191,21 +1170,6 @@ mod tests {
         assert!(
             config_event_rx.try_recv().is_err(),
             "no second pulse — coalesced"
-        );
-    }
-
-    /// The watcher's deferred-drain window is a fixed trailing-latency
-    /// constant — no longer config-derived. Pins the value and its
-    /// in-band placement so a future change is a conscious latency
-    /// decision, not accidental drift. The historical band was
-    /// `[10ms, 50ms]`; `50ms` is the prior default-`settle` resolution.
-    #[test]
-    fn watcher_drain_window_is_fixed_at_band_ceiling() {
-        assert_eq!(WATCHER_DRAIN_WINDOW, Duration::from_millis(50));
-        assert!(
-            WATCHER_DRAIN_WINDOW >= Duration::from_millis(10)
-                && WATCHER_DRAIN_WINDOW <= Duration::from_millis(50),
-            "constant must stay within the historical trailing-latency band",
         );
     }
 }

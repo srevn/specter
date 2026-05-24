@@ -6,16 +6,12 @@
 
 #![cfg(target_os = "linux")]
 
-use slotmap::SlotMap;
-use specter_core::{ClassSet, ResourceId, ResourceKind};
-use specter_sensor::{DrainWindow, FsWatcher, InotifyWatcher, WatcherEvent};
-use std::fs;
+use specter_sensor::{FsWatcher, InotifyWatcher, WatcherEvent};
 use std::time::{Duration, Instant};
-use tempfile::TempDir;
 
 #[test]
 fn wake_interrupts_long_poll_until() {
-    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = InotifyWatcher::new().unwrap();
     let wake = w.wake_handle();
 
     // Spawn the wake-issuing thread first; the main thread blocks in
@@ -45,7 +41,7 @@ fn wake_interrupts_long_poll_until() {
 
 #[test]
 fn multiple_concurrent_wakes_coalesce() {
-    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = InotifyWatcher::new().unwrap();
     let wake = w.wake_handle();
 
     let mut threads = Vec::new();
@@ -76,7 +72,7 @@ fn multiple_concurrent_wakes_coalesce() {
 
 #[test]
 fn wake_after_drop_does_not_panic() {
-    let watcher = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
+    let watcher = InotifyWatcher::new().unwrap();
     let wake = watcher.wake_handle();
 
     // Drop the watcher; the wake handle's `Arc<OwnedFd>` keeps the
@@ -92,7 +88,7 @@ fn wake_after_drop_does_not_panic() {
 
 #[test]
 fn wake_handle_clone_box_is_independent() {
-    let w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
+    let w = InotifyWatcher::new().unwrap();
     let h1 = w.wake_handle();
     let h2 = h1.clone();
     drop(h1);
@@ -101,7 +97,7 @@ fn wake_handle_clone_box_is_independent() {
 
 #[test]
 fn poll_until_returns_promptly_with_zero_deadline() {
-    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = InotifyWatcher::new().unwrap();
     let mut events: Vec<WatcherEvent> = Vec::new();
 
     let start = Instant::now();
@@ -116,80 +112,6 @@ fn poll_until_returns_promptly_with_zero_deadline() {
         "past deadline should yield non-blocking poll; took {elapsed:?}"
     );
     assert_eq!(events.len(), 0);
-
-    drop(w);
-}
-
-/// Live drain-window wake interaction (F-MED-1 regression detector).
-///
-/// Mirror of the kqueue twin: phase 2 is gated on `!p1.wake_fired`
-/// in addition to the recency + window terms. A wake observed
-/// alongside real events in phase 1 must suppress phase 2 —
-/// otherwise the watcher would burn the full drain window before
-/// returning to the bin's loop, delaying the application of queued
-/// `WatchOp`s.
-///
-/// The test primes `last_event_at` with one watcher-side cycle (so
-/// the recency gate would otherwise open), then enqueues a wake and
-/// a real event before the next `poll_until`. Phase 1's `epoll_wait`
-/// sees both fds ready; `poll_once` drains the eventfd, reads
-/// inotify, returns `wake_fired = true`. `poll_until` must short-
-/// circuit phase 2.
-///
-/// **Timing distinguishes the fix from the bug.** With the fix:
-/// `elapsed ≈ 0` (one `epoll_wait` + drain). Without the fix: phase 2
-/// enters with the window-bounded deadline and, with no further
-/// events queued, blocks the full window (≈ 50 ms).
-#[test]
-fn wake_during_phase1_suppresses_phase2() {
-    const DRAIN_WINDOW: Duration = Duration::from_millis(50);
-
-    let tmp = TempDir::new().unwrap();
-    let file = tmp.path().join("f.txt");
-    fs::write(&file, "v0").unwrap();
-
-    let mut w = InotifyWatcher::new(DrainWindow::new(DRAIN_WINDOW)).unwrap();
-    let mut sm = SlotMap::<ResourceId, ()>::with_key();
-    let r = sm.insert(());
-    w.watch(r, &file, ResourceKind::File, ClassSet::CONTENT)
-        .expect("watch file ok");
-
-    let mut events: Vec<WatcherEvent> = Vec::new();
-
-    // Prime cycle: one real event + drain so the watcher's
-    // `last_event_at` is set. Without this, the next call's recency
-    // gate is closed and phase 2 is skipped regardless of the
-    // wake-fired term — the test would pass on the buggy code too.
-    fs::write(&file, "v1").unwrap();
-    let _ = w
-        .poll_until(Some(Instant::now() + Duration::from_secs(1)), &mut events)
-        .expect("prime drain ok");
-    events.clear();
-
-    let wake = w.wake_handle();
-
-    // Enqueue wake and a real fs event before the next `poll_until`
-    // entry. Both end up ready on the watcher's epoll instance;
-    // `poll_once`'s phase-1 `epoll_wait` returns both fds ready and
-    // reports `wake_fired = true` alongside the inotify-data drain.
-    wake.wake();
-    fs::write(&file, "v2").unwrap();
-    // Small settle so the kernel's inotify-record delivery finishes
-    // before the watcher's syscall samples the queue. 10 ms is well
-    // inside the 50 ms recency window.
-    std::thread::sleep(Duration::from_millis(10));
-
-    let start = Instant::now();
-    let _ = w
-        .poll_until(Some(Instant::now() + Duration::from_secs(1)), &mut events)
-        .expect("poll_until ok");
-    let elapsed = start.elapsed();
-
-    assert!(
-        elapsed < Duration::from_millis(20),
-        "wake observed in phase 1 must suppress phase 2; \
-         elapsed {elapsed:?} suggests phase 2 burned the {DRAIN_WINDOW:?} window",
-    );
 
     drop(w);
 }

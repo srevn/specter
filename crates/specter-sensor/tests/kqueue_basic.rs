@@ -19,7 +19,7 @@
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
-use specter_sensor::{DrainWindow, FsWatcher, KqueueWatcher, WatcherEvent};
+use specter_sensor::{FsWatcher, KqueueWatcher, WatcherEvent};
 use std::ffi::OsStr;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::PermissionsExt;
@@ -70,7 +70,7 @@ fn fresh_id(sm: &mut SlotMap<ResourceId, ()>) -> ResourceId {
 #[test]
 fn watch_dir_observes_structure_changed_on_create() {
     let tmp = TempDir::new().unwrap();
-    let mut w = KqueueWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = fresh_id(&mut sm);
 
@@ -99,7 +99,7 @@ fn watch_file_observes_modified_on_write() {
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, "initial").unwrap();
 
-    let mut w = KqueueWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
     w.watch(r_file, &path, ResourceKind::File, ClassSet::CONTENT)
@@ -127,7 +127,7 @@ fn watch_file_observes_removed_on_unlink() {
     let path = tmp.path().join("doomed.txt");
     std::fs::write(&path, "x").unwrap();
 
-    let mut w = KqueueWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
     // EMPTY events suffice: NOTE_DELETE is in the identity floor.
@@ -157,7 +157,7 @@ fn watch_file_observes_renamed_on_rename() {
     let dst = tmp.path().join("dst.txt");
     std::fs::write(&src, "x").unwrap();
 
-    let mut w = KqueueWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
     // EMPTY events suffice: NOTE_RENAME is in the identity floor.
@@ -186,7 +186,7 @@ fn watch_file_observes_metadata_changed_on_chmod() {
     let path = tmp.path().join("perm.txt");
     std::fs::write(&path, "x").unwrap();
 
-    let mut w = KqueueWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
     w.watch(r_file, &path, ResourceKind::File, ClassSet::METADATA)
@@ -212,7 +212,7 @@ fn watch_file_observes_metadata_changed_on_chmod() {
 
 #[test]
 fn watch_path_with_nul_byte_returns_error() {
-    let mut w = KqueueWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = fresh_id(&mut sm);
 
@@ -227,7 +227,7 @@ fn watch_path_with_nul_byte_returns_error() {
 
 #[test]
 fn watch_nonexistent_path_returns_enoent() {
-    let mut w = KqueueWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = fresh_id(&mut sm);
 
@@ -253,7 +253,7 @@ fn unwatch_after_event_does_not_panic_on_subsequent_poll() {
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, "x").unwrap();
 
-    let mut w = KqueueWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
     // CONTENT so the kernel actually queues an event for the write

@@ -19,7 +19,7 @@
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, ResourceId, ResourceKind};
-use specter_sensor::{DrainWindow, FsWatcher, InotifyWatcher, WatchFailure};
+use specter_sensor::{FsWatcher, InotifyWatcher, WatchFailure};
 use tempfile::TempDir;
 
 #[test]
@@ -33,7 +33,7 @@ fn watch_with_stale_dir_kind_after_swap_to_file_returns_resource() {
     std::fs::remove_dir(&anchor).unwrap();
     std::fs::write(&anchor, "now a file").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = InotifyWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
@@ -63,7 +63,7 @@ fn watch_with_stale_file_kind_after_swap_to_dir_returns_resource() {
     std::fs::remove_file(&anchor).unwrap();
     std::fs::create_dir(&anchor).unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = InotifyWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 

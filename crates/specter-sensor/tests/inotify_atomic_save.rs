@@ -18,7 +18,7 @@
 
 use slotmap::SlotMap;
 use specter_core::{ClassSet, FsEvent, ResourceId, ResourceKind};
-use specter_sensor::{DrainWindow, FsWatcher, InotifyWatcher, WatcherEvent};
+use specter_sensor::{FsWatcher, InotifyWatcher, WatcherEvent};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
@@ -29,7 +29,7 @@ fn atomic_save_emits_terminal_on_old_inode_and_structure_on_dir() {
     let staging = tmp.path().join("main.c.tmp");
     std::fs::write(&target, "v1").unwrap();
 
-    let mut w = InotifyWatcher::new(DrainWindow::disabled()).unwrap();
+    let mut w = InotifyWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = sm.insert(());
     let r_file = sm.insert(());

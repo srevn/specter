@@ -321,11 +321,6 @@ pub struct PreFireBurst {
     /// - **Preserved** across `transition_to_verifying` (the reconfirm
     ///   path) and `transition_to_draining` — phase swaps without
     ///   semantic resets.
-    ///
-    /// **Distinct from the watcher's `last_event_at`.** The watcher's
-    /// field is per-watcher, scoped to drain-cadence recency. This field
-    /// is per-burst, scoped to settle-deadline reschedule. Different
-    /// consumers, different cadences.
     pub last_event_time: Option<Instant>,
     /// The N=2 quiescence proof — the prior `Authoritative` sample.
     /// Constructed fresh ([`CertifiedPrior::new`]) by the category-(a)
