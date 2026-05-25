@@ -11,14 +11,17 @@
 //!
 //! - [`protocol`] — wire-side request shape (`WireRequest`), response
 //!   carriers (`ResponsePayload`, `StatusResponse`, `ListResponse`,
-//!   `ShowResponse`), the `WireId` newtype, and `ERR_*` constants.
+//!   `ShowResponse`), the `WireId` newtype, and the `WireErrorCode`
+//!   closed-vocabulary enum.
 //! - [`wire`] — `WireDiagnostic` (the exhaustive
 //!   projection of every `specter_core::Diagnostic` variant),
 //!   `WireTime`, and the per-core-type `Wire*` projections every
 //!   variant transitively reaches.
-//! - [`framing`] — `serialize_line<T>`, the shared "build the
-//!   wire-ready bytes" step every send path on both client and
-//!   server converges through. Owns the LF-delimited framing
+//! - [`framing`] — `encode_line<T: InfallibleSerialize>` (the
+//!   marker-bounded "build the wire-ready bytes" wrapper every
+//!   production send path converges through) and `parse_strict<T>`
+//!   (the round-trip unknown-field gate every incoming request /
+//!   response is admitted through). Owns the LF-delimited framing
 //!   contract single-source.
 //! - [`sockpath`] — UNIX-socket path resolution, atomic-rename bind
 //!   with 0600 permissions, stale-socket recovery, and the

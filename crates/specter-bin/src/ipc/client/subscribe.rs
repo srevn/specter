@@ -26,6 +26,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::ipc::client::connect;
+use crate::ipc::framing::parse_strict;
 use crate::ipc::protocol::{ResponsePayload, WireRequest};
 use crate::ipc::wire::WireDiagnostic;
 
@@ -53,8 +54,8 @@ pub(crate) struct Subscription {
 /// `name = Some(_)` ⇒ per-Sub filter, server-resolved atomically
 /// inside the Subscribe handler (closes the historical
 /// resolve-then-subscribe race window — `disable` either lands
-/// before, producing `ERR_UNKNOWN_SUB`, or after, surfacing as
-/// `SubDetached` on the stream).
+/// before, producing `WireErrorCode::UnknownSub`, or after,
+/// surfacing as `SubDetached` on the stream).
 pub(crate) fn open(
     client: &ClientArgs,
     verb: &'static str,
@@ -92,10 +93,11 @@ pub(crate) fn open(
         eprintln!("specter {verb}: daemon closed connection before ack");
         return Err(ExitCode::from(1));
     }
-    let ack: ResponsePayload = serde_json::from_str(line.trim_end_matches('\n')).map_err(|e| {
-        eprintln!("specter {verb}: parse ack failed: {e}");
-        ExitCode::from(1)
-    })?;
+    let ack: ResponsePayload =
+        parse_strict(line.trim_end_matches('\n').as_bytes()).map_err(|e| {
+            eprintln!("specter {verb}: parse ack failed: {e}");
+            ExitCode::from(1)
+        })?;
     match ack {
         ResponsePayload::SubscribeAck { .. } => Ok(Subscription { reader }),
         ResponsePayload::Err { code, error } => {

@@ -2,16 +2,16 @@
 //!
 //! Subscribes by name (server resolves `name → SubId` atomic with
 //! `add_subscriber`; an unknown name fails the Subscribe immediately
-//! with `ERR_UNKNOWN_SUB`), then reads streamed [`WireDiagnostic`]s
-//! until one matches the requested `--kind` (or the deadline fires,
-//! or the stream ends without a match).
+//! with `WireErrorCode::UnknownSub`), then reads streamed
+//! [`WireDiagnostic`]s until one matches the requested `--kind` (or
+//! the deadline fires, or the stream ends without a match).
 //!
 //! # Exit codes
 //!
 //! - `0` — matched the requested kind. The matching event renders
 //!   to stdout for the operator's confirmation (one human line).
 //! - `1` — connect / subscribe failure (including the daemon's
-//!   structured `ERR_UNKNOWN_SUB` error response).
+//!   structured `WireErrorCode::UnknownSub` error response).
 //! - `2` — precondition violated mid-wait: `--kind fire` observed a
 //!   [`WireDiagnostic::SubDetached`] before the requested fire. The
 //!   Sub is gone; no fire is coming, an indefinite wait would hang

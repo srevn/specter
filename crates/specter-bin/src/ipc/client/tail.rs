@@ -42,7 +42,7 @@ use std::io::{self, Write};
 use std::process::ExitCode;
 
 use crate::ipc::client::subscribe;
-use crate::ipc::framing::serialize_line;
+use crate::ipc::framing::encode_line;
 use crate::ipc::render::diag_human;
 use crate::ipc::wire::{KNOWN_WIRE_VARIANTS, WireDiagnostic};
 
@@ -132,14 +132,17 @@ fn should_emit(wire: &WireDiagnostic, filter: &[String]) -> bool {
 /// line is byte-equivalent to the daemon's emission for every
 /// variant — the witness-fixture round-trip test
 /// (`wire_diagnostic_round_trips_via_serde`) pins this contract.
+/// [`encode_line`]'s
+/// [`crate::ipc::framing::InfallibleSerialize`] bound asserts the
+/// re-emit's `Vec<u8>`-build cannot fail (audited at the marker
+/// impl in [`crate::ipc::wire`]).
 fn emit<W: Write>(out: &mut W, wire: &WireDiagnostic, output: OutputFormat) -> io::Result<()> {
     match output {
         OutputFormat::Human => {
             out.write_all(diag_human::render(wire).as_bytes())?;
         }
         OutputFormat::Json => {
-            let bytes = serialize_line(wire).expect("WireDiagnostic always serializes");
-            out.write_all(&bytes)?;
+            out.write_all(&encode_line(wire))?;
         }
     }
     out.flush()

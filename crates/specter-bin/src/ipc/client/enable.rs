@@ -2,11 +2,11 @@
 //! disable override and (when the TOML entry is active) drives a
 //! fresh attach of the static Sub.
 //!
-//! The override is cleared even on the [`crate::ipc::protocol::ERR_TOML_DISABLED`]
-//! path: the operator's "no longer want this suppressed" intent is
-//! honoured regardless of whether the daemon can immediately re-
-//! attach. See `EngineDriver::handle_enable` for the server-side
-//! ordering.
+//! The override is cleared even on the
+//! [`crate::ipc::protocol::WireErrorCode::TomlDisabled`] path: the
+//! operator's "no longer want this suppressed" intent is honoured
+//! regardless of whether the daemon can immediately re-attach. See
+//! `EngineDriver::handle_enable` for the server-side ordering.
 //!
 //! Exit-code discipline matches the other unit-ack verbs.
 

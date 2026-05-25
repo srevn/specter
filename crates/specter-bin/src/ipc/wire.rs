@@ -77,6 +77,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use super::framing::InfallibleSerialize;
 use super::protocol::WireId;
 
 /// RFC 3339 wall-clock projection at second resolution.
@@ -958,6 +959,21 @@ impl WireDiagnostic {
         }
     }
 }
+
+/// [`WireDiagnostic`] is structurally infallible to serialize: every
+/// variant payload is plain data ([`WireTime`]'s manual
+/// `serialize_str` over an invariant-by-construction RFC-3339 token,
+/// [`WireId`] / `Wire*` enum derives, [`CompactString`] /
+/// [`WirePath`] as quoted strings, primitives). No field uses a
+/// `serialize_with` adapter that could return `Err`. Marks the
+/// diag-fan-out path
+/// ([`crate::driver::hub::DriverHub::dispatch_to_subscribers`]), the
+/// back-pressure `_missed` marker emit
+/// ([`crate::driver::conns::ConnState::try_dispatch_diag`]), and the
+/// client `tail -o json` re-emit ([`crate::ipc::client::tail`]) safe
+/// for [`crate::ipc::framing::encode_line`] without an
+/// `.expect`-at-a-distance.
+impl InfallibleSerialize for WireDiagnostic {}
 
 /// Operator-visible tag for every [`WireDiagnostic`] variant — the
 /// vocabulary `specter tail --filter` validates against and the

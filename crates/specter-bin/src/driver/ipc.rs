@@ -43,6 +43,7 @@ use super::EngineDriver;
 use super::conns::ConnRole;
 use super::hub::{EnqueueOutcome, ReadOutcome};
 use super::state::ReloadTrigger;
+use crate::ipc::framing::parse_strict;
 use crate::ipc::project;
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
 use compact_str::CompactString;
@@ -137,21 +138,34 @@ impl<W: FsWatcher> EngineDriver<W> {
 
     /// Parse and dispatch one LF-delimited line as a [`WireRequest`].
     ///
-    /// Malformed JSON enqueues an [`ResponsePayload::Err`] response
-    /// with `code = WireErrorCode::Malformed` and continues; the
-    /// client gets one structured error frame and the conn stays open
-    /// for the next line. (A repeat-offender peer trips the
-    /// read-accumulator-size guard in
+    /// Strict parse via [`parse_strict`]: a typoed operator JSON
+    /// (`{"op":"subscribe","names":"build"}`) is rejected with the
+    /// unknown-field surface rather than silently dropping the typo'd
+    /// key — the gate uses the derived [`serde::Serialize`] as the
+    /// schema and round-trip-validates the input against it. Either
+    /// kind of parse failure (malformed JSON or unknown field)
+    /// enqueues a [`ResponsePayload::Err`] with
+    /// `code = WireErrorCode::Malformed` and continues; the client
+    /// gets one structured error frame and the conn stays open for
+    /// the next line. (A repeat-offender peer trips the read-
+    /// accumulator-size guard in
     /// [`super::hub::DriverHub::read_conn_into_lines`] and the conn
     /// terminates on the next drain pass.)
     ///
     /// The trailing `\n` is stripped before serde sees the bytes —
     /// mirror of the standard `BufRead::read_line` convention; the
     /// JSON parser would reject a trailing newline as a structural
-    /// token.
+    /// token. The [`Option::expect`] is the framing invariant:
+    /// [`super::hub::DriverHub::read_conn_into_lines`] produces every
+    /// line via `drain(..=nl)` (LF inclusive), so a missing trailing
+    /// LF would mean an upstream framing breach. A loud panic at
+    /// this seam beats a misleading "json parse" surfacing one frame
+    /// later.
     fn handle_ipc_line(&mut self, token: Token, line: &[u8], now: Instant) -> ControlFlow<()> {
-        let trimmed = line.strip_suffix(b"\n").unwrap_or(line);
-        let request: WireRequest = match serde_json::from_slice(trimmed) {
+        let trimmed = line
+            .strip_suffix(b"\n")
+            .expect("framing invariant: line carries trailing LF");
+        let request: WireRequest = match parse_strict(trimmed) {
             Ok(r) => r,
             Err(e) => {
                 let resp = ResponsePayload::Err {

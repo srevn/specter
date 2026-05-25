@@ -1,5 +1,5 @@
 //! Operator IPC protocol — wire-side request shape, response carriers,
-//! wire-id newtype, and error-code constants.
+//! wire-id newtype, and the [`WireErrorCode`] closed-vocabulary enum.
 //!
 //! # Single-type request shape
 //!
@@ -35,6 +35,7 @@ use serde::{Deserialize, Serialize};
 use slotmap::Key;
 use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
 
+use super::framing::InfallibleSerialize;
 use super::wire::{WireEffectScope, WirePath, WireReloadTrigger, WireStateLabel, WireTime};
 
 /// Operator-facing wire request — the shape the daemon parses from
@@ -51,6 +52,16 @@ use super::wire::{WireEffectScope, WirePath, WireReloadTrigger, WireStateLabel, 
 /// Tagged internally on `op`; both the tag value and the field names
 /// use `snake_case` so the wire form matches the operator vocabulary
 /// (`{"op":"status"}`, `{"op":"show","name":"foo"}`).
+///
+/// Unknown-field strictness lives at the wire boundary, not on the
+/// type: [`crate::ipc::framing::parse_strict`] round-trip-validates
+/// every incoming request line so a typoed JSON
+/// (`{"op":"subscribe","names":"build"}`) reaches the handler as
+/// [`WireErrorCode::Malformed`] rather than silently dropping the
+/// typo'd field. The boundary discipline applies uniformly to
+/// `WireRequest` (daemon read) and [`ResponsePayload`] (client read);
+/// `WireDiagnostic` is deliberately exempt — streamed diags stay
+/// forward-compatible with older `tail`/`wait` clients.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub(crate) enum WireRequest {
@@ -88,6 +99,13 @@ pub(crate) enum WireRequest {
 /// parse responses back from the wire — every variant payload carries
 /// `Deserialize`. The wire schema is one canonical shape; the same
 /// JSON object the daemon writes is what the client reads.
+///
+/// Unknown-field strictness on the client side lives at the wire
+/// boundary via [`crate::ipc::framing::parse_strict`] — a future
+/// daemon field this client doesn't know about reaches the verb
+/// handler as a parse error rather than silently dropping the value.
+/// Symmetric with the daemon-side request gate (see
+/// [`WireRequest`]'s rustdoc).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum ResponsePayload {
@@ -182,7 +200,11 @@ impl WireErrorCode {
     /// to compile, keeping the wire vocabulary single-source against
     /// [`tests::wire_error_code_round_trips_every_variant`]'s
     /// JSON-form pin.
-    pub(crate) const fn as_str(&self) -> &'static str {
+    ///
+    /// Takes `self` by value: the enum is `Copy` and a single byte
+    /// wide, so the by-value form is a register-passing convention
+    /// rather than the indirection a `&self` borrow would imply.
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::UnknownSub => "unknown_sub",
             Self::DynamicSubNoOp => "dynamic_sub_no_op",
@@ -393,6 +415,28 @@ pub(crate) enum ShowResponse {
     Unknown { name: String },
 }
 
+/// [`WireRequest`] is structurally infallible to serialize: every
+/// variant carries only plain-data fields ([`CompactString`] / unit),
+/// every derived `Serialize` walks through `serialize_str` /
+/// `serialize_unit` against in-memory values, and no field uses a
+/// `serialize_with` adapter that could fail. Marks the client-side
+/// request path
+/// ([`crate::ipc::client::connect::write_request`]) safe for the
+/// `Vec<u8>`-returning wrapper without an `.expect`-at-a-distance.
+impl InfallibleSerialize for WireRequest {}
+
+/// [`ResponsePayload`] is structurally infallible to serialize: the
+/// variant payloads are plain-data structs ([`StatusResponse`],
+/// [`ListResponse`], [`ShowResponse`], [`SubDetails`]) whose fields
+/// are primitives, [`String`], [`Option`], [`Vec`], [`WireId`],
+/// [`WireTime`] (manual `serialize_str` over an invariant-by-
+/// construction RFC-3339 token), [`WirePath`] (transparent `String`),
+/// or other `Wire*` enums (closed-set derives). Marks the daemon-side
+/// response paths
+/// ([`crate::driver::hub::DriverHub::enqueue_response`] +
+/// `write_busy_then_drop`) safe for the wrapper.
+impl InfallibleSerialize for ResponsePayload {}
+
 /// `specter show <name>` detail block for an attached Sub.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SubDetails {
@@ -435,6 +479,7 @@ pub(crate) struct SubDetails {
 #[cfg(test)]
 mod tests {
     use super::{DisabledSource, ResponsePayload, WireErrorCode, WireId, WireRequest};
+    use crate::ipc::framing::parse_strict;
     use slotmap::KeyData;
     use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
 
@@ -512,6 +557,55 @@ mod tests {
         assert!(serde_json::from_str::<WireRequest>(r"{}").is_err());
     }
 
+    /// `parse_strict` rejects a typoed payload field on a struct
+    /// variant — the bug class the boundary gate exists to prevent.
+    /// `{"op":"subscribe","names":"build"}` (note the trailing `s`)
+    /// would silently parse with `name = None` under bare
+    /// `serde_json::from_slice` and the daemon would subscribe
+    /// unfiltered, ignoring the operator's intent. With the
+    /// boundary gate the typo surfaces as an unknown-field rejection
+    /// the [`crate::driver::ipc`] handler turns into
+    /// [`WireErrorCode::Malformed`].
+    ///
+    /// Bare `from_slice` is exercised first to pin the bug shape
+    /// (silent accept) the boundary gate fixes; the strict parse
+    /// is the structural floor.
+    #[test]
+    fn parse_strict_rejects_typoed_payload_field_on_wire_request() {
+        let bytes = br#"{"op":"subscribe","names":"build"}"#;
+        // Baseline: bare serde silently accepts the typo, dropping `names`.
+        let lenient: WireRequest = serde_json::from_slice(bytes).expect("bare parse succeeds");
+        match lenient {
+            WireRequest::Subscribe { name } => assert_eq!(
+                name, None,
+                "bare parse silently drops the typoed `names` key",
+            ),
+            other => panic!("expected Subscribe, got {other:?}"),
+        }
+        // Boundary: strict parse rejects.
+        let err = parse_strict::<WireRequest>(bytes).expect_err("strict parse rejects typo");
+        assert!(
+            err.to_string().contains("unknown field `names`"),
+            "rejection names the typoed field; got {err}",
+        );
+    }
+
+    /// `parse_strict` rejects an unknown top-level field on a
+    /// [`ResponsePayload`] — the daemon-bug class the client-side
+    /// boundary gate ([`crate::ipc::client::connect::read_response`])
+    /// surfaces as [`std::io::ErrorKind::InvalidData`] rather than
+    /// silently dropping the value. Symmetric protection with the
+    /// daemon-side request gate.
+    #[test]
+    fn parse_strict_rejects_unknown_field_on_response_payload() {
+        let bytes = br#"{"kind":"ok","stray":1}"#;
+        let err = parse_strict::<ResponsePayload>(bytes).expect_err("strict parse rejects unknown");
+        assert!(
+            err.to_string().contains("unknown field `stray`"),
+            "rejection names the unknown field; got {err}",
+        );
+    }
+
     /// `ResponsePayload`'s internal tag is the load-bearing wire
     /// commitment: every variant flattens into one JSON object
     /// keyed by `kind`. A retrofit to external tagging would change
@@ -568,7 +662,7 @@ mod tests {
     /// `"specter <verb>: {code}: ..."` line. A hand-edit to any
     /// variant — adding one, renaming a tag, drifting the as_str
     /// arm — fails here loudly, replacing the per-variant copy-paste
-    /// pin the [`ERR_*`](self) constants used to require.
+    /// pin the prior `ERR_*` constants used to require.
     #[test]
     fn wire_error_code_round_trips_every_variant() {
         // Compile-time exhaustive — a new variant without an entry

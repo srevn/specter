@@ -1805,7 +1805,8 @@ fn ipc_subscribe_unfiltered_acks_and_registers_subscriber() {
 }
 
 /// Subscribe { name: Some("nope") } against an empty engine returns
-/// `Err { ERR_UNKNOWN_SUB }` and DOES NOT flip the conn role.
+/// `Err { code: WireErrorCode::UnknownSub }` and DOES NOT flip the
+/// conn role.
 #[test]
 fn ipc_subscribe_unknown_name_errors_without_registering() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1875,7 +1876,7 @@ fn ipc_subscribe_known_name_resolves_and_acks() {
 
 /// A second `Subscribe` on a conn that already flipped to
 /// [`ConnRole::Sub`] is a precondition violation. The handler gate
-/// refuses with [`ERR_ALREADY_SUBSCRIBED`] before reaching
+/// refuses with [`WireErrorCode::AlreadySubscribed`] before reaching
 /// `transition_to_sub`, so the first subscription's `filter` and
 /// `missed` window survive unchanged.
 ///
@@ -1927,7 +1928,7 @@ fn subscribe_twice_returns_err_already_subscribed() {
     }
 
     // Second Subscribe on the SAME conn: `name = Some("build")`. The
-    // gate refuses with ERR_ALREADY_SUBSCRIBED before reaching
+    // gate refuses with WireErrorCode::AlreadySubscribed before reaching
     // `transition_to_sub`.
     let reply2 = ipc_round_trip(
         &mut rig,

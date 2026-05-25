@@ -56,7 +56,7 @@
 
 use crate::driver::WakeHandle;
 use crate::driver::conns::{ConnState, PushOutcome};
-use crate::ipc::framing::{MAX_LINE_BYTES, serialize_line};
+use crate::ipc::framing::{InfallibleSerialize, MAX_LINE_BYTES, encode_line};
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode};
 use crate::ipc::wire::{WireDiagnostic, WireTime};
 use crate::signals::SignalPipe;
@@ -678,8 +678,7 @@ impl<W: FsWatcher> DriverHub<W> {
             return;
         }
         let wire = WireDiagnostic::from((diag, wire_at));
-        let line = serialize_line(&wire)
-            .expect("WireDiagnostic serialization is infallible by construction");
+        let line = encode_line(&wire);
         for conn in self.conns.values_mut() {
             // The five-axis verdict (close, role, filter, capacity,
             // marker dance) and the per-conn missed-window
@@ -714,7 +713,7 @@ impl<W: FsWatcher> DriverHub<W> {
     /// the conn's existing role here before deciding whether to
     /// flip via [`crate::driver::conns::ConnState::transition_to_sub`]
     /// or refuse with
-    /// [`crate::ipc::protocol::ERR_ALREADY_SUBSCRIBED`].
+    /// [`crate::ipc::protocol::WireErrorCode::AlreadySubscribed`].
     pub(super) fn conn_ref(&self, token: Token) -> Option<&ConnState> {
         self.conns.get(&token)
     }
@@ -826,7 +825,7 @@ impl<W: FsWatcher> DriverHub<W> {
 
     /// Serialize a response value and append the JSON line to the
     /// conn's write_queue (the trailing `\n` is added by
-    /// [`serialize_line`]; framing is line-delimited).
+    /// [`encode_line`]; framing is line-delimited).
     ///
     /// Capacity-gated via
     /// [`crate::driver::conns::ConnState::push_response`]: if the
@@ -843,22 +842,18 @@ impl<W: FsWatcher> DriverHub<W> {
     /// [`Self::drain_writable`] and the close-flag is observed at
     /// flush time.
     ///
-    /// Serializer failure is `expect`'d: the daemon's wire types
-    /// ([`crate::ipc::protocol::ResponsePayload`] /
-    /// [`crate::ipc::wire::WireDiagnostic`]) are `Serialize`-derive
-    /// over plain-data fields and structurally cannot fail. The
-    /// wire-side `wire_diagnostic_round_trips_via_serde` regression
-    /// covers the projection invariant; reaching this panic surfaces
-    /// a programmer-error in the same shape the fan-out path uses,
-    /// rather than swallowing the error as a stale `let _ = ...`
-    /// `io::Error` would.
-    pub(super) fn enqueue_response<T: serde::Serialize>(
+    /// The `T: InfallibleSerialize` bound is the structural floor
+    /// for the serializer-cannot-fail claim — every call site passes
+    /// a type whose marker impl carries an audit of its serialize
+    /// tree, so the wrapper's `expect` lives at the contract source
+    /// in [`crate::ipc::framing`] rather than scattered as one-off
+    /// `.expect("…")` strings at every enqueue arm.
+    pub(super) fn enqueue_response<T: InfallibleSerialize>(
         &mut self,
         token: Token,
         response: &T,
     ) -> EnqueueOutcome {
-        let bytes = serialize_line(response)
-            .expect("ipc response serialization is infallible by construction");
+        let bytes = encode_line(response);
         // Scope the conn borrow so the post-push `try_terminate_if_idle`
         // can reach `&mut self` cleanly on the Refused arm. PushOutcome
         // is Copy, so the binding outlives the borrow without effort.
@@ -1105,8 +1100,7 @@ fn write_busy_then_drop(stream: mio::net::UnixStream) -> io::Result<()> {
         code: WireErrorCode::Busy,
         error: "max concurrent connections".into(),
     };
-    let bytes = serialize_line(&resp)?;
-    std_stream.write_all(&bytes)?;
+    std_stream.write_all(&encode_line(&resp))?;
     Ok(())
 }
 

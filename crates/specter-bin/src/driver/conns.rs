@@ -23,7 +23,7 @@
 //! dispatch) and the driver-side IPC handler (the Subscribe arm
 //! flips the role through [`ConnState::transition_to_sub`]).
 
-use crate::ipc::framing::serialize_line;
+use crate::ipc::framing::encode_line;
 use crate::ipc::wire::WireDiagnostic;
 use specter_core::SubId;
 use std::collections::VecDeque;
@@ -216,10 +216,10 @@ impl ConnState {
     /// flips to `Sub` once, and never flips back. The *structural*
     /// gate lives at the [`super::ipc`] Subscribe handler — a repeat
     /// Subscribe on a `Sub` conn returns
-    /// [`crate::ipc::protocol::ERR_ALREADY_SUBSCRIBED`] before
-    /// reaching this method. The `debug_assert!` here is the contract
-    /// witness: any future caller that bypasses the handler gate
-    /// fails loudly in debug builds.
+    /// [`crate::ipc::protocol::WireErrorCode::AlreadySubscribed`]
+    /// before reaching this method. The `debug_assert!` here is the
+    /// contract witness: any future caller that bypasses the handler
+    /// gate fails loudly in debug builds.
     pub(super) fn transition_to_sub(&mut self, filter: Option<SubId>) {
         debug_assert!(
             matches!(self.role, ConnRole::Reqs),
@@ -307,8 +307,7 @@ impl ConnState {
                 at: first_dropped_at.unwrap_or(at).into(),
                 count: *missed,
             };
-            serialize_line(&marker)
-                .expect("WireDiagnostic::Missed serialization is infallible by construction")
+            encode_line(&marker)
         });
 
         let marker_len = marker_bytes.as_ref().map_or(0, Vec::len);

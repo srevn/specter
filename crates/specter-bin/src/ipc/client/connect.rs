@@ -10,10 +10,10 @@
 //!
 //! Requests and responses are line-delimited JSON, one object per
 //! line — the shared framing contract owned by
-//! [`crate::ipc::framing::serialize_line`]. [`write_request`]
+//! [`crate::ipc::framing::encode_line`]. [`write_request`]
 //! serialises + appends LF + writes in one `write_all`.
 //! [`read_response`] reads through a [`BufReader`] until a newline,
-//! then deserialises.
+//! then strict-parses via [`crate::ipc::framing::parse_strict`].
 
 use specter_config::ClientArgs;
 use std::io::{self, BufRead, BufReader, Write};
@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
-use crate::ipc::framing::serialize_line;
+use crate::ipc::framing::{encode_line, parse_strict};
 use crate::ipc::protocol::{ResponsePayload, WireRequest};
 use crate::ipc::sockpath;
 
@@ -59,19 +59,27 @@ pub(crate) fn open(socket: &Path) -> io::Result<UnixStream> {
 /// The atomic single-write matters for framing correctness: a
 /// partial write would leave the daemon parsing half a JSON object
 /// next time the conn is readable, and serde's compact serializer
-/// (used by [`serialize_line`]) emits the object without internal
-/// newlines so the daemon's LF-splitter only ever sees the trailing
-/// frame delimiter. Serializer failure surfaces as
-/// [`io::ErrorKind::InvalidData`] (the contract
-/// [`serialize_line`] pins) so callers branch on one error kind
-/// across send paths.
+/// (used by [`encode_line`]) emits the object without
+/// internal newlines so the daemon's LF-splitter only ever sees the
+/// trailing frame delimiter. The wrapper's
+/// [`crate::ipc::framing::InfallibleSerialize`] bound asserts the
+/// `Vec<u8>`-build cannot fail for [`WireRequest`] (audited at the
+/// impl site in [`crate::ipc::protocol`]), so the only fallible
+/// step here is [`Write::write_all`].
 pub(crate) fn write_request(stream: &mut UnixStream, req: &WireRequest) -> io::Result<()> {
-    stream.write_all(&serialize_line(req)?)
+    stream.write_all(&encode_line(req))
 }
 
 /// Read the daemon's next JSON line and parse it as a
 /// [`ResponsePayload`]. Trailing newlines are tolerated (the daemon
 /// always emits one; future framing tweaks shouldn't break clients).
+///
+/// Strict parse via [`parse_strict`]: a daemon-bug response carrying
+/// a stale field name surfaces as
+/// [`io::ErrorKind::InvalidData`] (the boundary's uniform parse-
+/// failure shape) rather than silently dropping the unknown key.
+/// Symmetric with the daemon-side request gate so an unknown field
+/// is a deterministic, debuggable failure in either direction.
 pub(crate) fn read_response(stream: &mut UnixStream) -> io::Result<ResponsePayload> {
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
@@ -82,7 +90,7 @@ pub(crate) fn read_response(stream: &mut UnixStream) -> io::Result<ResponsePaylo
             "daemon closed connection before responding",
         ));
     }
-    serde_json::from_str(line.trim_end_matches('\n'))
+    parse_strict(line.trim_end_matches('\n').as_bytes())
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
