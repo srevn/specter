@@ -55,8 +55,8 @@
 //! handler reaches per-conn helpers.
 
 use crate::driver::WakeHandle;
-use crate::driver::conns::{ConnState, MAX_REQUEST_LINE_BYTES, PushOutcome};
-use crate::ipc::framing::serialize_line;
+use crate::driver::conns::{ConnState, PushOutcome};
+use crate::ipc::framing::{MAX_LINE_BYTES, serialize_line};
 use crate::ipc::protocol::{ERR_BUSY, ResponsePayload};
 use crate::ipc::wire::WireDiagnostic;
 use crate::signals::SignalPipe;
@@ -722,10 +722,10 @@ impl<W: FsWatcher> DriverHub<W> {
     /// `BufRead::read_line`'s convention).
     ///
     /// **Oversize line guard.** A line exceeding
-    /// [`MAX_REQUEST_LINE_BYTES`] is structurally hostile (operator
-    /// IPC verbs are small JSON objects; the largest verb is
-    /// `Subscribe { name: <CompactString> }` at ~60 bytes). The
-    /// guard arms `close_after_flush` via
+    /// [`MAX_LINE_BYTES`] is structurally hostile (operator IPC verbs
+    /// are small JSON objects; the largest verb is `Subscribe { name:
+    /// <CompactString> }` at ~60 bytes). The guard arms
+    /// `close_after_flush` via
     /// [`crate::driver::conns::ConnState::arm_close_after_flush`],
     /// breaks the line loop, and returns [`ReadOutcome::Continue`] —
     /// the caller pairs this with `try_terminate_if_idle` (so an
@@ -786,22 +786,22 @@ impl<W: FsWatcher> DriverHub<W> {
             // For the steady-state "one verb per line" cadence the
             // tail is empty, so the shift is a no-op.
             let line: Vec<u8> = conn.read_buf.drain(..=nl).collect();
-            if line.len() > MAX_REQUEST_LINE_BYTES {
+            if line.len() > MAX_LINE_BYTES {
                 tracing::warn!(
                     ?token,
                     len = line.len(),
-                    "ipc request line exceeds MAX_REQUEST_LINE_BYTES; closing conn",
+                    "ipc request line exceeds MAX_LINE_BYTES; closing conn",
                 );
                 conn.arm_close_after_flush();
                 break;
             }
             out.push(line);
         }
-        if conn.read_buf.len() > MAX_REQUEST_LINE_BYTES {
+        if conn.read_buf.len() > MAX_LINE_BYTES {
             tracing::warn!(
                 ?token,
                 buffered = conn.read_buf.len(),
-                "ipc read accumulator exceeds MAX_REQUEST_LINE_BYTES with no LF; closing conn",
+                "ipc read accumulator exceeds MAX_LINE_BYTES with no LF; closing conn",
             );
             conn.arm_close_after_flush();
         }

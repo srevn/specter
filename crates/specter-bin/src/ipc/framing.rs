@@ -1,24 +1,40 @@
-//! Wire-line framing — serialization helpers for the operator IPC
-//! protocol's LF-delimited JSON object lines.
+//! Wire-line framing — envelope constants and serialization helpers
+//! for the operator IPC protocol's LF-delimited JSON object lines.
 //!
 //! # Framing contract
 //!
-//! One JSON object per line, terminated by `\n`. Every send path on
-//! both client and server converges on this shape: the daemon's
-//! response writer, the diag fan-out, the back-pressure marker
-//! flush, the structured-busy reply on the accept cap, the client's
-//! request shipping, and the operator-side `tail -o json` echo. This
-//! module owns the "build the wire-ready bytes" step so the framing
-//! discipline is single-source — a future change to the protocol
-//! envelope (length-prefix, batching, etc.) lands here once.
+//! One JSON object per line, terminated by `\n`. Per-line length cap
+//! is [`MAX_LINE_BYTES`] — a line past that is structurally hostile
+//! and the reader path terminates the conn. Every send path on both
+//! client and server converges on this shape: the daemon's response
+//! writer, the diag fan-out, the back-pressure marker flush, the
+//! structured-busy reply on the accept cap, the client's request
+//! shipping, and the operator-side `tail -o json` echo. This module
+//! owns the envelope contract — the cap and the "build the wire-ready
+//! bytes" step — so a future change to the framing discipline
+//! (length-prefix, batching, larger cap, etc.) lands here once.
 //!
 //! # Visibility
 //!
 //! `pub(crate)` — both the server-side mio reactor
 //! ([`crate::driver::hub::DriverHub`]) and the client-side verb
-//! handlers ([`super::client`]) consume [`serialize_line`].
+//! handlers ([`super::client`]) consume [`serialize_line`] and read
+//! [`MAX_LINE_BYTES`] for envelope enforcement.
 
 use std::io;
+
+/// Per-line byte cap. A line past this is structurally hostile —
+/// operator IPC verbs are well under 1 KiB (the largest verb today,
+/// `Subscribe`, is ~60 bytes), so 256 KiB is 256× headroom against
+/// any legitimate use and the conn gets terminated rather than
+/// allowed to monopolise the driver thread on a malformed line.
+///
+/// The cap lives here so envelope enforcement is single-source:
+/// [`crate::driver::hub::DriverHub::read_conn_into_lines`] checks it
+/// on incoming bytes, and the per-conn write-queue high-water mark
+/// in `crate::driver::conns` is set to this value so an oversize
+/// response has the same backpressure footprint as a hostile read.
+pub(crate) const MAX_LINE_BYTES: usize = 256 * 1024;
 
 /// Serialize `value` as JSON and append a trailing `\n` so the
 /// bytes are wire-ready for the operator IPC protocol's

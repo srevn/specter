@@ -29,20 +29,17 @@ use specter_core::SubId;
 use std::collections::VecDeque;
 use std::time::SystemTime;
 
-/// Per-request line cap. Operator IPC requests are short JSON objects
-/// (the largest verb today is `Subscribe` at ~60 bytes); a 256 KiB
-/// cap is `4096×` headroom against the worst observed verb. Past the
-/// cap, the conn is structurally hostile and gets terminated rather
-/// than allowed to monopolise the driver thread on a malformed line.
-pub(super) const MAX_REQUEST_LINE_BYTES: usize = 256 * 1024;
-
 /// Per-conn write-queue high-water mark. A subscriber that can't keep
 /// up sees its queue grow; past this watermark the dispatch loop
 /// counts the dropped diag against the `Missed` marker rather than
-/// pushing more bytes into a stalled queue. Matches the
-/// [`MAX_REQUEST_LINE_BYTES`] cap so a single oversize response
-/// (a saturated `list` projection on a busy daemon) wedging the
-/// queue has the same backpressure footprint as a hostile read.
+/// pushing more bytes into a stalled queue. Matches the framing-level
+/// [`crate::ipc::framing::MAX_LINE_BYTES`] cap so a single oversize
+/// response (a saturated `list` projection on a busy daemon) wedging
+/// the queue has the same backpressure footprint as a hostile read.
+/// The two constants own different invariants (framing envelope vs
+/// per-conn backpressure) and stay split so a future divergence
+/// (chunked diag fan-out with a larger queue, etc.) doesn't have to
+/// untangle them.
 pub(super) const WRITE_QUEUE_HIGH_WATER: usize = 256 * 1024;
 
 /// Connection state held on [`super::hub::DriverHub`]'s
@@ -85,8 +82,9 @@ pub(super) struct ConnState {
     /// terminate the conn. Lifecycle:
     ///
     /// - **Oversize input** (the read accumulator exceeds
-    ///   [`MAX_REQUEST_LINE_BYTES`] or a complete line crosses the
-    ///   cap): set true via [`ConnState::arm_close_after_flush`].
+    ///   [`crate::ipc::framing::MAX_LINE_BYTES`] or a complete line
+    ///   crosses the cap): set true via
+    ///   [`ConnState::arm_close_after_flush`].
     /// - **Over-watermark response** (a verb projection serializes
     ///   into a payload larger than [`WRITE_QUEUE_HIGH_WATER`]):
     ///   set true via [`ConnState::push_response`]'s overflow arm.
