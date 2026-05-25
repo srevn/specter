@@ -1,13 +1,13 @@
 //! Driver-actuator channel topology.
 //!
 //! The driver thread owns every kernel-side fd directly via
-//! [`crate::driver::hub::DriverHub`], so cross-thread coordination
+//! [`crate::driver::Reactor`], so cross-thread coordination
 //! is limited to the two seams where blocking syscalls cannot collapse
 //! onto the reactor: the engine ↔ actuator seam (this module — the
 //! actuator thread spawns subprocesses and waits on `waitpid`
 //! synchronously) and the engine ↔ prober seam (see below — the
 //! prober pool's workers block on `lstat` / `readdir` during the
-//! directory walk). Each seam pulses the Hub's
+//! directory walk). Each seam pulses the Reactor's
 //! [`crate::driver::WakeHandle`] (the bin's sole [`mio::Waker`]) to
 //! lift the reactor out of `Poll::poll` when a response is ready.
 //!
@@ -33,7 +33,7 @@
 //! actuator-thread spawn.
 //!
 //! Prober traffic does NOT live here. The prober's response channel
-//! pairs the driver's [`crate::driver::hub::DriverHub`]
+//! pairs the driver's [`crate::driver::Reactor`]
 //! `prober_response_rx` with the bin's
 //! [`crate::app::WakingProberResponseSender`] wrapper — the pair is
 //! allocated inline in `App::run` because both halves are wrapped

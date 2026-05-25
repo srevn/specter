@@ -26,7 +26,7 @@ use specter_core::{Input, SendError};
 use std::io;
 use std::sync::Arc;
 
-/// Cloneable handle to the Hub's single mio Waker.
+/// Cloneable handle to the Reactor's single mio Waker.
 ///
 /// The `pub(crate)` constructor [`WakeHandle::new`] is the only call
 /// site of [`mio::Waker::new`] in the bin — `grep "Waker::new"`
@@ -42,7 +42,7 @@ impl WakeHandle {
     /// Construct the single [`mio::Waker`] for this Poll registry.
     ///
     /// The `token` argument is supplied by the caller so this module
-    /// stays token-agnostic — [`crate::driver::hub::DriverHub`] passes
+    /// stays token-agnostic — [`crate::driver::Reactor`] passes
     /// its `TOKEN_WAKER` constant in. Any other Poll registry is a
     /// bug: the project's structural invariant is one Poll per
     /// process; constructing a `WakeHandle` against a foreign
@@ -79,7 +79,7 @@ impl WakeHandle {
 /// strands until the next unrelated wake.
 ///
 /// Construction requires a [`WakeHandle`], which means routing
-/// through [`crate::driver::hub::DriverHub::new`]'s return value. New
+/// through [`crate::driver::Reactor::new`]'s return value. New
 /// wake-bearing sinks drop in as `WakingSink::new(tx, handle.clone())`
 /// — the mio "one Waker per Poll" invariant stays structural.
 pub(crate) struct WakingSink {
@@ -91,7 +91,7 @@ impl WakingSink {
     /// Wrap a [`Sender<Input>`] and a [`WakeHandle`] into the
     /// wake-bearing sink. The `waker` argument is typically a
     /// [`WakeHandle::clone`] of the handle returned from
-    /// [`crate::driver::hub::DriverHub::new`].
+    /// [`crate::driver::Reactor::new`].
     pub(crate) const fn new(tx: Sender<Input>, waker: WakeHandle) -> Self {
         Self { tx, waker }
     }

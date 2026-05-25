@@ -3,15 +3,15 @@
 //! diagnostic fan-out to operator-IPC subscribers.
 //!
 //! [`EngineDriver::forward`] ships every [`StepOutput`] onward:
-//! `watch_ops` → [`crate::driver::hub::DriverHub::apply_watch_ops`]
-//! (inline against the owned watcher; rejected ops queue as
+//! `watch_ops` → [`crate::driver::Reactor::apply_watch_ops`] (inline
+//! against the owned watcher; rejected ops queue as
 //! [`Input::WatchOpRejected`] in the deferred-input replay queue);
 //! `probe_ops` → `prober.submit` / `cancel`; `cancel_effects` +
 //! `effects` → `actuator_io.effects_tx` (lifted to
 //! [`EffectOp::Cancel`] / [`EffectOp::Submit`], cancels first so a
 //! defensive same-step cancel + submit for one profile would kill
 //! stale before spawn new); `diagnostics` → [`log_diagnostic`] AND
-//! [`crate::driver::hub::DriverHub::dispatch_to_subscribers`] (fan-out
+//! [`crate::driver::Hub::dispatch_to_subscribers`] (fan-out
 //! to live IPC subscribers, with a single `SystemTime::now()` capture
 //! per `StepOutput` so every subscriber sees byte-identical `at` for
 //! the same emission).
@@ -38,7 +38,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// Push a [`StepOutput`] to its downstream consumers.
     ///
     /// **`watch_ops` dispatch inline against the owned watcher.** The
-    /// driver thread owns [`crate::driver::hub::DriverHub`]'s watcher
+    /// driver thread owns [`crate::driver::Reactor`]'s watcher
     /// directly — no channel, no consumer-side disconnect to race.
     /// Rejected ops surface as `(resource, failure)` pairs which we
     /// queue into [`super::EngineDriver::deferred_inputs`] as
@@ -77,13 +77,13 @@ impl<W: FsWatcher> EngineDriver<W> {
         // dispatch order below without one clone per Effect.
         let (watch_ops, probe_ops, effects, cancel_effects, diagnostics) = out.into_parts();
 
-        // Apply watch ops inline against the Hub-owned watcher. The
-        // rejected list is the producer side of the
+        // Apply watch ops inline against the Reactor-owned watcher.
+        // The rejected list is the producer side of the
         // `Input::WatchOpRejected` replay queue — every rejection runs
         // through `engine.step` on the next tick's
         // `replay_deferred_inputs` pass, so the engine's claim-purge
         // dispatch fires within one tick of the failure.
-        for (resource, failure) in self.hub.apply_watch_ops(&watch_ops) {
+        for (resource, failure) in self.reactor.apply_watch_ops(&watch_ops) {
             self.deferred_inputs
                 .push_back(Input::WatchOpRejected { resource, failure });
         }
@@ -150,7 +150,7 @@ impl<W: FsWatcher> EngineDriver<W> {
 
     /// Log each [`Diagnostic`] via tracing AND fan it out to live
     /// IPC subscribers through
-    /// [`crate::driver::hub::DriverHub::dispatch_to_subscribers`].
+    /// [`crate::driver::Hub::dispatch_to_subscribers`].
     ///
     /// **Wall-clock capture is once per call.** A single
     /// [`SystemTime::now`] threads into every `dispatch_to_subscribers`
@@ -179,7 +179,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         for diag in diagnostics {
             log_diagnostic(diag);
             let diag_sub = diag_sub_id(diag);
-            self.hub
+            self.ipc
                 .dispatch_to_subscribers(diag, wall_now, &wire_at, diag_sub);
         }
     }
@@ -551,7 +551,7 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
 ///
 /// Called by [`EngineDriver::forward`] once per emitted diagnostic to
 /// resolve the `diag_sub` filter argument
-/// [`super::hub::DriverHub::dispatch_to_subscribers`] consumes — the
+/// [`super::Hub::dispatch_to_subscribers`] consumes — the
 /// projection lives on the engine-output side of the boundary, the
 /// reactor module never names [`Diagnostic`] internals.
 ///

@@ -1,16 +1,26 @@
 //! Free-function projections of engine + driver state into
-//! [`ResponsePayload`](super::protocol::ResponsePayload)-bound carriers.
+//! [`ResponsePayload`](crate::ipc::protocol::ResponsePayload)-bound
+//! carriers.
 //!
 //! Pure functions: every parameter is `&_`. The carriers clone what
 //! they own (`PathBuf` for `socket_path` / `config_path` — they rotate
 //! out to a fresh client per request, so sharing references is not an
 //! option). No I/O, no `Arc<Mutex>`, no engine mutation.
 //!
+//! Lives on the daemon side ([`crate::driver::ipc::project`]) because
+//! the source data ([`specter_engine::Engine`] +
+//! [`crate::driver::DriverState`]) is driver-owned. The "projection
+//! lives at the source" rule the codebase encodes for
+//! [`crate::driver::state`]'s `From<ReloadTrigger> for WireReloadTrigger`
+//! applies here too — the wire-side vocabulary at [`crate::ipc`] stays
+//! a true leaf with no `crate::driver` import.
+//!
 //! # Visibility
 //!
-//! `pub(crate)` — the driver's IPC drain (`crate::driver::ipc`) is the
-//! sole caller; client-side rendering reads through the response
-//! carriers, not through the helpers.
+//! `pub(super)` — the verb dispatcher
+//! ([`crate::driver::ipc::dispatch`]) is the sole caller;
+//! client-side rendering reads through the response carriers, not
+//! through the helpers.
 //!
 //! # Projections
 //!

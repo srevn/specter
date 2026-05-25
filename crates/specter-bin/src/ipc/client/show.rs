@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use crate::ipc::client::connect;
 use crate::ipc::protocol::{ResponsePayload, ShowResponse, WireRequest};
-use crate::ipc::render::show_human;
+use crate::ipc::render::show;
 
 /// Run the `specter show` round-trip.
 ///
@@ -49,7 +49,7 @@ pub(crate) fn run(args: &ShowArgs) -> ExitCode {
 /// rule single-source across `-o human` and `-o json`.
 fn render_show(output: OutputFormat, show: &ShowResponse) -> ExitCode {
     match output {
-        OutputFormat::Human => print!("{}", show_human::render(show)),
+        OutputFormat::Human => print!("{}", show::render(show)),
         OutputFormat::Json => {
             let s = serde_json::to_string(show).expect("ShowResponse always serializes");
             println!("{s}");

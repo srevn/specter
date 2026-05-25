@@ -2,14 +2,15 @@
 //! single-iteration body, and the module new inbound-path work lands
 //! in.
 //!
-//! [`EngineDriver::tick`] consults the [`super::hub::DriverHub`] for
-//! the multi-source mio poll, then drains the partitioned
-//! [`super::hub::DrainedTick`] in canonical order: deferred-replay →
-//! sensor inputs → expired timers → signals → config-event + settle
-//! expiry → effect completions → operator-IPC verbs → WRITABLE drain
-//! / interest rearm. The settle-expiry filter and `dispatch_reload`
-//! itself live in [`super::reload`]; downstream dispatch in
-//! [`super::forward`]; IPC dispatch in [`super::ipc`].
+//! [`EngineDriver::tick`] consults the [`super::Reactor`] for the
+//! multi-source mio poll, then drains the partitioned
+//! [`super::reactor::DrainedTick`] in canonical order: deferred-replay
+//! → listener accept → sensor inputs → expired timers → signals →
+//! config-event + settle expiry → effect completions → operator-IPC
+//! verbs → WRITABLE drain / interest rearm. The settle-expiry filter
+//! and `dispatch_reload` itself live in [`super::reload`]; downstream
+//! dispatch in [`super::forward`]; IPC dispatch in [`super::ipc`];
+//! per-conn state machinery on [`super::Hub`].
 //!
 //! # IPC drain placement
 //!
@@ -70,21 +71,22 @@
 //!
 //! # Disconnect policy
 //!
-//! The kernel-side inputs (watcher, config-watcher, signal, listener)
-//! are owned directly by the Hub on this thread — there is no
-//! upstream sender that can disconnect. The two wake'd channels
-//! (`prober_response_rx`, `effect_complete_rx`) and the outbound
-//! `effects_tx` are the only producer-driven seams. A `try_recv`
-//! / `try_send` error of `Disconnected` on any of those means the
-//! actuator or prober workers have died — the carrier propagates
-//! `ControlFlow::Break` upward and the tick routes through
+//! The kernel-side inputs (watcher, config-watcher, signal pipe,
+//! waker, channel receivers) are owned directly by the Reactor; the
+//! listener and per-conn streams are owned by the Hub. Both live on
+//! this thread — there is no upstream sender that can disconnect.
+//! The two wake'd channels (`prober_response_rx`, `effect_complete_rx`)
+//! and the outbound `effects_tx` are the only producer-driven seams.
+//! A `try_recv` / `try_send` error of `Disconnected` on any of those
+//! means the actuator or prober workers have died — the carrier
+//! propagates `ControlFlow::Break` upward and the tick routes through
 //! [`super::EngineDriver::begin_shutdown`].
 
+use super::ipc::hub;
 use super::{EngineDriver, TickOutcome};
 use specter_core::{FsEvent, Input, ResourceId};
 use specter_sensor::FsWatcher;
 use std::collections::BTreeSet;
-use std::io;
 use std::ops::ControlFlow;
 use std::time::{Duration, Instant};
 
@@ -142,20 +144,37 @@ impl<W: FsWatcher> EngineDriver<W> {
         // a spurious wait.
         let timeout = self.compute_block_timeout(now);
 
-        // Block on mio + drain every ready Source non-blockingly.
-        // `next_inputs` partitions the ready set into per-source
-        // buckets on [`super::hub::DrainedTick`].
-        let mut drained = match self.hub.next_inputs(timeout) {
+        // Block on mio + drain every ready static Source non-blockingly.
+        // `poll_and_drain` partitions the ready set into per-source
+        // buckets on [`super::reactor::DrainedTick`]; the listener's
+        // readiness surfaces as a bool flag (the accept itself runs
+        // through [`super::Hub::drain_accept`] below).
+        let mut drained = match self.reactor.poll_and_drain(timeout) {
             Ok(d) => d,
             Err(e) => {
                 tracing::error!(?e, "mio poll failed; shutting down");
                 return self.begin_shutdown();
             }
         };
-        // Refresh `now` after the block — `next_inputs` may have
+        // Refresh `now` after the block — `poll_and_drain` may have
         // waited up to `timeout`, and downstream `engine.step` /
         // settle-expiry / timer pops compare against this value.
         let now = Instant::now();
+
+        // 0. Listener accept — runs BEFORE every engine-input drain so
+        //    a freshly accepted conn observes the same engine state
+        //    this tick's projections will return. The dispatch loop in
+        //    `poll_and_drain` only sets `drained.listener_ready`; the
+        //    actual `accept(2)` loop lives on [`super::Hub`].
+        //    Operator-perception of "ack happens before any sub diag"
+        //    is preserved by the per-conn role-gate, independent of
+        //    accept ordering.
+        if drained.listener_ready
+            && let Err(e) = self.ipc.drain_accept()
+        {
+            tracing::error!(?e, "ipc accept failed; shutting down");
+            return self.begin_shutdown();
+        }
 
         // 1. Sensor inputs — fs events + overflows + probe responses.
         if self.drain_sensor_inputs(&mut drained, now).is_break() {
@@ -224,23 +243,15 @@ impl<W: FsWatcher> EngineDriver<W> {
 
         // 7. WRITABLE drain — flush write_queue residue for conns
         //    whose WRITABLE fired this tick. A conn whose drain
-        //    reaches `Ok(true)` (close-after-flush or peer-gone) is
-        //    terminated immediately so the next tick's poll has no
-        //    stale registration.
+        //    reaches `Terminate` (close-after-flush or peer-gone) is
+        //    closed immediately so the next tick's poll has no stale
+        //    registration. `ConnGone` is the benign "read drain
+        //    earlier this tick already terminated this conn" arm.
         for &token in &drained.ready_writes {
-            match self.hub.drain_writable(token) {
-                Ok(false) => {}
-                Ok(true) => self.hub.terminate_conn(token),
-                Err(e) if e.kind() == io::ErrorKind::NotFound => {
-                    // Conn already terminated by the read drain
-                    // earlier this tick — the mio registry was
-                    // deregistered at terminate_conn time, so there
-                    // is nothing left to drain.
-                }
-                Err(e) => {
-                    tracing::debug!(?token, ?e, "writable drain failed; closing conn");
-                    self.hub.terminate_conn(token);
-                }
+            match self.ipc.drain_writable(token) {
+                hub::DrainWritableOutcome::Continue => {}
+                hub::DrainWritableOutcome::Terminate => self.ipc.terminate_conn(token),
+                hub::DrainWritableOutcome::ConnGone => {}
             }
         }
         // 8. Arm WRITABLE interest on any conn whose queue gained
@@ -248,7 +259,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         //    handler's response enqueue). One re-register pass at
         //    end-of-tick amortizes a per-conn syscall across the
         //    whole tick.
-        if let Err(e) = self.hub.arm_writable_interests() {
+        if let Err(e) = self.ipc.arm_writable_interests() {
             tracing::error!(?e, "interest rearm failed; shutting down");
             return self.begin_shutdown();
         }
@@ -257,7 +268,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     }
 
     /// Compute the block-until duration handed to
-    /// [`super::hub::DriverHub::next_inputs`].
+    /// [`super::Reactor::poll_and_drain`].
     ///
     /// Three cases:
     /// - **`deferred_inputs` non-empty**: `Some(ZERO)` — return
@@ -316,7 +327,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// through `engine.step`, collapsing same-tick redundant recency
     /// hints into a single emission.
     ///
-    /// The drain visits three [`super::hub::DrainedTick`] fields:
+    /// The drain visits three [`super::reactor::DrainedTick`] fields:
     /// 1. `fs_events` — per-resource recency hints + identity-class
     ///    edges from the watcher fd.
     /// 2. `sensor_overflows` — kernel-level overflow markers
@@ -343,7 +354,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// baseline.
     fn drain_sensor_inputs(
         &mut self,
-        drained: &mut super::hub::DrainedTick,
+        drained: &mut super::reactor::DrainedTick,
         now: Instant,
     ) -> ControlFlow<()> {
         let mut seen: BTreeSet<(ResourceId, FsEvent)> = BTreeSet::new();

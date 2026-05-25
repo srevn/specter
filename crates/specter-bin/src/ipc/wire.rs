@@ -16,7 +16,7 @@
 //! [`WireDiagnostic`] is **two-way**: the daemon serializes for the
 //! per-conn fan-out (the [`From<(&Diagnostic, &WireTime)>`] projection
 //! at write time, called once per dispatch from
-//! [`crate::driver::hub::DriverHub::dispatch_to_subscribers`]), and
+//! [`crate::driver::Hub::dispatch_to_subscribers`]), and
 //! operator clients (`specter tail`, `specter wait`) deserialize the
 //! streamed JSON lines back into the typed enum. Every wire enum it
 //! transitively reaches carries both `Serialize` and `Deserialize`;
@@ -506,7 +506,7 @@ pub(crate) enum WireDiagnostic {
     },
     /// Fan-out back-pressure marker — not derived from any
     /// `specter_core::Diagnostic`. Emitted by
-    /// [`crate::driver::hub::DriverHub::dispatch_to_subscribers`]
+    /// [`crate::driver::Hub::dispatch_to_subscribers`]
     /// when a wedged subscriber's queue overflowed and the dispatch
     /// loop had to drop diag lines; the marker tells the operator
     /// how many were skipped before the next reachable line. The
@@ -967,9 +967,9 @@ impl WireDiagnostic {
 /// [`WirePath`] as quoted strings, primitives). No field uses a
 /// `serialize_with` adapter that could return `Err`. Marks the
 /// diag-fan-out path
-/// ([`crate::driver::hub::DriverHub::dispatch_to_subscribers`]), the
+/// ([`crate::driver::Hub::dispatch_to_subscribers`]), the
 /// back-pressure `_missed` marker emit
-/// ([`crate::driver::conns::ConnState::try_dispatch_diag`]), and the
+/// ([`crate::driver::ipc::conns::ConnState::try_dispatch_diag`]), and the
 /// client `tail -o json` re-emit ([`crate::ipc::client::tail`]) safe
 /// for [`crate::ipc::framing::encode_line`] without an
 /// `.expect`-at-a-distance.

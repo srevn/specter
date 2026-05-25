@@ -277,7 +277,7 @@ enum ShowResponseSnap {
 
 /// Headline test: spawn the daemon, send `{"op":"status"}` over the
 /// socket, parse a `StatusResponse`. Proves the entire IPC topology
-/// (`channels` → `ipc_server` → `drain_ipc` → `project::status` →
+/// (`channels` → `ipc::hub` → `drain_ipc` → `project::status` →
 /// reply channel → wire) end-to-end.
 #[test]
 fn status_round_trip() {
@@ -563,7 +563,7 @@ fn reload_via_ipc_increments_counters() {
 /// End-to-end `list`: spawn the daemon against a config carrying
 /// one enabled watch, one disabled watch, and assert the response
 /// surfaces both rows alphabetically with the right `disabled` tag.
-/// Pins the entire list path: `channels` → `ipc_server` →
+/// Pins the entire list path: `channels` → `ipc::hub` →
 /// `drain_ipc` → `project::list` → reply channel → wire.
 #[test]
 fn list_round_trip_alphabetic_with_disabled_rows() {

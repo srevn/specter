@@ -24,25 +24,30 @@
 //!    `eprintln!`.
 //! 3. **Sensor watcher + config watcher** — kernel fd handles that
 //!    will register against the reactor's [`mio::Poll`]; constructed
-//!    before the Hub takes ownership.
+//!    before the [`Reactor`] takes ownership.
 //! 4. **IPC socket bind** — `sockpath::bind_socket_atomic` writes the
 //!    socket file with the correct permissions; the returned
 //!    [`UnlinkGuard`](sockpath::UnlinkGuard) cleans up on graceful
 //!    shutdown or panic.
 //! 5. **Channels** — [`ActuatorIO::pair`] for the actuator seam, plus
-//!    two `unbounded::<Input>()` channels paired with the Hub's
+//!    two `unbounded::<Input>()` channels paired with the Reactor's
 //!    [`WakeHandle`] for the prober + actuator wake'd-channels.
-//! 6. **Hub construction** —
-//!    [`DriverHub::new`] consumes the listener, watcher, config
-//!    watcher, [`signals::SignalPipe`], and the two channel
-//!    receivers; returns the Hub and a clone of its [`WakeHandle`]
-//!    for the wake-bearing senders.
-//! 7. **Waking senders + worker spawns** —
+//! 6. **Reactor construction** —
+//!    [`Reactor::new`] consumes the watcher, config watcher,
+//!    [`signals::SignalPipe`], and the two channel receivers; returns
+//!    the Reactor, a clone of its [`WakeHandle`] for the wake-bearing
+//!    senders, and a [`mio::Registry::try_clone()`] handle the
+//!    Hub takes to register against the same Poll selector.
+//! 7. **Hub construction** — [`Hub::new`] consumes the
+//!    bound listener and the Registry clone; registers the listener
+//!    against the shared selector and owns the per-conn map for
+//!    every accepted client.
+//! 8. **Waking senders + worker spawns** —
 //!    [`WakingProberResponseSender`] and [`WakingEffectCompleteSender`]
 //!    are constructed with [`WakingSink`]s holding [`WakeHandle`]
-//!    clones; the prober pool + actuator thread spawn after the Hub
-//!    is built so they hold the one Waker the Hub owns.
-//! 8. **Engine driver** — [`EngineDriver::new`] takes ownership of
+//!    clones; the prober pool + actuator thread spawn after the
+//!    Reactor is built so they hold the one Waker it minted.
+//! 9. **Engine driver** — [`EngineDriver::new`] takes ownership of
 //!    every preceding piece; runs on the main thread.
 //!
 //! # Single-threaded reactor
@@ -54,11 +59,13 @@
 //! source the daemon cares about (watcher fd, config-watcher fd,
 //! signal pipe, listener fd, per-conn streams, and the [`mio::Waker`]
 //! the worker threads pulse) is registered against ONE [`mio::Poll`]
-//! owned by [`DriverHub`]. The driver's `tick` body is one drain
-//! pass over the partitioned ready set.
+//! owned by [`Reactor`] — the [`Hub`] registers against the
+//! same selector via a [`mio::Registry::try_clone()`] handle. The
+//! driver's `tick` body is one drain pass over the partitioned ready
+//! set.
 
 use crate::actuator::ActuatorIO;
-use crate::driver::{DriverHub, EngineDriver, ReloadTrigger, WakingSink};
+use crate::driver::{EngineDriver, Hub, Reactor, ReloadTrigger, WakingSink};
 use crate::ipc::sockpath;
 use crate::loader::Loader;
 use crate::observability;
@@ -83,8 +90,8 @@ use std::time::Instant;
 /// reactor + the one surviving worker thread (the actuator), drives
 /// the engine to completion, and runs the shutdown sequence. Returns
 /// `ExitCode::SUCCESS` on graceful exit; `ExitCode::from(1)` on
-/// startup failure (config / watcher / prober / thread spawn / Hub /
-/// listener bind).
+/// startup failure (config / watcher / prober / thread spawn /
+/// reactor / IPC server / listener bind).
 pub fn run(args: DaemonArgs) -> ExitCode {
     // Destructure at the function head — every field is consumed
     // exactly once by the lifecycle below (`config` moves into the
@@ -191,7 +198,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     let loader = Loader::new(initial_config, log_cfg, initial_meta);
 
     // 5. Kqueue on macOS / FreeBSD, inotify on Linux. The watcher
-    //    moves into the Hub below, which registers its fd against
+    //    moves into the Reactor below, which registers its fd against
     //    [`mio::Poll`].
     let watcher = match default_watcher() {
         Ok(w) => w,
@@ -220,12 +227,12 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     };
 
     // 7. Operator IPC socket — resolve, recover from stale, bind via
-    //    atomic-rename + chmod 0600 BEFORE Hub construction (the Hub
-    //    takes ownership of the listener fd). The `unlink_guard`
-    //    armed here unlinks the socket on graceful shutdown (via
-    //    explicit `unlink_now` after the driver drops) and on panic
-    //    (Drop runs unconditionally), so the next boot never trips
-    //    over our own residue.
+    //    atomic-rename + chmod 0600 BEFORE Hub construction
+    //    (the Hub takes ownership of the listener fd). The
+    //    `unlink_guard` armed here unlinks the socket on graceful
+    //    shutdown (via explicit `unlink_now` after the driver drops)
+    //    and on panic (Drop runs unconditionally), so the next boot
+    //    never trips over our own residue.
     let socket_path = sockpath::default_socket_path();
     if let Err(e) = sockpath::check_stale_or_remove(&socket_path) {
         tracing::error!(
@@ -265,15 +272,16 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     let (prober_tx, prober_rx) = crossbeam::channel::unbounded::<Input>();
     let (effect_complete_tx, effect_complete_rx) = crossbeam::channel::unbounded::<Input>();
 
-    // 9. Build the Hub. Consumes the listener, watcher, config
-    //    watcher, signal pipe, and the two channel receivers;
-    //    returns the Hub + a clone of its [`WakeHandle`] for the
-    //    wake-bearing senders. Every Source above is registered
-    //    against the Hub's [`mio::Poll`] before this call returns —
-    //    a signal arriving during the rest of init will fire the
+    // 9. Build the Reactor first. It mints the Poll, registers every
+    //    static fd source (watcher, config-watcher, signal pipe),
+    //    mints the [`WakeHandle`] returned for the wake-bearing
+    //    senders, and hands back a [`mio::Registry::try_clone()`]
+    //    handle the Hub registers its listener and per-conn
+    //    streams against. Every static Source is registered against
+    //    the Reactor's [`mio::Poll`] before this call returns — a
+    //    signal arriving during the rest of init will fire the
     //    reactor's `TOKEN_SIGNAL` on the first poll.
-    let (hub, wake) = match DriverHub::new(
-        listener,
+    let (reactor, wake, registry_for_ipc) = match Reactor::new(
         watcher,
         config_watcher,
         signals,
@@ -282,13 +290,25 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     ) {
         Ok(p) => p,
         Err(e) => {
+            tracing::error!(?e, "Reactor construction failed");
+            return ExitCode::from(1);
+        }
+    };
+
+    // 9b. Build the Hub with the Registry clone. The listener
+    //     registers against the same underlying selector as the
+    //     Reactor's Poll; the per-conn map starts empty and grows
+    //     through [`Hub::drain_accept`] as clients connect.
+    let ipc = match Hub::new(listener, registry_for_ipc) {
+        Ok(p) => p,
+        Err(e) => {
             tracing::error!(?e, "Hub construction failed");
             return ExitCode::from(1);
         }
     };
 
-    // 10. Build wrapped senders sharing the Hub's [`WakeHandle`]. mio
-    //     mandates one Waker per Poll — both adapters wrap a
+    // 10. Build wrapped senders sharing the Reactor's [`WakeHandle`].
+    //     mio mandates one Waker per Poll — both adapters wrap a
     //     [`WakingSink`] built on a `wake.clone()` so the worker
     //     threads pulse the same wake edge. The
     //     [`crate::driver::wake`] module's `WakeHandle::new` is the
@@ -305,7 +325,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
 
     // 11. Spawn the prober pool. The pool takes the `Arc<dyn>`
     //     sender directly and clones it per worker — workers wake
-    //     the Hub on every probe response.
+    //     the Reactor on every probe response.
     let probe_concurrency = probe_concurrency.unwrap_or_else(specter_sensor::default_concurrency);
     let prober = match WorkerProber::new(prober_sink, probe_concurrency) {
         Ok(p) => Arc::new(p),
@@ -316,7 +336,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     };
 
     // 12. Spawn the actuator thread. Its `effect_complete_tx`
-    //     wrapper wakes the Hub on every reaped completion.
+    //     wrapper wakes the Reactor on every reaped completion.
     let actuator_concurrency = concurrency.unwrap_or_else(specter_actuator::default_concurrency);
     let actuator_handle =
         match spawn_actuator_thread(actuator_concurrency, actuator_wiring, effect_sink) {
@@ -345,7 +365,8 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         obs_handle,
         prober.clone(),
         actuator_io,
-        hub,
+        ipc,
+        reactor,
     );
 
     // 14. Initial attach against the boot-parsed config.
@@ -370,7 +391,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
 
     // 15. Startup-TOCTOU close — the config can change between the
     //     initial `from_path_with_meta` capture (line 116) and the
-    //     config-watcher's registration (the `DriverHub::new`
+    //     config-watcher's registration (the `Reactor::new`
     //     return). A single `lstat` here catches the drift; on
     //     inequality the driver runs `dispatch_reload(Startup)`
     //     directly. Initial-attach has already run (#14), so the
@@ -415,13 +436,16 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         tracing::info!(?exit_reason, "engine driver exited");
     }
 
-    // 16. Shutdown sequence — drop the driver first so the Hub's fds
-    //     close (listener, watcher, config-watcher, signal pipe,
-    //     waker) before we touch anything else. The waker drop
-    //     decrements the Arc refcount; the prober + actuator
-    //     wrappers still hold their clones, but they're inert once
-    //     the Poll is gone (mio's `wake()` returns Err on a
-    //     destroyed Poll, which the wrappers ignore).
+    // 16. Shutdown sequence — drop the driver first so the reactor
+    //     fds close (listener, watcher, config-watcher, signal pipe,
+    //     waker) before we touch anything else. The driver's field
+    //     order ensures the Hub's Drop runs (deregistering
+    //     listener + conns) before the Reactor's Drop (deregistering
+    //     static sources). The waker drop decrements the Arc
+    //     refcount; the prober + actuator wrappers still hold their
+    //     clones, but they're inert once the Poll is gone (mio's
+    //     `wake()` returns Err on a destroyed Poll, which the
+    //     wrappers ignore).
     //
     //     `drop(driver)` also releases the `Arc<dyn Prober>` clone
     //     the driver held, leaving only this scope's `prober`
@@ -437,10 +461,11 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     drop(driver);
 
     // Unlink the bound socket path. Safe to do now: the listener fd
-    // closed when the Hub dropped (above). An operator reconnecting
-    // sees ENOENT, which is structurally correct (the daemon is
-    // gone). On panic anywhere between bind and here,
-    // `unlink_guard`'s Drop runs and cleans up.
+    // closed when the Hub dropped (as part of the driver's
+    // field-order drop above). An operator reconnecting sees ENOENT,
+    // which is structurally correct (the daemon is gone). On panic
+    // anywhere between bind and here, `unlink_guard`'s Drop runs and
+    // cleans up.
     unlink_guard.unlink_now();
 
     // Actuator: the closure runs `act.run(...)` to clean exit (or
@@ -553,7 +578,7 @@ impl EffectCompleteSender for WakingEffectCompleteSender {
 /// `engine_in` is the wake-bearing [`EffectCompleteSender`] —
 /// production passes a boxed [`WakingEffectCompleteSender`]
 /// constructed at `App::run` wiring time with a clone of the
-/// [`WakeHandle`] returned from [`DriverHub::new`]. The actuator's
+/// [`WakeHandle`] returned from [`Reactor::new`]. The actuator's
 /// controller borrows the sink via `&dyn` so it never names the
 /// engine's `Input` vocabulary on its own thread. The closure here
 /// owns the `Box<dyn>` for the actuator-thread lifetime and passes

@@ -1,4 +1,4 @@
-//! Per-connection state owned by [`super::hub::DriverHub`] via
+//! Per-connection state owned by [`super::hub::Hub`] via
 //! `BTreeMap<Token, ConnState>`.
 //!
 //! Each conn is one mio-registered [`mio::net::UnixStream`] plus the
@@ -10,16 +10,16 @@
 //! Every mutation that touches the per-conn role, the `missed` /
 //! `first_dropped_at` back-pressure accounting, the `close_after_flush`
 //! flag, or the write-queue bytes flows through a typed `&mut self`
-//! method on [`ConnState`]. The Hub's reactor surface (kernel-fd loops,
-//! mio Poll registry, accept) keeps its responsibilities; per-conn
-//! state-machine mechanics live here as the sole writer set. A future
+//! method on [`ConnState`]. The Hub's kernel-fd surface (listener,
+//! per-conn streams, registry clone, accept) keeps its responsibilities;
+//! per-conn state-machine mechanics live here as the sole writer set. A future
 //! dispatch path that re-implements a capacity gate or a role flip
 //! cannot diverge — there is no public field setter to reach for.
 //!
 //! # Visibility
 //!
-//! Every export is `pub(super)`. The only consumers are
-//! [`super::hub::DriverHub`] (per-conn read/write helpers, fan-out
+//! Every export is `pub(in crate::driver)`. The only consumers are
+//! [`super::hub::Hub`] (per-conn read/write helpers, fan-out
 //! dispatch) and the driver-side IPC handler (the Subscribe arm
 //! flips the role through [`ConnState::transition_to_sub`]).
 
@@ -40,44 +40,44 @@ use std::time::SystemTime;
 /// per-conn backpressure) and stay split so a future divergence
 /// (chunked diag fan-out with a larger queue, etc.) doesn't have to
 /// untangle them.
-pub(super) const WRITE_QUEUE_HIGH_WATER: usize = 256 * 1024;
+pub(in crate::driver) const WRITE_QUEUE_HIGH_WATER: usize = 256 * 1024;
 
-/// Connection state held on [`super::hub::DriverHub`]'s
+/// Connection state held on [`super::hub::Hub`]'s
 /// `conns: BTreeMap<Token, ConnState>`.
 ///
 /// One per accepted operator IPC client. Drops when
-/// `DriverHub::terminate_conn` removes the entry from the map,
+/// `Hub::terminate_conn` removes the entry from the map,
 /// closing the underlying socket fd and (after explicit
 /// `Registry::deregister` at the call site) freeing the mio-side
 /// registration.
-pub(super) struct ConnState {
+pub(in crate::driver) struct ConnState {
     /// The mio-wrapped accepted stream. Owned for the lifetime of the
     /// entry; `Drop` closes the fd. Holds mio's `IoSource` wrapping
     /// of the underlying `std::os::unix::net::UnixStream` — the
     /// non-blocking flag is set by mio at accept time, so no extra
     /// `set_nonblocking` is required at this constructor.
-    pub(super) stream: mio::net::UnixStream,
-    /// The mio Token registered against the [`super::hub::DriverHub`]
-    /// Poll registry. Kept on the struct so `DriverHub::drain_writable`
+    pub(in crate::driver) stream: mio::net::UnixStream,
+    /// The mio Token registered against the [`super::hub::Hub`]
+    /// Poll registry. Kept on the struct so `Hub::drain_writable`
     /// / `terminate_conn` can reach the registry without re-deriving
     /// the token from the map key.
-    pub(super) token: mio::Token,
-    /// Line accumulator. `DriverHub::read_conn_into_lines` appends
+    pub(in crate::driver) token: mio::Token,
+    /// Line accumulator. `Hub::read_conn_into_lines` appends
     /// every `read` chunk here and slices out LF-delimited lines.
     /// Pre-allocated to `1024` bytes — comfortably above the typical
     /// `Status` / `Show` verb size while keeping the cold start
     /// allocation small.
-    pub(super) read_buf: Vec<u8>,
+    pub(in crate::driver) read_buf: Vec<u8>,
     /// Pending write residue: response bytes the previous
     /// `drain_writable` could not flush due to kernel-side backpressure,
     /// plus any diag bytes queued by the fan-out path in this tick.
     /// `VecDeque` lets `drain_writable` slice off the consumed prefix
     /// without copying the tail forward.
-    pub(super) write_queue: VecDeque<u8>,
+    pub(in crate::driver) write_queue: VecDeque<u8>,
     /// Conn role — pre-subscribe `Reqs` or post-subscribe `Sub`. The
     /// role gate controls whether the fan-out path delivers diags into
     /// `write_queue`: only `Sub` conns receive them.
-    pub(super) role: ConnRole,
+    pub(in crate::driver) role: ConnRole,
     /// Set when the next successful flush of `write_queue` should
     /// terminate the conn. Lifecycle:
     ///
@@ -95,7 +95,7 @@ pub(super) struct ConnState {
     /// run drain_writable). Together the two paths cover both arming
     /// shapes: bytes-queued → flush-then-terminate, empty-queue →
     /// terminate-inline.
-    pub(super) close_after_flush: bool,
+    pub(in crate::driver) close_after_flush: bool,
 }
 
 /// Per-conn role axis. A fresh conn enters [`ConnRole::Reqs`]; the
@@ -103,7 +103,7 @@ pub(super) struct ConnState {
 /// [`ConnState::transition_to_sub`] *after* the SubscribeAck bytes
 /// are already in the write_queue — the ack-before-fanout ordering
 /// the wire-side regression test pins.
-pub(super) enum ConnRole {
+pub(in crate::driver) enum ConnRole {
     /// Request/response shape: every line is parsed as a `WireRequest`
     /// and answered with a `ResponsePayload`. The fan-out path skips
     /// `Reqs` conns.
@@ -149,7 +149,7 @@ pub(super) enum ConnRole {
 /// around to mentioning them) — the marker's `at` is the captured
 /// `since`, not the dispatch-time stamp.
 #[derive(Debug, Default, Eq, PartialEq)]
-pub(super) enum MissedWindow {
+pub(in crate::driver) enum MissedWindow {
     /// No drops pending since the last successful marker flush.
     #[default]
     Closed,
@@ -172,7 +172,7 @@ impl MissedWindow {
     /// Record one capacity-refused diag. The `Closed → Open` edge
     /// captures `at` as `since`; subsequent drops in the same window
     /// `saturating_add`-bump `count` and preserve `since`.
-    pub(super) const fn record_drop(&mut self, at: SystemTime) {
+    pub(in crate::driver) const fn record_drop(&mut self, at: SystemTime) {
         match self {
             Self::Closed => {
                 *self = Self::Open {
@@ -188,7 +188,7 @@ impl MissedWindow {
     /// [`MissedWindow::Closed`]. Returns `None` when no window was
     /// open. Callers that only need the reset (the marker bytes
     /// were pre-built ahead of the capacity gate) may `let _ = .take()`.
-    pub(super) const fn take(&mut self) -> Option<(u32, SystemTime)> {
+    pub(in crate::driver) const fn take(&mut self) -> Option<(u32, SystemTime)> {
         match std::mem::replace(self, Self::Closed) {
             Self::Closed => None,
             Self::Open { count, since } => Some((count, since)),
@@ -202,7 +202,7 @@ impl MissedWindow {
 /// observation of the axis the call took.
 #[must_use]
 #[derive(Debug, Eq, PartialEq)]
-pub(super) enum DispatchOutcome {
+pub(in crate::driver) enum DispatchOutcome {
     /// Diag bytes (possibly preceded by a flushed Missed marker) are
     /// in the write_queue.
     Accepted,
@@ -217,14 +217,14 @@ pub(super) enum DispatchOutcome {
 /// Outcome of one [`ConnState::push_response`] attempt.
 #[must_use]
 #[derive(Debug, Eq, PartialEq)]
-pub(super) enum PushOutcome {
+pub(in crate::driver) enum PushOutcome {
     /// Bytes pushed; the caller may want to arm WRITABLE interest
-    /// (done in bulk by [`super::hub::DriverHub::arm_writable_interests`]
+    /// (done in bulk by [`super::hub::Hub::arm_writable_interests`]
     /// at end of tick).
     Accepted,
     /// Bytes did NOT fit; `close_after_flush` was armed internally.
     /// The Hub-level caller pairs this with
-    /// [`super::hub::DriverHub::try_terminate_if_idle`] so a refusal
+    /// [`super::hub::Hub::try_terminate_if_idle`] so a refusal
     /// against a previously-empty queue terminates the conn inline
     /// (rather than lingering with an armed close that no WRITABLE
     /// edge will ever observe).
@@ -244,7 +244,7 @@ impl ConnState {
     /// Buffers pre-allocate `1024` bytes apiece: above the typical
     /// IPC verb / response size, below the page boundary that would
     /// otherwise dirty a fresh page for every cold-start client.
-    pub(super) fn new(stream: mio::net::UnixStream, token: mio::Token) -> Self {
+    pub(in crate::driver) fn new(stream: mio::net::UnixStream, token: mio::Token) -> Self {
         Self {
             stream,
             token,
@@ -272,7 +272,7 @@ impl ConnState {
     /// before reaching this method. The `debug_assert!` here is the
     /// contract witness: any future caller that bypasses the handler
     /// gate fails loudly in debug builds.
-    pub(super) fn transition_to_sub(&mut self, filter: Option<SubId>) {
+    pub(in crate::driver) fn transition_to_sub(&mut self, filter: Option<SubId>) {
         debug_assert!(
             matches!(self.role, ConnRole::Reqs),
             "transition_to_sub on non-Reqs role — the Subscribe handler gate is bypassed",
@@ -291,10 +291,10 @@ impl ConnState {
     /// Does NOT terminate. Termination is a Hub concern (needs the mio
     /// Poll registry to deregister the stream); the Hub-level call
     /// sites pair this with
-    /// [`super::hub::DriverHub::try_terminate_if_idle`] at the right
+    /// [`super::hub::Hub::try_terminate_if_idle`] at the right
     /// moment — typically *after* the in-flight processing pass that
     /// may have pushed response bytes into the queue.
-    pub(super) const fn arm_close_after_flush(&mut self) {
+    pub(in crate::driver) const fn arm_close_after_flush(&mut self) {
         self.close_after_flush = true;
     }
 
@@ -323,7 +323,7 @@ impl ConnState {
     /// `at` threads from the caller so every conn observes a
     /// byte-identical timestamp for one engine emission; the marker
     /// path uses the open window's captured `since` instead.
-    pub(super) fn try_dispatch_diag(
+    pub(in crate::driver) fn try_dispatch_diag(
         &mut self,
         diag_line: &[u8],
         diag_sub: Option<SubId>,
@@ -376,10 +376,10 @@ impl ConnState {
     /// [`WRITE_QUEUE_HIGH_WATER`], the queue is left untouched and
     /// `close_after_flush` is armed via
     /// [`Self::arm_close_after_flush`]. The Hub-level
-    /// [`super::hub::DriverHub::enqueue_response`] pairs the `Refused`
+    /// [`super::hub::Hub::enqueue_response`] pairs the `Refused`
     /// outcome with a `try_terminate_if_idle` call to handle the
     /// queue-empty-at-arm case.
-    pub(super) fn push_response(&mut self, bytes: &[u8]) -> PushOutcome {
+    pub(in crate::driver) fn push_response(&mut self, bytes: &[u8]) -> PushOutcome {
         if self.write_queue.len().saturating_add(bytes.len()) > WRITE_QUEUE_HIGH_WATER {
             self.arm_close_after_flush();
             return PushOutcome::Refused;

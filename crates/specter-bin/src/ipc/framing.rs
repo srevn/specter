@@ -51,7 +51,7 @@
 //!
 //! `pub(crate)` on the wrappers and constants; the fallible primitive
 //! stays private. Both the server-side mio reactor
-//! ([`crate::driver::hub::DriverHub`]) and the client-side verb
+//! ([`crate::driver::Hub`]) and the client-side verb
 //! handlers ([`super::client`]) consume
 //! [`encode_line`] / [`parse_strict`] and read
 //! [`MAX_LINE_BYTES`] for envelope enforcement.
@@ -65,9 +65,9 @@ use std::io;
 /// allowed to monopolise the driver thread on a malformed line.
 ///
 /// The cap lives here so envelope enforcement is single-source:
-/// [`crate::driver::hub::DriverHub::read_conn_into_lines`] checks it
+/// [`crate::driver::Hub::read_conn_into_lines`] checks it
 /// on incoming bytes, and the per-conn write-queue high-water mark
-/// in `crate::driver::conns` is set to this value so an oversize
+/// in `crate::driver::ipc::conns` is set to this value so an oversize
 /// response has the same backpressure footprint as a hostile read.
 pub(crate) const MAX_LINE_BYTES: usize = 256 * 1024;
 
@@ -138,11 +138,11 @@ pub(crate) trait InfallibleSerialize: serde::Serialize {}
 /// scattered across four call sites.
 ///
 /// Production wire path: diag fan-out
-/// ([`crate::driver::hub::DriverHub::dispatch_to_subscribers`]),
+/// ([`crate::driver::Hub::dispatch_to_subscribers`]),
 /// back-pressure `_missed` marker
-/// ([`crate::driver::conns::ConnState::try_dispatch_diag`]), response
-/// enqueue ([`crate::driver::hub::DriverHub::enqueue_response`] and
-/// [`crate::driver::hub::DriverHub::drain_accept`]'s cap-arm
+/// ([`crate::driver::ipc::conns::ConnState::try_dispatch_diag`]), response
+/// enqueue ([`crate::driver::Hub::enqueue_response`] and
+/// [`crate::driver::Hub::drain_accept`]'s cap-arm
 /// best-effort Busy write), client request shipping
 /// ([`super::client::connect::write_request`]), and client `tail -o json`
 /// re-emit ([`super::client::tail`]).

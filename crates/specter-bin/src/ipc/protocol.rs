@@ -433,8 +433,8 @@ impl InfallibleSerialize for WireRequest {}
 /// construction RFC-3339 token), [`WirePath`] (transparent `String`),
 /// or other `Wire*` enums (closed-set derives). Marks the daemon-side
 /// response paths
-/// ([`crate::driver::hub::DriverHub::enqueue_response`] +
-/// [`crate::driver::hub::DriverHub::drain_accept`]'s cap-arm
+/// ([`crate::driver::Hub::enqueue_response`] +
+/// [`crate::driver::Hub::drain_accept`]'s cap-arm
 /// best-effort Busy write) safe for the wrapper.
 impl InfallibleSerialize for ResponsePayload {}
 

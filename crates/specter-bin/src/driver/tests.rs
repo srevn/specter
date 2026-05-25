@@ -2,20 +2,22 @@
 //! over the [`TestRig`] mio-integrated harness.
 //!
 //! Wired by `#[cfg(test)] mod tests;` in `driver.rs`. The rig
-//! constructs a real [`mio::Poll`] via [`DriverHub::new`] against the
-//! sensor crate's [`MockFsWatcher`] (whose socketpair-backed `AsFd`
-//! surface lets reactor-integration tests run against a real reactor
-//! without any platform watcher backend). Tests inject `FsEvent`s
-//! through `hub.watcher_mut().inject(...)`, drive signals through
+//! constructs a real [`mio::Poll`] via [`Reactor::new`] (which hands
+//! back the `Registry` clone [`Hub::new`] then registers the
+//! listener against) and runs against the sensor crate's
+//! [`MockFsWatcher`] (whose socketpair-backed `AsFd` surface lets
+//! reactor-integration tests run against a real reactor without any
+//! platform watcher backend). Tests inject `FsEvent`s through
+//! `reactor.watcher_mut().inject(...)`, drive signals through
 //! [`EngineDriver::dispatch_signal`] directly (real signals would
 //! race nextest's process-wide handlers), and exercise IPC through a
 //! real bound socket on a tempdir path.
 
 use super::WakeHandle;
-use super::conns::{ConnRole, MissedWindow, WRITE_QUEUE_HIGH_WATER};
-use super::hub::{EnqueueOutcome, TOKEN_CONN_BASE};
+use super::ipc::conns::{ConnRole, MissedWindow, WRITE_QUEUE_HIGH_WATER};
+use super::ipc::hub::{EnqueueOutcome, TOKEN_CONN_BASE};
 use super::state::ReloadTrigger;
-use super::{DriverHub, EngineDriver, TickOutcome};
+use super::{EngineDriver, Hub, Reactor, TickOutcome};
 use crate::actuator::ActuatorIO;
 use crate::app::CliLogOverrides;
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
@@ -63,9 +65,9 @@ fn dummy_meta() -> FileMeta {
 /// Bundle of handles a test holds to drive [`EngineDriver`] without
 /// the [`crate::app`] orchestration layer.
 ///
-/// Field order is the drop order — the driver (owning the Hub) drops
-/// before `_tmp`, so the listener fd closes before the tempdir reaps
-/// the socket file.
+/// Field order is the drop order — the driver (owning the Hub
+/// and Reactor) drops before `_tmp`, so the listener fd closes before
+/// the tempdir reaps the socket file.
 struct TestRig {
     driver: EngineDriver<MockFsWatcher>,
     /// Held so the actuator-thread side of the bundle survives —
@@ -85,7 +87,7 @@ struct TestRig {
     /// Producer-side handle for the effect completion channel. Same
     /// send-then-wake protocol as `prober_response_tx`.
     effect_complete_tx: Sender<Input>,
-    /// Shared [`WakeHandle`] clone — the Hub holds one clone, the
+    /// Shared [`WakeHandle`] clone — the Reactor holds one clone, the
     /// rig holds another. Tests fire `waker.wake()` after writing to
     /// `prober_response_tx` / `effect_complete_tx` to mirror the
     /// production wake-after-send semantics.
@@ -101,10 +103,11 @@ struct TestRig {
 
 /// Build a [`TestRig`] for the supplied config + config_path. Every
 /// kernel-side resource is freshly allocated per call: a bound
-/// `UnixListener`, a fresh `mio::Poll` (via `DriverHub::new`), a
-/// fresh `Signals` iterator, two unbounded crossbeam channels for the
-/// wake'd Input streams, and a fresh `MockFsWatcher` with its
-/// socketpair-backed readiness substrate.
+/// `UnixListener`, a fresh `mio::Poll` (via `Reactor::new`, which hands
+/// back the `Registry` clone the [`Hub`] then registers the
+/// listener against), a fresh `Signals` iterator, two unbounded
+/// crossbeam channels for the wake'd Input streams, and a fresh
+/// `MockFsWatcher` with its socketpair-backed readiness substrate.
 fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let socket_path = tmp.path().join("specter-test.sock");
@@ -114,15 +117,15 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     let signals = crate::signals::register_signal_handlers().expect("signal pipe init");
     let (prober_response_tx, prober_response_rx) = crossbeam::channel::unbounded::<Input>();
     let (effect_complete_tx, effect_complete_rx) = crossbeam::channel::unbounded::<Input>();
-    let (hub, waker) = DriverHub::new(
-        listener,
+    let (reactor, waker, registry_for_ipc) = Reactor::new(
         watcher,
         None,
         signals,
         prober_response_rx,
         effect_complete_rx,
     )
-    .expect("hub init");
+    .expect("reactor init");
+    let ipc = Hub::new(listener, registry_for_ipc).expect("ipc server init");
     let prober: Arc<MockProber> = Arc::new(MockProber::new());
     let (actuator_io, actuator_side) = ActuatorIO::pair();
 
@@ -142,7 +145,8 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
         obs_handle,
         prober.clone(),
         actuator_io,
-        hub,
+        ipc,
+        reactor,
     );
 
     TestRig {
@@ -1635,7 +1639,7 @@ fn watch_op_rejection_queues_deferred_input_and_replays_next_tick() {
     // `WatchOp::Watch` returns `Err(Pressure { errno: 24 (EMFILE) })`,
     // forward queues an `Input::WatchOpRejected` onto deferred_inputs.
     rig.driver
-        .hub
+        .reactor
         .watcher_mut()
         .fail_next_watch(specter_sensor::WatchFailure::Pressure { errno: 24 });
 
@@ -1910,7 +1914,7 @@ fn ipc_subscribe_unfiltered_acks_and_registers_subscriber() {
     }
     // The Sub-role conn is still in the conn map — the new
     // subscriber storage (one ConnRole::Sub conn ≡ one subscriber).
-    assert_eq!(rig.driver.hub.conn_count(), 1);
+    assert_eq!(rig.driver.ipc.conn_count(), 1);
 }
 
 /// Subscribe { name: Some("nope") } against an empty engine returns
@@ -1943,7 +1947,7 @@ fn ipc_subscribe_unknown_name_errors_without_registering() {
     }
     // The conn stays alive as a Reqs conn (no role flip happened),
     // so conn_count is still 1.
-    assert_eq!(rig.driver.hub.conn_count(), 1);
+    assert_eq!(rig.driver.ipc.conn_count(), 1);
 }
 
 /// Subscribe { name: Some("build") } against a config with a `build`
@@ -1978,7 +1982,7 @@ fn ipc_subscribe_known_name_resolves_and_acks() {
         }
         other => panic!("expected SubscribeAck(Some), got {other:?}"),
     }
-    assert_eq!(rig.driver.hub.conn_count(), 1);
+    assert_eq!(rig.driver.ipc.conn_count(), 1);
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -2020,7 +2024,7 @@ fn subscribe_twice_returns_err_already_subscribed() {
     {
         let conn = rig
             .driver
-            .hub
+            .ipc
             .conn_ref(token)
             .expect("conn lives across the first round-trip");
         assert!(
@@ -2060,7 +2064,7 @@ fn subscribe_twice_returns_err_already_subscribed() {
     // (not `Some(sid_build)`), missed window still `Closed` (none opened).
     let conn = rig
         .driver
-        .hub
+        .ipc
         .conn_ref(token)
         .expect("conn still in map after refusal");
     assert!(
@@ -2106,7 +2110,7 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
     {
         let conn = rig
             .driver
-            .hub
+            .ipc
             .conn_mut(token)
             .expect("conn lives after Subscribe ack flushed");
         match &mut conn.role {
@@ -2137,7 +2141,7 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
     // before `transition_to_sub` runs, so the window is not reset.
     let conn = rig
         .driver
-        .hub
+        .ipc
         .conn_ref(token)
         .expect("conn still in map after refusal");
     match &conn.role {
@@ -2159,9 +2163,9 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
 
 /// An oversize response refused against a previously-empty queue
 /// terminates the conn inline within the same call — the linger
-/// path is structurally closed. [`super::hub::DriverHub::enqueue_response`]'s
+/// path is structurally closed. [`super::Hub::enqueue_response`]'s
 /// `Refused` arm internally calls
-/// [`super::hub::DriverHub::try_terminate_if_idle`], which (queue
+/// [`super::Hub::try_terminate_if_idle`], which (queue
 /// empty + close armed) deregisters the stream and removes the entry
 /// from the conn map.
 ///
@@ -2183,7 +2187,7 @@ fn oversize_response_terminates_conn_inline_when_queue_empty() {
     arm_zero_timeout(&mut rig);
     let _ = rig.driver.tick();
     assert_eq!(
-        rig.driver.hub.conn_count(),
+        rig.driver.ipc.conn_count(),
         1,
         "client accepted on the first tick",
     );
@@ -2195,20 +2199,20 @@ fn oversize_response_terminates_conn_inline_when_queue_empty() {
         code: WireErrorCode::Busy,
         error: padding,
     };
-    let outcome = rig.driver.hub.enqueue_response(token, &huge);
+    let outcome = rig.driver.ipc.enqueue_response(token, &huge);
     assert_eq!(
         outcome,
         EnqueueOutcome::Refused,
         "oversize response is refused by the capacity gate",
     );
     assert_eq!(
-        rig.driver.hub.conn_count(),
+        rig.driver.ipc.conn_count(),
         0,
         "conn terminated inline: refusal armed close, queue was empty, \
          try_terminate_if_idle ran",
     );
     assert!(
-        rig.driver.hub.conn_ref(token).is_none(),
+        rig.driver.ipc.conn_ref(token).is_none(),
         "conn removed from map",
     );
 
@@ -2242,7 +2246,7 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
     // non-empty when the oversize one is refused.
     let small = ResponsePayload::Ok;
     assert_eq!(
-        rig.driver.hub.enqueue_response(token, &small),
+        rig.driver.ipc.enqueue_response(token, &small),
         EnqueueOutcome::Accepted,
     );
 
@@ -2252,19 +2256,19 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
         error: padding,
     };
     assert_eq!(
-        rig.driver.hub.enqueue_response(token, &huge),
+        rig.driver.ipc.enqueue_response(token, &huge),
         EnqueueOutcome::Refused,
     );
 
     // Inline-terminate did NOT fire — queue still holds the small
     // response. close_after_flush is armed for the next drain.
     assert_eq!(
-        rig.driver.hub.conn_count(),
+        rig.driver.ipc.conn_count(),
         1,
         "conn lives, queue non-empty"
     );
     {
-        let conn = rig.driver.hub.conn_ref(token).expect("conn lives");
+        let conn = rig.driver.ipc.conn_ref(token).expect("conn lives");
         assert!(conn.close_after_flush, "armed");
         assert!(!conn.write_queue.is_empty(), "small response queued");
     }
@@ -2275,12 +2279,12 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
     for _ in 0..5 {
         arm_zero_timeout(&mut rig);
         let _ = rig.driver.tick();
-        if rig.driver.hub.conn_count() == 0 {
+        if rig.driver.ipc.conn_count() == 0 {
             break;
         }
     }
     assert_eq!(
-        rig.driver.hub.conn_count(),
+        rig.driver.ipc.conn_count(),
         0,
         "flushed-then-terminated within a handful of ticks",
     );
@@ -2297,7 +2301,7 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
 /// part of the timeline.
 ///
 /// Drives the full fan-out path via
-/// [`super::hub::DriverHub::dispatch_to_subscribers`]: a saturated
+/// [`super::Hub::dispatch_to_subscribers`]: a saturated
 /// queue throttles the diag (missed window opens with `count = 1`,
 /// `since = at_drop`), the queue clears (simulating drain), a second
 /// dispatch lands at at_flush AND flushes the marker. The marker's
@@ -2328,7 +2332,7 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     {
         let conn = rig
             .driver
-            .hub
+            .ipc
             .conn_ref(token)
             .expect("conn lives post-Subscribe");
         assert!(matches!(conn.role, ConnRole::Sub { .. }));
@@ -2337,7 +2341,7 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     // Pre-fill the queue near high-water so the next dispatch
     // overflows the capacity gate.
     {
-        let conn = rig.driver.hub.conn_mut(token).expect("conn lives");
+        let conn = rig.driver.ipc.conn_mut(token).expect("conn lives");
         let fill = WRITE_QUEUE_HIGH_WATER - 10;
         conn.write_queue.extend(std::iter::repeat_n(b'x', fill));
     }
@@ -2351,10 +2355,10 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
         source_promoter: None,
     };
     rig.driver
-        .hub
+        .ipc
         .dispatch_to_subscribers(&diag, at_drop, &wire_at_drop, None);
     {
-        let conn = rig.driver.hub.conn_ref(token).expect("conn lives");
+        let conn = rig.driver.ipc.conn_ref(token).expect("conn lives");
         match &conn.role {
             ConnRole::Sub { missed, .. } => {
                 assert_eq!(
@@ -2372,7 +2376,7 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     // Simulate the wire draining — clear the queue so the next
     // dispatch fits the marker + diag.
     {
-        let conn = rig.driver.hub.conn_mut(token).expect("conn lives");
+        let conn = rig.driver.ipc.conn_mut(token).expect("conn lives");
         conn.write_queue.clear();
     }
 
@@ -2381,9 +2385,9 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     let at_flush = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
     let wire_at_flush = WireTime::from(at_flush);
     rig.driver
-        .hub
+        .ipc
         .dispatch_to_subscribers(&diag, at_flush, &wire_at_flush, None);
-    let conn = rig.driver.hub.conn_ref(token).expect("conn lives");
+    let conn = rig.driver.ipc.conn_ref(token).expect("conn lives");
     match &conn.role {
         ConnRole::Sub { missed, .. } => {
             assert_eq!(
@@ -2743,7 +2747,7 @@ fn ipc_enable_toml_disabled_clears_override_returns_err() {
 /// 1. Client writes Subscribe.
 /// 2. Drive ticks until the conn is accepted AND `handle_subscribe`
 ///    has run (ack bytes enqueued, role flipped to Sub). We detect
-///    this by polling `hub.conn_count() == 1` AND a per-tick check
+///    this by polling `ipc.conn_count() == 1` AND a per-tick check
 ///    on the role through the wire (the ack bytes must be queued —
 ///    not yet flushed if WRITABLE hasn't fired, but the role is the
 ///    structural witness). Easier surrogate: drive ticks until the
@@ -2897,7 +2901,7 @@ fn prober_response_send_then_wake_drains_through_token_waker() {
 
 /// The effect-complete sender protocol mirrors the prober one. Pin
 /// the channel routing — send-then-wake delivers an
-/// `Input::EffectComplete` through the Hub's `TOKEN_WAKER` arm.
+/// `Input::EffectComplete` through the Reactor's `TOKEN_WAKER` arm.
 #[test]
 fn effect_complete_send_then_wake_drains_through_token_waker() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2920,7 +2924,7 @@ fn effect_complete_send_then_wake_drains_through_token_waker() {
     arm_zero_timeout(&mut rig);
     let _ = rig.driver.tick();
     // No panic / no hang ⇒ the tick consumed the EffectComplete via
-    // the Hub's TOKEN_WAKER arm.
+    // the Reactor's TOKEN_WAKER arm.
 }
 
 // ============================================================
@@ -2953,7 +2957,7 @@ fn fs_event_and_effect_complete_both_drain_in_one_tick() {
     // on the watcher fd; drain_watcher reads it on the next poll).
     let r = ResourceId::default();
     rig.driver
-        .hub
+        .reactor
         .watcher_mut()
         .inject(r, specter_core::FsEvent::Modified);
     // Queue an EffectComplete via the wake'd channel.

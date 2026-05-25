@@ -1,11 +1,15 @@
-//! Operator IPC scaffold — request/response shapes, diagnostic
-//! projection, socket lifecycle.
+//! Operator IPC vocabulary — request/response shapes, diagnostic
+//! projection, socket lifecycle, client verbs, human rendering.
 //!
-//! This module is the bin's fourth stable seam, alongside engine
-//! state, the reload pipeline, and diagnostic fan-out. It owns every
-//! type that escapes the daemon as a JSON line on the operator
-//! socket; nothing in `specter-core` or the actor crates carries a
-//! `serde` derive on its behalf.
+//! True leaf: nothing here imports [`crate::driver`]. The wire surface
+//! lives here so an external CLI (today's in-bin client, a hypothetical
+//! out-of-process tool tomorrow) could reuse the same vocabulary
+//! without dragging in the daemon's runtime.
+//!
+//! Daemon-side IPC code — the kernel-fd owner ([`crate::driver::Hub`]),
+//! per-conn state, verb dispatch, and engine-state projection — lives
+//! under [`crate::driver::ipc`]. Direction is one-way: `driver::ipc`
+//! consumes this module, never the reverse.
 //!
 //! # Submodules
 //!
@@ -27,15 +31,8 @@
 //!   with 0600 permissions, stale-socket recovery, and the
 //!   drop-guard that unlinks the socket on graceful shutdown or
 //!   panic.
-//! - [`project`] — pure projection of engine + driver state into
-//!   the response carriers. No I/O, no engine mutation.
 //! - [`client`] — operator-facing client verbs.
 //! - [`render`] — human-readable rendering for `-o human` output.
-//!
-//! There is no dedicated `server` module: the driver's mio reactor
-//! accepts each connection directly via
-//! [`crate::driver::hub::DriverHub`] and dispatches `WireRequest`
-//! lines inline through [`crate::driver`]'s IPC handler.
 //!
 //! # Visibility
 //!
@@ -46,7 +43,6 @@
 
 pub(crate) mod client;
 pub(crate) mod framing;
-pub(crate) mod project;
 pub(crate) mod protocol;
 pub(crate) mod render;
 pub(crate) mod sockpath;

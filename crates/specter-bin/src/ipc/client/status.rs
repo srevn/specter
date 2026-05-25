@@ -3,7 +3,7 @@
 //! Resolves the daemon's socket path (CLI override or per-platform
 //! default), connects, ships a [`WireRequest::Status`], parses the
 //! [`ResponsePayload::Status`], and dispatches to
-//! [`crate::ipc::render::status_human`] (default `-o human`) or
+//! [`crate::ipc::render::status`] (default `-o human`) or
 //! serialises the response verbatim (`-o json`).
 //!
 //! Exit codes mirror the daemon convention: `0` success, `1`
@@ -15,7 +15,7 @@ use std::process::ExitCode;
 
 use crate::ipc::client::connect;
 use crate::ipc::protocol::{ResponsePayload, WireRequest};
-use crate::ipc::render::status_human;
+use crate::ipc::render::status;
 
 /// Run the `specter status` round-trip.
 ///
@@ -42,7 +42,7 @@ pub(crate) fn run(args: &StatusArgs) -> ExitCode {
     match resp {
         ResponsePayload::Status(status) => match args.output {
             OutputFormat::Human => {
-                print!("{}", status_human::render(&status, args.wide));
+                print!("{}", status::render(&status, args.wide));
                 ExitCode::SUCCESS
             }
             OutputFormat::Json => {

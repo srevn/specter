@@ -5,30 +5,32 @@
 //! [`state::DriverState`] (process-level facts: start instants +
 //! reload counters + socket path), an operator-runtime disable
 //! override set, the actuator-coordination channels, the prober
-//! [`Arc`] clone, the deferred-input queue, and the
-//! [`hub::DriverHub`] that owns the mio reactor surface. This module
-//! holds the struct and its lifecycle ([`EngineDriver::new`],
+//! [`Arc`] clone, the deferred-input queue, and the two mio-reactor
+//! halves: [`reactor::Reactor`] (kernel-driven non-IPC sources) and
+//! [`ipc::Hub`] (the operator-IPC listener + per-conn map). This
+//! module holds the struct and its lifecycle ([`EngineDriver::new`],
 //! [`EngineDriver::run_initial_attach`], [`EngineDriver::run`]) plus
-//! the cancel-first shutdown drain (`begin_shutdown`). The
-//! load-bearing work lives next to it:
+//! the cancel-first shutdown drain (`begin_shutdown`). The load-bearing
+//! work lives next to it:
 //!
-//! - [`tick`] — one pass of the drain order (sensor → timers → reload
-//!   → config-settle → effects → ipc → block). The hot loop; new
-//!   inbound-path work lands there.
+//! - [`tick`] — one pass of the drain order (accept → sensor →
+//!   timers → reload → config-settle → effects → ipc → block). The
+//!   hot loop; new inbound-path work lands there.
 //! - [`reload`] — the SIGHUP + auto-reload settle pipeline.
 //! - [`forward`] — ships a `StepOutput` downstream, maps a
 //!   `Diagnostic` to tracing, and fans diagnostics out to live IPC
-//!   subscribers via [`hub::DriverHub::dispatch_to_subscribers`].
+//!   subscribers via [`ipc::Hub::dispatch_to_subscribers`].
 //! - [`state`] — driver-owned process facts (startup instants,
 //!   reload counters, socket path) consumed by the IPC `status`
 //!   surface.
-//! - [`hub`] — owner of the mio reactor surface (watcher,
-//!   config-watcher, signal pipe, waker, listener, per-conn map).
-//! - [`conns`] — per-conn state (`ConnState` + `ConnRole`) stored in
-//!   the hub's conn map.
-//! - [`ipc`] — drains operator-IPC requests off accepted conns and
-//!   dispatches them through the hub fan-out, the reload pipeline,
-//!   or the `status` projection.
+//! - [`reactor`] — owner of the mio reactor surface for kernel-driven
+//!   non-IPC sources (watcher, config-watcher, signal pipe, waker,
+//!   channel receivers).
+//! - [`ipc`] — the daemon-side IPC concern: kernel-fd owner ([`ipc::Hub`]),
+//!   per-conn state ([`ipc::conns`]), verb dispatch
+//!   ([`ipc::dispatch`]), and engine-state projection
+//!   ([`ipc::project`]) — all registered against the same Poll selector
+//!   as the Reactor via a [`mio::Registry::try_clone()`] handle.
 //!
 //! `run_initial_attach` walks `loader.current_config` in source order,
 //! attaching each Sub / Promoter and forwarding the resulting output
@@ -36,10 +38,9 @@
 //! wraps [`EngineDriver::tick`] until shutdown. All file I/O is on
 //! this thread — no Mutex.
 
-mod conns;
 mod forward;
-mod hub;
 mod ipc;
+mod reactor;
 mod reload;
 mod state;
 mod tick;
@@ -59,7 +60,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Instant;
 
-pub(crate) use hub::DriverHub;
+pub(crate) use ipc::Hub;
+pub(crate) use reactor::Reactor;
 pub(crate) use state::{DriverState, ReloadTrigger};
 pub(crate) use wake::{WakeHandle, WakingSink};
 
@@ -100,13 +102,18 @@ pub enum TickOutcome {
 /// `mio::Poll`). Production uses the platform [`DefaultWatcher`];
 /// the type-parameter default keeps `app.rs` and call sites free of
 /// `<DefaultWatcher>` boilerplate (inference fills the type from the
-/// `DriverHub<W>` passed to [`Self::new`]).
+/// `Reactor<W>` passed to [`Self::new`]).
 ///
 /// **Field order is the drop order.** [`Engine`] FIRST so the probe
 /// tripwire (`specter_core::probe`) runs against a fully-armed
-/// engine until [`Self::begin_shutdown`] has drained it; [`hub::DriverHub`]
-/// LAST so the mio reactor fds (watcher, listener, signal pipe,
-/// waker) outlive every channel-sender clone the driver holds.
+/// engine until [`Self::begin_shutdown`] has drained it.
+/// [`ipc::Hub`] drops BEFORE [`reactor::Reactor`] so
+/// its explicit `Drop` impl can deregister the listener + every
+/// live conn stream against the still-live Poll selector;
+/// [`reactor::Reactor`] drops LAST so the mio reactor fds (watcher,
+/// signal pipe, waker) outlive every channel-sender clone the
+/// driver holds — a stray send-to-disconnected from a midway drop
+/// can't fire on a partially-torn-down reactor.
 pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     engine: Engine,
     loader: Loader,
@@ -182,20 +189,35 @@ pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     /// produced unbounded rejections would fail loud rather than
     /// silently grow.
     deferred_inputs: VecDeque<Input>,
-    /// The mio reactor surface — kqueue/inotify watcher,
-    /// config-watcher, signal pipe, listener, per-conn map, and
-    /// the `Arc<Waker>` shared with the prober + actuator
-    /// wake-bearing senders. Owned by the driver for the lifetime
-    /// of the daemon; constructed once in `App::run` and threaded
-    /// through [`Self::new`].
+    /// The operator-IPC kernel surface — bound listener + per-conn
+    /// map + per-conn Token allocator + a [`mio::Registry::try_clone()`]
+    /// handle pointing at the [`reactor::Reactor`]'s Poll selector.
+    /// Owned by the driver for the lifetime of the daemon;
+    /// constructed once in `App::run` from the registry clone the
+    /// Reactor handed back.
     ///
-    /// Field-order LAST so the listener / signal pipe / watcher fd
-    /// drops fire after every channel-sender clone the driver holds
-    /// has released — a stray send-to-disconnected from a midway
-    /// drop can't fire on a partially-torn-down Hub. See
-    /// [`hub::DriverHub`]'s module rustdoc for the Hub-internal
+    /// Field-order BEFORE `reactor` so the explicit `Drop` impl on
+    /// [`ipc::Hub`] can deregister the listener + every live conn
+    /// stream against the still-live Poll selector; once the Hub is
+    /// gone, its Registry clone drops, leaving the Reactor's own Poll
+    /// holding the last Arc-reference to the underlying selector. See
+    /// [`ipc::hub`]'s module rustdoc for the Hub-internal field drop
+    /// order.
+    ipc: Hub,
+    /// The mio reactor surface for kernel-driven non-IPC sources —
+    /// kqueue/inotify watcher, config-watcher, signal pipe, and the
+    /// `Arc<Waker>` shared with the prober + actuator wake-bearing
+    /// senders. Owned by the driver for the lifetime of the daemon;
+    /// constructed once in `App::run` and threaded through
+    /// [`Self::new`].
+    ///
+    /// Field-order LAST so the static-source fds (watcher, signal
+    /// pipe, waker) outlive every channel-sender clone the driver
+    /// holds — a stray send-to-disconnected from a midway drop
+    /// can't fire on a partially-torn-down Reactor. See
+    /// [`reactor::Reactor`]'s module rustdoc for the Reactor-internal
     /// field drop order.
-    hub: DriverHub<W>,
+    reactor: Reactor<W>,
 }
 
 impl<W: FsWatcher> std::fmt::Debug for EngineDriver<W> {
@@ -207,7 +229,8 @@ impl<W: FsWatcher> std::fmt::Debug for EngineDriver<W> {
             .field("obs_handle", &self.obs_handle)
             .field("driver_state", &self.driver_state)
             .field("disabled_runtime", &self.disabled_runtime)
-            .field("hub", &self.hub)
+            .field("ipc", &self.ipc)
+            .field("reactor", &self.reactor)
             .finish_non_exhaustive()
     }
 }
@@ -221,13 +244,21 @@ impl<W: FsWatcher> EngineDriver<W> {
         &self.config_path
     }
 
-    /// Build the driver from preconstructed pieces. The [`DriverHub`] is
-    /// constructed in `App::run` because it must own the [`mio::Waker`]
-    /// the prober + actuator wrappers clone before the driver gets
-    /// built; passing it in here keeps the construction order honest
-    /// (Hub fixes the Waker identity → wrappers clone it → wrappers
-    /// thread into the prober pool + actuator thread → driver holds
-    /// the Hub).
+    /// Build the driver from preconstructed pieces.
+    ///
+    /// The [`Reactor`] is constructed in `App::run` first because it
+    /// mints the [`mio::Waker`] (via [`WakeHandle`]) that the prober +
+    /// actuator wrappers clone before the driver gets built. It also
+    /// hands back the [`mio::Registry::try_clone()`] handle the
+    /// [`Hub`] takes to register its listener — the boot order is
+    /// therefore Reactor → wrappers → Hub → EngineDriver. Passing
+    /// both halves in here keeps the construction order honest.
+    ///
+    /// **Argument order matches drop order.** `ipc` precedes `reactor`
+    /// in the parameter list as a syntactic mirror of the field order
+    /// (which IS the drop order); a future contributor wiring a new
+    /// driver would write the constructor call in the same syntactic
+    /// shape as the struct.
     #[must_use]
     pub(crate) fn new(
         engine: Engine,
@@ -238,7 +269,8 @@ impl<W: FsWatcher> EngineDriver<W> {
         obs_handle: ObservabilityHandle,
         prober: Arc<dyn Prober>,
         actuator_io: ActuatorIO,
-        hub: DriverHub<W>,
+        ipc: Hub,
+        reactor: Reactor<W>,
     ) -> Self {
         Self {
             engine,
@@ -253,7 +285,8 @@ impl<W: FsWatcher> EngineDriver<W> {
             actuator_io,
             first_term: None,
             deferred_inputs: VecDeque::new(),
-            hub,
+            ipc,
+            reactor,
         }
     }
 
@@ -341,7 +374,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     }
 
     /// Inline dispatch for a single signal value drained off the
-    /// Hub's `TOKEN_SIGNAL` arm.
+    /// Reactor's `TOKEN_SIGNAL` arm.
     ///
     /// Production wrapper: delegates to
     /// [`Self::dispatch_signal_with_exit_fn`] with the real
@@ -355,7 +388,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// second-within-window (hard-exit escalation, only reachable
     /// from tests since production's `exit_fn` does not return).
     ///
-    /// Called from [`tick`]'s signal-drain pass: the Hub's
+    /// Called from [`tick`]'s signal-drain pass: the Reactor's
     /// `TOKEN_SIGNAL` arm hands every queued signum to this method in
     /// arrival order. No cross-thread coordination, no global-handler
     /// racing — the dispatch runs on the same thread that owns the

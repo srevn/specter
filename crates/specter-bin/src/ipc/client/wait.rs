@@ -46,7 +46,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use crate::ipc::client::subscribe;
-use crate::ipc::render::diag_human;
+use crate::ipc::render::diag;
 use crate::ipc::wire::WireDiagnostic;
 
 /// Run the `specter wait` stream loop.
@@ -157,7 +157,7 @@ const fn classify(kind: WaitKind, wire: &WireDiagnostic) -> Match {
 /// preserving in the exit code.
 fn emit_matched(wire: &WireDiagnostic) -> ExitCode {
     let mut stdout = io::stdout().lock();
-    let rendered = diag_human::render(wire);
+    let rendered = diag::render(wire);
     if let Err(e) = stdout
         .write_all(rendered.as_bytes())
         .and_then(|()| stdout.flush())

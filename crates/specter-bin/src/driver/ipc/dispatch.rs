@@ -4,19 +4,19 @@
 //! per-conn role flip.
 //!
 //! Lives between [`super::tick`] (which collects per-conn readiness
-//! into the [`super::hub::DrainedTick`]) and the downstream sinks
-//! ([`super::hub::DriverHub::dispatch_to_subscribers`] for fan-out,
-//! [`super::EngineDriver::dispatch_reload`] for the reload pipeline,
-//! and the [`crate::ipc::project`] free functions for status / list /
+//! into the [`super::reactor::DrainedTick`]) and the downstream sinks
+//! ([`super::Hub::dispatch_to_subscribers`] for fan-out,
+//! [`crate::driver::EngineDriver::dispatch_reload`] for the reload pipeline,
+//! and the [`super::project`] free functions for status / list /
 //! show projections). Every handler returns [`ControlFlow<()>`] so a
-//! mid-handler shutdown (a [`super::EngineDriver::forward`] that
+//! mid-handler shutdown (a [`crate::driver::EngineDriver::forward`] that
 //! observed a downstream disconnect, or a `dispatch_reload` that
 //! observed shutdown mid-apply) propagates back through the tick and
-//! into [`super::EngineDriver::begin_shutdown`].
+//! into [`crate::driver::EngineDriver::begin_shutdown`].
 //!
 //! # Visibility
 //!
-//! `pub(super)` — the only caller is [`super::tick`]. The per-verb
+//! `pub(in crate::driver)` — the only caller is [`super::tick`]. The per-verb
 //! handlers are private to this module; `drain_ipc_lines` is the
 //! single seam.
 //!
@@ -39,12 +39,12 @@
 //! "recover and continue" handler would need to thread its disarm
 //! site through the engine's probe lattice first.
 
-use super::EngineDriver;
 use super::conns::ConnRole;
 use super::hub::{EnqueueOutcome, ReadOutcome};
-use super::state::ReloadTrigger;
+use super::project;
+use crate::driver::EngineDriver;
+use crate::driver::state::ReloadTrigger;
 use crate::ipc::framing::{InfallibleSerialize, parse_strict};
-use crate::ipc::project;
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
 use compact_str::CompactString;
 use mio::Token;
@@ -57,34 +57,34 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// Drain the per-conn readiness this tick into IPC verb
     /// dispatches.
     ///
-    /// Walks every per-conn Token in `read_tokens`, asks the Hub to
-    /// pull bytes off the kernel buffer into LF-delimited line
-    /// chunks, and dispatches each line through
+    /// Walks every per-conn Token in `read_tokens`, asks the
+    /// [`super::Hub`] to pull bytes off the kernel buffer into
+    /// LF-delimited line chunks, and dispatches each line through
     /// [`Self::handle_ipc_line`]. The two termination semantics are
     /// distinguished by the [`ReadOutcome`] return:
     ///
     /// - [`ReadOutcome::PeerGone`] (EOF or unrecoverable read error)
-    ///   ⇒ unconditional [`super::hub::DriverHub::terminate_conn`].
-    ///   Any pending write-queue bytes are wasted because the peer's
+    ///   ⇒ unconditional [`super::Hub::terminate_conn`]. Any
+    ///   pending write-queue bytes are wasted because the peer's
     ///   read end has closed.
     /// - [`ReadOutcome::Continue`] ⇒ pair with
-    ///   [`super::hub::DriverHub::try_terminate_if_idle`]. The read
-    ///   drain may have armed `close_after_flush` (oversize line, or
+    ///   [`super::Hub::try_terminate_if_idle`]. The read drain
+    ///   may have armed `close_after_flush` (oversize line, or
     ///   over-cap read accumulator); the handler loop may have
     ///   enqueued response bytes; the queue state at this point is
     ///   the conn's settled state for the tick. If armed AND empty,
     ///   the conn terminates inline. If armed AND non-empty,
-    ///   [`super::hub::DriverHub::drain_writable`] handles the
-    ///   terminate on the flush edge.
+    ///   [`super::Hub::drain_writable`] handles the terminate
+    ///   on the flush edge.
     ///
-    /// A read-side `Err` from the Hub is the "no conn for token"
-    /// shape — a tick-body bug that nonetheless terminates the
-    /// (presumably already-gone) conn defensively.
+    /// A read-side `Err` from the Hub is the "no conn for
+    /// token" shape — a tick-body bug that nonetheless terminates
+    /// the (presumably already-gone) conn defensively.
     ///
     /// Write-side termination (peer-gone observed during a
     /// `drain_writable` call, or a `close_after_flush` that flushed
     /// cleanly) lives on the tick's WRITABLE pass — that pass
-    /// terminates directly via [`super::hub::DriverHub::terminate_conn`]
+    /// terminates directly via [`super::Hub::terminate_conn`]
     /// because it doesn't need any IPC handler state.
     ///
     /// Returns [`ControlFlow::Break`] iff a handler observed
@@ -94,7 +94,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// [`ControlFlow::Continue`] — including malformed JSON, unknown
     /// names, and read failures, which surface to the operator as a
     /// structured `Err` response or a clean conn close.
-    pub(super) fn drain_ipc_lines(
+    pub(in crate::driver) fn drain_ipc_lines(
         &mut self,
         read_tokens: &[Token],
         now: Instant,
@@ -106,11 +106,11 @@ impl<W: FsWatcher> EngineDriver<W> {
             // the line-framing explicit; `Vec<u8>` would force a
             // re-scan for LFs at every dispatch.
             let mut lines: Vec<Vec<u8>> = Vec::new();
-            let outcome = match self.hub.read_conn_into_lines(token, &mut lines) {
+            let outcome = match self.ipc.read_conn_into_lines(token, &mut lines) {
                 Ok(o) => o,
                 Err(e) => {
                     tracing::debug!(?token, ?e, "ipc read pipeline failed; closing conn");
-                    self.hub.terminate_conn(token);
+                    self.ipc.terminate_conn(token);
                     continue;
                 }
             };
@@ -126,10 +126,10 @@ impl<W: FsWatcher> EngineDriver<W> {
                     // been set by the read drain's oversize-line
                     // guard. try_terminate_if_idle resolves the
                     // four combinations into the right action.
-                    self.hub.try_terminate_if_idle(token);
+                    self.ipc.try_terminate_if_idle(token);
                 }
                 ReadOutcome::PeerGone => {
-                    self.hub.terminate_conn(token);
+                    self.ipc.terminate_conn(token);
                 }
             }
         }
@@ -158,9 +158,9 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// [`Self::handle_subscribe`] gates the
     /// [`super::conns::ConnState::transition_to_sub`] role flip on
     /// the `Accepted` discriminant and therefore reaches
-    /// [`super::hub::DriverHub::enqueue_response`] directly.
+    /// [`super::Hub::enqueue_response`] directly.
     fn respond<T: InfallibleSerialize>(&mut self, token: Token, payload: &T) {
-        let _ = self.hub.enqueue_response(token, payload);
+        let _ = self.ipc.enqueue_response(token, payload);
     }
 
     /// Parse and dispatch one LF-delimited line as a [`WireRequest`].
@@ -176,14 +176,14 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// gets one structured error frame and the conn stays open for
     /// the next line. (A repeat-offender peer trips the read-
     /// accumulator-size guard in
-    /// [`super::hub::DriverHub::read_conn_into_lines`] and the conn
+    /// [`super::Hub::read_conn_into_lines`] and the conn
     /// terminates on the next drain pass.)
     ///
     /// The trailing `\n` is stripped before serde sees the bytes —
     /// mirror of the standard `BufRead::read_line` convention; the
     /// JSON parser would reject a trailing newline as a structural
     /// token. The [`Option::expect`] is the framing invariant:
-    /// [`super::hub::DriverHub::read_conn_into_lines`] produces every
+    /// [`super::Hub::read_conn_into_lines`] produces every
     /// line via `drain(..=nl)` (LF inclusive), so a missing trailing
     /// LF would mean an upstream framing breach. A loud panic at
     /// this seam beats a misleading "json parse" surfacing one frame
@@ -282,7 +282,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         // `is_some_and` consumes the conn_ref borrow before the
         // following `respond`'s `&mut self` reach.
         let already_subscribed = self
-            .hub
+            .ipc
             .conn_ref(token)
             .is_some_and(|c| matches!(c.role, ConnRole::Sub { .. }));
         if already_subscribed {
@@ -319,20 +319,20 @@ impl<W: FsWatcher> EngineDriver<W> {
             sub: resolved.map(WireId::from),
         };
         if matches!(
-            self.hub.enqueue_response(token, &ack),
+            self.ipc.enqueue_response(token, &ack),
             EnqueueOutcome::Accepted
         ) {
             // Structural invariant: an `Accepted` outcome means the
             // conn was in the map at enqueue time, and the same
-            // `&mut self.hub` borrow continues here — nothing
+            // `&mut self.ipc` borrow continues here — nothing
             // between the two reaches has had the opportunity to
             // remove the entry. A `None` from `conn_mut` here would
-            // be a Hub-internal lifecycle bug; the `expect` documents
-            // the load-bearing reason a defensive Option-branch is
-            // not appropriate at this seam.
-            self.hub
+            // be a Hub-internal lifecycle bug; the `expect`
+            // documents the load-bearing reason a defensive
+            // Option-branch is not appropriate at this seam.
+            self.ipc
                 .conn_mut(token)
-                .expect("just-Accepted conn must remain in map — same &mut self.hub borrow")
+                .expect("just-Accepted conn must remain in map — same &mut self.ipc borrow")
                 .transition_to_sub(resolved);
         }
         ControlFlow::Continue(())
@@ -438,7 +438,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///    a fresh [`Input::AttachSub`] step drives re-attach, and
     ///    per-anchor outcomes (Pending descent, AttachPathInvalid)
     ///    surface via diag fan-out
-    ///    ([`super::hub::DriverHub::dispatch_to_subscribers`]), not
+    ///    ([`super::Hub::dispatch_to_subscribers`]), not
     ///    the verb ack.
     ///
     /// The reply is acked unconditionally after the work — same

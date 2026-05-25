@@ -11,7 +11,7 @@
 //! death) and bypass orderly shutdown.
 //!
 //! [`SignalPipe`] exists for one reason: expose the signal pipe's
-//! read end via [`AsFd`] so [`crate::driver::hub::DriverHub`]
+//! read end via [`AsFd`] so [`crate::driver::Reactor`]
 //! registers it through [`mio::unix::SourceFd`] uniformly with the
 //! other kernel-fd Sources (watcher, config_watcher). Holding one
 //! [`SignalPipe`] live for the daemon's lifetime closes the
@@ -81,7 +81,7 @@ pub(crate) const HARD_SHUTDOWN_CONFIRM_TIMEOUT: Duration = Duration::from_millis
 /// than silently `EAGAIN`-ing.
 ///
 /// Exists for one reason: expose the signal pipe's read end via
-/// [`AsFd`] so the Hub registers it through [`SourceFd`](mio::unix::SourceFd)
+/// [`AsFd`] so the Reactor registers it through [`SourceFd`](mio::unix::SourceFd)
 /// uniformly with the other kernel-fd Sources (watcher, config_watcher).
 #[derive(Debug)]
 pub(crate) struct SignalPipe {
@@ -131,13 +131,13 @@ impl AsFd for SignalPipe {
 /// initialisation window after this call is captured by the
 /// signal-pipeline's internal pipe (owned by the returned
 /// [`SignalPipe`]) and surfaces on the first reactor tick's
-/// `TOKEN_SIGNAL` drain once the Hub has registered the pipe fd
+/// `TOKEN_SIGNAL` drain once the Reactor has registered the pipe fd
 /// against [`mio::Poll`]. Without this lift, every line of init ran
 /// with SIGTERM's kernel-default disposition (immediate process
 /// death) — see [`crate::app::run`] for the longer rationale.
 ///
 /// The returned value is consumed by
-/// [`crate::driver::hub::DriverHub::new`] which registers the pipe
+/// [`crate::driver::Reactor::new`] which registers the pipe
 /// fd as the reactor's `TOKEN_SIGNAL` source. Holding one
 /// [`SignalPipe`] for the daemon's lifetime means `sa_sigaction`
 /// stays installed from the moment this call returns until process

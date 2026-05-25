@@ -3,7 +3,7 @@
 //! Subscribes unfiltered, optionally restricts the stream to a set
 //! of `--filter <variant>` tags (validated against
 //! [`KNOWN_WIRE_VARIANTS`] at handler entry), and emits each surviving
-//! event through [`diag_human`] (default `-o human`) or the wire's
+//! event through [`diag`] (default `-o human`) or the wire's
 //! own JSON line (`-o json`).
 //!
 //! # Exit codes
@@ -43,7 +43,7 @@ use std::process::ExitCode;
 
 use crate::ipc::client::subscribe;
 use crate::ipc::framing::encode_line;
-use crate::ipc::render::diag_human;
+use crate::ipc::render::diag;
 use crate::ipc::wire::{KNOWN_WIRE_VARIANTS, WireDiagnostic};
 
 /// Run the `specter tail` stream loop.
@@ -139,7 +139,7 @@ fn should_emit(wire: &WireDiagnostic, filter: &[String]) -> bool {
 fn emit<W: Write>(out: &mut W, wire: &WireDiagnostic, output: OutputFormat) -> io::Result<()> {
     match output {
         OutputFormat::Human => {
-            out.write_all(diag_human::render(wire).as_bytes())?;
+            out.write_all(diag::render(wire).as_bytes())?;
         }
         OutputFormat::Json => {
             out.write_all(&encode_line(wire))?;

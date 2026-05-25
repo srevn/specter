@@ -165,7 +165,7 @@ mod tests {
         engine
     }
 
-    /// RAII guard — see [`crate::ipc::project::list::tests::EngineGuard`]
+    /// RAII guard — see [`crate::driver::ipc::project::list::tests::EngineGuard`]
     /// for the linear-edge `ProbeSlot` rationale. Inlined here rather
     /// than reaching across the inline tests to keep the test modules
     /// self-contained.

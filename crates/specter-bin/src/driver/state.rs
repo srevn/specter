@@ -32,7 +32,7 @@
 //!
 //! # Visibility
 //!
-//! `pub(crate)` so [`crate::ipc::project`] can project the recorded
+//! `pub(crate)` so [`crate::driver::ipc::project`] can project the recorded
 //! facts into the wire-side `StatusResponse`. The fields are
 //! `pub(crate)` for the same reason — projection reads them
 //! directly. The write-once-via-`record_reload` invariant for the
@@ -118,7 +118,7 @@ impl DriverState {
 /// `EngineDriver::dispatch_reload` body; this enum carries the
 /// per-caller attribution into [`DriverState::record_reload`].
 ///
-/// `pub(crate)` so the IPC layer (`crate::ipc::project`) can project
+/// `pub(crate)` so the IPC layer (`crate::driver::ipc::project`) can project
 /// the recorded trigger into the wire-side `status` response. The
 /// enum is constructed at the call site that knows the trigger
 /// (SIGHUP arm in `tick`, settle-expiry arm in
