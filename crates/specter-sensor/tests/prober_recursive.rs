@@ -91,7 +91,7 @@ fn recursive_walk_with_max_depth_three_collects_three_levels() {
     std::fs::write(tmp.path().join("a/b/c/file.c"), b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 1).unwrap();
     let cfg = ScanConfig::builder()
         .recursive(true)
         .max_depth(Some(3))
@@ -116,7 +116,7 @@ fn exclude_target_dir_omits_subtree_contents() {
     std::fs::write(tmp.path().join("src/main.c"), b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 1).unwrap();
     let cfg = ScanConfig::builder()
         .recursive(true)
         .exclude(GlobPattern::compile("target/**").unwrap())
@@ -139,7 +139,7 @@ fn pattern_double_star_matches_recursive_files() {
     std::fs::write(tmp.path().join("src/foo.txt"), b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 1).unwrap();
     let cfg = ScanConfig::builder()
         .recursive(true)
         .pattern(GlobPattern::compile("**/*.c").unwrap())
@@ -162,7 +162,7 @@ fn hidden_false_skips_dot_subtree_entirely() {
     std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 1).unwrap();
     let cfg = ScanConfig::builder().recursive(true).hidden(false).build();
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     assert!(!segs.contains(".git"));
@@ -179,7 +179,7 @@ fn hidden_true_includes_dot_subtree() {
     std::fs::write(tmp.path().join(".git/HEAD"), b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 1).unwrap();
     let cfg = ScanConfig::builder().recursive(true).hidden(true).build();
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     assert!(segs.contains(".git"));

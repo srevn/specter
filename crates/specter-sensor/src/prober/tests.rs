@@ -1634,7 +1634,7 @@ fn sink(tx: Sender<Input>) -> Arc<dyn ProberResponseSender> {
 #[test]
 fn worker_prober_concurrency_zero_clamps_to_one() {
     let (out_tx, _out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(out_tx), 0).unwrap();
+    let mut prober = WorkerProber::new(sink(out_tx), 0).unwrap();
     let _ = prober.shutdown();
 }
 
@@ -1646,7 +1646,7 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
     std::fs::write(&path, b"x").unwrap();
 
     let (out_tx, out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(out_tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(out_tx), 1).unwrap();
 
     let request = ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(pids[0]),
@@ -1676,7 +1676,7 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
 fn worker_prober_cancel_removes_expectation() {
     let pids = fresh_profile_ids(1);
     let (out_tx, _out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(out_tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(out_tx), 1).unwrap();
 
     // Cancel without submit is a no-op — verify no panic.
     prober.cancel(ProbeOwner::Profile(pids[0]));
@@ -1688,7 +1688,7 @@ fn worker_prober_cancel_removes_expectation() {
 #[test]
 fn worker_prober_shutdown_returns_indexed_join_results() {
     let (out_tx, _out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(out_tx), 4).expect("spawn 4 workers");
+    let mut prober = WorkerProber::new(sink(out_tx), 4).expect("spawn 4 workers");
     let results = prober.shutdown();
     assert_eq!(results.len(), 4);
     let indices: Vec<usize> = results.iter().map(|(i, _)| *i).collect();
@@ -1712,7 +1712,7 @@ fn worker_prober_resubmit_after_cancel_runs() {
     std::fs::write(&path, b"x").unwrap();
 
     let (out_tx, out_rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(out_tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(out_tx), 1).unwrap();
 
     // Submit c1, cancel, submit c2. Expect: c1 either runs or skips
     // (race), c2 runs deterministically (its expectation is fresh and
@@ -1790,7 +1790,7 @@ fn worker_prober_concurrent_submit_is_safe() {
         }
     }
     assert_eq!(received, 15, "all submits delivered");
-    let prober = Arc::try_unwrap(prober).expect("only one strong ref");
+    let mut prober = Arc::try_unwrap(prober).expect("only one strong ref");
     let _ = prober.shutdown();
 }
 

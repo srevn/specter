@@ -50,7 +50,7 @@ fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> Pro
 #[test]
 fn shutdown_with_no_pending_probes_returns_ok_per_worker() {
     let (tx, _rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 4).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 4).unwrap();
     let results = prober.shutdown();
     assert_eq!(results.len(), 4);
     for (i, r) in results {
@@ -65,7 +65,7 @@ fn shutdown_after_completed_probe_returns_ok() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 2).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 2).unwrap();
     let p = fresh_profile_id();
     prober.submit(mk_request(p, path, 1));
     let _ = rx.recv_timeout(Duration::from_secs(2)).expect("response");

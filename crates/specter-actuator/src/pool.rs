@@ -374,6 +374,46 @@ impl SubprocessActuator {
     }
 }
 
+impl Drop for SubprocessActuator {
+    /// Safety net for drop paths the explicit `run → shutdown`
+    /// pipeline can't reach: a panic mid-[`Self::run`] unwinds past
+    /// the explicit `shutdown` call without firing it; a boot-fail
+    /// that constructs but never runs the controller drops the
+    /// actuator with empty state. The fanout below SIGTERMs then
+    /// SIGKILLs every still-running child so wait threads' blocked
+    /// `waitpid` calls return and the kernel reaps anything left
+    /// over `_exit`.
+    ///
+    /// **No grace window, no reap drain.** Drop is the panic-recovery
+    /// shape — clean exit goes through [`Self::shutdown`], which owns
+    /// the SIGTERM → grace → SIGKILL → reap-drain phasing. Here the
+    /// invariant is "make the kernel-side cleanup unblockable, then
+    /// return." Wait threads each hold a `reap_tx` clone; the channel
+    /// stays connected for their final sends (the controller's clone
+    /// drops only with this struct's `reap_tx` field, which is after
+    /// Drop returns). Detached wait threads finish either inline with
+    /// the kernel's reap or, in pathological cases, get reaped by the
+    /// kernel on this process's `_exit`.
+    ///
+    /// On the happy path, [`Self::shutdown`] has already drained
+    /// `state.slots` of running children (its phase 4 reaps every
+    /// completion before returning), so the iteration below runs
+    /// zero times.
+    fn drop(&mut self) {
+        for slot in self.state.slots.values() {
+            let Some(job) = slot.running.as_ref() else {
+                continue;
+            };
+            if let Err(e) = job.signaler.signal_term() {
+                tracing::debug!(pid = job.pid, ?e, "drop-fallback SIGTERM failed",);
+            }
+            if let Err(e) = job.signaler.signal_kill() {
+                tracing::debug!(pid = job.pid, ?e, "drop-fallback SIGKILL failed",);
+            }
+        }
+    }
+}
+
 #[cfg(all(test, feature = "testkit"))]
 #[allow(
     clippy::items_after_statements,

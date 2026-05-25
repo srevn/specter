@@ -53,7 +53,7 @@ fn single_worker_drains_more_than_concurrency_serially() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 1).unwrap();
     let pids = fresh_profile_ids(5);
 
     for (i, p) in pids.iter().enumerate() {
@@ -90,7 +90,7 @@ fn pool_with_four_workers_handles_burst() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 4).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 4).unwrap();
     let pids = fresh_profile_ids(20);
 
     for (i, p) in pids.iter().enumerate() {

@@ -433,14 +433,32 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     // `unlink_guard`'s Drop runs and cleans up.
     unlink_guard.disarm();
 
-    if let Err(e) = actuator_handle.join() {
-        tracing::error!(?e, "actuator thread panicked");
+    // Actuator: the closure runs `act.run(...)` to clean exit (or
+    // panic). On panic the closure unwinds — `SubprocessActuator::drop`
+    // fires the SIGTERM+SIGKILL fanout safety net, the `Box<dyn
+    // EffectCompleteSender>` and `RunWiring` locals drop, and the
+    // thread exits with the panic payload. `join()` returns
+    // `Err(payload)` here; extract the string message so the operator
+    // log carries the actual panic text rather than a Debug-formatted
+    // `Box<dyn Any>` shell.
+    if let Err(payload) = actuator_handle.join() {
+        let msg = payload
+            .downcast_ref::<&'static str>()
+            .copied()
+            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("(non-string panic payload)");
+        tracing::error!(message = %msg, "actuator thread panicked");
     }
 
     // Prober: now that the driver is dropped, only `App` holds the
-    // Arc. `try_unwrap` succeeds → `shutdown` joins workers.
+    // Arc. `try_unwrap` succeeds → explicit `shutdown` returns the
+    // per-worker join `Vec` so this site fans out the operator-narration
+    // log at the right teardown phase. The `Drop` impl on `WorkerProber`
+    // is the safety net (boot-fail unwind, panic recovery, leaked-Arc
+    // late drop); on the happy path here it fires against an already-
+    // drained pool and is a structural no-op.
     match Arc::try_unwrap(prober) {
-        Ok(p) => {
+        Ok(mut p) => {
             for (worker, r) in p.shutdown() {
                 if let Err(e) = r {
                     tracing::warn!(worker, ?e, "prober worker join error");
@@ -448,13 +466,15 @@ pub fn run(args: DaemonArgs) -> ExitCode {
             }
         }
         Err(arc) => {
+            // Refcount leak: a clone outlives `drop(driver)` above.
+            // Drop our clone; `WorkerProber::drop` runs when the
+            // leaked clone eventually drops, joining workers and
+            // warn-logging any join failures from there. The kernel
+            // is no longer the workers' only reaper.
             tracing::error!(
                 refcount = Arc::strong_count(&arc),
-                "prober Arc leaked; abandoning workers (kernel reaps on process exit)",
+                "prober Arc leaked; workers join via WorkerProber::drop on leaked clone teardown",
             );
-            // Best-effort: drop our Arc clone so the workers exit
-            // on queue disconnect when the leaked clone eventually
-            // drops (or, in pathological cases, on process exit).
             drop(arc);
         }
     }
@@ -547,15 +567,15 @@ fn spawn_actuator_thread(
         .spawn(move || {
             let spawner = default_spawner();
             let mut act = SubprocessActuator::new(concurrency);
-            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                act.run(wiring, &*engine_in, spawner.as_ref());
-            }));
-            if let Err(payload) = result {
-                tracing::error!(
-                    "actuator thread panicked; payload size = {}",
-                    std::mem::size_of_val(&payload),
-                );
-            }
+            // No `catch_unwind` wrapper: on panic, the closure
+            // unwinds, `SubprocessActuator::drop` runs the SIGTERM
+            // + SIGKILL fanout safety net, and the thread exits
+            // with the panic payload intact. The caller's
+            // `actuator_handle.join()` becomes the load-bearing
+            // observation point — its `Err(payload)` arm extracts
+            // the panic message for operator logs (see `run`'s
+            // teardown).
+            act.run(wiring, &*engine_in, spawner.as_ref());
         })
 }
 

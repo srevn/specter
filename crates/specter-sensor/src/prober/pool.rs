@@ -17,7 +17,24 @@
 //!    cleanup → send`. Panics convert to `Failed(EIO)`; the worker
 //!    survives.
 //! 4. On bin shutdown, [`WorkerProber::shutdown`] drops the queue
-//!    sender and joins every worker thread.
+//!    sender and joins every worker thread. The same body runs from
+//!    [`Drop`] (see "Teardown discipline" below) — the explicit path
+//!    returns each worker's `(index, thread::Result<()>)` so the
+//!    operator-narration site can log per-worker join errors at the
+//!    right phase of bin teardown, while [`Drop`] is the safety net
+//!    that fires on any drop path the explicit teardown can't reach.
+//!
+//! # Teardown discipline
+//!
+//! [`Drop`] is the primary path: it closes the queue, joins every
+//! worker, and warn-logs join failures. The explicit
+//! [`WorkerProber::shutdown`] is the operator-narration wrapper —
+//! same body, returned to the caller as a `Vec` so the bin's
+//! teardown site can fan out per-worker logs at the right phase.
+//! The two paths are idempotent against each other: the
+//! `Option<Sender>` and `Vec<JoinHandle<()>>` fields drain on the
+//! first call; a second call (explicit-then-Drop or Drop-only) is a
+//! structural no-op.
 //!
 //! # Shutdown observability
 //!
@@ -118,8 +135,15 @@ pub(super) fn lock_expected(
 
 /// Multi-threaded probe pool. See module rustdoc for the cancellation
 /// contract and lifecycle.
+///
+/// `queue_tx` is `Option<Sender<…>>` so both the explicit
+/// [`Self::shutdown`] path and the [`Drop`] safety net can drain the
+/// pool from a `&mut self` body — [`Option::take`] is the single
+/// move-out point, and a second drain finds `None`. Workers stay
+/// alive (kernel-side) until joined, so the drain-then-join idiom
+/// runs at most once even when both paths fire.
 pub struct WorkerProber {
-    queue_tx: Sender<ProbeRequest>,
+    queue_tx: Option<Sender<ProbeRequest>>,
     workers: Vec<JoinHandle<()>>,
     expected: ExpectedMap,
 }
@@ -209,7 +233,7 @@ impl WorkerProber {
             }
         }
         Ok(Self {
-            queue_tx,
+            queue_tx: Some(queue_tx),
             workers,
             expected,
         })
@@ -225,10 +249,17 @@ impl WorkerProber {
     /// `sp-prober-{i}` for the same `i`), so post-mortem logs can
     /// correlate a panicking handle back to its thread name without
     /// reaching for thread-local state.
+    ///
+    /// **Idempotent.** A second call (from [`Drop`] after the bin's
+    /// explicit teardown, or vice versa) returns an empty `Vec`: the
+    /// [`Option::take`] yields `None` on the second go, and
+    /// `mem::take` on the workers `Vec` leaves it empty. The
+    /// per-worker fan-out is the operator-narration shape; [`Drop`]
+    /// runs the same body and warn-logs any join error itself.
     #[must_use]
-    pub fn shutdown(self) -> Vec<(usize, thread::Result<()>)> {
-        drop(self.queue_tx);
-        self.workers
+    pub fn shutdown(&mut self) -> Vec<(usize, thread::Result<()>)> {
+        drop(self.queue_tx.take());
+        std::mem::take(&mut self.workers)
             .into_iter()
             .enumerate()
             .map(|(i, h)| (i, h.join()))
@@ -254,7 +285,22 @@ impl Prober for WorkerProber {
             let mut e = lock_expected(&self.expected);
             e.insert(req.owner(), req.correlation());
         }
-        if let Err(crossbeam::channel::SendError(dropped)) = self.queue_tx.send(req) {
+        // `queue_tx` is `None` post-shutdown (explicit or Drop). A
+        // submit landing here means the bin ordered Sub teardown
+        // after the prober teardown — a controller bug worth a
+        // `debug!` rather than a panic. Routes to the same log
+        // statement as the `Err(SendError)` arm so an operator sees
+        // one shape for "prober queue closed; submit dropped" across
+        // both pre-disconnect and post-disconnect calls.
+        let Some(tx) = self.queue_tx.as_ref() else {
+            tracing::debug!(
+                owner = ?req.owner(),
+                correlation = ?req.correlation(),
+                "prober queue closed; submit dropped",
+            );
+            return;
+        };
+        if let Err(crossbeam::channel::SendError(dropped)) = tx.send(req) {
             // Symmetric with the response-side `debug!` at the bottom of
             // `run_worker`: the queue closes only when every worker has
             // exited (the receivers are dropped), which under current
@@ -270,6 +316,33 @@ impl Prober for WorkerProber {
 
     fn cancel(&self, owner: ProbeOwner) {
         lock_expected(&self.expected).remove(&owner);
+    }
+}
+
+impl Drop for WorkerProber {
+    /// Safety net for any drop path the bin's explicit
+    /// [`Self::shutdown`] doesn't reach (boot-fail unwind, panic
+    /// recovery, an `Arc::try_unwrap` Err arm whose leaked clone
+    /// eventually drops). Runs the same body as the explicit path
+    /// and warn-logs each join failure so the leaked-clone case in
+    /// particular still surfaces per-worker telemetry, instead of
+    /// "abandoning workers" as the prior bin comment claimed.
+    ///
+    /// On the happy path, the bin's explicit
+    /// [`Self::shutdown`] has already drained the queue and joined
+    /// workers — this Drop's `shutdown()` call finds an empty
+    /// `Option<Sender>` and empty workers `Vec`, the for-loop runs
+    /// zero iterations, and Drop returns silently.
+    fn drop(&mut self) {
+        for (worker, r) in self.shutdown() {
+            if let Err(panic) = r {
+                tracing::warn!(
+                    worker,
+                    ?panic,
+                    "prober worker join error during drop-fallback teardown",
+                );
+            }
+        }
     }
 }
 

@@ -51,7 +51,7 @@ fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> Pro
 #[test]
 fn cancel_without_prior_submit_is_noop() {
     let (tx, _rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 1).unwrap();
     let p = fresh_profile_id();
 
     // No panic; subsequent submits unaffected.
@@ -67,7 +67,7 @@ fn cancel_after_completion_is_noop() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 1).unwrap();
     let p = fresh_profile_id();
 
     prober.submit(mk_request(p, path, 1));
@@ -91,7 +91,7 @@ fn resubmit_after_cancel_runs_with_new_correlation() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let prober = WorkerProber::new(sink(tx), 1).unwrap();
+    let mut prober = WorkerProber::new(sink(tx), 1).unwrap();
     let p = fresh_profile_id();
 
     prober.submit(mk_request(p, path.clone(), 1));
