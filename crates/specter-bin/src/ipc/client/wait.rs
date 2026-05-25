@@ -173,9 +173,16 @@ const fn classify(kind: WaitKind, wire: &WireDiagnostic) -> Match {
 /// [`ExitCode::FAILURE`] — the match succeeded but the operator
 /// won't see the confirmation line, which is itself a signal worth
 /// preserving in the exit code.
+///
+/// One-shot — `wait` exits after the first match — so the render
+/// buffer is allocated locally rather than threaded from `run`. The
+/// 256-byte initial capacity mirrors `tail`'s reused buffer so a
+/// long-field event (e.g. [`WireDiagnostic::DynamicSubReaped`] with a
+/// deep path) does not grow on the first hit.
 fn emit_matched(wire: &WireDiagnostic) -> ExitCode {
     let mut stdout = io::stdout().lock();
-    let rendered = diag::render(wire);
+    let mut rendered = String::with_capacity(256);
+    diag::render(&mut rendered, wire);
     if let Err(e) = stdout
         .write_all(rendered.as_bytes())
         .and_then(|()| stdout.flush())

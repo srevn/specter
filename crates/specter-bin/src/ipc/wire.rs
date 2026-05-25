@@ -1097,6 +1097,19 @@ impl From<OverflowScope> for WireOverflowScope {
     }
 }
 
+impl std::fmt::Display for WireOverflowScope {
+    /// Operator-visible label — `resource/<id>` for the per-resource
+    /// arm, bare `global` for the daemon-wide arm. Mirrors
+    /// [`WireTime`] / [`WirePath`]: the renderer writes the projection
+    /// verbatim through the formatter, no per-event allocation.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Resource { resource } => write!(f, "resource/{}", resource.0),
+            Self::Global => f.write_str("global"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum WireProbeOwner {
@@ -1117,6 +1130,19 @@ impl From<ProbeOwner> for WireProbeOwner {
     }
 }
 
+impl std::fmt::Display for WireProbeOwner {
+    /// Operator-visible label — `<kind>/<id>` so the owner tag and the
+    /// inner id read as one token in the renderer's `owner=` field.
+    /// Mirrors [`WireTime`] / [`WirePath`]'s `Display`-as-projection
+    /// precedent so per-event diag rendering carries no allocation.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Profile { profile } => write!(f, "profile/{}", profile.0),
+            Self::Promoter { promoter } => write!(f, "promoter/{}", promoter.0),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub(crate) enum WireWatchFailure {
@@ -1131,6 +1157,21 @@ impl From<WatchFailure> for WireWatchFailure {
             WatchFailure::Pressure { errno } => Self::Pressure { errno },
             WatchFailure::Resource { errno } => Self::Resource { errno },
             WatchFailure::Invariant { errno } => Self::Invariant { errno },
+        }
+    }
+}
+
+impl std::fmt::Display for WireWatchFailure {
+    /// Operator-visible label — `<class>(errno=<n>)` so the failure
+    /// class and the raw kernel errno read together. Operators chasing
+    /// kernel-pressure incidents see the errno without consulting
+    /// `errno.h` separately. Mirrors [`WireTime`] / [`WirePath`]'s
+    /// `Display`-as-projection precedent.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pressure { errno } => write!(f, "pressure(errno={errno})"),
+            Self::Resource { errno } => write!(f, "resource(errno={errno})"),
+            Self::Invariant { errno } => write!(f, "invariant(errno={errno})"),
         }
     }
 }
@@ -1474,6 +1515,64 @@ mod tests {
         let json = serde_json::to_string(&wire).expect("WirePath serialization is infallible");
         let back: WirePath = serde_json::from_str(&json).expect("deserialize");
         assert_eq!(back, wire);
+    }
+
+    /// [`WireProbeOwner`]'s `Display` projects to `<kind>/<id>` — the
+    /// operator-visible token the `owner=` column on
+    /// `StaleProbeResponse` lines carries. Extends [`WireTime`] /
+    /// [`WirePath`]'s `Display`-as-projection precedent across the
+    /// compound enums; the renderer writes verbatim through the
+    /// formatter (no per-event allocation).
+    #[test]
+    fn wire_probe_owner_display_projects_kind_slash_id() {
+        assert_eq!(
+            WireProbeOwner::Profile { profile: WireId(7) }.to_string(),
+            "profile/7",
+        );
+        assert_eq!(
+            WireProbeOwner::Promoter {
+                promoter: WireId(42),
+            }
+            .to_string(),
+            "promoter/42",
+        );
+    }
+
+    /// [`WireOverflowScope`]'s `Display` is asymmetric by design — the
+    /// `Resource` arm carries an id (`resource/<n>`), the `Global` arm
+    /// is the bare tag. Operators reading `scope=` on `SensorOverflow`
+    /// lines distinguish daemon-wide overflow from a single-resource
+    /// queue overrun by the absence of the trailing `/<id>`.
+    #[test]
+    fn wire_overflow_scope_display_resource_carries_id_global_is_bare() {
+        assert_eq!(
+            WireOverflowScope::Resource {
+                resource: WireId(13),
+            }
+            .to_string(),
+            "resource/13",
+        );
+        assert_eq!(WireOverflowScope::Global.to_string(), "global");
+    }
+
+    /// [`WireWatchFailure`]'s `Display` carries `(errno=<n>)` for every
+    /// arm — the raw kernel errno is the operator's index into
+    /// `errno.h` and stays paired with the failure class in the
+    /// rendered `failure=` field.
+    #[test]
+    fn wire_watch_failure_display_includes_errno() {
+        assert_eq!(
+            WireWatchFailure::Pressure { errno: 24 }.to_string(),
+            "pressure(errno=24)",
+        );
+        assert_eq!(
+            WireWatchFailure::Resource { errno: 28 }.to_string(),
+            "resource(errno=28)",
+        );
+        assert_eq!(
+            WireWatchFailure::Invariant { errno: 22 }.to_string(),
+            "invariant(errno=22)",
+        );
     }
 
     /// Witness fixture covering every [`WireDiagnostic`] variant.

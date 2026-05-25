@@ -66,13 +66,20 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
     }
 
     let mut stdout = io::stdout().lock();
+    // One render buffer reused for the lifetime of the stream loop —
+    // amortizes the per-event allocation the previous owned-String
+    // `render` shape paid. Symmetric with
+    // [`crate::ipc::client::subscribe::Subscription`]'s reused
+    // inbound `line_buf`. The 256-byte initial capacity covers the
+    // common diag line (~120 bytes) without growing on the first hit.
+    let mut buf = String::with_capacity(256);
     loop {
         match sub.read_next() {
             Ok(Some(wire)) => {
                 if !should_emit(&wire, &args.filter) {
                     continue;
                 }
-                if let Err(e) = emit(&mut stdout, &wire, args.output) {
+                if let Err(e) = emit(&mut stdout, &wire, args.output, &mut buf) {
                     // Downstream pipe consumer closed (`BrokenPipe`)
                     // or any other stdout failure: graceful exit.
                     // The daemon's stream is healthy; the operator's
@@ -126,6 +133,13 @@ fn should_emit(wire: &WireDiagnostic, filter: &[String]) -> bool {
 /// `io::Error` on any failure so the caller can distinguish
 /// `BrokenPipe` (graceful exit) from genuine write failures.
 ///
+/// `buf` is the caller's reused render buffer — the Human branch
+/// clears and refills it through [`diag::render`]'s writer-shape
+/// surface; the Json branch is untouched and goes through
+/// [`encode_line`]'s owned [`Vec<u8>`] path. Threading the buffer
+/// keeps the per-event amortization legible at the call site without
+/// inlining the I/O error matching into the stream loop.
+///
 /// JSON output re-serializes the parsed [`WireDiagnostic`] rather
 /// than passing through the daemon's original bytes. Serde derive is
 /// symmetric over the wire's `#[serde]` tags, so the re-serialized
@@ -136,10 +150,17 @@ fn should_emit(wire: &WireDiagnostic, filter: &[String]) -> bool {
 /// [`crate::ipc::framing::InfallibleSerialize`] bound asserts the
 /// re-emit's `Vec<u8>`-build cannot fail (audited at the marker
 /// impl in [`crate::ipc::wire`]).
-fn emit<W: Write>(out: &mut W, wire: &WireDiagnostic, output: OutputFormat) -> io::Result<()> {
+fn emit<W: Write>(
+    out: &mut W,
+    wire: &WireDiagnostic,
+    output: OutputFormat,
+    buf: &mut String,
+) -> io::Result<()> {
     match output {
         OutputFormat::Human => {
-            out.write_all(diag::render(wire).as_bytes())?;
+            buf.clear();
+            diag::render(buf, wire);
+            out.write_all(buf.as_bytes())?;
         }
         OutputFormat::Json => {
             out.write_all(&encode_line(wire))?;

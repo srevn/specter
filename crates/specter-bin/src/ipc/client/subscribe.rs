@@ -38,8 +38,15 @@ use crate::ipc::wire::WireDiagnostic;
 /// terminates the corresponding per-conn entry, dropping the
 /// subscriber from the fan-out map on the same tick. No explicit
 /// "unsubscribe" verb is required.
+///
+/// `line_buf` is the reused inbound line buffer — [`Self::read_next`]
+/// clears it before each [`BufRead::read_line`] so the per-event
+/// allocation collapses to zero after the first read sizes the heap.
+/// Symmetric with [`crate::ipc::client::tail`]'s reused render buffer
+/// on the outbound side.
 pub(crate) struct Subscription {
     reader: BufReader<UnixStream>,
+    line_buf: String,
 }
 
 /// Open a daemon connection, ship the Subscribe request, validate
@@ -99,7 +106,10 @@ pub(crate) fn open(
             ExitCode::from(1)
         })?;
     match ack {
-        ResponsePayload::SubscribeAck { .. } => Ok(Subscription { reader }),
+        ResponsePayload::SubscribeAck { .. } => Ok(Subscription {
+            reader,
+            line_buf: String::new(),
+        }),
         ResponsePayload::Err { code, error } => {
             eprintln!("specter {verb}: {code}: {error}");
             Err(ExitCode::from(1))
@@ -138,13 +148,19 @@ impl Subscription {
     ///   [`connect::read_response`]'s discipline so callers can
     ///   distinguish "transport broken" from "daemon sent malformed
     ///   JSON" with one error type.
+    ///
+    /// The inbound line buffer is reused across calls — `clear`
+    /// preserves the previously-grown heap so subsequent lines pay no
+    /// allocation. A partial read on `Err` discards the bytes (the
+    /// next call clears before reading), matching the
+    /// fresh-`String`-per-call behaviour the prior shape carried.
     pub(crate) fn read_next(&mut self) -> io::Result<Option<WireDiagnostic>> {
-        let mut line = String::new();
-        let n = self.reader.read_line(&mut line)?;
+        self.line_buf.clear();
+        let n = self.reader.read_line(&mut self.line_buf)?;
         if n == 0 {
             return Ok(None);
         }
-        serde_json::from_str::<WireDiagnostic>(line.trim_end_matches('\n'))
+        serde_json::from_str::<WireDiagnostic>(self.line_buf.trim_end_matches('\n'))
             .map(Some)
             .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }

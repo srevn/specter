@@ -20,23 +20,37 @@
 //! Same row shape on every line so a column-aligning eye can scan
 //! quickly without `column -t`.
 //!
-//! Pure function: `&WireDiagnostic -> String`. No I/O, no styling.
+//! Pure writer: `(&mut String, &WireDiagnostic)`. No I/O, no styling.
+//! The caller owns the buffer's lifetime so the per-event allocation
+//! amortizes across stream-loop iterations
+//! ([`crate::ipc::client::tail::run`] reuses one buffer for the
+//! lifetime of the subscription).
 
 use std::fmt::Write as _;
 
 use crate::ipc::wire::{
     WireBurstHelper, WireBurstIntent, WireClaimKind, WireDetachReason, WireDiagnostic, WireFsEvent,
-    WireOverflowScope, WireProbeOwner, WireProfileStateDiscriminant, WirePromoterClaimKind,
-    WireReapTrigger, WireResourceKind, WireSpliceFailureCause, WireTime, WireWatchFailure,
+    WireProfileStateDiscriminant, WirePromoterClaimKind, WireReapTrigger, WireResourceKind,
+    WireSpliceFailureCause, WireTime,
 };
 
-/// Render one event as a single newline-terminated line.
-pub(crate) fn render(d: &WireDiagnostic) -> String {
-    let mut out = String::with_capacity(128);
+/// Render one event as a single newline-terminated line into the
+/// caller's buffer.
+///
+/// Writer-shape so the call site amortizes the line buffer across
+/// iterations — `specter tail` reuses one [`String`] for the lifetime
+/// of the stream loop, symmetric with
+/// [`crate::ipc::client::subscribe::Subscription`]'s reused inbound
+/// `line_buf`. A 1000-evt/s tail carries no per-event allocation
+/// through the human path; the three compound-enum Display impls
+/// ([`crate::ipc::wire::WireProbeOwner`] /
+/// [`crate::ipc::wire::WireOverflowScope`] /
+/// [`crate::ipc::wire::WireWatchFailure`]) write through the same
+/// formatter so the compound fields likewise carry no allocation.
+pub(crate) fn render(out: &mut String, d: &WireDiagnostic) {
     let _ = write!(out, "{}  {}", at_field(d), d.variant_name());
-    write_fields(&mut out, d);
+    write_fields(out, d);
     out.push('\n');
-    out
 }
 
 /// Project the variant's `at` field through the structural commitment
@@ -112,11 +126,7 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         WireDiagnostic::StaleProbeResponse {
             owner, correlation, ..
         } => {
-            let _ = write!(
-                out,
-                "  owner={}  correlation={correlation}",
-                probe_owner_str(*owner),
-            );
+            let _ = write!(out, "  owner={owner}  correlation={correlation}");
         }
         WireDiagnostic::StaleTimer { id, .. } => {
             let _ = write!(out, "  id={id}");
@@ -180,12 +190,7 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         WireDiagnostic::WatchOpRejected {
             resource, failure, ..
         } => {
-            let _ = write!(
-                out,
-                "  resource={}  failure={}",
-                resource.0,
-                watch_failure_str(*failure),
-            );
+            let _ = write!(out, "  resource={}  failure={failure}", resource.0);
         }
         WireDiagnostic::PendingPathProbeVanished {
             profile, prefix, ..
@@ -226,11 +231,10 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  profile={}  claim={}  resource={}  failure={}",
+                "  profile={}  claim={}  resource={}  failure={failure}",
                 profile.0,
                 claim_kind_str(*claim),
                 resource.0,
-                watch_failure_str(*failure),
             );
         }
         WireDiagnostic::PromoterClaimPurged {
@@ -242,11 +246,10 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  promoter={}  claim={}  resource={}  failure={}",
+                "  promoter={}  claim={}  resource={}  failure={failure}",
                 promoter.0,
                 promoter_claim_kind_str(*claim),
                 resource.0,
-                watch_failure_str(*failure),
             );
         }
         WireDiagnostic::AttachPathInvalid { path, hint, .. } => {
@@ -336,7 +339,7 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             );
         }
         WireDiagnostic::SensorOverflow { scope, .. } => {
-            let _ = write!(out, "  scope={}", overflow_scope_str(*scope));
+            let _ = write!(out, "  scope={scope}");
         }
         WireDiagnostic::PromoterReseededForOverflow { promoter, .. }
         | WireDiagnostic::PromoterReaped { promoter, .. } => {
@@ -466,35 +469,6 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
     }
 }
 
-/// Operator-visible label for [`WireProbeOwner`]. Compound — encodes
-/// the tag and the inner id as `<kind>/<id>`.
-fn probe_owner_str(o: WireProbeOwner) -> String {
-    match o {
-        WireProbeOwner::Profile { profile } => format!("profile/{}", profile.0),
-        WireProbeOwner::Promoter { promoter } => format!("promoter/{}", promoter.0),
-    }
-}
-
-/// Operator-visible label for [`WireOverflowScope`]. Compound — the
-/// resource arm encodes the id, the global arm is a bare tag.
-fn overflow_scope_str(s: WireOverflowScope) -> String {
-    match s {
-        WireOverflowScope::Resource { resource } => format!("resource/{}", resource.0),
-        WireOverflowScope::Global => "global".to_string(),
-    }
-}
-
-/// Operator-visible label for [`WireWatchFailure`]. The errno is
-/// preserved so operators chasing kernel-pressure incidents see the
-/// raw value without consulting `errno.h` separately.
-fn watch_failure_str(f: WireWatchFailure) -> String {
-    match f {
-        WireWatchFailure::Pressure { errno } => format!("pressure(errno={errno})"),
-        WireWatchFailure::Resource { errno } => format!("resource(errno={errno})"),
-        WireWatchFailure::Invariant { errno } => format!("invariant(errno={errno})"),
-    }
-}
-
 /// Operator-visible label for [`WireBurstIntent`]. Mirrors the
 /// `snake_case` serde rename so the human view matches the JSON.
 const fn burst_intent_str(i: WireBurstIntent) -> &'static str {
@@ -615,12 +589,16 @@ mod tests {
     /// operator-visible fields stay structural.
     #[test]
     fn render_sub_fired_carries_timestamp_tag_sub_profile_count() {
-        let s = render(&WireDiagnostic::SubFired {
-            at: WireTime::from(UNIX_EPOCH),
-            sub: WireId(11),
-            profile: WireId(22),
-            count: 3,
-        });
+        let mut s = String::new();
+        render(
+            &mut s,
+            &WireDiagnostic::SubFired {
+                at: WireTime::from(UNIX_EPOCH),
+                sub: WireId(11),
+                profile: WireId(22),
+                count: 3,
+            },
+        );
         assert!(
             s.starts_with("1970-01-01T00:00:00Z  SubFired"),
             "leading timestamp + tag: {s:?}",
@@ -637,10 +615,14 @@ mod tests {
     /// daemon dropped events upstream.
     #[test]
     fn render_missed_marker_is_underscore_prefixed() {
-        let s = render(&WireDiagnostic::Missed {
-            at: WireTime::from(UNIX_EPOCH),
-            count: 5,
-        });
+        let mut s = String::new();
+        render(
+            &mut s,
+            &WireDiagnostic::Missed {
+                at: WireTime::from(UNIX_EPOCH),
+                count: 5,
+            },
+        );
         assert!(
             s.starts_with("1970-01-01T00:00:00Z  _missed"),
             "leading `_missed` tag: {s:?}",
@@ -655,24 +637,32 @@ mod tests {
     /// presence/absence of the field.
     #[test]
     fn render_sub_attached_promoter_field_optional() {
-        let static_attach = render(&WireDiagnostic::SubAttached {
-            at: WireTime::from(UNIX_EPOCH),
-            sub: WireId(1),
-            name: "static_watch".into(),
-            source_promoter: None,
-        });
+        let mut static_attach = String::new();
+        render(
+            &mut static_attach,
+            &WireDiagnostic::SubAttached {
+                at: WireTime::from(UNIX_EPOCH),
+                sub: WireId(1),
+                name: "static_watch".into(),
+                source_promoter: None,
+            },
+        );
         assert!(static_attach.contains("name=static_watch"));
         assert!(
             !static_attach.contains("source_promoter"),
             "None must omit source_promoter: {static_attach:?}",
         );
 
-        let dynamic_attach = render(&WireDiagnostic::SubAttached {
-            at: WireTime::from(UNIX_EPOCH),
-            sub: WireId(2),
-            name: "p@/tmp/x".into(),
-            source_promoter: Some(WireId(99)),
-        });
+        let mut dynamic_attach = String::new();
+        render(
+            &mut dynamic_attach,
+            &WireDiagnostic::SubAttached {
+                at: WireTime::from(UNIX_EPOCH),
+                sub: WireId(2),
+                name: "p@/tmp/x".into(),
+                source_promoter: Some(WireId(99)),
+            },
+        );
         assert!(dynamic_attach.contains("source_promoter=99"));
     }
 
@@ -682,12 +672,16 @@ mod tests {
     /// the human form matches the JSON.
     #[test]
     fn render_sub_detached_reason_label() {
-        let s = render(&WireDiagnostic::SubDetached {
-            at: WireTime::from(UNIX_EPOCH),
-            sub: WireId(1),
-            profile: WireId(2),
-            reason: WireDetachReason::IpcDisabled,
-        });
+        let mut s = String::new();
+        render(
+            &mut s,
+            &WireDiagnostic::SubDetached {
+                at: WireTime::from(UNIX_EPOCH),
+                sub: WireId(1),
+                profile: WireId(2),
+                reason: WireDetachReason::IpcDisabled,
+            },
+        );
         assert!(s.contains("  reason=ipc_disabled"), "got: {s:?}");
     }
 
@@ -697,11 +691,15 @@ mod tests {
     /// per-Sub variants that always carry `sub=N`.
     #[test]
     fn render_profile_keyed_has_no_sub_field() {
-        let s = render(&WireDiagnostic::ProfileReaped {
-            at: WireTime::from(UNIX_EPOCH),
-            profile: WireId(7),
-            via: crate::ipc::wire::WireReapTrigger::DeferredFromBurst,
-        });
+        let mut s = String::new();
+        render(
+            &mut s,
+            &WireDiagnostic::ProfileReaped {
+                at: WireTime::from(UNIX_EPOCH),
+                profile: WireId(7),
+                via: crate::ipc::wire::WireReapTrigger::DeferredFromBurst,
+            },
+        );
         assert!(s.contains("  profile=7"));
         assert!(s.contains("  via=deferred_from_burst"));
         assert!(
@@ -714,11 +712,15 @@ mod tests {
     /// `promoter=N` key. Sanity-checks the cross-cutting helper coverage.
     #[test]
     fn render_promoter_attached_carries_promoter_and_name() {
-        let s = render(&WireDiagnostic::PromoterAttached {
-            at: WireTime::from(UNIX_EPOCH),
-            promoter: WireId(42),
-            name: "watch_glob".into(),
-        });
+        let mut s = String::new();
+        render(
+            &mut s,
+            &WireDiagnostic::PromoterAttached {
+                at: WireTime::from(UNIX_EPOCH),
+                promoter: WireId(42),
+                name: "watch_glob".into(),
+            },
+        );
         assert!(s.contains("  promoter=42"));
         assert!(s.contains("  name=watch_glob"));
     }
@@ -728,21 +730,29 @@ mod tests {
     /// is more operator-readable than two separate fields.
     #[test]
     fn render_probe_owner_compound_label() {
-        let profile_owner = render(&WireDiagnostic::StaleProbeResponse {
-            at: WireTime::from(UNIX_EPOCH),
-            owner: WireProbeOwner::Profile { profile: WireId(1) },
-            correlation: 9,
-        });
+        let mut profile_owner = String::new();
+        render(
+            &mut profile_owner,
+            &WireDiagnostic::StaleProbeResponse {
+                at: WireTime::from(UNIX_EPOCH),
+                owner: WireProbeOwner::Profile { profile: WireId(1) },
+                correlation: 9,
+            },
+        );
         assert!(profile_owner.contains("  owner=profile/1"));
         assert!(profile_owner.contains("  correlation=9"));
 
-        let promoter_owner = render(&WireDiagnostic::StaleProbeResponse {
-            at: WireTime::from(UNIX_EPOCH),
-            owner: WireProbeOwner::Promoter {
-                promoter: WireId(2),
+        let mut promoter_owner = String::new();
+        render(
+            &mut promoter_owner,
+            &WireDiagnostic::StaleProbeResponse {
+                at: WireTime::from(UNIX_EPOCH),
+                owner: WireProbeOwner::Promoter {
+                    promoter: WireId(2),
+                },
+                correlation: 11,
             },
-            correlation: 11,
-        });
+        );
         assert!(promoter_owner.contains("  owner=promoter/2"));
     }
 
@@ -751,12 +761,16 @@ mod tests {
     /// declaration order with the correct enum label for the event.
     #[test]
     fn render_event_class_dropped_three_fields_in_order() {
-        let s = render(&WireDiagnostic::EventClassDropped {
-            at: WireTime::from(UNIX_EPOCH),
-            resource: WireId(100),
-            event: WireFsEvent::MetadataChanged,
-            profile: WireId(200),
-        });
+        let mut s = String::new();
+        render(
+            &mut s,
+            &WireDiagnostic::EventClassDropped {
+                at: WireTime::from(UNIX_EPOCH),
+                resource: WireId(100),
+                event: WireFsEvent::MetadataChanged,
+                profile: WireId(200),
+            },
+        );
         // Field order matches declaration order.
         let idx_resource = s.find("resource=").expect("resource present");
         let idx_event = s.find("event=").expect("event present");
@@ -772,10 +786,14 @@ mod tests {
     /// rendering must emit `scope=global` without any `/id` tail.
     #[test]
     fn render_sensor_overflow_global_scope_bare() {
-        let s = render(&WireDiagnostic::SensorOverflow {
-            at: WireTime::from(UNIX_EPOCH),
-            scope: WireOverflowScope::Global,
-        });
+        let mut s = String::new();
+        render(
+            &mut s,
+            &WireDiagnostic::SensorOverflow {
+                at: WireTime::from(UNIX_EPOCH),
+                scope: WireOverflowScope::Global,
+            },
+        );
         assert!(s.contains("  scope=global"), "got: {s:?}");
         assert!(
             !s.contains("scope=global/"),
@@ -808,7 +826,8 @@ mod tests {
             let wire: WireDiagnostic = serde_json::from_value(value).unwrap_or_else(|e| {
                 panic!("failed to deserialize witness for tag {tag}: {e}");
             });
-            let line = render(&wire);
+            let mut line = String::new();
+            render(&mut line, &wire);
             assert!(
                 line.contains(tag),
                 "render line missing tag {tag}: {line:?}"
@@ -961,12 +980,16 @@ mod tests {
     /// `WireBurstIntent` labels mirror the snake_case wire form.
     #[test]
     fn render_probe_failed_burst_intent_label() {
-        let s = render(&WireDiagnostic::ProbeFailed {
-            at: WireTime::from(UNIX_EPOCH),
-            profile: WireId(1),
-            intent: WireBurstIntent::Seed,
-            errno: 13,
-        });
+        let mut s = String::new();
+        render(
+            &mut s,
+            &WireDiagnostic::ProbeFailed {
+                at: WireTime::from(UNIX_EPOCH),
+                profile: WireId(1),
+                intent: WireBurstIntent::Seed,
+                errno: 13,
+            },
+        );
         assert!(s.contains("  intent=seed"), "got: {s:?}");
         assert!(s.contains("  errno=13"), "got: {s:?}");
     }
