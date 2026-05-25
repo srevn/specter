@@ -175,6 +175,21 @@ pub(crate) enum WireErrorCode {
     TomlDisabled,
     /// Connection cap reached — too many concurrent operator clients.
     Busy,
+    /// Daemon refused a response whose serialized bytes would exceed
+    /// the per-conn write-queue accept cap. Symmetric with [`Self::Busy`]:
+    /// both are cap-class failures, both close the conn after the
+    /// structured Err line flushes, both let operator scripts branch
+    /// on a single closed-vocabulary token rather than parsing an
+    /// `UnexpectedEof`.
+    ///
+    /// Emitted by [`crate::driver::Hub::enqueue_response`]'s Refused
+    /// arm; the structured line is queued into the per-conn reserve
+    /// (sized so the Err always fits regardless of queue state) and
+    /// `close_after_flush` is armed by the upstream `push_response`.
+    /// The `error` field carries the byte counts as
+    /// `response of N bytes exceeds per-conn cap of M bytes`,
+    /// renderable verbatim by the operator client.
+    ResponseTooBig,
     /// Request line failed JSON parse, or carries an unknown `op`.
     Malformed,
     /// `Subscribe` invoked on a conn that already flipped to
@@ -211,6 +226,7 @@ impl WireErrorCode {
             Self::NotDisabled => "not_disabled",
             Self::TomlDisabled => "toml_disabled",
             Self::Busy => "busy",
+            Self::ResponseTooBig => "response_too_big",
             Self::Malformed => "malformed",
             Self::AlreadySubscribed => "already_subscribed",
         }
@@ -724,6 +740,7 @@ mod tests {
             WireErrorCode::NotDisabled,
             WireErrorCode::TomlDisabled,
             WireErrorCode::Busy,
+            WireErrorCode::ResponseTooBig,
             WireErrorCode::Malformed,
             WireErrorCode::AlreadySubscribed,
         ];

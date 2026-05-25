@@ -14,7 +14,7 @@
 //! real bound socket on a tempdir path.
 
 use super::WakeHandle;
-use super::ipc::conns::{ConnRole, MissedWindow, WRITE_QUEUE_HIGH_WATER};
+use super::ipc::conns::{ACCEPT_CAP, ConnRole, MissedWindow};
 use super::ipc::hub::{EnqueueOutcome, TOKEN_CONN_BASE};
 use super::state::ReloadTrigger;
 use super::{EngineDriver, Hub, Reactor, TickOutcome};
@@ -2164,28 +2164,39 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
 }
 
 /// An oversize response refused against a previously-empty queue
-/// terminates the conn inline within the same call — the linger
-/// path is structurally closed. [`super::Hub::enqueue_response`]'s
-/// `Refused` arm internally calls
-/// [`super::Hub::try_terminate_if_idle`], which (queue
-/// empty + close armed) deregisters the stream and removes the entry
-/// from the conn map.
+/// queues the structured [`WireErrorCode::ResponseTooBig`] Err line
+/// into the per-conn reserve, arms `close_after_flush`, and then
+/// flushes-then-terminates on the next WRITABLE drain — the cap-class
+/// signal lands on the wire ahead of the close.
+///
+/// The Phase 4 convergence: with the Err line in the queue,
+/// `try_terminate_if_idle`'s queue-empty precondition no longer
+/// holds even when the prior queue was empty, so the empty-queue
+/// refusal case takes the same flush-then-terminate path as the
+/// non-empty-queue case ([`oversize_response_arms_close_then_flushes_then_terminates`]).
 ///
 /// Synthesises the oversize payload via a `ResponsePayload::Err`
 /// whose `error: String` is padded past the cap; the serialized JSON
 /// envelope adds ~50 bytes of `{"kind":"err","code":"…","error":"…"}`
 /// framing, so the padded payload comfortably exceeds the cap with
 /// no need for a custom carrier or a `cfg(test)` constant override.
-/// The code value [`WireErrorCode::Busy`] is incidental — the test
-/// pins the oversize-refusal mechanism, not the error vocabulary.
+/// The pre-padding code value [`WireErrorCode::Busy`] is incidental —
+/// the test pins the cap-refusal mechanism, not the inner Err
+/// vocabulary; the structured signal the Refused arm emits is a
+/// separate `WireErrorCode::ResponseTooBig` line, asserted at the
+/// wire below.
 #[test]
-fn oversize_response_terminates_conn_inline_when_queue_empty() {
+fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
 
-    let _client = ipc_connect(&rig);
+    let mut client = ipc_connect(&rig);
+    // The client is in blocking mode by default (50ms read timeout).
+    // Tests below want to read the structured Err line from the wire,
+    // so leave blocking but tighten the deadline through the
+    // run_until_response polling loop.
     arm_zero_timeout(&mut rig);
     let _ = rig.driver.tick();
     assert_eq!(
@@ -2196,7 +2207,7 @@ fn oversize_response_terminates_conn_inline_when_queue_empty() {
 
     let token = mio::Token(TOKEN_CONN_BASE);
 
-    let padding = "x".repeat(WRITE_QUEUE_HIGH_WATER + 1);
+    let padding = "x".repeat(ACCEPT_CAP + 1);
     let huge = ResponsePayload::Err {
         code: WireErrorCode::Busy,
         error: padding,
@@ -2207,11 +2218,58 @@ fn oversize_response_terminates_conn_inline_when_queue_empty() {
         EnqueueOutcome::Refused,
         "oversize response is refused by the capacity gate",
     );
+
+    // Phase 4 convergence: conn lives, queue holds the structured
+    // ResponseTooBig Err line, close_after_flush is armed.
+    assert_eq!(
+        rig.driver.ipc.conn_count(),
+        1,
+        "conn lives — the Err line populates the reserve so the queue \
+         is not empty when try_terminate_if_idle runs",
+    );
+    {
+        let conn = rig.driver.ipc.conn_ref(token).expect("conn lives");
+        assert!(conn.close_after_flush, "close armed by the Refused arm");
+        assert!(
+            !conn.write_queue.is_empty(),
+            "ResponseTooBig Err line queued into the reserve",
+        );
+    }
+
+    // Read the Err line off the wire — drives ticks until the bytes
+    // surface on the client end. The response is the structured Err
+    // the Refused arm built; assert on `code` so a rename of the
+    // wire token would fail loudly here.
+    let reply = run_until_response(&mut rig, &mut client)
+        .expect("ResponseTooBig Err line within test deadline");
+    match reply {
+        ResponsePayload::Err { code, error } => {
+            assert_eq!(
+                code,
+                WireErrorCode::ResponseTooBig,
+                "structured cap-class signal precedes the close",
+            );
+            assert!(
+                error.contains("exceeds per-conn cap"),
+                "error string carries the byte counts: got {error}",
+            );
+        }
+        other => panic!("expected Err(ResponseTooBig), got {other:?}"),
+    }
+
+    // Drive ticks: the flush completes, close_after_flush observed,
+    // conn terminates.
+    for _ in 0..5 {
+        arm_zero_timeout(&mut rig);
+        let _ = rig.driver.tick();
+        if rig.driver.ipc.conn_count() == 0 {
+            break;
+        }
+    }
     assert_eq!(
         rig.driver.ipc.conn_count(),
         0,
-        "conn terminated inline: refusal armed close, queue was empty, \
-         try_terminate_if_idle ran",
+        "flushed-then-terminated within a handful of ticks",
     );
     assert!(
         rig.driver.ipc.conn_ref(token).is_none(),
@@ -2222,16 +2280,18 @@ fn oversize_response_terminates_conn_inline_when_queue_empty() {
 }
 
 /// An oversize response refused against a queue that already holds
-/// bytes (a normal response from a prior verb) does NOT terminate
-/// inline — `try_terminate_if_idle`'s queue-empty precondition is
-/// not met. The conn stays in the map, `drain_writable` flushes the
-/// existing bytes on the next WRITABLE edge, observes
-/// `close_after_flush`, and terminates on the flush edge.
+/// bytes (a normal response from a prior verb) takes the
+/// flush-then-terminate path: the queue holds the prior bytes plus
+/// the structured [`WireErrorCode::ResponseTooBig`] Err line the
+/// Refused arm appended, `close_after_flush` is armed, and the next
+/// WRITABLE drain flushes both lines before observing the close.
 ///
-/// The flush-then-terminate half of the linger fix. Together with
-/// [`oversize_response_terminates_conn_inline_when_queue_empty`] the
-/// two tests cover both shapes (queue-empty-at-arm and
-/// queue-non-empty-at-arm) of an over-water-armed close.
+/// Together with
+/// [`oversize_response_emits_response_too_big_then_flushes_then_terminates`]
+/// the two tests cover both starting-queue shapes
+/// (queue-empty-at-arm and queue-non-empty-at-arm); both shapes
+/// converge on the same flush-then-terminate teardown after
+/// Phase 4.
 #[test]
 fn oversize_response_arms_close_then_flushes_then_terminates() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2252,7 +2312,7 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
         EnqueueOutcome::Accepted,
     );
 
-    let padding = "x".repeat(WRITE_QUEUE_HIGH_WATER + 1);
+    let padding = "x".repeat(ACCEPT_CAP + 1);
     let huge = ResponsePayload::Err {
         code: WireErrorCode::Busy,
         error: padding,
@@ -2344,7 +2404,7 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     // overflows the capacity gate.
     {
         let conn = rig.driver.ipc.conn_mut(token).expect("conn lives");
-        let fill = WRITE_QUEUE_HIGH_WATER - 10;
+        let fill = ACCEPT_CAP - 10;
         conn.write_queue.extend(std::iter::repeat_n(b'x', fill));
     }
 

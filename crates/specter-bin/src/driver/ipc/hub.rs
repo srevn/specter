@@ -52,7 +52,7 @@
 //! reaches per-conn helpers; `forward.rs` drives
 //! [`Hub::dispatch_to_subscribers`].
 
-use super::conns::{ConnRole, ConnState, PushOutcome};
+use super::conns::{self, ConnRole, ConnState, PushOutcome};
 use crate::ipc::framing::{InfallibleSerialize, MAX_LINE_BYTES, encode_line};
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode};
 use crate::ipc::wire::{WireDiagnostic, WireTime};
@@ -125,11 +125,13 @@ pub(in crate::driver) enum EnqueueOutcome {
     /// Bytes pushed into the write_queue; will flush on the next
     /// WRITABLE drain.
     Accepted,
-    /// Response did not fit. `close_after_flush` is armed; if the
-    /// queue was empty at the time, the conn has been terminated
-    /// already (this call internally invoked
-    /// [`Hub::try_terminate_if_idle`]). If the queue had bytes,
-    /// [`Hub::drain_writable`] will terminate when those drain.
+    /// Response did not fit under the per-conn accept cap. The arm
+    /// emitted a structured
+    /// [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err
+    /// line into the per-conn reserve and armed `close_after_flush`;
+    /// the next [`Hub::drain_writable`] flushes the Err (and any
+    /// prior queued bytes) and terminates the conn at the flush-empty
+    /// edge.
     Refused,
     /// `token` is not in the conn map — the caller addressed a conn
     /// that closed between an earlier point in this tick and the
@@ -533,19 +535,31 @@ impl Hub {
     /// [`encode_line`]; framing is line-delimited).
     ///
     /// Capacity-gated via
-    /// [`super::conns::ConnState::push_response`]: if the
-    /// projected queue length would exceed
-    /// [`super::conns::WRITE_QUEUE_HIGH_WATER`], the queue
-    /// is left untouched, `close_after_flush` is armed, and this
-    /// returns [`EnqueueOutcome::Refused`]. The refusal path then
-    /// runs [`Self::try_terminate_if_idle`] inline — when the queue
-    /// was empty at the time of the refusal (the "oversize response
-    /// into an idle conn" linger case), no WRITABLE edge would ever
-    /// observe the armed flag, so the terminate has to happen here.
-    /// When the queue had bytes (a normal response queued first,
-    /// then an over-water one), the in-flight bytes drain through
-    /// [`Self::drain_writable`] and the close-flag is observed at
-    /// flush time.
+    /// [`super::conns::ConnState::push_response`]: if the projected
+    /// queue length would exceed [`super::conns::ACCEPT_CAP`] (the
+    /// soft cap, sitting [`super::conns::RESPONSE_TOO_BIG_RESERVE`]
+    /// bytes below [`super::conns::WRITE_QUEUE_HIGH_WATER`]), the
+    /// queue is left untouched, `close_after_flush` is armed, and this
+    /// returns [`EnqueueOutcome::Refused`]. The refusal arm then
+    /// emits a structured
+    /// [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err
+    /// line into the per-conn reserve via
+    /// [`super::conns::ConnState::push_err_in_reserve`] — the
+    /// reserve's existence guarantees the Err line fits regardless of
+    /// queue state, so the operator branches on `response_too_big`
+    /// instead of decoding an `UnexpectedEof`. With the Err line
+    /// queued, the conn is no longer idle, so the trailing
+    /// [`Self::try_terminate_if_idle`] is a structural no-op; the
+    /// next WRITABLE drain flushes the Err and observes
+    /// `close_after_flush` at the flush-empty edge. The path
+    /// converges with the queue-non-empty case: the in-flight bytes
+    /// drain, then the Err drains, then the conn terminates.
+    ///
+    /// The cap-class signal vocabulary now matches the accept-cap's
+    /// `Err { code: Busy }` shape ([`Self::drain_accept`]'s cap arm):
+    /// both cap surfaces emit a closed-vocabulary structured token
+    /// before close. Operator scripts decode either with one wire-
+    /// stable `code` field.
     ///
     /// The `T: InfallibleSerialize` bound is the structural floor
     /// for the serializer-cannot-fail claim — every call site passes
@@ -559,9 +573,9 @@ impl Hub {
         response: &T,
     ) -> EnqueueOutcome {
         let bytes = encode_line(response);
-        // Scope the conn borrow so the post-push `try_terminate_if_idle`
-        // can reach `&mut self` cleanly on the Refused arm. PushOutcome
-        // is Copy, so the binding outlives the borrow without effort.
+        // Scope the conn borrow so the post-push reaches into &mut self
+        // cleanly on the Refused arm. PushOutcome is Copy, so the
+        // binding outlives the borrow without effort.
         let outcome = match self.conns.get_mut(&token) {
             Some(conn) => conn.push_response(&bytes),
             None => return EnqueueOutcome::ConnGone,
@@ -572,14 +586,36 @@ impl Hub {
                 tracing::warn!(
                     ?token,
                     response_len = bytes.len(),
-                    "ipc response over write-queue high-water; arming close",
+                    accept_cap = conns::ACCEPT_CAP,
+                    "ipc response over accept cap; emitting ResponseTooBig + arming close",
                 );
-                // push_response already armed close_after_flush. The
-                // queue may be empty (over-water response into an idle
-                // conn) in which case no WRITABLE edge ever drains and
-                // observes the flag — terminate inline. If the queue
-                // had bytes, the conn stays in the map and
-                // drain_writable handles termination on the flush edge.
+                let err_payload = ResponsePayload::Err {
+                    code: WireErrorCode::ResponseTooBig,
+                    error: format!(
+                        "response of {} bytes exceeds per-conn cap of {} bytes",
+                        bytes.len(),
+                        conns::ACCEPT_CAP,
+                    ),
+                };
+                let err_bytes = encode_line(&err_payload);
+                // push_response just refused (so conn was in the map
+                // and close_after_flush is armed). The same &mut self
+                // borrow continues here — nothing between the two
+                // reaches has had the opportunity to remove the entry.
+                // The reserve invariant
+                // (ACCEPT_CAP + RESPONSE_TOO_BIG_RESERVE = WRITE_QUEUE_HIGH_WATER)
+                // makes push_err_in_reserve total.
+                self.conns
+                    .get_mut(&token)
+                    .expect(
+                        "conn was in map at push_response — same &mut self.conns borrow continues",
+                    )
+                    .push_err_in_reserve(&err_bytes);
+                // No-op once the Err line populated the queue (queue
+                // is no longer empty). Kept for parity with the
+                // pre-Phase-4 close path — a defensive call against
+                // the unreachable queue-empty post-condition costs
+                // one map lookup and a flag read.
                 self.try_terminate_if_idle(token);
                 EnqueueOutcome::Refused
             }
@@ -591,17 +627,22 @@ impl Hub {
     /// on terminate, `false` otherwise (queue still holding bytes,
     /// close not armed, or conn already gone).
     ///
-    /// Called at two natural moments:
-    /// 1. After [`super::EngineDriver::drain_ipc_lines`] finishes
-    ///    processing a conn's lines — the post-process pass folds in
-    ///    any response bytes the handler may have pushed, so the
-    ///    queue state at THIS point is the conn's settled state for
-    ///    the tick.
-    /// 2. From [`Self::enqueue_response`]'s `Refused` arm — an
-    ///    over-water response that didn't fit into a previously-
-    ///    empty queue must terminate now rather than waiting for a
-    ///    WRITABLE edge that will never come (the queue is empty;
-    ///    no edge will trigger).
+    /// Called from [`super::EngineDriver::drain_ipc_lines`] after a
+    /// conn's lines are processed — the post-process pass folds in
+    /// any response bytes the handler may have pushed, so the queue
+    /// state at THIS point is the conn's settled state for the tick.
+    /// The read drain's oversize-line guard arms
+    /// `close_after_flush` without queueing anything, so an armed
+    /// guard against an empty queue terminates inline here rather
+    /// than waiting for a WRITABLE edge that will never come.
+    ///
+    /// Also called defensively at the tail of [`Self::enqueue_response`]'s
+    /// Refused arm. After Phase 4 the structured ResponseTooBig Err
+    /// line populates the queue ahead of this call, so the
+    /// `write_queue.is_empty()` precondition does not hold and the
+    /// call is a structural no-op; the flush-then-terminate path on
+    /// the next WRITABLE drain handles teardown uniformly with the
+    /// queue-non-empty case.
     ///
     /// Termination needs the cloned [`Registry`] to deregister the
     /// stream, which is why this lives on Hub rather than on

@@ -29,10 +29,9 @@ use specter_core::SubId;
 use std::collections::VecDeque;
 use std::time::SystemTime;
 
-/// Per-conn write-queue high-water mark. A subscriber that can't keep
-/// up sees its queue grow; past this watermark the dispatch loop
-/// counts the dropped diag against the `Missed` marker rather than
-/// pushing more bytes into a stalled queue. Matches the framing-level
+/// Per-conn write-queue hard ceiling. No byte path ever pushes past
+/// this point — the queue's memory footprint is bounded above by
+/// this constant. Matches the framing-level
 /// [`crate::ipc::framing::MAX_LINE_BYTES`] cap so a single oversize
 /// response (a saturated `list` projection on a busy daemon) wedging
 /// the queue has the same backpressure footprint as a hostile read.
@@ -40,7 +39,51 @@ use std::time::SystemTime;
 /// per-conn backpressure) and stay split so a future divergence
 /// (chunked diag fan-out with a larger queue, etc.) doesn't have to
 /// untangle them.
+///
+/// # Two-cap discipline
+///
+/// `WRITE_QUEUE_HIGH_WATER` is the *hard* ceiling. The *soft* cap
+/// every legitimate push honours is [`ACCEPT_CAP`], which sits
+/// [`RESPONSE_TOO_BIG_RESERVE`] bytes below the hard ceiling. The
+/// reserve is sacrosanct: only [`ConnState::push_err_in_reserve`]
+/// reaches it, and only with a single structured
+/// [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err line.
+/// Every other writer ([`ConnState::push_response`],
+/// [`ConnState::try_dispatch_diag`]) refuses bytes that would push
+/// the queue past `ACCEPT_CAP`. Reaching the hard ceiling is then a
+/// structural invariant of the reserve writer — not a runtime check
+/// against pathological accumulation.
 pub(in crate::driver) const WRITE_QUEUE_HIGH_WATER: usize = 256 * 1024;
+
+/// Bytes held at the top of [`WRITE_QUEUE_HIGH_WATER`] for the
+/// structured [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`]
+/// Err line. Sized for one render of:
+///
+/// ```text
+/// {"kind":"err","code":"response_too_big",
+///  "error":"response of N bytes exceeds per-conn cap of M bytes"}\n
+/// ```
+///
+/// (~120 bytes worst case at u64-sized byte counts) — the 1 KiB
+/// figure is 8× headroom against the actual line width, structurally
+/// witnessed by the `debug_assert!` in
+/// [`ConnState::push_err_in_reserve`]. The reserve is owned by the
+/// ResponseTooBig path — no other writer reaches it — so the headroom
+/// also absorbs the pathological case where a peer pipelines several
+/// over-water requests on one conn and stacks multiple Err lines into
+/// the reserve before the first flush.
+pub(in crate::driver) const RESPONSE_TOO_BIG_RESERVE: usize = 1024;
+
+/// Soft cap every legitimate write path honours. Bytes above this
+/// drop into the structured-Err path
+/// ([`ConnState::push_response`]'s Refused arm via the upstream
+/// [`super::hub::Hub::enqueue_response`] Refused arm) or the missed-
+/// marker accumulator ([`ConnState::try_dispatch_diag`]'s Dropped
+/// arm). Computed as
+/// [`WRITE_QUEUE_HIGH_WATER`] − [`RESPONSE_TOO_BIG_RESERVE`] so the
+/// arithmetic relationship between the two cap surfaces is single-
+/// source: bumping either constant moves `ACCEPT_CAP` with it.
+pub(in crate::driver) const ACCEPT_CAP: usize = WRITE_QUEUE_HIGH_WATER - RESPONSE_TOO_BIG_RESERVE;
 
 /// Connection state held on [`super::hub::Hub`]'s
 /// `conns: BTreeMap<Token, ConnState>`.
@@ -85,9 +128,14 @@ pub(in crate::driver) struct ConnState {
     ///   [`crate::ipc::framing::MAX_LINE_BYTES`] or a complete line
     ///   crosses the cap): set true via
     ///   [`ConnState::arm_close_after_flush`].
-    /// - **Over-watermark response** (a verb projection serializes
-    ///   into a payload larger than [`WRITE_QUEUE_HIGH_WATER`]):
-    ///   set true via [`ConnState::push_response`]'s overflow arm.
+    /// - **Over-cap response** (a verb projection serializes into a
+    ///   payload that would push the queue past [`ACCEPT_CAP`]): set
+    ///   true via [`ConnState::push_response`]'s overflow arm. The
+    ///   structured [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`]
+    ///   Err line is queued into the reserve via
+    ///   [`ConnState::push_err_in_reserve`] by the upstream
+    ///   [`super::hub::Hub::enqueue_response`], so the flush carries
+    ///   the operator-actionable signal ahead of the close.
     ///
     /// `drain_writable` observes the flag when the queue empties via a
     /// successful flush; the Hub-level `try_terminate_if_idle` handles
@@ -311,9 +359,13 @@ impl ConnState {
     /// 2. `role != Sub` → `Skipped` (pre-subscribe conn).
     /// 3. Per-Sub `filter` mismatch → `Skipped`.
     /// 4. Capacity gate: combined `(queue_len + marker_bytes + diag_line)`
-    ///    must fit under [`WRITE_QUEUE_HIGH_WATER`]. When it does not,
-    ///    the diag drops and [`MissedWindow::record_drop`] bumps the
-    ///    window — opening one on the `Closed → Open` edge or
+    ///    must fit under [`ACCEPT_CAP`]. The diag fan-out path
+    ///    honours the response-cap reserve too — a streaming diag
+    ///    that could fill the reserve would deny the next
+    ///    [`crate::ipc::protocol::WireErrorCode::ResponseTooBig`] Err
+    ///    its guaranteed-fit space. When the combined size does not
+    ///    fit, the diag drops and [`MissedWindow::record_drop`] bumps
+    ///    the window — opening one on the `Closed → Open` edge or
     ///    `saturating_add`-bumping `count` on a subsequent drop.
     /// 5. Otherwise: flush any pending Missed marker (carrying the
     ///    open window's `since` as the marker's `at` so operators see
@@ -357,7 +409,7 @@ impl ConnState {
         let combined = queue_len
             .saturating_add(marker_len)
             .saturating_add(diag_line.len());
-        if combined > WRITE_QUEUE_HIGH_WATER {
+        if combined > ACCEPT_CAP {
             missed.record_drop(at);
             return DispatchOutcome::Dropped;
         }
@@ -372,20 +424,62 @@ impl ConnState {
 
     /// Push response bytes into the write_queue.
     ///
-    /// Capacity-gated: if the projected queue length would exceed
-    /// [`WRITE_QUEUE_HIGH_WATER`], the queue is left untouched and
+    /// Capacity-gated on the soft cap: if the projected queue length
+    /// would exceed [`ACCEPT_CAP`] (the soft cap, sitting
+    /// [`RESPONSE_TOO_BIG_RESERVE`] bytes below
+    /// [`WRITE_QUEUE_HIGH_WATER`]), the queue is left untouched and
     /// `close_after_flush` is armed via
     /// [`Self::arm_close_after_flush`]. The Hub-level
     /// [`super::hub::Hub::enqueue_response`] pairs the `Refused`
-    /// outcome with a `try_terminate_if_idle` call to handle the
-    /// queue-empty-at-arm case.
+    /// outcome with [`Self::push_err_in_reserve`] (queueing the
+    /// structured `ResponseTooBig` Err into the reserve so operators
+    /// see an actionable signal ahead of the close) and then
+    /// [`super::hub::Hub::try_terminate_if_idle`] (a no-op once the
+    /// Err line populated the queue — the flush-then-terminate path
+    /// on the next WRITABLE drain handles teardown).
     pub(in crate::driver) fn push_response(&mut self, bytes: &[u8]) -> PushOutcome {
-        if self.write_queue.len().saturating_add(bytes.len()) > WRITE_QUEUE_HIGH_WATER {
+        if self.write_queue.len().saturating_add(bytes.len()) > ACCEPT_CAP {
             self.arm_close_after_flush();
             return PushOutcome::Refused;
         }
         self.write_queue.extend(bytes);
         PushOutcome::Accepted
+    }
+
+    /// Append the pre-encoded `ResponseTooBig` Err line bytes into the
+    /// per-conn reserve unconditionally. Total fn — the structural
+    /// invariant the [`ACCEPT_CAP`] / [`RESPONSE_TOO_BIG_RESERVE`]
+    /// split encodes guarantees the reserve has room regardless of
+    /// the prior queue state, so refusal is unrepresentable.
+    ///
+    /// Sole caller: [`super::hub::Hub::enqueue_response`]'s Refused
+    /// arm — paired with the upstream [`Self::push_response`] refusal
+    /// that already armed `close_after_flush`. The Hub builds the
+    /// `ResponsePayload::Err { code: ResponseTooBig, error: ... }`,
+    /// encodes the line, and calls through here; this method owns
+    /// the reserve-write half of the contract and stays unaware of
+    /// the wire vocabulary so the cap arithmetic lives single-source
+    /// alongside the rest of the per-conn state.
+    ///
+    /// # Invariant (debug-asserted)
+    ///
+    /// `bytes.len() <= RESPONSE_TOO_BIG_RESERVE`. The current Err
+    /// shape (`{"kind":"err","code":"response_too_big","error":"response
+    /// of N bytes exceeds per-conn cap of M bytes"}\n`) is ~120 bytes
+    /// at u64-sized counts; the 1 KiB reserve carries 8× headroom.
+    /// A future Err rendering that grew past the reserve would trip
+    /// the assert in debug builds, prompting the operator to widen
+    /// `RESPONSE_TOO_BIG_RESERVE` rather than silently overrun
+    /// [`WRITE_QUEUE_HIGH_WATER`].
+    pub(in crate::driver) fn push_err_in_reserve(&mut self, bytes: &[u8]) {
+        debug_assert!(
+            bytes.len() <= RESPONSE_TOO_BIG_RESERVE,
+            "ResponseTooBig Err line ({} bytes) exceeds RESPONSE_TOO_BIG_RESERVE ({} bytes); \
+             widen the reserve",
+            bytes.len(),
+            RESPONSE_TOO_BIG_RESERVE,
+        );
+        self.write_queue.extend(bytes);
     }
 }
 
@@ -534,15 +628,15 @@ mod tests {
     }
 
     /// Capacity gate: a diag whose projected queue length crosses
-    /// [`WRITE_QUEUE_HIGH_WATER`] drops, bumping `missed` to 1. No
+    /// [`ACCEPT_CAP`] drops, bumping `missed` to 1. No
     /// bytes leak into the queue.
     #[test]
     fn try_dispatch_diag_drops_and_bumps_missed_on_capacity_overflow() {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
-        // Pre-fill near the high-water mark so a small diag overflows.
+        // Pre-fill near the soft cap so a small diag overflows.
         conn.write_queue
-            .extend(std::iter::repeat_n(b'x', WRITE_QUEUE_HIGH_WATER - 10));
+            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 10));
         let queue_len_before = conn.write_queue.len();
         let line: &[u8] = b"{\"diag\":\"too_big_to_fit_in_remaining_capacity\"}\n";
         assert!(line.len() > 10, "test precondition");
@@ -574,7 +668,7 @@ mod tests {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
         conn.write_queue
-            .extend(std::iter::repeat_n(b'x', WRITE_QUEUE_HIGH_WATER - 5));
+            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
         let line: &[u8] = b"{\"diag\":\"too_big_to_fit\"}\n";
 
         let at1 = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
@@ -617,7 +711,7 @@ mod tests {
         conn.transition_to_sub(None);
         // Drive one drop to open a missed window.
         conn.write_queue
-            .extend(std::iter::repeat_n(b'x', WRITE_QUEUE_HIGH_WATER - 5));
+            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
         let big: &[u8] = b"{\"diag\":\"too_big_to_fit\"}\n";
         let at_drop = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         assert_eq!(
@@ -659,7 +753,7 @@ mod tests {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
         conn.write_queue
-            .extend(std::iter::repeat_n(b'x', WRITE_QUEUE_HIGH_WATER - 5));
+            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
         let big: &[u8] = b"{\"diag\":\"too_big_to_fit\"}\n";
         let at_drop = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         assert_eq!(
@@ -691,7 +785,7 @@ mod tests {
     }
 
     /// Combined-capacity check: when the marker+diag combined size
-    /// crosses [`WRITE_QUEUE_HIGH_WATER`], the dispatch drops without
+    /// crosses [`ACCEPT_CAP`], the dispatch drops without
     /// pushing the marker. `missed` re-accumulates; the marker tries
     /// again on the next dispatch.
     #[test]
@@ -700,7 +794,7 @@ mod tests {
         conn.transition_to_sub(None);
         // Drive one drop to open the marker window.
         conn.write_queue
-            .extend(std::iter::repeat_n(b'x', WRITE_QUEUE_HIGH_WATER - 5));
+            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
         let big: &[u8] = b"{\"diag\":\"too_big_to_fit\"}\n";
         let at_drop = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         assert_eq!(
@@ -748,7 +842,7 @@ mod tests {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
         conn.write_queue
-            .extend(std::iter::repeat_n(b'x', WRITE_QUEUE_HIGH_WATER - 5));
+            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP - 5));
         let big: &[u8] = b"{\"diag\":\"too_big_to_fit\"}\n";
         let at_drop = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
         assert_eq!(
@@ -797,7 +891,7 @@ mod tests {
     #[test]
     fn push_response_arms_close_on_capacity_overflow() {
         let (mut conn, _peer) = fresh_conn();
-        let huge = vec![b'x'; WRITE_QUEUE_HIGH_WATER + 1];
+        let huge = vec![b'x'; ACCEPT_CAP + 1];
         let outcome = conn.push_response(&huge);
         assert_eq!(outcome, PushOutcome::Refused);
         assert!(
@@ -821,5 +915,48 @@ mod tests {
         assert_eq!(outcome, PushOutcome::Accepted);
         let queued: Vec<u8> = conn.write_queue.iter().copied().collect();
         assert_eq!(queued, bytes);
+    }
+
+    /// `push_err_in_reserve` extends the write_queue unconditionally —
+    /// the reserve carries no soft-cap gate. The pre-existing queue
+    /// state is preserved; the new bytes append at the tail. Pins the
+    /// total-fn contract `Hub::enqueue_response`'s Refused arm depends
+    /// on (the reserve invariant
+    /// `ACCEPT_CAP + RESPONSE_TOO_BIG_RESERVE = WRITE_QUEUE_HIGH_WATER`
+    /// makes refusal unrepresentable).
+    #[test]
+    fn push_err_in_reserve_extends_queue_unconditionally() {
+        let (mut conn, _peer) = fresh_conn();
+        // Pre-fill at exactly the soft cap — push_err_in_reserve must
+        // still succeed because the reserve sits above ACCEPT_CAP.
+        conn.write_queue
+            .extend(std::iter::repeat_n(b'x', ACCEPT_CAP));
+        let err_line: &[u8] = b"{\"kind\":\"err\",\"code\":\"response_too_big\",\"error\":\"x\"}\n";
+        assert!(
+            err_line.len() <= RESPONSE_TOO_BIG_RESERVE,
+            "sample Err line fits the reserve invariant",
+        );
+        conn.push_err_in_reserve(err_line);
+        assert_eq!(
+            conn.write_queue.len(),
+            ACCEPT_CAP + err_line.len(),
+            "Err line appended verbatim past the soft cap into the reserve",
+        );
+    }
+
+    /// In debug builds, an Err line wider than [`RESPONSE_TOO_BIG_RESERVE`]
+    /// trips the [`ConnState::push_err_in_reserve`] `debug_assert!`.
+    /// Pins the structural witness that the reserve sizing assumption
+    /// is checked in lockstep with the rendered Err shape — a future
+    /// rendering that grew past the reserve would fail this test loudly,
+    /// prompting the operator to widen `RESPONSE_TOO_BIG_RESERVE` before
+    /// silently overrunning `WRITE_QUEUE_HIGH_WATER` in release.
+    #[cfg(debug_assertions)]
+    #[test]
+    #[should_panic(expected = "exceeds RESPONSE_TOO_BIG_RESERVE")]
+    fn push_err_in_reserve_oversize_panics_in_debug() {
+        let (mut conn, _peer) = fresh_conn();
+        let oversize = vec![b'x'; RESPONSE_TOO_BIG_RESERVE + 1];
+        conn.push_err_in_reserve(&oversize);
     }
 }
