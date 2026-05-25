@@ -239,7 +239,12 @@ impl Prober for WorkerProber {
             e.insert(req.owner(), req.correlation());
         }
         if let Err(crossbeam::channel::SendError(dropped)) = self.queue_tx.send(req) {
-            tracing::error!(
+            // Symmetric with the response-side `debug!` at the bottom of
+            // `run_worker`: the queue closes only when every worker has
+            // exited (the receivers are dropped), which under current
+            // ownership only happens via `WorkerProber::shutdown` — i.e.
+            // clean teardown. `debug!` matches that severity.
+            tracing::debug!(
                 owner = ?dropped.owner(),
                 correlation = ?dropped.correlation(),
                 "prober queue closed; submit dropped",

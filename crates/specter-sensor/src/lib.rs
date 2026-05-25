@@ -98,17 +98,22 @@ pub enum WatcherEvent {
     },
 }
 
-/// Single-threaded filesystem watcher.
+/// Single-owner filesystem watcher.
 ///
-/// `Send + AsFd`. One thread owns the watcher and drives every
-/// [`watch`](FsWatcher::watch) / [`unwatch`](FsWatcher::unwatch) /
-/// [`drain_ready`](FsWatcher::drain_ready) call. Blocking is the
-/// caller's responsibility: a reactor (mio::Poll, libc::poll, etc.)
-/// registers [`AsFd::as_fd`] in edge-triggered mode and invokes
-/// `drain_ready` only when the reactor reports the fd readable. The
-/// trait itself is non-blocking — there is no wake mechanism, no
-/// deadline, no internal block; cross-thread coordination lives in the
-/// reactor (e.g. `mio::Waker`), not on the watcher.
+/// `Send + AsFd`. One thread at a time owns the watcher and drives
+/// every [`watch`](FsWatcher::watch) / [`unwatch`](FsWatcher::unwatch) /
+/// [`drain_ready`](FsWatcher::drain_ready) call. The `Send` bound is
+/// load-bearing for the bin's boot-time ownership transfer: the
+/// watcher is constructed on the main thread and *moved* into the
+/// driver's `DriverHub` for the lifetime of the process. Once inside
+/// that owner, every call is on the same thread by construction —
+/// there is no internal synchronization. Blocking is the caller's
+/// responsibility: a reactor (mio::Poll, libc::poll, etc.) registers
+/// [`AsFd::as_fd`] in edge-triggered mode and invokes `drain_ready`
+/// only when the reactor reports the fd readable. The trait itself is
+/// non-blocking — there is no wake mechanism, no deadline, no internal
+/// block; cross-thread coordination lives in the reactor (e.g.
+/// `mio::Waker`), not on the watcher.
 ///
 /// # `AsFd` contract
 ///
@@ -272,11 +277,13 @@ pub trait FsWatcher: Send + AsFd {
 /// boundary — just "kernel said something happened (substantively)"
 /// or "nothing yet."
 ///
-/// `Send + AsFd`: same discipline as [`FsWatcher`]. One thread owns
-/// the watcher and drives [`drain_ready`](Self::drain_ready); a
-/// reactor blocks on [`AsFd::as_fd`] and invokes `drain_ready` only
-/// when the reactor reports the fd readable. The trait itself is
-/// non-blocking and owns no wake mechanism.
+/// `Send + AsFd`: same discipline as [`FsWatcher`]. One thread at a
+/// time owns the watcher and drives [`drain_ready`](Self::drain_ready);
+/// the `Send` bound supports the bin's boot-time hand-off into the
+/// driver thread the same way it does for `FsWatcher`. A reactor
+/// blocks on [`AsFd::as_fd`] and invokes `drain_ready` only when the
+/// reactor reports the fd readable. The trait itself is non-blocking
+/// and owns no wake mechanism.
 ///
 /// The `AsFd` contract is the same as [`FsWatcher`]'s: a long-lived
 /// kernel-resource-backed [`std::os::fd::BorrowedFd`], kernel marks

@@ -247,13 +247,9 @@ impl SubprocessActuator {
                 },
                 recv(self.reap_rx) -> msg => match msg {
                     Ok(r)  => self.state.handle_reap(r, engine_in, spawner, &self.reap_tx),
-                    Err(_) => {
-                        // Controller holds reap_tx, so the rx cannot disconnect under
-                        // current invariants. Logged break preserves orderly shutdown
-                        // if a future refactor reshuffles ownership.
-                        tracing::error!("reap channel disconnected; controller invariant broken");
-                        break;
-                    }
+                    Err(_) => unreachable!(
+                        "self.reap_tx keeps reap_rx connected for run's lifetime",
+                    ),
                 },
                 recv(shutdown_rx) -> _ => break,
                 recv(hard_shutdown_rx) -> _ => { hard = true; break; }
