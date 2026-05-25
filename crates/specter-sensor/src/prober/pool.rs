@@ -4,12 +4,14 @@
 //! # Lifecycle
 //!
 //! 1. [`WorkerProber::new(out, concurrency)`](WorkerProber::new)
-//!    spawns `concurrency.max(1)` threads named `sp-prober-{i}`. The
-//!    prefix is abbreviated (not the full `specter-prober-`) so the
-//!    name fits Linux's `TASK_COMM_LEN` (15 visible bytes + null) at
-//!    every legal `--probe-concurrency` value — preserving the index
-//!    in `/proc/<pid>/task/<tid>/comm`. Each worker holds clones of the
-//!    queue receiver, the response sender, and the expectation map.
+//!    spawns `concurrency.get()` threads named `sp-prober-{i}` —
+//!    `concurrency: NonZeroUsize` retires the runtime clamp the prior
+//!    `usize` signature carried. The prefix is abbreviated (not the
+//!    full `specter-prober-`) so the name fits Linux's `TASK_COMM_LEN`
+//!    (15 visible bytes + null) at every legal `--probe-concurrency`
+//!    value — preserving the index in `/proc/<pid>/task/<tid>/comm`.
+//!    Each worker holds clones of the queue receiver, the response
+//!    sender, and the expectation map.
 //! 2. The bin maps each `ProbeOp::Probe` from the engine to
 //!    [`Prober::submit`]; each `ProbeOp::Cancel` to
 //!    [`Prober::cancel`].
@@ -91,13 +93,20 @@ use crossbeam::channel::{Receiver, Sender};
 use specter_core::{ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse};
 use std::collections::BTreeMap;
 use std::io;
+use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 
-/// Default worker count. The bin's `--probe-concurrency` CLI flag
-/// overrides; this constant is the fallback.
-pub const DEFAULT_CONCURRENCY: usize = 4;
+/// Production default for [`WorkerProber::new`] when the bin's
+/// `--probe-concurrency` CLI flag is unset: a fixed `4`.
+///
+/// Mirrors the shape of `specter_actuator::default_concurrency` so the
+/// bin's two concurrency knobs resolve through symmetric APIs.
+#[must_use]
+pub const fn default_concurrency() -> NonZeroUsize {
+    NonZeroUsize::new(4).expect("4 is non-zero")
+}
 
 /// Per-owner correlation expectation map. `Arc<Mutex<...>>` is shared
 /// across the [`WorkerProber`] and every worker thread; the `Mutex`
@@ -157,8 +166,10 @@ impl std::fmt::Debug for WorkerProber {
 }
 
 impl WorkerProber {
-    /// Spawn the worker pool. `concurrency.max(1)` workers — a
-    /// zero-worker pool would queue requests forever.
+    /// Spawn the worker pool. `concurrency: NonZeroUsize` retires the
+    /// runtime `.max(1)` clamp the prior `usize` signature carried —
+    /// a zero-worker pool is unrepresentable rather than silently
+    /// upgraded.
     ///
     /// `out` is `Arc<dyn>`-in: the constructor owns one `Arc<dyn
     /// ProberResponseSender>` and `Arc::clone`s it into each worker.
@@ -172,8 +183,8 @@ impl WorkerProber {
     /// process-wide thread limit), drops the queue sender so
     /// already-spawned workers exit on `Disconnected`, joins them, and
     /// returns the underlying `io::Error`.
-    pub fn new(out: Arc<dyn ProberResponseSender>, concurrency: usize) -> io::Result<Self> {
-        let concurrency = concurrency.max(1);
+    pub fn new(out: Arc<dyn ProberResponseSender>, concurrency: NonZeroUsize) -> io::Result<Self> {
+        let concurrency = concurrency.get();
         let (queue_tx, queue_rx) = crossbeam::channel::unbounded::<ProbeRequest>();
         let expected: ExpectedMap = Arc::new(Mutex::new(BTreeMap::new()));
 

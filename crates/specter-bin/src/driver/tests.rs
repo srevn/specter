@@ -131,11 +131,7 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     // subscriber slot — tests assert on the driver's reload-pipeline
     // behaviour, not the subscriber's filter state.
     let obs_handle = crate::observability::ObservabilityHandle::noop();
-    let loader = Loader {
-        current_config: config,
-        current_log: log_cfg,
-        config_meta: dummy_meta(),
-    };
+    let loader = Loader::new(config, log_cfg, dummy_meta());
 
     let driver = EngineDriver::new(
         Engine::new(),
@@ -489,7 +485,7 @@ fn reload_with_invalid_path_logs_and_keeps_config() {
         .driver
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    assert_eq!(rig.driver.loader.current_config, config);
+    assert_eq!(rig.driver.loader.current_config(), &config);
 }
 
 /// Empty-diff reload preserves Sub identity: re-saving the same TOML
@@ -531,7 +527,7 @@ actions   = [{{ exec = ["true"] }}]
         .find_by_name("build")
         .expect("still attached");
     assert_eq!(sid_before, sid_after);
-    assert_eq!(rig.driver.loader.current_config, initial);
+    assert_eq!(rig.driver.loader.current_config(), &initial);
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -904,7 +900,7 @@ settle    = "100ms"
 
     let mut rig = rig_for(initial, cfg_path.clone());
     let _ = rig.driver.run_initial_attach();
-    assert_eq!(rig.driver.loader.config_meta, dummy_meta());
+    assert_eq!(rig.driver.loader.config_meta(), dummy_meta());
 
     std::fs::write(&cfg_path, &v2_text).unwrap();
     let expected_meta = FileMeta::from_path(&cfg_path).expect("lstat ok");
@@ -913,7 +909,7 @@ settle    = "100ms"
         .driver
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    assert_eq!(rig.driver.loader.config_meta, expected_meta);
+    assert_eq!(rig.driver.loader.config_meta(), expected_meta);
     assert!(rig.driver.engine.subs().find_by_name("b").is_some());
 
     let _ = rig.driver.begin_shutdown();
@@ -955,8 +951,8 @@ actions   = [{{ exec = ["true"] }}]
         .driver
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    assert_eq!(rig.driver.loader.config_meta, expected_meta);
-    assert_eq!(rig.driver.loader.current_config, initial);
+    assert_eq!(rig.driver.loader.config_meta(), expected_meta);
+    assert_eq!(rig.driver.loader.current_config(), &initial);
     let sid_after = rig
         .driver
         .engine
@@ -988,7 +984,7 @@ actions   = [{{ exec = ["true"] }}]
     let v1_config = Config::from_str(&v1_text).expect("v1 parses");
 
     let mut rig = rig_for(v1_config.clone(), cfg_path.clone());
-    rig.driver.loader.config_meta = v1_meta;
+    rig.driver.loader.rotate_meta_only(v1_meta);
 
     // Sleep so mtime advances at least one nanosecond past `v1_meta`
     // on coarse-resolution filesystems.
@@ -1001,8 +997,8 @@ actions   = [{{ exec = ["true"] }}]
         .driver
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    assert_eq!(rig.driver.loader.config_meta, v2_lstat);
-    assert_eq!(rig.driver.loader.current_config, v1_config);
+    assert_eq!(rig.driver.loader.config_meta(), v2_lstat);
+    assert_eq!(rig.driver.loader.current_config(), &v1_config);
 }
 
 /// Destination mismatch on reload preserves the running log shape
@@ -1034,10 +1030,12 @@ level       = "info"
     let initial_log = initial.log.clone();
 
     let mut rig = rig_for(initial, cfg_path.clone());
-    rig.driver.loader.config_meta = FileMeta::from_path(&cfg_path).expect("v1 lstat ok");
+    rig.driver
+        .loader
+        .rotate_meta_only(FileMeta::from_path(&cfg_path).expect("v1 lstat ok"));
 
     assert_eq!(
-        rig.driver.loader.current_log.destination,
+        rig.driver.loader.current_log().destination,
         specter_config::LogDestination::File,
     );
 
@@ -1048,10 +1046,10 @@ level       = "info"
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert_eq!(
-        rig.driver.loader.current_log.destination,
+        rig.driver.loader.current_log().destination,
         specter_config::LogDestination::File,
     );
-    assert_eq!(rig.driver.loader.current_log.path, initial_log.path);
+    assert_eq!(rig.driver.loader.current_log().path, initial_log.path);
 }
 
 // ============================================================
@@ -1066,11 +1064,11 @@ fn apply_config_settle_expiry_no_op_when_unarmed() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config.clone(), cfg_path);
 
-    let snapshot_meta = rig.driver.loader.config_meta;
+    let snapshot_meta = rig.driver.loader.config_meta();
     let _ = rig.driver.apply_config_settle_expiry(Instant::now());
     assert_eq!(rig.driver.config_settle_until, None);
-    assert_eq!(rig.driver.loader.config_meta, snapshot_meta);
-    assert_eq!(rig.driver.loader.current_config, config);
+    assert_eq!(rig.driver.loader.config_meta(), snapshot_meta);
+    assert_eq!(rig.driver.loader.current_config(), &config);
 }
 
 /// Helper short-circuits when `now < deadline`. Deadline stays armed.
@@ -1101,7 +1099,7 @@ fn apply_config_settle_expiry_fires_at_exact_deadline() {
     let real_meta = FileMeta::from_path(&cfg_path).expect("lstat ok");
 
     let mut rig = rig_for(config, cfg_path);
-    rig.driver.loader.config_meta = real_meta;
+    rig.driver.loader.rotate_meta_only(real_meta);
 
     let deadline = Instant::now();
     rig.driver.config_settle_until = Some(deadline);
@@ -1109,7 +1107,7 @@ fn apply_config_settle_expiry_fires_at_exact_deadline() {
     let _ = rig.driver.apply_config_settle_expiry(deadline);
 
     assert_eq!(rig.driver.config_settle_until, None);
-    assert_eq!(rig.driver.loader.config_meta, real_meta);
+    assert_eq!(rig.driver.loader.config_meta(), real_meta);
 }
 
 /// Settle expiry whose lstat agrees with `loader.config_meta` silently
@@ -1132,7 +1130,7 @@ actions   = [{{ exec = ["true"] }}]
     let initial = Config::from_str(&cfg_text).expect("v1 parses");
 
     let mut rig = rig_for(initial.clone(), cfg_path);
-    rig.driver.loader.config_meta = real_meta;
+    rig.driver.loader.rotate_meta_only(real_meta);
     let _ = rig.driver.run_initial_attach();
     let sid_snapshot = rig
         .driver
@@ -1148,8 +1146,8 @@ actions   = [{{ exec = ["true"] }}]
         .apply_config_settle_expiry(deadline + Duration::from_millis(1));
 
     assert_eq!(rig.driver.config_settle_until, None);
-    assert_eq!(rig.driver.loader.config_meta, real_meta);
-    assert_eq!(rig.driver.loader.current_config, initial);
+    assert_eq!(rig.driver.loader.config_meta(), real_meta);
+    assert_eq!(rig.driver.loader.current_config(), &initial);
     let sid_after = rig
         .driver
         .engine
@@ -1181,7 +1179,7 @@ actions   = [{{ exec = ["true"] }}]
     let v1_config = Config::from_str(&v1_text).expect("v1 parses");
 
     let mut rig = rig_for(v1_config, cfg_path.clone());
-    rig.driver.loader.config_meta = v1_meta;
+    rig.driver.loader.rotate_meta_only(v1_meta);
     let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.subs().find_by_name("a").is_some());
     assert!(rig.driver.engine.subs().find_by_name("b").is_none());
@@ -1212,10 +1210,10 @@ actions   = [{{ exec = ["true"] }}]
         .apply_config_settle_expiry(deadline + Duration::from_millis(1));
 
     assert_eq!(rig.driver.config_settle_until, None);
-    assert_eq!(rig.driver.loader.config_meta, v2_lstat);
+    assert_eq!(rig.driver.loader.config_meta(), v2_lstat);
     assert!(rig.driver.engine.subs().find_by_name("a").is_some());
     assert!(rig.driver.engine.subs().find_by_name("b").is_some());
-    assert_eq!(rig.driver.loader.current_config.watches.len(), 2);
+    assert_eq!(rig.driver.loader.current_config().watches.len(), 2);
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -1228,7 +1226,7 @@ fn apply_config_settle_expiry_treats_missing_path_as_changed() {
     let cfg_path = PathBuf::from("/dev/null/no/such/file.toml");
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config.clone(), cfg_path);
-    let pre_meta = rig.driver.loader.config_meta;
+    let pre_meta = rig.driver.loader.config_meta();
 
     let deadline = Instant::now();
     rig.driver.config_settle_until = Some(deadline);
@@ -1237,8 +1235,8 @@ fn apply_config_settle_expiry_treats_missing_path_as_changed() {
         .apply_config_settle_expiry(deadline + Duration::from_millis(1));
 
     assert_eq!(rig.driver.config_settle_until, None);
-    assert_eq!(rig.driver.loader.config_meta, pre_meta);
-    assert_eq!(rig.driver.loader.current_config, config);
+    assert_eq!(rig.driver.loader.config_meta(), pre_meta);
+    assert_eq!(rig.driver.loader.current_config(), &config);
 }
 
 // ============================================================
@@ -1318,7 +1316,7 @@ actions   = [{{ exec = ["true"] }}]
     let v1_config = Config::from_str(&v1_text).expect("v1 parses");
 
     let mut rig = rig_for(v1_config, cfg_path.clone());
-    rig.driver.loader.config_meta = v1_meta;
+    rig.driver.loader.rotate_meta_only(v1_meta);
     let _ = rig.driver.run_initial_attach();
 
     assert_eq!(rig.driver.driver_state.reload_count, 0);
@@ -1735,7 +1733,7 @@ max_settle = "500ms"
 
     let mut rig = rig_for(old, cfg_path);
 
-    let unfiltered = specter_config::diff(&rig.driver.loader.current_config, &new);
+    let unfiltered = specter_config::diff(rig.driver.loader.current_config(), &new);
     assert_eq!(unfiltered.subs.added.len(), 1);
     assert_eq!(unfiltered.subs.removed.len(), 1);
     assert_eq!(unfiltered.subs.modified_identity.len(), 1);
@@ -2446,7 +2444,9 @@ fn ipc_reload_via_pipeline_records_ipc_trigger() {
     std::fs::write(&cfg_path, "").expect("write empty config");
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path.clone());
-    rig.driver.loader.config_meta = FileMeta::from_path(&cfg_path).expect("lstat ok");
+    rig.driver
+        .loader
+        .rotate_meta_only(FileMeta::from_path(&cfg_path).expect("lstat ok"));
     let mut client = ipc_connect(&rig);
 
     let reply = ipc_round_trip(&mut rig, &mut client, &WireRequest::Reload);

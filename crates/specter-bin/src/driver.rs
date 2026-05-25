@@ -213,6 +213,14 @@ impl<W: FsWatcher> std::fmt::Debug for EngineDriver<W> {
 }
 
 impl<W: FsWatcher> EngineDriver<W> {
+    /// Borrow the config file path this driver was constructed against.
+    /// The path lives for the driver's lifetime — `App::run` consumes
+    /// `args.config` into the constructor below, so the boot-time
+    /// startup-TOCTOU lstat reads it back through this accessor.
+    pub(crate) fn config_path(&self) -> &std::path::Path {
+        &self.config_path
+    }
+
     /// Build the driver from preconstructed pieces. The [`DriverHub`] is
     /// constructed in `App::run` because it must own the [`mio::Waker`]
     /// the prober + actuator wrappers clone before the driver gets
@@ -288,13 +296,13 @@ impl<W: FsWatcher> EngineDriver<W> {
         // cannot be held across the loop.
         let watch_specs: Vec<_> = self
             .loader
-            .current_config
+            .current_config()
             .active_watches()
             .cloned()
             .collect();
         let promoter_specs: Vec<_> = self
             .loader
-            .current_config
+            .current_config()
             .active_promoters()
             .cloned()
             .collect();

@@ -11,7 +11,7 @@ use std::time::Duration;
 
 #[test]
 fn distinct_keys_run_concurrently_under_cap() {
-    let mut h = Harness::new(4);
+    let mut h = Harness::new(nz(4));
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().to_path_buf();
     let mk = |marker: &str| format!("touch {}/{} && sleep 0.1", dir.path().display(), marker);

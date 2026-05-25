@@ -54,7 +54,7 @@ use std::time::Duration;
 ///    Effect — preserving the per-Effect outstanding accounting.
 #[test]
 fn pending_submit_during_running_plan_does_not_replace_in_flight_steps() {
-    let mut h = Harness::new(4);
+    let mut h = Harness::new(nz(4));
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().to_path_buf();
     // `/bin/sleep` accepts decimal-seconds on BSD, GNU coreutils, and

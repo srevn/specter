@@ -182,7 +182,7 @@ impl<W: FsWatcher> EngineDriver<W> {
                     &self.engine,
                     &self.driver_state,
                     &self.disabled_runtime,
-                    &self.loader.current_config,
+                    self.loader.current_config(),
                     &self.config_path,
                 );
                 let _ = self
@@ -195,7 +195,7 @@ impl<W: FsWatcher> EngineDriver<W> {
                     &self.engine,
                     &self.driver_state,
                     &self.disabled_runtime,
-                    &self.loader.current_config,
+                    self.loader.current_config(),
                 );
                 let _ = self
                     .hub
@@ -207,7 +207,7 @@ impl<W: FsWatcher> EngineDriver<W> {
                     &self.engine,
                     &self.driver_state,
                     &self.disabled_runtime,
-                    &self.loader.current_config,
+                    self.loader.current_config(),
                     name.as_str(),
                 );
                 let _ = self
@@ -409,7 +409,7 @@ impl<W: FsWatcher> EngineDriver<W> {
             let _ = self.hub.enqueue_response(token, &resp);
             return ControlFlow::Continue(());
         }
-        let Some(spec) = self.loader.current_config.find_active_watch(name) else {
+        let Some(spec) = self.loader.current_config().find_active_watch(name) else {
             let resp = ResponsePayload::Err {
                 code: WireErrorCode::TomlDisabled,
                 error: "runtime override cleared, but the watch is not active in the \

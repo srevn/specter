@@ -11,7 +11,7 @@ use std::time::Duration;
 
 #[test]
 fn non_existent_command_returns_failed() {
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     h.submit(perfile_effect(
         1,
         1,
@@ -33,7 +33,7 @@ fn non_existent_command_returns_failed() {
 
 #[test]
 fn non_zero_exit_returns_failed_with_exit_code() {
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     h.submit(perfile_effect(
         1,
         1,
@@ -57,7 +57,7 @@ fn non_zero_exit_returns_failed_with_exit_code() {
 
 #[test]
 fn zero_exit_returns_ok() {
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     h.submit(perfile_effect(
         1,
         1,
@@ -76,7 +76,7 @@ fn zero_exit_returns_ok() {
 
 #[test]
 fn nonexistent_cwd_returns_failed() {
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     h.submit(perfile_effect(
         1,
         1,
@@ -98,7 +98,7 @@ fn nonexistent_cwd_returns_failed() {
 
 #[test]
 fn empty_argv_returns_failed() {
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     h.submit(perfile_effect(1, 1, 1, 1, vec![], std::env::temp_dir()));
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(2));
     match &completions[0] {

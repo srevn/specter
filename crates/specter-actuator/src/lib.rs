@@ -59,7 +59,7 @@ pub mod testkit;
 
 pub use os::OsSpawner;
 pub use permits::{Permit, Permits};
-pub use pool::{DEFAULT_CONCURRENCY, RunWiring, SubprocessActuator};
+pub use pool::{RunWiring, SubprocessActuator, default_concurrency};
 pub use spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
 
 // The actuator's completion envelope and sender-error vocabulary both

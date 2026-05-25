@@ -14,7 +14,7 @@
 
 mod common;
 
-use common::{Harness, next_corr, perfile_effect_with_program, unique_sub_id};
+use common::{Harness, next_corr, nz, perfile_effect_with_program, unique_sub_id};
 use specter_core::program::{BranchTarget, MultiStage, ProgramBuilder, SpawnBody};
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, EffectOutcome, ExecAction, Input, Termination,
@@ -61,7 +61,7 @@ fn pipe_program(stages: Vec<Vec<String>>) -> Arc<ActionProgram> {
 /// `exit_code = 7` and `signal = 15`.
 #[test]
 fn pipe_drain_does_not_block_on_hung_stage_0() {
-    let mut harness = Harness::new(2);
+    let mut harness = Harness::new(nz(2));
     let program = pipe_program(vec![
         vec!["/bin/sleep".into(), "60".into()],
         vec!["/bin/sh".into(), "-c".into(), "sleep 2; exit 7".into()],
@@ -114,7 +114,7 @@ fn pipe_drain_does_not_block_on_hung_stage_0() {
 /// the cascade firing.
 #[test]
 fn pipe_drain_all_ok_completes_ok() {
-    let mut harness = Harness::new(2);
+    let mut harness = Harness::new(nz(2));
     let program = pipe_program(vec![
         vec!["/bin/echo".into(), "hi".into()],
         vec!["/bin/cat".into()],

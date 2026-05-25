@@ -1,7 +1,7 @@
 //! Subprocess pool controller — single thread, drains submits + reaps +
 //! shutdown, owns slot state.
 //!
-//! Channel topology (`N` = resolved concurrency, [`resolve_concurrency`]):
+//! Channel topology (`N` = resolved concurrency, [`default_concurrency`]):
 //!
 //! ```text
 //! bin --(effects, bounded(1024))--> Controller
@@ -31,10 +31,21 @@ use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Sentinel for "default concurrency" passed to [`SubprocessActuator::new`].
-/// Resolved to `2 * num_cpus` (or `4` if `num_cpus` is unavailable). The
-/// bin's CLI flag passes a non-zero value when set.
-pub const DEFAULT_CONCURRENCY: usize = 0;
+/// Production default for [`SubprocessActuator::new`] when the bin's
+/// `--concurrency` flag is unset: `2 × available_parallelism()`.
+///
+/// Falls back to `4` if either query fails. The bin calls this and
+/// passes the [`NonZeroUsize`] result into [`SubprocessActuator::new`]
+/// directly — the `0`-as-sentinel pattern is typed away; everything
+/// below the constructor receives a [`NonZeroUsize`] and trusts it.
+#[must_use]
+pub fn default_concurrency() -> NonZeroUsize {
+    let fallback = NonZeroUsize::new(4).expect("4 is non-zero");
+    std::thread::available_parallelism()
+        .ok()
+        .and_then(|n| NonZeroUsize::new(n.get().saturating_mul(2)))
+        .unwrap_or(fallback)
+}
 
 /// SIGTERM → SIGKILL grace, pinned in one place so the shutdown drain
 /// and per-step timer threads can't drift apart.
@@ -79,20 +90,6 @@ pub struct RunWiring {
     pub hard_shutdown_done_tx: Sender<()>,
 }
 
-/// Resolve a `concurrency: usize` knob into a [`NonZeroUsize`]:
-/// `0` ⇒ `2 × available_parallelism()` (fallback `4`); non-zero ⇒
-/// pass-through. Shared between [`SubprocessActuator::new`] and the
-/// test constructors so the resolution logic stays single-source.
-fn resolve_concurrency(concurrency: usize) -> NonZeroUsize {
-    let fallback = NonZeroUsize::new(4).expect("4 is non-zero");
-    NonZeroUsize::new(concurrency).unwrap_or_else(|| {
-        std::thread::available_parallelism()
-            .ok()
-            .and_then(|n| NonZeroUsize::new(n.get().saturating_mul(2)))
-            .unwrap_or(fallback)
-    })
-}
-
 /// Build the [`EffectCompletion`] back-channel sized to the resolved
 /// concurrency.
 ///
@@ -125,11 +122,11 @@ pub struct SubprocessActuator {
 }
 
 impl SubprocessActuator {
-    /// Construct with `concurrency` global permits. Pass
-    /// [`DEFAULT_CONCURRENCY`] (`0`) to resolve to `2 * num_cpus`; non-zero
-    /// values pass through. The `0`-sentinel is the only place this
-    /// crate resolves "default concurrency"; everything below
-    /// `ActuatorState::new` receives a [`NonZeroUsize`] and trusts it.
+    /// Construct with `concurrency` global permits. The bin resolves
+    /// "unset → default" via [`default_concurrency`] before this call;
+    /// the [`NonZeroUsize`] type retires the `0`-as-sentinel pattern,
+    /// so everything below `ActuatorState::new` receives a non-zero
+    /// value and trusts it.
     ///
     /// Captures three pieces of startup-immutable process state — the
     /// env snapshot, the temp directory, and the actuator pid — once
@@ -139,12 +136,11 @@ impl SubprocessActuator {
     /// calls, `temp_dir` is shared by `Arc<Path>` across
     /// `DiffTmpFile::create` calls, and `actuator_pid` is a copy.
     #[must_use]
-    pub fn new(concurrency: usize) -> Self {
-        let resolved = resolve_concurrency(concurrency);
-        let (reap_tx, reap_rx) = reap_channel(resolved);
+    pub fn new(concurrency: NonZeroUsize) -> Self {
+        let (reap_tx, reap_rx) = reap_channel(concurrency);
         Self {
             state: ActuatorState::new(
-                resolved,
+                concurrency,
                 Arc::new(EnvSnapshot::capture()),
                 Arc::from(std::env::temp_dir().into_boxed_path()),
                 std::process::id(),
@@ -170,7 +166,7 @@ impl SubprocessActuator {
     /// dead code under `cargo test --lib` (no features).
     #[cfg(all(test, feature = "testkit"))]
     pub(crate) fn new_with_grace_and_env(
-        concurrency: usize,
+        concurrency: NonZeroUsize,
         grace: Duration,
         env: Arc<EnvSnapshot>,
     ) -> Self {
@@ -191,16 +187,15 @@ impl SubprocessActuator {
     /// `ActuatorState.temp_dir`, not `std::env::temp_dir()`.
     #[cfg(all(test, feature = "testkit"))]
     pub(crate) fn new_with_grace_and_env_and_tmp(
-        concurrency: usize,
+        concurrency: NonZeroUsize,
         grace: Duration,
         env: Arc<EnvSnapshot>,
         temp_dir: Arc<std::path::Path>,
         actuator_pid: u32,
     ) -> Self {
-        let resolved = resolve_concurrency(concurrency);
-        let (reap_tx, reap_rx) = reap_channel(resolved);
+        let (reap_tx, reap_rx) = reap_channel(concurrency);
         Self {
-            state: ActuatorState::new(resolved, env, temp_dir, actuator_pid, grace),
+            state: ActuatorState::new(concurrency, env, temp_dir, actuator_pid, grace),
             reap_tx,
             reap_rx,
         }
@@ -435,10 +430,15 @@ mod tests {
         EffectCompletion, EffectOp, EffectOutcome, EffectTarget, ExecAction, Input, ProfileId,
         ResourceId, ResourceKind, SubId, Termination,
     };
+    use std::num::NonZeroUsize;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
+
+    const fn nz(n: usize) -> NonZeroUsize {
+        NonZeroUsize::new(n).expect("non-zero literal in test fixture")
+    }
 
     /// Test adapter that lifts an [`EffectCompletion`] envelope into
     /// the engine-side `Input::EffectComplete` so the harness's
@@ -579,16 +579,16 @@ mod tests {
     }
 
     impl Harness {
-        fn new(concurrency: usize) -> Self {
+        fn new(concurrency: NonZeroUsize) -> Self {
             Self::new_with_grace_and_env(concurrency, Duration::from_secs(5), empty_env())
         }
 
-        fn new_with_grace(concurrency: usize, grace: Duration) -> Self {
+        fn new_with_grace(concurrency: NonZeroUsize, grace: Duration) -> Self {
             Self::new_with_grace_and_env(concurrency, grace, empty_env())
         }
 
         fn new_with_grace_and_env(
-            concurrency: usize,
+            concurrency: NonZeroUsize,
             grace: Duration,
             env: Arc<EnvSnapshot>,
         ) -> Self {
@@ -603,7 +603,7 @@ mod tests {
         /// `ActuatorState.temp_dir` rather than calling
         /// `std::env::temp_dir()` per Effect.
         fn new_with_grace_and_env_and_tmp(
-            concurrency: usize,
+            concurrency: NonZeroUsize,
             grace: Duration,
             env: Arc<EnvSnapshot>,
             temp_dir: Arc<Path>,
@@ -723,7 +723,7 @@ mod tests {
 
     #[test]
     fn submit_to_empty_slot_spawns_immediately() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         assert_eq!(s.len(), 1);
@@ -739,7 +739,7 @@ mod tests {
         // The actuator must surface `Effect.capture_output` to the
         // `Spawner::spawn` call so the production OsSpawner can switch
         // between Stdio::null() (false) and Stdio::inherit() (true).
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let mut e_off = make_effect_subtree(1, 1, 1);
         e_off.capture_output = false;
         let mut e_on = make_effect_subtree(2, 2, 2);
@@ -758,7 +758,7 @@ mod tests {
 
     #[test]
     fn submit_to_running_slot_replaces_pending() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         // While the first is "running", submit two more on the same key.
@@ -780,7 +780,7 @@ mod tests {
 
     #[test]
     fn reap_with_no_pending_emits_completion_and_clears_slot() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
@@ -798,7 +798,7 @@ mod tests {
 
     #[test]
     fn concurrency_cap_blocks_excess() {
-        let mut h = Harness::new(2);
+        let mut h = Harness::new(nz(2));
         h.submit(make_effect_perfile(1, 1, 1, 1));
         h.submit(make_effect_perfile(2, 2, 2, 2));
         h.submit(make_effect_perfile(3, 3, 3, 3));
@@ -821,7 +821,7 @@ mod tests {
 
     #[test]
     fn per_sub_serializes_two_per_file_keys() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         // Same Sub, different Resources → both PerFile keys, one Sub.
         h.submit(make_effect_perfile(7, 7, 1, 1));
         h.submit(make_effect_perfile(7, 7, 2, 2));
@@ -842,7 +842,7 @@ mod tests {
 
     #[test]
     fn per_sub_does_not_serialize_distinct_subs() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         // Different Subs → no per-Sub gating.
         h.submit(make_effect_perfile(1, 1, 1, 1));
         h.submit(make_effect_perfile(2, 2, 2, 2));
@@ -856,7 +856,7 @@ mod tests {
 
     #[test]
     fn subtree_and_per_file_for_same_sub_serialize() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.submit(make_effect_subtree(5, 1, 1));
         h.submit(make_effect_perfile(5, 5, 2, 2));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
@@ -878,7 +878,7 @@ mod tests {
 
     #[test]
     fn shutdown_with_no_running_returns_immediately() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.shutdown();
         assert!(
             h.spawner.signals().is_empty(),
@@ -888,7 +888,7 @@ mod tests {
 
     #[test]
     fn shutdown_sigterms_running_then_drains_reap() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         let pid = s[0].pid;
@@ -923,7 +923,7 @@ mod tests {
     #[test]
     fn shutdown_grace_expires_then_sigkills_stragglers() {
         // Use a short grace so the test runs quickly.
-        let mut h = Harness::new_with_grace(4, Duration::from_millis(150));
+        let mut h = Harness::new_with_grace(nz(4), Duration::from_millis(150));
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         let pid = s[0].pid;
@@ -972,7 +972,7 @@ mod tests {
         // with `process::exit` instead of relying on a sleep heuristic.
         // With a long grace (5s) configured, this test asserts that
         // SIGKILL lands *well* before the grace would have elapsed.
-        let mut h = Harness::new_with_grace(4, Duration::from_secs(5));
+        let mut h = Harness::new_with_grace(nz(4), Duration::from_secs(5));
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         let pid = s[0].pid;
@@ -1027,7 +1027,7 @@ mod tests {
 
     #[test]
     fn shutdown_drops_pending_effects() {
-        let mut h = Harness::new(1);
+        let mut h = Harness::new(nz(1));
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
         // Submit a second effect on the same key — it becomes pending.
@@ -1066,7 +1066,7 @@ mod tests {
 
     #[test]
     fn spawn_failure_synthesizes_failed_outcome() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
@@ -1088,7 +1088,7 @@ mod tests {
     fn spawn_failure_releases_permit() {
         // After a spawn failure the permit must be released — otherwise
         // subsequent submits would never spawn.
-        let mut h = Harness::new(1);
+        let mut h = Harness::new(nz(1));
         h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
         h.submit(make_effect_perfile(1, 1, 1, 1));
         h.wait_for_effect_completes(1, Duration::from_secs(1));
@@ -1119,7 +1119,7 @@ mod tests {
         // Resource=2) must spawn promptly. If `running_subs` still
         // contained Sub 7, the per-Sub gate would defer the second
         // submit indefinitely.
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
         h.submit(make_effect_perfile(7, 1, 1, 1));
         h.wait_for_effect_completes(1, Duration::from_secs(1));
@@ -1139,7 +1139,7 @@ mod tests {
         use smallvec::smallvec;
         use specter_core::{EntryKind, EntryRef, FsIdentity};
 
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let diff = Arc::new(Diff {
             created: smallvec![EntryRef {
                 segment: CompactString::from("a.rs"),
@@ -1182,7 +1182,7 @@ mod tests {
 
     #[test]
     fn effect_without_diff_does_not_set_specter_diff_path() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let e = make_effect_subtree(1, 1, 1);
         h.submit(e);
         let s = h.wait_for_spawns(1, Duration::from_secs(1));
@@ -1210,7 +1210,7 @@ mod tests {
         let custom_arc: Arc<Path> = Arc::from(custom.path().to_path_buf().into_boxed_path());
 
         let mut h = Harness::new_with_grace_and_env_and_tmp(
-            4,
+            nz(4),
             Duration::from_secs(5),
             empty_env(),
             Arc::clone(&custom_arc),
@@ -1258,7 +1258,7 @@ mod tests {
     /// emits exactly one `EffectComplete::Ok` after the last step.
     #[test]
     fn three_step_plan_runs_steps_sequentially_and_emits_one_complete() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let plan = n_step_program(3);
         h.submit(make_effect_perfile_with_program(1, 1, 1, 1, plan));
 
@@ -1297,7 +1297,7 @@ mod tests {
     /// `EffectComplete::Failed`.
     #[test]
     fn three_step_plan_stops_on_first_failure() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let plan = n_step_program(3);
         h.submit(make_effect_perfile_with_program(2, 2, 2, 1, plan));
 
@@ -1332,7 +1332,7 @@ mod tests {
         use smallvec::smallvec;
         use specter_core::{EntryKind, EntryRef, FsIdentity};
 
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let diff = Arc::new(Diff {
             created: smallvec![EntryRef {
                 segment: CompactString::from("a.rs"),
@@ -1401,7 +1401,7 @@ mod tests {
     /// terminus before pending fires (plan-atomicity invariant).
     #[test]
     fn submit_during_running_plan_replaces_pending_runs_after_terminal() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let plan_a = n_step_program(2);
         let effect_a = make_effect_perfile_with_program(4, 4, 4, 100, plan_a);
         h.submit(effect_a);
@@ -1456,7 +1456,7 @@ mod tests {
     /// test in `pool/state.rs`.
     #[test]
     fn multi_step_plan_runs_to_terminus_before_concurrent_sub_starts() {
-        let mut h = Harness::new(1); // cap=1: one global permit
+        let mut h = Harness::new(nz(1)); // cap=1: one global permit
         // Sub A: 2-step plan. Step 0 spawns, holding the only permit.
         let plan = n_step_program(2);
         h.submit(make_effect_perfile_with_program(5, 5, 5, 1, plan));
@@ -1501,7 +1501,7 @@ mod tests {
     /// outcome. Subsequent steps are abandoned.
     #[test]
     fn shutdown_mid_plan_abandons_remaining_steps() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let plan = n_step_program(3);
         h.submit(make_effect_perfile_with_program(7, 7, 7, 1, plan));
         let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
@@ -1556,7 +1556,7 @@ mod tests {
     /// before any spawn happens — the resolver fails fast.
     #[test]
     fn env_var_unset_no_default_terminates_plan_failed_before_spawn() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.submit(make_effect_perfile_with_program(
             1,
             1,
@@ -1584,7 +1584,7 @@ mod tests {
     /// the spawn proceeds normally and reaps Ok.
     #[test]
     fn env_var_unset_with_default_renders_default_in_argv() {
-        let mut h = Harness::new_with_grace_and_env(4, Duration::from_secs(5), empty_env());
+        let mut h = Harness::new_with_grace_and_env(nz(4), Duration::from_secs(5), empty_env());
         h.submit(make_effect_perfile_with_program(
             2,
             2,
@@ -1607,7 +1607,7 @@ mod tests {
     #[test]
     fn env_var_present_substitutes_from_injected_snapshot() {
         let mut h = Harness::new_with_grace_and_env(
-            4,
+            nz(4),
             Duration::from_secs(5),
             Arc::new(EnvSnapshot::from_map([("SPECTER_TEST_X", "value-x")])),
         );
@@ -1649,7 +1649,7 @@ mod tests {
     /// thread).
     #[test]
     fn step_timeout_sigterms_unfinished_child_after_deadline() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.submit(make_effect_perfile_with_program(
             10,
             10,
@@ -1696,7 +1696,7 @@ mod tests {
     #[test]
     fn step_timeout_short_circuits_when_child_completes_before_deadline() {
         // Long deadline; complete the child immediately.
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.submit(make_effect_perfile_with_program(
             11,
             11,
@@ -1785,7 +1785,7 @@ mod tests {
     /// EffectComplete is emitted (Ok) at plan terminus.
     #[test]
     fn predicate_ok_spawns_then_branch_and_terminates_ok() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let program = predicate_then_else("/bin/check", "/bin/then", "/bin/else");
         h.submit(make_effect_perfile_with_program(1, 1, 1, 1, program));
 
@@ -1822,7 +1822,7 @@ mod tests {
     /// terminates Ok after else-exec reaps Ok.
     #[test]
     fn predicate_failed_spawns_else_branch_outcome_does_not_propagate() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let program = predicate_then_else("/bin/check", "/bin/then", "/bin/else");
         h.submit(make_effect_perfile_with_program(2, 2, 2, 1, program));
 
@@ -1855,7 +1855,7 @@ mod tests {
     /// of `EffectComplete`.
     #[test]
     fn predicate_failed_no_else_terminates_ok_without_propagation() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let program = predicate_then_no_else("/bin/check", "/bin/then");
         h.submit(make_effect_perfile_with_program(3, 3, 3, 1, program));
 
@@ -1900,7 +1900,7 @@ mod tests {
     /// `MockSpawner::spawn` before the `SpawnRecord` push.
     #[test]
     fn predicate_spawn_failure_does_not_propagate_no_else() {
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         let program = predicate_then_no_else("/bin/check", "/bin/then");
         h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
         h.submit(make_effect_perfile_with_program(4, 4, 4, 1, program));
@@ -1979,7 +1979,7 @@ mod tests {
             Arc::new(b.build().unwrap())
         };
         let mut h = Harness::new_with_grace_and_env(
-            4,
+            nz(4),
             Duration::from_secs(5),
             Arc::new(EnvSnapshot::from_map::<_, &str, &str>([])),
         );
@@ -2059,7 +2059,7 @@ mod tests {
 
         // Path 1: B reaps Ok → C runs.
         {
-            let mut h = Harness::new(4);
+            let mut h = Harness::new(nz(4));
             h.submit(make_effect_perfile_with_program(10, 10, 10, 1, prog_path()));
             let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
             assert_eq!(s0[0].argv, vec!["/bin/a".to_string()]);
@@ -2080,7 +2080,7 @@ mod tests {
 
         // Path 2: B reaps Failed → C is skipped, plan terminates Ok.
         {
-            let mut h = Harness::new(4);
+            let mut h = Harness::new(nz(4));
             h.submit(make_effect_perfile_with_program(11, 11, 11, 1, prog_path()));
             let s0 = h.wait_for_spawns(1, Duration::from_secs(1));
             h.spawner.complete(s0[0].pid, EffectOutcome::Ok).unwrap();
@@ -2138,7 +2138,7 @@ mod tests {
         ]);
         let program = pipe_program(stages);
 
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.submit(make_effect_perfile_with_program(50, 50, 50, 1, program));
         // Both stages spawn at once.
         let spawns = h.wait_for_spawns(2, Duration::from_secs(1));
@@ -2176,7 +2176,7 @@ mod tests {
         ]);
         let program = pipe_program(stages);
 
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.submit(make_effect_perfile_with_program(51, 51, 51, 1, program));
         let spawns = h.wait_for_spawns(2, Duration::from_secs(1));
         let stage0_pid = spawns[0].pid;
@@ -2234,7 +2234,7 @@ mod tests {
         ]);
         let program = pipe_program(stages);
 
-        let mut h = Harness::new(4);
+        let mut h = Harness::new(nz(4));
         h.spawner.inject_spawn_error(std::io::ErrorKind::NotFound);
         h.submit(make_effect_perfile_with_program(52, 52, 52, 1, program));
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
@@ -2281,7 +2281,7 @@ mod tests {
 
         // Path 1: pipe Ok → /bin/after runs.
         {
-            let mut h = Harness::new(4);
+            let mut h = Harness::new(nz(4));
             h.submit(make_effect_perfile_with_program(
                 53,
                 53,
@@ -2311,7 +2311,7 @@ mod tests {
 
         // Path 2: pipe Failed → /bin/after must NOT run.
         {
-            let mut h = Harness::new(4);
+            let mut h = Harness::new(nz(4));
             h.submit(make_effect_perfile_with_program(54, 54, 54, 1, program));
             let pipe_spawns = h.wait_for_spawns(2, Duration::from_secs(1));
             h.spawner
@@ -2359,7 +2359,7 @@ mod tests {
 
         // Short shutdown_grace so the SIGKILL escalation also lands
         // inside the test window if SIGTERM doesn't take effect.
-        let mut h = Harness::new_with_grace(4, Duration::from_millis(20));
+        let mut h = Harness::new_with_grace(nz(4), Duration::from_millis(20));
         h.submit(make_effect_perfile_with_program(55, 55, 55, 1, program));
         let spawns = h.wait_for_spawns(2, Duration::from_secs(1));
         let stage0_pid = spawns[0].pid;

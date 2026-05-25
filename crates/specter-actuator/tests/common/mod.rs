@@ -23,6 +23,7 @@ use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon,
     EffectCompletion, EffectOp, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
 };
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -54,6 +55,10 @@ pub fn next_corr() -> u64 {
     NEXT_CORR.fetch_add(1, Ordering::SeqCst)
 }
 
+pub const fn nz(n: usize) -> NonZeroUsize {
+    NonZeroUsize::new(n).expect("non-zero literal in test fixture")
+}
+
 pub fn unique_sub_id(seed: u64) -> SubId {
     use slotmap::KeyData;
     SubId::from(KeyData::from_ffi(seed))
@@ -79,7 +84,7 @@ pub struct Harness {
 }
 
 impl Harness {
-    pub fn new(concurrency: usize) -> Self {
+    pub fn new(concurrency: NonZeroUsize) -> Self {
         let (effects_tx, effects_rx) = bounded::<EffectOp>(1024);
         let (shutdown_tx, shutdown_rx) = bounded::<()>(1);
         let (hard_shutdown_tx, hard_shutdown_rx) = bounded::<()>(1);

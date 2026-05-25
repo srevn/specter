@@ -93,7 +93,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///    error is paced by external pulse rate, not internal spinning.
     fn config_meta_changed(&self) -> bool {
         match FileMeta::from_path(&self.config_path) {
-            Ok(m) => m != self.loader.config_meta,
+            Ok(m) => m != self.loader.config_meta(),
             Err(_) => true,
         }
     }
@@ -364,7 +364,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         let requested = match new_config.log.clone().merge_cli(
             self.cli_log_overrides.level,
             self.cli_log_overrides.destination,
-            self.cli_log_overrides.path.clone(),
+            self.cli_log_overrides.path.as_deref(),
         ) {
             Ok(r) => r,
             Err(issue) => {
@@ -372,11 +372,11 @@ impl<W: FsWatcher> EngineDriver<W> {
                     issue = %issue,
                     "log reload failed; keeping running log config",
                 );
-                return self.loader.current_log.clone();
+                return self.loader.current_log().clone();
             }
         };
 
-        let running = &self.loader.current_log;
+        let running = self.loader.current_log();
 
         let applied_level = if requested.level == running.level {
             running.level
@@ -433,7 +433,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         &self,
         new_config: &Config,
     ) -> specter_core::WatchRegistryDiff {
-        let mut diff = specter_config::diff(&self.loader.current_config, new_config);
+        let mut diff = specter_config::diff(self.loader.current_config(), new_config);
         let disabled = &self.disabled_runtime;
         diff.subs
             .added
@@ -471,7 +471,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     pub(super) fn prune_disabled_runtime_against_current_config(&mut self) {
         self.disabled_runtime.retain(|name| {
             self.loader
-                .current_config
+                .current_config()
                 .watches
                 .iter()
                 .any(|s| s.name.as_str() == name.as_str())

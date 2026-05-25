@@ -10,25 +10,26 @@
 //! Lives on the engine driver thread — file I/O on SIGHUP runs there
 //! too, eliminating the Mutex an early design sketch anticipated.
 //!
-//! **Sole writers:** [`Loader::rotate_apply`] and
-//! [`Loader::rotate_meta_only`]. Falsifiable in one grep — production
-//! code outside this impl block contains zero `loader.{field} =`
-//! assignments. Construction is the single struct-literal at
-//! `app::run`, which is structurally not a writer of an existing
-//! `Loader`.
+//! **Encapsulation.** Fields are private; construction goes through
+//! [`Loader::new`] at boot and rotation through [`Loader::rotate_apply`]
+//! / [`Loader::rotate_meta_only`]. Read access is via
+//! [`Loader::current_config`], [`Loader::current_log`], and
+//! [`Loader::config_meta`]. Falsifiable in one grep — production code
+//! contains zero `loader.{field} =` assignments, because the field
+//! names are not in scope outside this module.
 
 use specter_config::{Config, FileMeta, LogConfig};
 
 /// Bin-side reload state. See module rustdoc.
 #[derive(Debug)]
 pub(crate) struct Loader {
-    pub(crate) current_config: Config,
+    current_config: Config,
     /// `[log]` block as resolved at startup or after the last successful
     /// reload — *with* CLI overrides folded in. Compared against the
     /// next reload's resolved value to decide whether to call
     /// `obs_handle.set_level` and / or fail-with-error on a destination
     /// change.
-    pub(crate) current_log: LogConfig,
+    current_log: LogConfig,
     /// Inode-level identity of `current_config`'s on-disk source —
     /// captured atomically with the content read via
     /// [`Config::from_path_with_meta`] (the `f.metadata()` call binds to
@@ -40,10 +41,47 @@ pub(crate) struct Loader {
     /// the auto-reload settle-expiry filter would observe a fresh
     /// lstat that differs from the stored value forever, looping
     /// `dispatch_reload` against the same content.
-    pub(crate) config_meta: FileMeta,
+    config_meta: FileMeta,
 }
 
 impl Loader {
+    /// Build the boot-time loader from the freshly-parsed config, the
+    /// resolved log block (CLI overrides folded in), and the atomic
+    /// [`FileMeta`] capture that produced the config bytes. The single
+    /// production construction site is `App::run`; tests construct via
+    /// the same path so the seeding rule stays single-source.
+    #[must_use]
+    pub(crate) const fn new(
+        current_config: Config,
+        current_log: LogConfig,
+        config_meta: FileMeta,
+    ) -> Self {
+        Self {
+            current_config,
+            current_log,
+            config_meta,
+        }
+    }
+
+    /// Borrow the currently-applied [`Config`].
+    pub(crate) const fn current_config(&self) -> &Config {
+        &self.current_config
+    }
+
+    /// Borrow the currently-applied [`LogConfig`] — the runtime shape,
+    /// with CLI overrides folded in.
+    pub(crate) const fn current_log(&self) -> &LogConfig {
+        &self.current_log
+    }
+
+    /// Read the stored [`FileMeta`]. `FileMeta` is [`Copy`] (a flat
+    /// inode-level fingerprint), so the by-value return matches the
+    /// comparison-then-discard usage on the auto-reload settle-expiry
+    /// path without forcing callers to deref.
+    pub(crate) const fn config_meta(&self) -> FileMeta {
+        self.config_meta
+    }
+
     /// Atomic rotation across all three fields on a successful reload —
     /// both the apply-diff and empty-diff branches of
     /// `EngineDriver::dispatch_reload` converge here. The empty-diff

@@ -440,7 +440,7 @@ pub use inotify::{InotifyConfigWatcher, InotifyWatcher};
 mod prober;
 
 #[cfg(unix)]
-pub use prober::{DEFAULT_CONCURRENCY, WorkerProber};
+pub use prober::{WorkerProber, default_concurrency};
 
 #[cfg(feature = "testkit")]
 pub mod testkit;

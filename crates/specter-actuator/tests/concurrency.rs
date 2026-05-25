@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 fn cap_two_with_four_distinct_subs_serializes_two_at_a_time() {
     // With cap=2 and four distinct (sub, resource) pairs, the wall-clock
     // time should be ~2x a single child's runtime, not ~4x.
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().to_path_buf();
     let script = "sleep 0.2".to_string();
@@ -48,7 +48,7 @@ fn per_sub_serializes_per_file_burst() {
     // Same Sub, four distinct resources → 4 PerFile keys; cap=4 so the
     // global gate isn't binding. Per-Sub semaphore (1) serializes all 4
     // anyway. Expect wall-time ~4x a single child's runtime.
-    let mut h = Harness::new(4);
+    let mut h = Harness::new(nz(4));
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().to_path_buf();
     let script = "sleep 0.15".to_string();
@@ -76,7 +76,7 @@ fn per_sub_serializes_per_file_burst() {
 #[test]
 fn distinct_subs_run_concurrently_under_cap() {
     // Distinct Subs and cap=4 → all 4 run concurrently; wall-time ~1x.
-    let mut h = Harness::new(4);
+    let mut h = Harness::new(nz(4));
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().to_path_buf();
     let script = "sleep 0.15".to_string();
@@ -106,7 +106,7 @@ fn distinct_subs_run_concurrently_under_cap() {
 fn engine_receives_one_effect_complete_per_spawn() {
     // Sanity: the actuator emits exactly one EffectComplete per Effect
     // (regardless of coalescing victims); the wait_for helper counts.
-    let mut h = Harness::new(4);
+    let mut h = Harness::new(nz(4));
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().to_path_buf();
     let script = "exit 0".to_string();

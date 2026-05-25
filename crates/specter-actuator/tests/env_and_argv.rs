@@ -60,7 +60,7 @@ fn assert_env_var_received(
         name = name,
         out = out_path.display()
     );
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     let mut e = perfile_effect(
         1,
         1,
@@ -156,7 +156,7 @@ fn child_receives_specter_created_newline_separated() {
         "printf '%s' \"$SPECTER_CREATED\" > {out}",
         out = out_path.display()
     );
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     let diff = Arc::new(Diff {
         created: smallvec![
             EntryRef {
@@ -210,7 +210,7 @@ fn child_receives_specter_diff_path_when_diff_present() {
         dbg = dbg_path.display(),
         out = out_path.display(),
     );
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     let diff = Arc::new(Diff {
         created: smallvec![EntryRef {
             segment: CompactString::from("a.rs"),
@@ -260,7 +260,7 @@ fn child_does_not_receive_specter_diff_path_without_diff() {
         "printf '%s' \"${{SPECTER_DIFF_PATH-}}\" > {out}",
         out = out_path.display()
     );
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     // Subtree is the only shape that can carry no diff: a PerFile
     // effect's diff is mandatory, so "no diff" is exercised here via a
     // diff-less Subtree fire.
@@ -289,7 +289,7 @@ fn tmp_diff_file_cleaned_up_after_completion() {
         "printf '%s' \"$SPECTER_DIFF_PATH\" > {p}",
         p = path_record.display()
     );
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     let diff = Arc::new(Diff {
         created: smallvec![EntryRef {
             segment: CompactString::from("a"),

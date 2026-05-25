@@ -85,12 +85,26 @@ use std::time::Instant;
 /// `ExitCode::SUCCESS` on graceful exit; `ExitCode::from(1)` on
 /// startup failure (config / watcher / prober / thread spawn / Hub /
 /// listener bind).
-///
-/// `DaemonArgs` is taken by value because every field is consumed
-/// (config moves into the driver; concurrency knobs are extracted then
-/// dropped); the `needless_pass_by_value` allow documents the intent.
-#[allow(clippy::needless_pass_by_value)]
 pub fn run(args: DaemonArgs) -> ExitCode {
+    // Destructure at the function head — every field is consumed
+    // exactly once by the lifecycle below (`config` moves into the
+    // driver constructor; `log_path` moves into `CliLogOverrides`;
+    // `log_level`, `log_destination`, `concurrency`, `probe_concurrency`,
+    // and `no_config_watch` are `Copy`). The bare bindings retire the
+    // `args.<field>.clone()` chains the pre-Phase-3.3 shape carried at
+    // the driver-constructor and merge_cli sites — the driver consumes
+    // `config` directly and the boot-time TOCTOU lstat reads back
+    // through [`EngineDriver::config_path`].
+    let DaemonArgs {
+        config,
+        log_level,
+        log_destination,
+        log_path,
+        concurrency,
+        probe_concurrency,
+        no_config_watch,
+    } = args;
+
     // 1. Register signal handlers BEFORE any other production action.
     //    `SignalPipe::new` installs `sa_sigaction` for HANDLED_SIGNALS
     //    synchronously on construction; any signal arriving in the
@@ -113,7 +127,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //    value seeds `loader.config_meta` and is consulted by the
     //    auto-reload settle filter to decide whether a watcher pulse
     //    reflects substantive change.
-    let (initial_config, initial_meta) = match Config::from_path_with_meta(&args.config) {
+    let (initial_config, initial_meta) = match Config::from_path_with_meta(&config) {
         Ok(pair) => pair,
         Err(e) => {
             eprintln!("specter: config load failed:\n{e}");
@@ -125,17 +139,18 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //    `merge_cli` returns a bare `ValidationIssue` (not wrapped in
     //    `ConfigError::Validate`): the issue's own `Display` carries
     //    the field + detail + kind, so we forward it verbatim.
-    let log_cfg = match initial_config.log.clone().merge_cli(
-        args.log_level,
-        args.log_destination,
-        args.log_path.clone(),
-    ) {
-        Ok(c) => c,
-        Err(issue) => {
-            eprintln!("specter: log config invalid: {issue}");
-            return ExitCode::from(1);
-        }
-    };
+    let log_cfg =
+        match initial_config
+            .log
+            .clone()
+            .merge_cli(log_level, log_destination, log_path.as_deref())
+        {
+            Ok(c) => c,
+            Err(issue) => {
+                eprintln!("specter: log config invalid: {issue}");
+                return ExitCode::from(1);
+            }
+        };
     // `_obs_guard` holds the file appender's worker thread alive for
     // the entire process lifetime. Drop ordering is load-bearing: if
     // the engine driver owned the guard, every `tracing::*` event
@@ -164,20 +179,16 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         promoters = initial_config.promoters.len(),
         ?disabled_watches,
         ?disabled_promoters,
-        config = %args.config.display(),
+        config = %config.display(),
         "specter starting"
     );
 
     // 4. Bin-side reload state — handed to the engine driver and
     //    mutated only via `Loader::rotate_apply` / `rotate_meta_only`
-    //    (the sole-writer claim on `Loader`'s module rustdoc). The
-    //    struct-literal construction here is the one production site
-    //    outside those rotation methods that touches the fields.
-    let loader = Loader {
-        current_config: initial_config,
-        current_log: log_cfg,
-        config_meta: initial_meta,
-    };
+    //    (the sole-writer claim on `Loader`'s module rustdoc). Fields
+    //    are private; `Loader::new` is the one production construction
+    //    site that touches them.
+    let loader = Loader::new(initial_config, log_cfg, initial_meta);
 
     // 5. Kqueue on macOS / FreeBSD, inotify on Linux. The watcher
     //    moves into the Hub below, which registers its fd against
@@ -195,11 +206,11 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //    failure under `--no-config-watch` keeps `None` (no
     //    auto-reload); a spawn failure with auto-reload on logs and
     //    degrades to SIGHUP-only.
-    let config_watcher = if args.no_config_watch {
+    let config_watcher = if no_config_watch {
         tracing::info!("auto-reload disabled via --no-config-watch");
         None
     } else {
-        match default_config_watcher(&args.config) {
+        match default_config_watcher(&config) {
             Ok(w) => Some(w),
             Err(e) => {
                 tracing::warn!(?e, "config watcher init failed; SIGHUP-only reload");
@@ -295,9 +306,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     // 11. Spawn the prober pool. The pool takes the `Arc<dyn>`
     //     sender directly and clones it per worker — workers wake
     //     the Hub on every probe response.
-    let probe_concurrency = args
-        .probe_concurrency
-        .map_or(specter_sensor::DEFAULT_CONCURRENCY, NonZeroUsize::get);
+    let probe_concurrency = probe_concurrency.unwrap_or_else(specter_sensor::default_concurrency);
     let prober = match WorkerProber::new(prober_sink, probe_concurrency) {
         Ok(p) => Arc::new(p),
         Err(e) => {
@@ -308,9 +317,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
 
     // 12. Spawn the actuator thread. Its `effect_complete_tx`
     //     wrapper wakes the Hub on every reaped completion.
-    let actuator_concurrency = args
-        .concurrency
-        .map_or(specter_actuator::DEFAULT_CONCURRENCY, NonZeroUsize::get);
+    let actuator_concurrency = concurrency.unwrap_or_else(specter_actuator::default_concurrency);
     let actuator_handle =
         match spawn_actuator_thread(actuator_concurrency, actuator_wiring, effect_sink) {
             Ok(h) => h,
@@ -320,16 +327,19 @@ pub fn run(args: DaemonArgs) -> ExitCode {
             }
         };
 
-    // 13. Engine driver — main thread.
+    // 13. Engine driver — main thread. `config` and `log_path` move
+    //     into the driver here; subsequent reads of the config path
+    //     (the boot-time TOCTOU lstat at step #15) go through
+    //     [`EngineDriver::config_path`].
     let cli_log_overrides = CliLogOverrides {
-        level: args.log_level,
-        destination: args.log_destination,
-        path: args.log_path,
+        level: log_level,
+        destination: log_destination,
+        path: log_path,
     };
     let mut driver = EngineDriver::new(
         Engine::new(),
         loader,
-        args.config.clone(),
+        config,
         socket_path,
         cli_log_overrides,
         obs_handle,
@@ -382,7 +392,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //     `forward`, the inner drain runs symmetrically (see the
     //     [`EngineDriver::dispatch_reload`] rustdoc).
     let drift_break = if !initial_attach_break
-        && let Ok(post_meta) = FileMeta::from_path(&args.config)
+        && let Ok(post_meta) = FileMeta::from_path(driver.config_path())
         && post_meta != initial_meta
     {
         tracing::info!("config changed during startup; running reload now");
@@ -558,7 +568,7 @@ impl EffectCompleteSender for WakingEffectCompleteSender {
 /// caller translates to a startup-fail [`ExitCode`], same shape as
 /// every other init path in [`run`].
 fn spawn_actuator_thread(
-    concurrency: usize,
+    concurrency: NonZeroUsize,
     wiring: RunWiring,
     engine_in: Box<dyn EffectCompleteSender>,
 ) -> io::Result<JoinHandle<()>> {

@@ -90,7 +90,7 @@ impl LogConfig {
         mut self,
         level: Option<LogLevel>,
         destination: Option<LogDestination>,
-        path: Option<PathBuf>,
+        path: Option<&Path>,
     ) -> Result<Self, ValidationIssue> {
         if let Some(l) = level {
             self.level = l;
@@ -99,7 +99,7 @@ impl LogConfig {
             self.destination = d;
         }
         if let Some(p) = path {
-            self.path = Some(p);
+            self.path = Some(p.to_path_buf());
         }
         self.path = validate_log_path(
             self.destination,
@@ -1575,7 +1575,7 @@ mod tests {
     use crate::error::{ConfigError, IssueKind};
     use specter_core::program::SpawnBody;
     use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
-    use std::path::PathBuf;
+    use std::path::Path;
     use std::time::Duration;
 
     const ROOT: &str = "/";
@@ -1719,7 +1719,7 @@ mod tests {
             path: None,
         };
         let issue = cfg
-            .merge_cli(None, None, Some(PathBuf::from("relative-log.txt")))
+            .merge_cli(None, None, Some(Path::new("relative-log.txt")))
             .unwrap_err();
         assert!(issue.watch_index.is_none());
         assert_eq!(issue.field, "log.path");

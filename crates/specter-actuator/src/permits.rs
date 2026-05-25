@@ -17,8 +17,8 @@ use std::num::NonZeroUsize;
 ///
 /// The `n: NonZeroUsize` constructor argument encodes the "at least one
 /// permit" invariant in the type system; the public boundary
-/// ([`crate::SubprocessActuator::new`]) resolves the `0`-as-default
-/// sentinel into a [`NonZeroUsize`] before reaching this layer.
+/// ([`crate::SubprocessActuator::new`]) takes [`NonZeroUsize`] directly,
+/// so the invariant flows in by typing rather than by runtime sentinel.
 #[derive(Debug)]
 pub struct Permits {
     /// Receiver side: acquiring a token consumes one.
@@ -88,7 +88,7 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    fn nz(n: usize) -> NonZeroUsize {
+    const fn nz(n: usize) -> NonZeroUsize {
         NonZeroUsize::new(n).expect("test setup: n must be non-zero")
     }
 

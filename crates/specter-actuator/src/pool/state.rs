@@ -1782,7 +1782,7 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    fn nz(n: usize) -> NonZeroUsize {
+    const fn nz(n: usize) -> NonZeroUsize {
         NonZeroUsize::new(n).expect("test setup: n must be non-zero")
     }
 

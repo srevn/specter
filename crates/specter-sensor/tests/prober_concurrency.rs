@@ -9,6 +9,7 @@ use crossbeam::channel::{Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{Input, ProbeCorrelation, ProbeOwner, ProbeRequest, ProfileId};
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
+use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -53,7 +54,8 @@ fn single_worker_drains_more_than_concurrency_serially() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let mut prober = WorkerProber::new(sink(tx), 1).unwrap();
+    let mut prober =
+        WorkerProber::new(sink(tx), NonZeroUsize::new(1).expect("1 is non-zero")).unwrap();
     let pids = fresh_profile_ids(5);
 
     for (i, p) in pids.iter().enumerate() {
@@ -90,7 +92,8 @@ fn pool_with_four_workers_handles_burst() {
     std::fs::write(&path, b"x").unwrap();
 
     let (tx, rx) = unbounded::<Input>();
-    let mut prober = WorkerProber::new(sink(tx), 4).unwrap();
+    let mut prober =
+        WorkerProber::new(sink(tx), NonZeroUsize::new(4).expect("4 is non-zero")).unwrap();
     let pids = fresh_profile_ids(20);
 
     for (i, p) in pids.iter().enumerate() {

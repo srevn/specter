@@ -36,4 +36,4 @@ mod walk;
 #[cfg(test)]
 mod tests;
 
-pub use pool::{DEFAULT_CONCURRENCY, WorkerProber};
+pub use pool::{WorkerProber, default_concurrency};

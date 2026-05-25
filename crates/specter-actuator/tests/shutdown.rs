@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 fn shutdown_sigkills_term_resistant_child() {
     // Child traps SIGTERM (ignores it) and loops forever. Shutdown
     // forces SIGKILL after the 5s grace.
-    let mut h = Harness::new(2);
+    let mut h = Harness::new(nz(2));
     let dir = tempfile::tempdir().expect("tempdir");
     let cwd = dir.path().to_path_buf();
     // Trap TERM (no-op) and loop. After SIGKILL it dies signal=9.
