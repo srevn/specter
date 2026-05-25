@@ -1211,9 +1211,13 @@ impl From<EffectScope> for WireEffectScope {
     }
 }
 
-/// Reload-trigger projection of `crate::driver::ReloadTrigger`.
-/// Lives in this module to keep every wire enum (core- or bin-sourced)
-/// in one place; surfaces in `StatusResponse.last_reload_via`.
+/// Reload-trigger projection of [`crate::driver::ReloadTrigger`].
+/// The enum lives here to keep every wire shape (core- or bin-sourced)
+/// declared in one module; the `From` projection lives at the source
+/// ([`crate::driver::state`]) so a new `ReloadTrigger` variant fails
+/// to compile at its declaration site, keeping the wire layer a leaf
+/// (no `crate::driver` import here). Surfaces in
+/// `StatusResponse.last_reload_via`.
 ///
 /// `AutoReload` projects to operator-facing `auto` — the engine-internal
 /// `AutoReload` name carries the "settle-expiry observed drift"
@@ -1228,18 +1232,6 @@ pub(crate) enum WireReloadTrigger {
     Auto,
     Ipc,
     Startup,
-}
-
-impl From<crate::driver::ReloadTrigger> for WireReloadTrigger {
-    fn from(t: crate::driver::ReloadTrigger) -> Self {
-        use crate::driver::ReloadTrigger as R;
-        match t {
-            R::Sighup => Self::Sighup,
-            R::AutoReload => Self::Auto,
-            R::Ipc => Self::Ipc,
-            R::Startup => Self::Startup,
-        }
-    }
 }
 
 #[cfg(test)]

@@ -40,6 +40,7 @@
 //! `&mut DriverState` (it is a field of [`super::EngineDriver`]); a
 //! `&DriverState` borrow handed out cross-module cannot mutate.
 
+use crate::ipc::wire::WireReloadTrigger;
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -147,4 +148,19 @@ pub(crate) enum ReloadTrigger {
     /// operators can distinguish "boot-time drift caught and applied"
     /// from a subsequent operator-driven reload.
     Startup,
+}
+
+/// Projection lives at the source so the wire layer stays a leaf
+/// (no `crate::driver` import in [`crate::ipc::wire`]) and a new
+/// [`ReloadTrigger`] variant fails compilation here, at the
+/// variant's declaration site.
+impl From<ReloadTrigger> for WireReloadTrigger {
+    fn from(t: ReloadTrigger) -> Self {
+        match t {
+            ReloadTrigger::Sighup => Self::Sighup,
+            ReloadTrigger::AutoReload => Self::Auto,
+            ReloadTrigger::Ipc => Self::Ipc,
+            ReloadTrigger::Startup => Self::Startup,
+        }
+    }
 }
