@@ -1,6 +1,6 @@
 use crate::driver::DriverState;
 use crate::ipc::protocol::StatusResponse;
-use crate::ipc::wire::{WireReloadTrigger, WireTime};
+use crate::ipc::wire::{WirePath, WireReloadTrigger, WireTime};
 use compact_str::CompactString;
 use specter_config::Config;
 use specter_engine::Engine;
@@ -11,8 +11,8 @@ use std::path::Path;
 ///
 /// The projection is **pure** — every read is a borrow off its
 /// source and every owned field on the response is a fresh
-/// allocation (mostly `WireTime` strings; `PathBuf` clones for the
-/// two filesystem paths).
+/// allocation (mostly `WireTime` strings; `WirePath` lossy
+/// projections for the two filesystem paths).
 ///
 /// **`sub_total` semantics** — every Sub currently in the engine
 /// registry, *including* dynamic Subs minted by Promoters. An
@@ -43,8 +43,8 @@ pub(crate) fn status(
         sub_disabled_runtime: disabled_runtime.len(),
         profile_active: engine.profiles().active_count(),
         promoter_active: engine.promoters().len(),
-        config_path: config_path.to_path_buf(),
-        socket_path: ds.socket_path.clone(),
+        config_path: WirePath::from(config_path),
+        socket_path: WirePath::from(&ds.socket_path),
     }
 }
 
@@ -52,11 +52,12 @@ pub(crate) fn status(
 mod tests {
     use super::status;
     use crate::driver::{DriverState, ReloadTrigger};
+    use crate::ipc::wire::WirePath;
     use compact_str::CompactString;
     use specter_config::Config;
     use specter_engine::Engine;
     use std::collections::BTreeSet;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::thread::sleep;
     use std::time::Duration;
 
@@ -87,8 +88,14 @@ mod tests {
         assert_eq!(r.sub_disabled_runtime, 0);
         assert_eq!(r.profile_active, 0);
         assert_eq!(r.promoter_active, 0);
-        assert_eq!(r.config_path, PathBuf::from("/etc/specter.toml"));
-        assert_eq!(r.socket_path, PathBuf::from("/tmp/specter-test.sock"));
+        assert_eq!(
+            r.config_path,
+            WirePath::from(Path::new("/etc/specter.toml"))
+        );
+        assert_eq!(
+            r.socket_path,
+            WirePath::from(Path::new("/tmp/specter-test.sock")),
+        );
     }
 
     #[test]
@@ -228,6 +235,9 @@ mod tests {
             &config,
             &PathBuf::from("/etc/specter.toml"),
         );
-        assert_eq!(r.socket_path, PathBuf::from("/run/user/1000/custom.sock"));
+        assert_eq!(
+            r.socket_path,
+            WirePath::from(Path::new("/run/user/1000/custom.sock")),
+        );
     }
 }

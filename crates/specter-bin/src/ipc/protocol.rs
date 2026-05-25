@@ -34,10 +34,8 @@ use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
 use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
-use std::borrow::Cow;
-use std::path::PathBuf;
 
-use super::wire::{WireEffectScope, WireReloadTrigger, WireStateLabel, WireTime};
+use super::wire::{WireEffectScope, WirePath, WireReloadTrigger, WireStateLabel, WireTime};
 
 /// Operator-facing wire request — the shape the daemon parses from
 /// the socket and the client constructs at write time.
@@ -102,56 +100,108 @@ pub(crate) enum ResponsePayload {
     SubscribeAck {
         sub: Option<WireId>,
     },
-    /// Structured error: `code` is one of the [`ERR_*`](self) static
-    /// constants on the server side — clients branch on it. `error`
+    /// Structured error: `code` is a closed-set [`WireErrorCode`]
+    /// vocabulary the daemon emits — clients branch on it. `error`
     /// is the human-readable amplification.
-    ///
-    /// `code` is `Cow<'static, str>` so the type carries the
-    /// trichotomy of construction sites in one shape: the server
-    /// constructs with `Cow::Borrowed(ERR_*)` (zero-alloc, type-
-    /// checked against the static constants), the client deserializes
-    /// into `Cow::Owned(String)` (no `'static` borrow exists in the
-    /// wire bytes). Both halves derive cleanly via the
-    /// [`err_code_serde`] helper — `Cow<'static, str>` is not directly
-    /// `Deserialize`-able because the `'de: 'static` bound demands
-    /// statically-rooted input, which `serde_json` cannot supply.
     Err {
-        #[serde(with = "err_code_serde")]
-        code: Cow<'static, str>,
+        code: WireErrorCode,
         error: String,
     },
 }
 
-/// Custom serde adapter for the [`ResponsePayload::Err::code`] field.
+/// Closed-set error vocabulary for [`ResponsePayload::Err::code`].
 ///
-/// `Cow<'static, str>` cannot directly derive `Deserialize`: serde's
-/// blanket `Cow<'a, str>: Deserialize<'de>` impl requires `'de: 'a`,
-/// and no non-`'static` deserializer (i.e. every real-world one)
-/// satisfies `'de: 'static`. The two free functions below deserialize
-/// into an owned `String` first and lift into `Cow::Owned`, and
-/// serialize through `str` directly so the wire form is identical
-/// regardless of whether the server constructed `Borrowed(ERR_*)` or
-/// the client round-tripped through `Owned`.
-mod err_code_serde {
-    use serde::{Deserialize, Deserializer, Serializer};
-    use std::borrow::Cow;
+/// Every variant is a unit value; `#[serde(rename_all = "snake_case")]`
+/// makes the wire form a bare quoted token (`"unknown_sub"`,
+/// `"already_subscribed"`, …) symmetric with the rest of the
+/// wire-projection layer's discipline ([`WireFsEvent`](super::wire),
+/// [`WireStateLabel`](super::wire), etc.). Serialize and Deserialize
+/// validate the same finite set, so a client receiving a daemon-emitted
+/// error parses into the same typed variant the daemon constructed —
+/// no host type behind the field, no separate adapter, no `Cow`.
+///
+/// [`Display`](std::fmt::Display) writes the exact wire form via
+/// [`Self::as_str`], so the existing client renderer
+/// (`eprintln!("specter <verb>: {code}: {error}")`) emits the same
+/// bytes after the refactor as before.
+///
+/// The vocabulary is intentionally closed (no `#[serde(other)]`
+/// fallback): a client that hits a daemon emitting a code it doesn't
+/// understand surfaces the failure loudly through the verb's catch-all
+/// arm (`unexpected response: ...`), rather than silently parsing a
+/// future code into an opaque sink. Per the audit's policy split,
+/// request/response carriers favor strictness; diag fan-out favors
+/// forgiveness.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WireErrorCode {
+    /// Sub name not in the engine registry, the operator-runtime
+    /// disable set, or the TOML watches.
+    UnknownSub,
+    /// Operator targeted a dynamic (promoter-spawned) Sub with an op
+    /// the bin refuses to apply: the synthesised name would silently
+    /// evaporate on the next reload's promoter prune pass.
+    ///
+    /// Consumed by the `disable` / `enable` IPC handlers in
+    /// [`crate::driver`].
+    DynamicSubNoOp,
+    /// `enable` / `disable` precondition: the targeted Sub is not in
+    /// the state the verb expects (`enable` against a Sub that is
+    /// not runtime-disabled, or `disable` against one already
+    /// disabled).
+    NotDisabled,
+    /// `enable` cleared the runtime override but the Sub is also
+    /// TOML-disabled (or absent from the file entirely) — the daemon
+    /// cannot re-attach until the operator edits the config and
+    /// reloads.
+    TomlDisabled,
+    /// Connection cap reached — too many concurrent operator clients.
+    Busy,
+    /// Request line failed JSON parse, or carries an unknown `op`.
+    Malformed,
+    /// `Subscribe` invoked on a conn that already flipped to
+    /// subscriber role. Subscribe is one-shot per conn — a repeat
+    /// call would silently overwrite the prior `name` filter and
+    /// drop any pending back-pressure accounting. The handler refuses
+    /// with this structured error so the operator sees a deterministic
+    /// failure instead of an invisible state mutation.
+    ///
+    /// The wire vocabulary is pinned by
+    /// [`tests::wire_error_code_round_trips_every_variant`]; the
+    /// handler-side gate that reaches this variant lives on
+    /// [`crate::driver::EngineDriver`]'s Subscribe arm.
+    AlreadySubscribed,
+}
 
-    // `#[serde(with = "...")]` fixes the serializer's first parameter
-    // shape (`&T` where `T` is the field type), so the `clippy::ptr_arg`
-    // suggestion of `&str` cannot apply here — the signature is the
-    // serde contract, not a free choice.
-    #[allow(clippy::ptr_arg)]
-    pub(super) fn serialize<S: Serializer>(
-        code: &Cow<'static, str>,
-        ser: S,
-    ) -> Result<S::Ok, S::Error> {
-        ser.serialize_str(code)
+impl WireErrorCode {
+    /// Wire-form token for this variant — the same `code` field value
+    /// the JSON shape carries. Mirrors the
+    /// `#[serde(rename_all = "snake_case")]` projection exactly.
+    ///
+    /// Exhaustive `match` — a new variant without a paired arm fails
+    /// to compile, keeping the wire vocabulary single-source against
+    /// [`tests::wire_error_code_round_trips_every_variant`]'s
+    /// JSON-form pin.
+    pub(crate) const fn as_str(&self) -> &'static str {
+        match self {
+            Self::UnknownSub => "unknown_sub",
+            Self::DynamicSubNoOp => "dynamic_sub_no_op",
+            Self::NotDisabled => "not_disabled",
+            Self::TomlDisabled => "toml_disabled",
+            Self::Busy => "busy",
+            Self::Malformed => "malformed",
+            Self::AlreadySubscribed => "already_subscribed",
+        }
     }
+}
 
-    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
-        de: D,
-    ) -> Result<Cow<'static, str>, D::Error> {
-        String::deserialize(de).map(Cow::Owned)
+impl std::fmt::Display for WireErrorCode {
+    /// Operator-visible rendering — writes the snake_case wire token
+    /// verbatim via [`Self::as_str`]. The client's
+    /// `eprintln!("specter <verb>: {code}: {error}")` reaches here,
+    /// so the human view and the JSON form share one source of truth.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -258,10 +308,10 @@ pub(crate) struct StatusResponse {
     pub(crate) promoter_active: usize,
     /// Currently-loaded config's source path. Every code path through
     /// `App::run` resolves one; a future stdin-TOML / ephemeral-config
-    /// mode would widen this to `Option<PathBuf>` honestly.
-    pub(crate) config_path: PathBuf,
+    /// mode would widen this to `Option<WirePath>` honestly.
+    pub(crate) config_path: WirePath,
     /// UNIX-socket path the IPC server is bound to.
-    pub(crate) socket_path: PathBuf,
+    pub(crate) socket_path: WirePath,
 }
 
 /// `specter list` response — every operator-declared Sub keyed by
@@ -295,7 +345,7 @@ pub(crate) struct ListRow {
     pub(crate) state: Option<WireStateLabel>,
     /// Anchor path. `None` for non-attached rows (no Profile, no
     /// resource).
-    pub(crate) anchor: Option<PathBuf>,
+    pub(crate) anchor: Option<WirePath>,
     /// Wall-clock projection of `Sub.last_fired_at`. `None` for
     /// never-fired Subs and non-attached rows.
     pub(crate) last_fired_at: Option<WireTime>,
@@ -358,7 +408,7 @@ pub(crate) struct SubDetails {
     /// signals "anchor vanished / not yet resolved" — symmetric with
     /// [`ListRow::anchor`], so operators reading `list -o json` and
     /// `show -o json` decode vanish identically (`null`).
-    pub(crate) anchor: Option<PathBuf>,
+    pub(crate) anchor: Option<WirePath>,
     /// Wall-clock projection of `Sub.last_fired_at`. `None` until
     /// the first successful fire.
     pub(crate) last_fired_at: Option<WireTime>,
@@ -382,57 +432,11 @@ pub(crate) struct SubDetails {
     pub(crate) program: Vec<String>,
 }
 
-/// Sub name not in the engine registry, the operator-runtime disable
-/// set, or the TOML watches.
-pub(crate) const ERR_UNKNOWN_SUB: &str = "unknown_sub";
-
-/// Operator targeted a dynamic (promoter-spawned) Sub with an op
-/// the bin refuses to apply: the synthesised name would silently
-/// evaporate on the next reload's promoter prune pass.
-///
-/// Consumed by the `disable` / `enable` IPC handlers in
-/// [`crate::driver`].
-pub(crate) const ERR_DYNAMIC_SUB_NO_OP: &str = "dynamic_sub_no_op";
-
-/// `enable` / `disable` precondition: the targeted Sub is not in
-/// the state the verb expects (`enable` against a Sub that is not
-/// runtime-disabled, or `disable` against one already disabled).
-pub(crate) const ERR_NOT_DISABLED: &str = "not_disabled";
-
-/// `enable` cleared the runtime override but the Sub is also
-/// TOML-disabled (or absent from the file entirely) — the daemon
-/// cannot re-attach until the operator edits the config and
-/// reloads.
-pub(crate) const ERR_TOML_DISABLED: &str = "toml_disabled";
-
-/// Connection cap reached — too many concurrent operator clients.
-pub(crate) const ERR_BUSY: &str = "busy";
-
-/// Request line failed JSON parse, or carries an unknown `op`.
-pub(crate) const ERR_MALFORMED: &str = "malformed";
-
-/// `Subscribe` invoked on a conn that already flipped to subscriber
-/// role. Subscribe is one-shot per conn — a repeat call would
-/// silently overwrite the prior `name` filter and drop any pending
-/// back-pressure accounting. The handler refuses with this structured
-/// error so the operator sees a deterministic failure instead of an
-/// invisible state mutation.
-///
-/// The wire-vocabulary value is pinned by
-/// [`tests::err_already_subscribed_round_trips_through_serde`]; the
-/// handler-side gate that reaches this constant lives on
-/// [`crate::driver::EngineDriver`]'s Subscribe arm.
-pub(crate) const ERR_ALREADY_SUBSCRIBED: &str = "already_subscribed";
-
 #[cfg(test)]
 mod tests {
-    use super::{
-        DisabledSource, ERR_ALREADY_SUBSCRIBED, ERR_UNKNOWN_SUB, ResponsePayload, WireId,
-        WireRequest,
-    };
+    use super::{DisabledSource, ResponsePayload, WireErrorCode, WireId, WireRequest};
     use slotmap::KeyData;
     use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
-    use std::borrow::Cow;
 
     /// Every slotmap key family projects through `KeyData::as_ffi()`
     /// to the same canonical `WireId(u64)`. A regression in any
@@ -512,13 +516,18 @@ mod tests {
     /// commitment: every variant flattens into one JSON object
     /// keyed by `kind`. A retrofit to external tagging would change
     /// the operator-visible shape and fail this test.
+    ///
+    /// The Err arm exercises one [`WireErrorCode`] variant inline so
+    /// the test's reach across [`ResponsePayload`] stays intact;
+    /// every-variant coverage of the error-code vocabulary lives in
+    /// [`wire_error_code_round_trips_every_variant`].
     #[test]
     fn response_payload_round_trips_internal_tag() {
         let ok = serde_json::to_string(&ResponsePayload::Ok).unwrap();
         assert_eq!(ok, r#"{"kind":"ok"}"#);
 
         let err = serde_json::to_string(&ResponsePayload::Err {
-            code: Cow::Borrowed(ERR_UNKNOWN_SUB),
+            code: WireErrorCode::UnknownSub,
             error: "no watch named foo".into(),
         })
         .unwrap();
@@ -527,13 +536,10 @@ mod tests {
             r#"{"kind":"err","code":"unknown_sub","error":"no watch named foo"}"#
         );
 
-        // Wire round-trip — server emits `Cow::Borrowed`; client
-        // deserializes through `Cow::Owned`. Both halves observe the
-        // same canonical bytes (`{"kind":"err","code":...,"error":...}`).
         let round_trip: ResponsePayload = serde_json::from_str(&err).unwrap();
         match round_trip {
             ResponsePayload::Err { code, error } => {
-                assert_eq!(code.as_ref(), ERR_UNKNOWN_SUB);
+                assert_eq!(code, WireErrorCode::UnknownSub);
                 assert_eq!(error, "no watch named foo");
             }
             other => panic!("expected Err, got {other:?}"),
@@ -552,35 +558,64 @@ mod tests {
         assert_eq!(disabled, r#""runtime""#);
     }
 
-    /// `ERR_ALREADY_SUBSCRIBED` exposes the `"already_subscribed"`
-    /// wire vocabulary and round-trips through the
-    /// [`ResponsePayload::Err::code`] adapter without losing its
-    /// value. Mirrors the cross-cutting witness pattern the
-    /// [`ERR_UNKNOWN_SUB`] arm of
-    /// [`response_payload_round_trips_internal_tag`] establishes —
-    /// a hand-edit to the constant body would silently change the
-    /// wire shape clients branch on, and this test catches it.
+    /// Every [`WireErrorCode`] variant projects to its
+    /// snake_case wire token and round-trips identically through
+    /// serde + [`WireErrorCode::as_str`] + [`std::fmt::Display`].
+    ///
+    /// One iteration pins three surfaces in lockstep:
+    /// the JSON byte form clients parse, the `as_str()` table the
+    /// daemon's Display reaches, and the renderer-visible
+    /// `"specter <verb>: {code}: ..."` line. A hand-edit to any
+    /// variant — adding one, renaming a tag, drifting the as_str
+    /// arm — fails here loudly, replacing the per-variant copy-paste
+    /// pin the [`ERR_*`](self) constants used to require.
     #[test]
-    fn err_already_subscribed_round_trips_through_serde() {
-        assert_eq!(ERR_ALREADY_SUBSCRIBED, "already_subscribed");
+    fn wire_error_code_round_trips_every_variant() {
+        // Compile-time exhaustive — a new variant without an entry
+        // here is a missing-arm match below.
+        const ALL: &[WireErrorCode] = &[
+            WireErrorCode::UnknownSub,
+            WireErrorCode::DynamicSubNoOp,
+            WireErrorCode::NotDisabled,
+            WireErrorCode::TomlDisabled,
+            WireErrorCode::Busy,
+            WireErrorCode::Malformed,
+            WireErrorCode::AlreadySubscribed,
+        ];
+        for &code in ALL {
+            let json = serde_json::to_string(&code).expect("serialize");
+            let stripped = json
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .expect("JSON form is a bare quoted token");
+            assert_eq!(
+                stripped,
+                code.as_str(),
+                "JSON form ({json}) must equal as_str() ({}) for {code:?}",
+                code.as_str(),
+            );
+            assert_eq!(
+                code.to_string(),
+                code.as_str(),
+                "Display must write as_str() for {code:?}",
+            );
+            let round_trip: WireErrorCode =
+                serde_json::from_str(&json).expect("deserialize wire form");
+            assert_eq!(round_trip, code);
+        }
 
-        let err = serde_json::to_string(&ResponsePayload::Err {
-            code: Cow::Borrowed(ERR_ALREADY_SUBSCRIBED),
-            error: "conn already in subscribe mode".into(),
-        })
-        .unwrap();
-        assert_eq!(
-            err,
+        // Spot-check the embedded shape: a `code` field deserialized
+        // from a daemon-emitted Err line yields the matching variant.
+        let err: ResponsePayload = serde_json::from_str(
             r#"{"kind":"err","code":"already_subscribed","error":"conn already in subscribe mode"}"#,
-        );
-
-        let round_trip: ResponsePayload = serde_json::from_str(&err).unwrap();
-        match round_trip {
+        )
+        .unwrap();
+        match err {
             ResponsePayload::Err { code, error } => {
-                assert_eq!(code.as_ref(), ERR_ALREADY_SUBSCRIBED);
+                assert_eq!(code, WireErrorCode::AlreadySubscribed);
                 assert_eq!(error, "conn already in subscribe mode");
             }
-            other => panic!("expected Err, got {other:?}"),
+            other => panic!("expected Err(AlreadySubscribed), got {other:?}"),
         }
     }
 }

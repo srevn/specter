@@ -186,7 +186,7 @@ fn col_state(row: &ListRow) -> String {
 fn col_anchor(row: &ListRow) -> String {
     row.anchor
         .as_ref()
-        .map_or_else(|| "-".to_string(), |p| p.display().to_string())
+        .map_or_else(|| "-".to_string(), ToString::to_string)
 }
 
 fn col_last_fired(row: &ListRow) -> String {
@@ -249,14 +249,14 @@ const fn state_label_str(s: WireStateLabel) -> &'static str {
 mod tests {
     use super::render;
     use crate::ipc::protocol::{DisabledSource, ListResponse, ListRow};
-    use crate::ipc::wire::WireStateLabel;
-    use std::path::PathBuf;
+    use crate::ipc::wire::{WirePath, WireStateLabel};
+    use std::path::Path;
 
     fn attached_row(name: &str) -> ListRow {
         ListRow {
             name: name.to_string(),
             state: Some(WireStateLabel::Idle),
-            anchor: Some(PathBuf::from("/tmp/anchor")),
+            anchor: Some(WirePath::from(Path::new("/tmp/anchor"))),
             last_fired_at: None,
             fire_count: Some(0),
             dedup_suppressed_count: Some(0),

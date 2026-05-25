@@ -69,20 +69,10 @@ pub(crate) fn render(resp: &StatusResponse, _wide: bool) -> String {
         "{:LABEL_WIDTH$}{} attached",
         "promoters", resp.promoter_active,
     );
-    // `Path::display()` returns a formatter adapter that streams into
-    // `out` without materialising an intermediate `String`.
-    let _ = writeln!(
-        out,
-        "{:LABEL_WIDTH$}{}",
-        "config",
-        resp.config_path.display(),
-    );
-    let _ = writeln!(
-        out,
-        "{:LABEL_WIDTH$}{}",
-        "socket",
-        resp.socket_path.display(),
-    );
+    // `WirePath: Display` writes its inner UTF-8 / lossy-projected
+    // string verbatim — zero-alloc into `out`, no intermediate.
+    let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "config", resp.config_path);
+    let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "socket", resp.socket_path);
     out
 }
 
@@ -137,8 +127,8 @@ const fn trigger_label(t: WireReloadTrigger) -> &'static str {
 mod tests {
     use super::{format_reloads, format_uptime, render, trigger_label};
     use crate::ipc::protocol::StatusResponse;
-    use crate::ipc::wire::{WireReloadTrigger, WireTime};
-    use std::path::PathBuf;
+    use crate::ipc::wire::{WirePath, WireReloadTrigger, WireTime};
+    use std::path::Path;
     use std::time::{Duration, UNIX_EPOCH};
 
     fn fresh_status() -> StatusResponse {
@@ -153,8 +143,8 @@ mod tests {
             sub_disabled_runtime: 0,
             profile_active: 0,
             promoter_active: 0,
-            config_path: PathBuf::from("/etc/specter.toml"),
-            socket_path: PathBuf::from("/tmp/specter-test.sock"),
+            config_path: WirePath::from(Path::new("/etc/specter.toml")),
+            socket_path: WirePath::from(Path::new("/tmp/specter-test.sock")),
         }
     }
 

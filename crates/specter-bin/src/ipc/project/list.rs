@@ -10,7 +10,6 @@
 //! per-tick.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
 
 use compact_str::CompactString;
 use specter_config::Config;
@@ -19,7 +18,7 @@ use specter_engine::Engine;
 
 use crate::driver::DriverState;
 use crate::ipc::protocol::{DisabledSource, ListResponse, ListRow, WireId};
-use crate::ipc::wire::{WireStateLabel, WireTime};
+use crate::ipc::wire::{WirePath, WireStateLabel, WireTime};
 
 use super::project_wall;
 
@@ -82,7 +81,7 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
     let state = profile.map(|p| WireStateLabel::from(p.state().label()));
     let anchor = profile
         .and_then(|p| engine.tree().path_of(p.resource()))
-        .map(|arc| PathBuf::from(arc.as_ref()));
+        .map(|arc| WirePath::from(&arc));
     let last_fired_at = sub
         .last_fired_at
         .map(|t| WireTime::from(project_wall(ds.start_wall, ds.start_instant, t)));

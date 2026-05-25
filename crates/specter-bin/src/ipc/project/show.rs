@@ -12,7 +12,6 @@
 //! callsite, not inside the index.
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
 
 use compact_str::CompactString;
 use specter_config::Config;
@@ -21,7 +20,7 @@ use specter_engine::Engine;
 
 use crate::driver::DriverState;
 use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId};
-use crate::ipc::wire::{WireEffectScope, WireStateLabel, WireTime};
+use crate::ipc::wire::{WireEffectScope, WirePath, WireStateLabel, WireTime};
 
 use super::{program, project_wall};
 
@@ -96,7 +95,7 @@ fn project_details(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) -> 
     let anchor = engine
         .tree()
         .path_of(profile.resource())
-        .map(|arc| PathBuf::from(arc.as_ref()));
+        .map(|arc| WirePath::from(&arc));
     SubDetails {
         name: sub.name.to_string(),
         sub: WireId::from(sid),

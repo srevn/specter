@@ -57,7 +57,7 @@
 use crate::driver::WakeHandle;
 use crate::driver::conns::{ConnState, PushOutcome};
 use crate::ipc::framing::{MAX_LINE_BYTES, serialize_line};
-use crate::ipc::protocol::{ERR_BUSY, ResponsePayload};
+use crate::ipc::protocol::{ResponsePayload, WireErrorCode};
 use crate::ipc::wire::WireDiagnostic;
 use crate::signals::SignalPipe;
 use crossbeam::channel::Receiver;
@@ -69,7 +69,6 @@ use specter_core::{
 use specter_sensor::{
     ConfigWatcher, DefaultConfigWatcher, DefaultWatcher, FsWatcher, WatcherEvent,
 };
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd};
@@ -565,7 +564,7 @@ impl<W: FsWatcher> DriverHub<W> {
     /// # Cap behavior
     ///
     /// On reaching [`MAX_IPC_CONNS`], extra accepts get a structured
-    /// `ERR_BUSY` JSON response written best-effort + the stream
+    /// [`WireErrorCode::Busy`] JSON response written best-effort + the stream
     /// dropped. The cap rejects rather than queues — operator IPC is
     /// not throughput-sensitive, and a queue would let a misbehaving
     /// client wedge the daemon's resource budget.
@@ -1074,9 +1073,9 @@ impl<W: FsWatcher> std::fmt::Debug for DriverHub<W> {
     }
 }
 
-/// Best-effort blocking write of a structured `ERR_BUSY` response to
-/// a stream we are about to drop. The conn count is at the cap; the
-/// peer gets one short JSON line and the stream closes.
+/// Best-effort blocking write of a structured `WireErrorCode::Busy`
+/// response to a stream we are about to drop. The conn count is at
+/// the cap; the peer gets one short JSON line and the stream closes.
 ///
 /// `set_nonblocking(false)` + `set_write_timeout(Some(500ms))` bounds
 /// the wait: a healthy peer receives ~80 bytes in microseconds; a
@@ -1090,7 +1089,7 @@ fn write_busy_then_drop(stream: mio::net::UnixStream) -> io::Result<()> {
     std_stream.set_nonblocking(false)?;
     std_stream.set_write_timeout(Some(Duration::from_millis(500)))?;
     let resp = ResponsePayload::Err {
-        code: Cow::Borrowed(ERR_BUSY),
+        code: WireErrorCode::Busy,
         error: "max concurrent connections".into(),
     };
     let bytes = serialize_line(&resp)?;

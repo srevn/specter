@@ -61,7 +61,7 @@ fn render_active(d: &SubDetails) -> String {
     out.push('\n');
     let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "state", state_label_str(d.state));
     let _ = match d.anchor.as_ref() {
-        Some(p) => writeln!(out, "{:LABEL_WIDTH$}{}", "anchor", p.display()),
+        Some(p) => writeln!(out, "{:LABEL_WIDTH$}{}", "anchor", p),
         None => writeln!(out, "{:LABEL_WIDTH$}-", "anchor"),
     };
     let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "scope", effect_scope_str(d.scope));
@@ -127,10 +127,9 @@ const fn disabled_source_str(s: DisabledSource) -> &'static str {
 mod tests {
     use super::render;
     use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId};
-    use crate::ipc::wire::{WireEffectScope, WireStateLabel};
-    use std::path::PathBuf;
+    use crate::ipc::wire::{WireEffectScope, WirePath, WireStateLabel};
 
-    fn details(name: &str, anchor: Option<PathBuf>, program: Vec<String>) -> SubDetails {
+    fn details(name: &str, anchor: Option<WirePath>, program: Vec<String>) -> SubDetails {
         SubDetails {
             name: name.to_string(),
             sub: WireId(1),
@@ -153,7 +152,7 @@ mod tests {
     fn show_human_active_renders_program_lines_indented() {
         let d = details(
             "foo",
-            Some(PathBuf::from("/etc/specter")),
+            Some(WirePath::from(std::path::Path::new("/etc/specter"))),
             vec![
                 "[0] exec /bin/build  ok→#1 fail→terminate".to_string(),
                 "[1] exec /bin/notify  ok→escape fail→terminate".to_string(),
@@ -174,9 +173,9 @@ mod tests {
         );
     }
 
-    /// Anchor-vanish (`None`) renders as `-` rather than an empty-PathBuf
-    /// sentinel — list and show carry the same `Option<PathBuf>` semantics
-    /// on the wire.
+    /// Anchor-vanish (`None`) renders as `-` rather than an empty-string
+    /// sentinel — list and show carry the same `Option<WirePath>`
+    /// semantics on the wire.
     #[test]
     fn show_human_active_anchor_none_renders_dash() {
         let d = details("foo", None, vec![]);

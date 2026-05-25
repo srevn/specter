@@ -55,7 +55,7 @@ use specter_core::{
     OverflowScope, ProbeOwner, ProfileStateDiscriminant, PromoterClaimKind, ReapTrigger,
     ResourceKind, SpliceFailureCause, StateLabel, WatchFailure,
 };
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -104,6 +104,71 @@ impl std::fmt::Display for WireTime {
     /// Renderers reproduce the RFC 3339 token verbatim through
     /// `Display`, so the token is a zero-alloc `&str` write — the
     /// only consumer outside the JSON wire path.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Wire-shape projection of a filesystem path.
+///
+/// The schema is JSON-safe: non-UTF-8 bytes ride as
+/// `U+FFFD REPLACEMENT CHARACTER` via [`Path::to_string_lossy`],
+/// matching `tracing`'s own lossy path projection. The lossy
+/// projection runs once at construct time (the [`From`] impls
+/// below); the wire serialization is then a structural copy of an
+/// already-validated UTF-8 string, so the daemon's `serde_json`
+/// path cannot panic on a non-UTF-8 [`PathBuf`] / [`Arc<Path>`] —
+/// the structural floor closes the daemon-panic surface the audit's
+/// F-CRIT-1 finding identified.
+///
+/// `#[serde(transparent)]` makes the JSON form a bare quoted string
+/// (`"/etc/specter.toml"`), not a wrapped object. The shape is
+/// symmetric across Serialize and Deserialize: server emits a
+/// lossy-projected UTF-8 token, client parses the same bytes back
+/// into the inner [`String`].
+///
+/// `Deserialize` accepts any UTF-8 string (the server-side projection
+/// is the gating shape; the client treats the inner bytes as opaque
+/// path-display text). The renderer reproduces the value verbatim
+/// through [`Display`].
+///
+/// Construction is one-way: every [`From`] impl projects *into*
+/// `WirePath`. There is no `From<String>` — a `WirePath` is built
+/// from a path-typed source, not from an unconstrained string. The
+/// discipline mirrors [`WireId`]'s "no `From<u64>` from clients" rule.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(transparent)]
+pub(crate) struct WirePath(String);
+
+impl From<&Path> for WirePath {
+    fn from(p: &Path) -> Self {
+        Self(p.to_string_lossy().into_owned())
+    }
+}
+
+impl From<&PathBuf> for WirePath {
+    /// Convenience for the common `WirePath::from(&driver_state.socket_path)`
+    /// shape. Delegates to the `&Path` projection.
+    fn from(p: &PathBuf) -> Self {
+        Self::from(p.as_path())
+    }
+}
+
+impl From<&Arc<Path>> for WirePath {
+    /// Diagnostic-side projection — the engine emits `path: Arc<Path>`
+    /// fields and the [`WireDiagnostic::from`] arms reach this impl
+    /// to project them. Delegates to the `&Path` projection.
+    fn from(p: &Arc<Path>) -> Self {
+        Self::from(p.as_ref())
+    }
+}
+
+impl std::fmt::Display for WirePath {
+    /// Renderers reproduce the projected path verbatim through
+    /// `Display`, so the token is a zero-alloc `&str` write — used
+    /// by `status -o human` / `list -o human` / `show -o human` /
+    /// `tail -o human` and the embedded `path={path}` fields on
+    /// diagnostic lines.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
@@ -222,7 +287,7 @@ pub(crate) enum WireDiagnostic {
     },
     AttachPathInvalid {
         at: WireTime,
-        path: String,
+        path: WirePath,
         /// Operator-visible explanation of *why* the path was
         /// rejected. The core-side carrier is a `&'static str`
         /// literal; on the wire it becomes an owned [`String`] so
@@ -265,7 +330,7 @@ pub(crate) enum WireDiagnostic {
     QuiescenceCeilingUnreadable {
         at: WireTime,
         profile: WireId,
-        first_unread: String,
+        first_unread: WirePath,
         intent: WireBurstIntent,
     },
     RebaseCeilingStillChanging {
@@ -276,7 +341,7 @@ pub(crate) enum WireDiagnostic {
     RebaseCeilingUnreadable {
         at: WireTime,
         profile: WireId,
-        first_unread: String,
+        first_unread: WirePath,
         intent: WireBurstIntent,
     },
     SensorOverflow {
@@ -344,7 +409,7 @@ pub(crate) enum WireDiagnostic {
     PromotionKindObserved {
         at: WireTime,
         promoter: WireId,
-        path: String,
+        path: WirePath,
         kind: WireResourceKind,
     },
     PromoterFanoutThreshold {
@@ -372,7 +437,7 @@ pub(crate) enum WireDiagnostic {
         at: WireTime,
         promoter: WireId,
         sub: WireId,
-        path: String,
+        path: WirePath,
     },
     InvalidBurstTransition {
         at: WireTime,
@@ -528,7 +593,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
             },
             Diagnostic::AttachPathInvalid { path, hint } => Self::AttachPathInvalid {
                 at,
-                path: arc_path_to_wire(path),
+                path: WirePath::from(path),
                 hint: (*hint).to_owned(),
             },
             Diagnostic::AttachResourceStale { resource } => Self::AttachResourceStale {
@@ -588,7 +653,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
             } => Self::QuiescenceCeilingUnreadable {
                 at,
                 profile: WireId::from(*profile),
-                first_unread: arc_path_to_wire(first_unread),
+                first_unread: WirePath::from(first_unread),
                 intent: WireBurstIntent::from(*intent),
             },
             Diagnostic::RebaseCeilingStillChanging { profile, intent } => {
@@ -605,7 +670,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
             } => Self::RebaseCeilingUnreadable {
                 at,
                 profile: WireId::from(*profile),
-                first_unread: arc_path_to_wire(first_unread),
+                first_unread: WirePath::from(first_unread),
                 intent: WireBurstIntent::from(*intent),
             },
             Diagnostic::SensorOverflow { scope } => Self::SensorOverflow {
@@ -701,7 +766,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
             } => Self::PromotionKindObserved {
                 at,
                 promoter: WireId::from(*promoter),
-                path: arc_path_to_wire(path),
+                path: WirePath::from(path),
                 kind: WireResourceKind::from(*kind),
             },
             Diagnostic::PromoterFanoutThreshold { promoter, count } => {
@@ -743,7 +808,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 at,
                 promoter: WireId::from(*promoter),
                 sub: WireId::from(*sub),
-                path: arc_path_to_wire(path),
+                path: WirePath::from(path),
             },
             Diagnostic::InvalidBurstTransition {
                 profile,
@@ -757,14 +822,6 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
             },
         }
     }
-}
-
-/// Project an [`Arc<Path>`] to its operator-visible string form.
-/// Non-UTF-8 bytes ride as `U+FFFD REPLACEMENT CHARACTER`; the
-/// schema stays JSON-safe and matches `tracing`'s own lossy path
-/// projection.
-fn arc_path_to_wire(p: &Arc<Path>) -> String {
-    p.as_ref().to_string_lossy().into_owned()
 }
 
 impl WireDiagnostic {
@@ -1238,12 +1295,13 @@ pub(crate) enum WireReloadTrigger {
 mod tests {
     use super::{
         KNOWN_WIRE_VARIANTS, WireBurstHelper, WireBurstIntent, WireClaimKind, WireDetachReason,
-        WireDiagnostic, WireFsEvent, WireOverflowScope, WireProbeOwner,
+        WireDiagnostic, WireFsEvent, WireOverflowScope, WirePath, WireProbeOwner,
         WireProfileStateDiscriminant, WirePromoterClaimKind, WireReapTrigger, WireResourceKind,
         WireSpliceFailureCause, WireTime, WireWatchFailure,
     };
     use crate::ipc::protocol::WireId;
     use std::collections::BTreeSet;
+    use std::path::Path;
     use std::time::{Duration, UNIX_EPOCH};
 
     /// Pre-epoch `SystemTime` clamps to `UNIX_EPOCH` and serializes
@@ -1261,6 +1319,51 @@ mod tests {
             serde_json::to_string(&epoch).unwrap(),
             r#""1970-01-01T00:00:00Z""#
         );
+    }
+
+    /// A non-UTF-8 path projects to U+FFFD-bearing UTF-8 at construct
+    /// time and round-trips cleanly through serde — `serde_json` never
+    /// sees the offending bytes, so the daemon-panic surface the
+    /// audit's F-CRIT-1 finding identified is structurally closed.
+    ///
+    /// The construct-time projection (`Path::to_string_lossy`) is the
+    /// load-bearing barrier: a `WirePath` whose inner [`String`]
+    /// already holds valid UTF-8 cannot panic at JSON-serialize time,
+    /// regardless of how exotic the source `PathBuf` / `Arc<Path>`
+    /// bytes are.
+    ///
+    /// Runs unix-only because [`OsStr::from_bytes`] is the standard
+    /// way to manufacture non-UTF-8 path bytes; the projection is the
+    /// same on every platform but the witness needs a non-UTF-8
+    /// `OsStr` to be meaningful.
+    #[cfg(unix)]
+    #[test]
+    fn wire_path_projects_non_utf8_to_replacement_and_round_trips() {
+        use std::ffi::OsStr;
+        use std::os::unix::ffi::OsStrExt;
+
+        // 0xff 0xfe is an invalid UTF-8 prefix on every Unix.
+        let raw: &OsStr = OsStr::from_bytes(&[0xff, 0xfe]);
+        let path = Path::new(raw);
+        let wire = WirePath::from(path);
+
+        // U+FFFD is the lossy-projection sentinel. Path::to_string_lossy
+        // emits one per invalid byte sequence; both bytes here form one
+        // invalid sequence (0xff is not a valid lead byte), so each
+        // shows as its own replacement. Reach through Display to read
+        // the projected form back as a String witness.
+        let projected = wire.to_string();
+        assert!(
+            projected.chars().any(|c| c == '\u{FFFD}'),
+            "non-UTF-8 path projects through U+FFFD; got {projected:?}",
+        );
+
+        // Construct-time validity ⇒ JSON-serialize cannot panic; the
+        // bytes survive a full round-trip (structural equality on
+        // WirePath is via the inner String).
+        let json = serde_json::to_string(&wire).expect("WirePath serialization is infallible");
+        let back: WirePath = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, wire);
     }
 
     /// Witness fixture covering every [`WireDiagnostic`] variant.
@@ -1381,7 +1484,7 @@ mod tests {
             },
             WireDiagnostic::AttachPathInvalid {
                 at: at(),
-                path: "/tmp/x".into(),
+                path: WirePath::from(Path::new("/tmp/x")),
                 hint: "relative".into(),
             },
             WireDiagnostic::AttachResourceStale {
@@ -1419,7 +1522,7 @@ mod tests {
             WireDiagnostic::QuiescenceCeilingUnreadable {
                 at: at(),
                 profile: WireId(120),
-                first_unread: "/tmp/x/y".into(),
+                first_unread: WirePath::from(Path::new("/tmp/x/y")),
                 intent: WireBurstIntent::Standard,
             },
             WireDiagnostic::RebaseCeilingStillChanging {
@@ -1430,7 +1533,7 @@ mod tests {
             WireDiagnostic::RebaseCeilingUnreadable {
                 at: at(),
                 profile: WireId(122),
-                first_unread: "/tmp/z".into(),
+                first_unread: WirePath::from(Path::new("/tmp/z")),
                 intent: WireBurstIntent::Seed,
             },
             WireDiagnostic::SensorOverflow {
@@ -1498,7 +1601,7 @@ mod tests {
             WireDiagnostic::PromotionKindObserved {
                 at: at(),
                 promoter: WireId(166),
-                path: "/tmp/p/x".into(),
+                path: WirePath::from(Path::new("/tmp/p/x")),
                 kind: WireResourceKind::Dir,
             },
             WireDiagnostic::PromoterFanoutThreshold {
@@ -1526,7 +1629,7 @@ mod tests {
                 at: at(),
                 promoter: WireId(174),
                 sub: WireId(175),
-                path: "/tmp/p/dyn".into(),
+                path: WirePath::from(Path::new("/tmp/p/dyn")),
             },
             WireDiagnostic::InvalidBurstTransition {
                 at: at(),

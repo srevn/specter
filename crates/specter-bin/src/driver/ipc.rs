@@ -44,15 +44,11 @@ use super::conns::ConnRole;
 use super::hub::{EnqueueOutcome, ReadOutcome};
 use super::state::ReloadTrigger;
 use crate::ipc::project;
-use crate::ipc::protocol::{
-    ERR_ALREADY_SUBSCRIBED, ERR_DYNAMIC_SUB_NO_OP, ERR_MALFORMED, ERR_NOT_DISABLED,
-    ERR_TOML_DISABLED, ERR_UNKNOWN_SUB, ResponsePayload, WireId, WireRequest,
-};
+use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
 use compact_str::CompactString;
 use mio::Token;
 use specter_core::Input;
 use specter_sensor::FsWatcher;
-use std::borrow::Cow;
 use std::ops::ControlFlow;
 use std::time::Instant;
 
@@ -142,9 +138,9 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// Parse and dispatch one LF-delimited line as a [`WireRequest`].
     ///
     /// Malformed JSON enqueues an [`ResponsePayload::Err`] response
-    /// with `code = ERR_MALFORMED` and continues; the client gets
-    /// one structured error frame and the conn stays open for the
-    /// next line. (A repeat-offender peer trips the
+    /// with `code = WireErrorCode::Malformed` and continues; the
+    /// client gets one structured error frame and the conn stays open
+    /// for the next line. (A repeat-offender peer trips the
     /// read-accumulator-size guard in
     /// [`super::hub::DriverHub::read_conn_into_lines`] and the conn
     /// terminates on the next drain pass.)
@@ -159,7 +155,7 @@ impl<W: FsWatcher> EngineDriver<W> {
             Ok(r) => r,
             Err(e) => {
                 let resp = ResponsePayload::Err {
-                    code: Cow::Borrowed(ERR_MALFORMED),
+                    code: WireErrorCode::Malformed,
                     error: format!("json parse: {e}"),
                 };
                 let _ = self.hub.enqueue_response(token, &resp);
@@ -228,14 +224,14 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///    that already flipped to [`ConnRole::Sub`] is a client-side
     ///    bug; left ungated it silently overwrites the prior filter
     ///    and drops the accumulated `missed` window. The handler
-    ///    refuses with [`ERR_ALREADY_SUBSCRIBED`] so the operator
-    ///    sees a deterministic failure rather than an invisible
-    ///    state mutation.
+    ///    refuses with [`WireErrorCode::AlreadySubscribed`] so the
+    ///    operator sees a deterministic failure rather than an
+    ///    invisible state mutation.
     /// 2. **Unknown-name gate.** A `Some(name)` that does not
     ///    resolve through the engine's `find_by_name` index returns
-    ///    [`ERR_UNKNOWN_SUB`]. The conn stays in `Reqs` (no role
-    ///    flip), so a retry with a valid name still goes through
-    ///    the unfiltered path.
+    ///    [`WireErrorCode::UnknownSub`]. The conn stays in `Reqs`
+    ///    (no role flip), so a retry with a valid name still goes
+    ///    through the unfiltered path.
     /// 3. **Ack-then-flip.** With `conn.role` still in `Reqs`, any
     ///    concurrent `dispatch_to_subscribers` call skips this conn
     ///    — no diag can interleave between the ack enqueue and the
@@ -254,7 +250,7 @@ impl<W: FsWatcher> EngineDriver<W> {
             .is_some_and(|c| matches!(c.role, ConnRole::Sub { .. }));
         if already_subscribed {
             let resp = ResponsePayload::Err {
-                code: Cow::Borrowed(ERR_ALREADY_SUBSCRIBED),
+                code: WireErrorCode::AlreadySubscribed,
                 error: "conn already in subscribe mode".into(),
             };
             let _ = self.hub.enqueue_response(token, &resp);
@@ -267,7 +263,7 @@ impl<W: FsWatcher> EngineDriver<W> {
             && resolved.is_none()
         {
             let resp = ResponsePayload::Err {
-                code: Cow::Borrowed(ERR_UNKNOWN_SUB),
+                code: WireErrorCode::UnknownSub,
                 error: format!("no watch named {n}"),
             };
             let _ = self.hub.enqueue_response(token, &resp);
@@ -296,15 +292,15 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// Three precondition gates ahead of the apply:
     ///
     /// 1. A name absent from the engine's `by_name` index is refused
-    ///    with [`ERR_UNKNOWN_SUB`].
+    ///    with [`WireErrorCode::UnknownSub`].
     /// 2. The resolved Sub's `source_promoter.is_some()` (a dynamic,
     ///    promoter-spawned Sub) is refused with
-    ///    [`ERR_DYNAMIC_SUB_NO_OP`] — a runtime override against a
-    ///    synthesised name has no TOML anchor and would evaporate at
-    ///    the next reload's prune pass.
+    ///    [`WireErrorCode::DynamicSubNoOp`] — a runtime override
+    ///    against a synthesised name has no TOML anchor and would
+    ///    evaporate at the next reload's prune pass.
     /// 3. A name already in `disabled_runtime` is refused with
-    ///    [`ERR_NOT_DISABLED`] — the verb's precondition (sub is
-    ///    runtime-enabled) is violated.
+    ///    [`WireErrorCode::NotDisabled`] — the verb's precondition
+    ///    (sub is runtime-enabled) is violated.
     ///
     /// On the apply path, the override-set insert runs BEFORE the
     /// engine's [`Input::DetachSub`] step. The ordering binds the
@@ -328,7 +324,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     ) -> ControlFlow<()> {
         let Some(sid) = self.engine.subs().find_by_name(name.as_str()) else {
             let resp = ResponsePayload::Err {
-                code: Cow::Borrowed(ERR_UNKNOWN_SUB),
+                code: WireErrorCode::UnknownSub,
                 error: format!("no watch named {name}"),
             };
             let _ = self.hub.enqueue_response(token, &resp);
@@ -341,7 +337,7 @@ impl<W: FsWatcher> EngineDriver<W> {
             .expect("by_name resolves to live SubId — registry lockstep invariant");
         if sub.source_promoter.is_some() {
             let resp = ResponsePayload::Err {
-                code: Cow::Borrowed(ERR_DYNAMIC_SUB_NO_OP),
+                code: WireErrorCode::DynamicSubNoOp,
                 error: "cannot disable a promoter-spawned dynamic sub \
                         (synthesised names cannot persist as runtime overrides)"
                     .into(),
@@ -351,7 +347,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         }
         if self.disabled_runtime.contains(name.as_str()) {
             let resp = ResponsePayload::Err {
-                code: Cow::Borrowed(ERR_NOT_DISABLED),
+                code: WireErrorCode::NotDisabled,
                 error: "already disabled at runtime".into(),
             };
             let _ = self.hub.enqueue_response(token, &resp);
@@ -371,20 +367,20 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// 1. **Clear the override.** [`std::collections::BTreeSet::remove`]
     ///    returns the membership flag atomically with the removal; a
-    ///    `false` return surfaces as [`ERR_NOT_DISABLED`]. The
-    ///    override IS cleared before step 2 runs, so even on the
-    ///    [`ERR_TOML_DISABLED`] failure path the runtime state is
-    ///    consistent: the operator's "no longer want this suppressed"
-    ///    intent is honoured regardless of whether the TOML can
-    ///    re-attach.
+    ///    `false` return surfaces as [`WireErrorCode::NotDisabled`].
+    ///    The override IS cleared before step 2 runs, so even on the
+    ///    [`WireErrorCode::TomlDisabled`] failure path the runtime
+    ///    state is consistent: the operator's "no longer want this
+    ///    suppressed" intent is honoured regardless of whether the
+    ///    TOML can re-attach.
     /// 2. **Re-attach iff the TOML carries the entry active.**
     ///    [`specter_config::Config::find_active_watch`] returns
     ///    `None` for both "entry has `enabled = false`" AND "entry
     ///    left the TOML entirely"; both surface the same
-    ///    [`ERR_TOML_DISABLED`] to the operator. On a hit, a fresh
-    ///    [`Input::AttachSub`] step drives re-attach, and per-anchor
-    ///    outcomes (Pending descent, AttachPathInvalid) surface via
-    ///    diag fan-out
+    ///    [`WireErrorCode::TomlDisabled`] to the operator. On a hit,
+    ///    a fresh [`Input::AttachSub`] step drives re-attach, and
+    ///    per-anchor outcomes (Pending descent, AttachPathInvalid)
+    ///    surface via diag fan-out
     ///    ([`super::hub::DriverHub::dispatch_to_subscribers`]), not
     ///    the verb ack.
     ///
@@ -393,7 +389,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     fn handle_enable(&mut self, token: Token, name: &str, now: Instant) -> ControlFlow<()> {
         if !self.disabled_runtime.remove(name) {
             let resp = ResponsePayload::Err {
-                code: Cow::Borrowed(ERR_NOT_DISABLED),
+                code: WireErrorCode::NotDisabled,
                 error: "not disabled at runtime".into(),
             };
             let _ = self.hub.enqueue_response(token, &resp);
@@ -401,7 +397,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         }
         let Some(spec) = self.loader.current_config.find_active_watch(name) else {
             let resp = ResponsePayload::Err {
-                code: Cow::Borrowed(ERR_TOML_DISABLED),
+                code: WireErrorCode::TomlDisabled,
                 error: "runtime override cleared, but the watch is not active in the \
                         current TOML (enabled = false or removed); edit config and \
                         reload to re-attach"

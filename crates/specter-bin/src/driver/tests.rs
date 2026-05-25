@@ -18,10 +18,7 @@ use super::state::ReloadTrigger;
 use super::{DriverHub, EngineDriver, TickOutcome};
 use crate::app::CliLogOverrides;
 use crate::channels::ActuatorIO;
-use crate::ipc::protocol::{
-    ERR_ALREADY_SUBSCRIBED, ERR_DYNAMIC_SUB_NO_OP, ERR_NOT_DISABLED, ERR_TOML_DISABLED,
-    ERR_UNKNOWN_SUB, ResponsePayload, WireId, WireRequest,
-};
+use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
 use crate::loader::Loader;
 use compact_str::CompactString;
 use crossbeam::channel::Sender;
@@ -30,7 +27,6 @@ use specter_config::{Config, FileMeta};
 use specter_core::{Diagnostic, Input, ProbeOwner, ResourceId, StepOutput, SubId};
 use specter_engine::Engine;
 use specter_sensor::testkit::{MockFsWatcher, MockProber};
-use std::borrow::Cow;
 use std::io::{Read, Write};
 use std::ops::ControlFlow;
 use std::os::unix::net::UnixStream;
@@ -1772,7 +1768,10 @@ fn ipc_status_replies_with_projection() {
     let reply = ipc_round_trip(&mut rig, &mut client, &WireRequest::Status);
     match reply {
         ResponsePayload::Status(status) => {
-            assert_eq!(status.socket_path, expected_socket);
+            assert_eq!(
+                status.socket_path,
+                crate::ipc::wire::WirePath::from(&expected_socket),
+            );
             assert_eq!(status.sub_total, 0);
         }
         other => panic!("expected Status, got {other:?}"),
@@ -1823,13 +1822,13 @@ fn ipc_subscribe_unknown_name_errors_without_registering() {
     );
     match reply {
         ResponsePayload::Err { code, error } => {
-            assert_eq!(code.as_ref(), ERR_UNKNOWN_SUB);
+            assert_eq!(code, WireErrorCode::UnknownSub);
             assert!(
                 error.contains("no watch named nope"),
                 "error carries the resolution detail; got {error:?}",
             );
         }
-        other => panic!("expected Err(ERR_UNKNOWN_SUB), got {other:?}"),
+        other => panic!("expected Err(WireErrorCode::UnknownSub), got {other:?}"),
     }
     // The conn stays alive as a Reqs conn (no role flip happened),
     // so conn_count is still 1.
@@ -1938,13 +1937,13 @@ fn subscribe_twice_returns_err_already_subscribed() {
     );
     match reply2 {
         ResponsePayload::Err { code, error } => {
-            assert_eq!(code.as_ref(), ERR_ALREADY_SUBSCRIBED);
+            assert_eq!(code, WireErrorCode::AlreadySubscribed);
             assert!(
                 error.contains("already in subscribe mode"),
                 "error carries the precondition detail; got {error:?}",
             );
         }
-        other => panic!("expected Err(ERR_ALREADY_SUBSCRIBED); got {other:?}"),
+        other => panic!("expected Err(WireErrorCode::AlreadySubscribed); got {other:?}"),
     }
 
     // The first subscription's role is untouched — `filter == None`
@@ -2024,7 +2023,7 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
         },
     );
     assert!(
-        matches!(reply, ResponsePayload::Err { ref code, .. } if code.as_ref() == ERR_ALREADY_SUBSCRIBED),
+        matches!(reply, ResponsePayload::Err { code, .. } if code == WireErrorCode::AlreadySubscribed),
         "second Subscribe is refused; got {reply:?}",
     );
 
@@ -2066,6 +2065,8 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
 /// envelope adds ~50 bytes of `{"kind":"err","code":"…","error":"…"}`
 /// framing, so the padded payload comfortably exceeds the cap with
 /// no need for a custom carrier or a `cfg(test)` constant override.
+/// The code value [`WireErrorCode::Busy`] is incidental — the test
+/// pins the oversize-refusal mechanism, not the error vocabulary.
 #[test]
 fn oversize_response_terminates_conn_inline_when_queue_empty() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2086,7 +2087,7 @@ fn oversize_response_terminates_conn_inline_when_queue_empty() {
 
     let padding = "x".repeat(WRITE_QUEUE_HIGH_WATER + 1);
     let huge = ResponsePayload::Err {
-        code: Cow::Borrowed("test_oversize"),
+        code: WireErrorCode::Busy,
         error: padding,
     };
     let outcome = rig.driver.hub.enqueue_response(token, &huge);
@@ -2142,7 +2143,7 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
 
     let padding = "x".repeat(WRITE_QUEUE_HIGH_WATER + 1);
     let huge = ResponsePayload::Err {
-        code: Cow::Borrowed("test_oversize"),
+        code: WireErrorCode::Busy,
         error: padding,
     };
     assert_eq!(
@@ -2389,7 +2390,7 @@ fn ipc_disable_unknown_name_returns_err() {
     );
     match reply {
         ResponsePayload::Err { code, error } => {
-            assert_eq!(code.as_ref(), ERR_UNKNOWN_SUB);
+            assert_eq!(code, WireErrorCode::UnknownSub);
             assert!(error.contains("no watch named ghost"));
         }
         other => panic!("expected Err, got {other:?}"),
@@ -2414,7 +2415,7 @@ fn ipc_disable_unknown_dynamic_shape_name_returns_unknown_sub() {
     );
     match reply {
         ResponsePayload::Err { code, error } => {
-            assert_eq!(code.as_ref(), ERR_UNKNOWN_SUB);
+            assert_eq!(code, WireErrorCode::UnknownSub);
             assert!(error.contains("no watch named promoter@/tmp/x"));
         }
         other => panic!("expected Err, got {other:?}"),
@@ -2423,8 +2424,8 @@ fn ipc_disable_unknown_dynamic_shape_name_returns_unknown_sub() {
 }
 
 /// Disable against a real dynamic (promoter-spawned) Sub returns
-/// `ERR_DYNAMIC_SUB_NO_OP`. Inject a dynamic Sub directly so the
-/// gate (which reads `source_promoter`) fires.
+/// [`WireErrorCode::DynamicSubNoOp`]. Inject a dynamic Sub directly
+/// so the gate (which reads `source_promoter`) fires.
 #[test]
 fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
@@ -2487,7 +2488,7 @@ fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
         },
     );
     match reply {
-        ResponsePayload::Err { code, .. } => assert_eq!(code.as_ref(), ERR_DYNAMIC_SUB_NO_OP),
+        ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::DynamicSubNoOp),
         other => panic!("expected Err, got {other:?}"),
     }
     assert!(rig.driver.disabled_runtime.is_empty());
@@ -2523,7 +2524,7 @@ fn ipc_disable_already_disabled_returns_err() {
         },
     );
     match reply {
-        ResponsePayload::Err { code, .. } => assert_eq!(code.as_ref(), ERR_NOT_DISABLED),
+        ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::NotDisabled),
         other => panic!("expected Err, got {other:?}"),
     }
     assert!(rig.driver.engine.subs().find_by_name("build").is_some());
@@ -2586,13 +2587,13 @@ fn ipc_enable_not_disabled_returns_err() {
         },
     );
     match reply {
-        ResponsePayload::Err { code, .. } => assert_eq!(code.as_ref(), ERR_NOT_DISABLED),
+        ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::NotDisabled),
         other => panic!("expected Err, got {other:?}"),
     }
 }
 
 /// Enable against a runtime-disabled name whose TOML entry no longer
-/// exists clears the override AND returns `ERR_TOML_DISABLED`.
+/// exists clears the override AND returns [`WireErrorCode::TomlDisabled`].
 #[test]
 fn ipc_enable_toml_disabled_clears_override_returns_err() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2612,7 +2613,7 @@ fn ipc_enable_toml_disabled_clears_override_returns_err() {
         },
     );
     match reply {
-        ResponsePayload::Err { code, .. } => assert_eq!(code.as_ref(), ERR_TOML_DISABLED),
+        ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::TomlDisabled),
         other => panic!("expected Err, got {other:?}"),
     }
     assert!(rig.driver.disabled_runtime.is_empty());
