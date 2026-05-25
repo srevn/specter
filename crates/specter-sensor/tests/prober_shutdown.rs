@@ -35,8 +35,8 @@ impl ProberResponseSender for TestProberSink {
     }
 }
 
-fn sink(tx: Sender<Input>) -> Box<dyn ProberResponseSender> {
-    Box::new(TestProberSink { tx })
+fn sink(tx: Sender<Input>) -> Arc<dyn ProberResponseSender> {
+    Arc::new(TestProberSink { tx })
 }
 
 fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {

@@ -130,6 +130,6 @@ fn engine_receives_one_effect_complete_per_spawn() {
     h.shutdown();
     assert_eq!(completions.len(), 2);
     for c in &completions {
-        assert!(matches!(c, Input::EffectComplete { .. }));
+        assert!(matches!(c, Input::EffectComplete(_)));
     }
 }

@@ -31,17 +31,17 @@
 //!    shutdown or panic.
 //! 5. **Channels** — [`ActuatorIO::pair`] for the actuator seam, plus
 //!    two `unbounded::<Input>()` channels paired with the Hub's
-//!    [`mio::Waker`] for the prober + actuator wake'd-channels.
+//!    [`WakeHandle`] for the prober + actuator wake'd-channels.
 //! 6. **Hub construction** —
 //!    [`DriverHub::new`] consumes the listener, watcher, config
 //!    watcher, [`signals::SignalPipe`], and the two channel
-//!    receivers; returns the Hub and a clone of its `Arc<mio::Waker>`
+//!    receivers; returns the Hub and a clone of its [`WakeHandle`]
 //!    for the wake-bearing senders.
 //! 7. **Waking senders + worker spawns** —
 //!    [`WakingProberResponseSender`] and [`WakingEffectCompleteSender`]
-//!    are constructed with `Arc<Waker>` clones; the prober pool +
-//!    actuator thread spawn after the Hub is built so they hold the
-//!    one Waker the Hub owns.
+//!    are constructed with [`WakingSink`]s holding [`WakeHandle`]
+//!    clones; the prober pool + actuator thread spawn after the Hub
+//!    is built so they hold the one Waker the Hub owns.
 //! 8. **Engine driver** — [`EngineDriver::new`] takes ownership of
 //!    every preceding piece; runs on the main thread.
 //!
@@ -58,20 +58,17 @@
 //! pass over the partitioned ready set.
 
 use crate::channels::ActuatorIO;
-use crate::driver::{DriverHub, EngineDriver, ReloadTrigger};
+use crate::driver::{DriverHub, EngineDriver, ReloadTrigger, WakingSink};
 use crate::ipc::sockpath;
 use crate::loader::Loader;
 use crate::observability;
 use crate::signals;
-use specter_actuator::{
-    EffectCompleteSender, SendError as ActSendError, SubprocessActuator, default_spawner,
-};
+use specter_actuator::{EffectCompleteSender, RunWiring, SubprocessActuator, default_spawner};
 use specter_config::{Config, DaemonArgs, FileMeta};
-use specter_core::{DedupKey, EffectOutcome, Input, SubId};
+use specter_core::{EffectCompletion, Input, SendError};
 use specter_engine::Engine;
 use specter_sensor::{
-    ProbeResponse, ProberResponseSender, SendError, WorkerProber, default_config_watcher,
-    default_watcher,
+    ProbeResponse, ProberResponseSender, WorkerProber, default_config_watcher, default_watcher,
 };
 use std::io;
 use std::num::NonZeroUsize;
@@ -253,18 +250,18 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //    `probe_concurrency` (≤2×num_cpus) + actuator concurrency
     //    (operator-configured) — at default settings, ≤16 entries
     //    queued at once.
-    let (actuator_io, actuator_side) = ActuatorIO::pair();
+    let (actuator_io, actuator_wiring) = ActuatorIO::pair();
     let (prober_tx, prober_rx) = crossbeam::channel::unbounded::<Input>();
     let (effect_complete_tx, effect_complete_rx) = crossbeam::channel::unbounded::<Input>();
 
     // 9. Build the Hub. Consumes the listener, watcher, config
     //    watcher, signal pipe, and the two channel receivers;
-    //    returns the Hub + a clone of its `Arc<Waker>` for the
+    //    returns the Hub + a clone of its [`WakeHandle`] for the
     //    wake-bearing senders. Every Source above is registered
     //    against the Hub's [`mio::Poll`] before this call returns —
     //    a signal arriving during the rest of init will fire the
     //    reactor's `TOKEN_SIGNAL` on the first poll.
-    let (hub, waker) = match DriverHub::new(
+    let (hub, wake) = match DriverHub::new(
         listener,
         watcher,
         config_watcher,
@@ -279,22 +276,25 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         }
     };
 
-    // 10. Build wrapped senders sharing the Hub's `Arc<Waker>`. mio
-    //     mandates one Waker per Poll — both wrappers clone THIS
-    //     `Arc` so the worker threads pulse the same wake edge.
-    let prober_sink: Box<dyn ProberResponseSender> = Box::new(WakingProberResponseSender {
-        tx: prober_tx,
-        waker: Arc::clone(&waker),
-    });
-    let effect_sink: Box<dyn EffectCompleteSender> = Box::new(WakingEffectCompleteSender {
-        tx: effect_complete_tx,
-        waker,
-    });
+    // 10. Build wrapped senders sharing the Hub's [`WakeHandle`]. mio
+    //     mandates one Waker per Poll — both adapters wrap a
+    //     [`WakingSink`] built on a `wake.clone()` so the worker
+    //     threads pulse the same wake edge. The
+    //     [`crate::driver::wake`] module's `WakeHandle::new` is the
+    //     sole `mio::Waker::new` site in the bin; constructing
+    //     `WakingSink` requires holding a `WakeHandle`, so a future
+    //     wake-bearing sink inherits the "one Waker" invariant by
+    //     typing rather than convention.
+    let prober_sink: Arc<dyn ProberResponseSender> = Arc::new(WakingProberResponseSender(
+        WakingSink::new(prober_tx, wake.clone()),
+    ));
+    let effect_sink: Box<dyn EffectCompleteSender> = Box::new(WakingEffectCompleteSender(
+        WakingSink::new(effect_complete_tx, wake),
+    ));
 
-    // 11. Spawn the prober pool. The pool consumes the boxed
-    //     `ProberResponseSender` and internally clones it into each
-    //     worker's `Arc<dyn>` — workers wake the Hub directly on
-    //     every probe response.
+    // 11. Spawn the prober pool. The pool takes the `Arc<dyn>`
+    //     sender directly and clones it per worker — workers wake
+    //     the Hub on every probe response.
     let probe_concurrency = args
         .probe_concurrency
         .map_or(specter_sensor::DEFAULT_CONCURRENCY, NonZeroUsize::get);
@@ -312,7 +312,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         .concurrency
         .map_or(specter_actuator::DEFAULT_CONCURRENCY, NonZeroUsize::get);
     let actuator_handle =
-        match spawn_actuator_thread(actuator_concurrency, actuator_side, effect_sink) {
+        match spawn_actuator_thread(actuator_concurrency, actuator_wiring, effect_sink) {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!(?e, "failed to spawn actuator thread");
@@ -440,89 +440,63 @@ pub(crate) struct CliLogOverrides {
     pub path: Option<std::path::PathBuf>,
 }
 
-/// Bin's [`ProberResponseSender`] impl with mio wake-after-send.
-///
-/// Holds a single `Sender<Input>` clone routing [`ProbeResponse`]s
-/// into the engine's `Input::ProbeResponse(_)` envelope, plus an
-/// `Arc<mio::Waker>` clone that fires the reactor edge immediately
-/// after each successful send. Send-THEN-wake order is load-bearing:
-/// the channel must hold the message before the wake fires, or the
-/// driver's `try_recv` after `Poll::poll` returns sees `Empty` and
-/// the message strands until the next unrelated wake.
+/// Bin's [`ProberResponseSender`] impl — content-lift over a single
+/// [`WakingSink`].
 ///
 /// The sensor crate does not name [`Input`] (it would couple worker
-/// code to the engine's inbound vocabulary); the wrap happens here,
-/// the one place the channel's transport identity AND the reactor's
-/// wake identity are both known.
+/// code to the engine's inbound vocabulary); this newtype is the one
+/// place the [`ProbeResponse`] payload lifts into the engine's
+/// `Input::ProbeResponse(_)` envelope before crossing the sink's
+/// send-then-wake protocol.
 ///
-/// One instance per process — boxed inside the prober's `Arc<dyn>`
+/// One instance per process — held inside the prober's `Arc<dyn>`
 /// so every worker shares the single underlying transport + waker.
 /// Drops when the pool's last worker exits (the workers' `Arc<dyn>`
 /// clones are the only refs once `App::run` returns).
-///
-/// **One Waker per Poll.** mio's contract is at most one
-/// [`mio::Waker`] per [`mio::Poll`]: registering a second one is
-/// unspecified behavior. Both this wrapper and
-/// [`WakingEffectCompleteSender`] clone the SAME
-/// `Arc<mio::Waker>` returned from `DriverHub::new`; the shared
-/// `Arc` is the structural enforcement of "one waker."
-struct WakingProberResponseSender {
-    tx: crossbeam::channel::Sender<Input>,
-    waker: Arc<mio::Waker>,
-}
+struct WakingProberResponseSender(WakingSink);
 
 impl ProberResponseSender for WakingProberResponseSender {
     fn send(&self, response: ProbeResponse) -> Result<(), SendError> {
-        // Send THEN wake: the channel must hold the message before
-        // the wake edge fires.
-        self.tx
-            .send(Input::ProbeResponse(response))
-            .map_err(|_| SendError::Disconnected)?;
-        // `wake` only errors when the paired `Poll` has been
-        // dropped — exactly the shutdown path. Receiver-side
-        // `try_recv` after `Poll::poll` returns picks the message
-        // up on the next surviving wake; no need to propagate.
-        let _ = self.waker.wake();
-        Ok(())
+        self.0.send(Input::ProbeResponse(response))
     }
 }
 
-/// Bin's [`EffectCompleteSender`] impl with mio wake-after-send.
+/// Bin's [`EffectCompleteSender`] impl — content-lift over a single
+/// [`WakingSink`].
 ///
 /// Mirror-shape of [`WakingProberResponseSender`] for the actuator's
-/// `(sub, key, outcome)` completion triple. Same send-THEN-wake
-/// ordering, same `Arc<mio::Waker>` shared with the prober wrapper.
+/// [`EffectCompletion`] envelope: lifts into
+/// `Input::EffectComplete(_)` before crossing the sink's send-then-
+/// wake protocol. The two adapters share the same [`WakingSink`]
+/// shape — a third wake-bearing sink drops in as a one-line content
+/// lift with the same structural guarantees.
 ///
 /// One instance per actuator-thread spawn — boxed into the
 /// actuator's `Box<dyn EffectCompleteSender>` constructor argument.
 /// Drops when the actuator's `run` returns at shutdown.
-struct WakingEffectCompleteSender {
-    tx: crossbeam::channel::Sender<Input>,
-    waker: Arc<mio::Waker>,
-}
+struct WakingEffectCompleteSender(WakingSink);
 
 impl EffectCompleteSender for WakingEffectCompleteSender {
-    fn send(&self, sub: SubId, key: DedupKey, result: EffectOutcome) -> Result<(), ActSendError> {
-        self.tx
-            .send(Input::EffectComplete { sub, key, result })
-            .map_err(|_| ActSendError::Disconnected)?;
-        let _ = self.waker.wake();
-        Ok(())
+    fn send(&self, completion: EffectCompletion) -> Result<(), SendError> {
+        self.0.send(Input::EffectComplete(completion))
     }
 }
 
 /// Spawn the actuator thread. Constructs [`SubprocessActuator`] with
 /// the resolved concurrency, runs the controller blocking until
-/// either `effects_rx` disconnects or `shutdown_actuator_rx` fires.
+/// either `wiring.effects_rx` disconnects or `wiring.shutdown_rx`
+/// fires.
 ///
 /// `engine_in` is the wake-bearing [`EffectCompleteSender`] —
 /// production passes a boxed [`WakingEffectCompleteSender`]
-/// constructed at `App::run` wiring time with the `Arc<mio::Waker>`
-/// returned from [`DriverHub::new`]. The actuator's controller calls
-/// through the trait object so it never names the engine's `Input`
-/// vocabulary on its own thread.
+/// constructed at `App::run` wiring time with a clone of the
+/// [`WakeHandle`] returned from [`DriverHub::new`]. The actuator's
+/// controller borrows the sink via `&dyn` so it never names the
+/// engine's `Input` vocabulary on its own thread. The closure here
+/// owns the `Box<dyn>` for the actuator-thread lifetime and passes
+/// `&*engine_in` into `run`; on closure exit the Box drops cleanly.
 ///
-/// `sides.hard_shutdown_done_tx` is the back-channel the actuator
+/// `wiring.hard_shutdown_done_tx` is the back-channel the actuator
 /// pulses after phase 3 SIGKILL fanout; the driver's hard-exit path
 /// (running inside the reactor thread) waits on its paired receiver
 /// before `process::exit(130)` so the parent never aborts mid-fanout.
@@ -532,7 +506,7 @@ impl EffectCompleteSender for WakingEffectCompleteSender {
 /// every other init path in [`run`].
 fn spawn_actuator_thread(
     concurrency: usize,
-    sides: crate::channels::ActuatorSide,
+    wiring: RunWiring,
     engine_in: Box<dyn EffectCompleteSender>,
 ) -> io::Result<JoinHandle<()>> {
     thread::Builder::new()
@@ -541,14 +515,7 @@ fn spawn_actuator_thread(
             let spawner = default_spawner();
             let mut act = SubprocessActuator::new(concurrency);
             let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                act.run(
-                    sides.effects_rx,
-                    sides.shutdown_actuator_rx,
-                    sides.hard_shutdown_actuator_rx,
-                    engine_in,
-                    spawner.as_ref(),
-                    sides.hard_shutdown_done_tx,
-                );
+                act.run(wiring, &*engine_in, spawner.as_ref());
             }));
             if let Err(payload) = result {
                 tracing::error!(
@@ -562,14 +529,14 @@ fn spawn_actuator_thread(
 #[cfg(test)]
 mod tests {
     use super::{WakingEffectCompleteSender, WakingProberResponseSender};
-    use mio::{Events, Poll, Token, Waker};
+    use crate::driver::{WakeHandle, WakingSink};
+    use mio::{Events, Poll, Token};
     use specter_actuator::EffectCompleteSender;
     use specter_core::{
-        DedupKey, EffectOutcome, Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse,
-        ProfileId, SubId,
+        DedupKey, EffectCompletion, EffectOutcome, Input, ProbeCorrelation, ProbeOutcome,
+        ProbeOwner, ProbeResponse, ProfileId, SubId,
     };
     use specter_sensor::ProberResponseSender;
-    use std::sync::Arc;
     use std::time::Duration;
 
     /// Constructing a [`WakingProberResponseSender`] manually + sending
@@ -582,12 +549,9 @@ mod tests {
     fn waking_prober_response_sender_pulses_waker_after_send() {
         let mut poll = Poll::new().expect("mio Poll");
         let waker_token = Token(0xABC);
-        let waker = Arc::new(Waker::new(poll.registry(), waker_token).expect("Waker"));
+        let wake = WakeHandle::new(poll.registry(), waker_token).expect("WakeHandle");
         let (tx, rx) = crossbeam::channel::unbounded::<Input>();
-        let sender = WakingProberResponseSender {
-            tx,
-            waker: Arc::clone(&waker),
-        };
+        let sender = WakingProberResponseSender(WakingSink::new(tx, wake));
 
         // Construct a minimal ProbeResponse. `Vanished` is the
         // narrowest outcome (no payload). The owner/correlation are
@@ -618,28 +582,29 @@ mod tests {
     }
 
     /// Mirror-shape proof for [`WakingEffectCompleteSender`]. The two
-    /// wrappers share an `Arc<mio::Waker>` in production; this test
-    /// constructs a separate Waker to keep the two wrappers'
+    /// adapters share one [`WakeHandle`] in production; this test
+    /// constructs a separate handle to keep the two adapters'
     /// contracts independently testable.
     #[test]
     fn waking_effect_complete_sender_pulses_waker_after_send() {
         let mut poll = Poll::new().expect("mio Poll");
         let waker_token = Token(0xDEF);
-        let waker = Arc::new(Waker::new(poll.registry(), waker_token).expect("Waker"));
+        let wake = WakeHandle::new(poll.registry(), waker_token).expect("WakeHandle");
         let (tx, rx) = crossbeam::channel::unbounded::<Input>();
-        let sender = WakingEffectCompleteSender {
-            tx,
-            waker: Arc::clone(&waker),
-        };
+        let sender = WakingEffectCompleteSender(WakingSink::new(tx, wake));
 
         let sub = SubId::default();
         let profile = ProfileId::default();
         sender
-            .send(sub, DedupKey::Subtree { sub, profile }, EffectOutcome::Ok)
+            .send(EffectCompletion {
+                sub,
+                key: DedupKey::Subtree { sub, profile },
+                outcome: EffectOutcome::Ok,
+            })
             .expect("send into wake'd channel");
 
         match rx.try_recv().expect("Input on channel post-send") {
-            Input::EffectComplete { .. } => {}
+            Input::EffectComplete(_) => {}
             other => panic!("expected Input::EffectComplete, got {other:?}"),
         }
 

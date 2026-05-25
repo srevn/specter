@@ -1,6 +1,6 @@
 //! Engine input variants and the normalized `FsEvent`.
 
-use crate::effect::{DedupKey, EffectOutcome};
+use crate::effect::EffectCompletion;
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::op::{ProbeResponse, WatchFailure};
 use crate::profile::TimerKind;
@@ -102,11 +102,13 @@ pub enum Input {
         kind: TimerKind,
         id: TimerId,
     },
-    EffectComplete {
-        sub: SubId,
-        key: DedupKey,
-        result: EffectOutcome,
-    },
+    /// One effect-completion envelope reaching the engine. Built once
+    /// at the actuator's wait thread, threaded unchanged through the
+    /// controller, lifted into this variant by the bin's wake-bearing
+    /// adapter. Tuple-variant shape mirrors [`Input::ProbeResponse`] —
+    /// both are envelope-bearing inbound facts, both destructure once
+    /// at [`crate::Input`]'s engine-side dispatcher.
+    EffectComplete(EffectCompletion),
     WatchOpRejected {
         resource: ResourceId,
         failure: WatchFailure,

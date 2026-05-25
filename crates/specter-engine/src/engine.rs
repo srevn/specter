@@ -188,8 +188,14 @@ impl Engine {
             Input::TimerExpired { profile, kind, id } => {
                 self.on_timer_expired(profile, kind, id, now, &mut out);
             }
-            Input::EffectComplete { sub, key, result } => {
-                self.on_effect_complete(sub, &key, &result, now, &mut out);
+            Input::EffectComplete(completion) => {
+                self.on_effect_complete(
+                    completion.sub,
+                    &completion.key,
+                    &completion.outcome,
+                    now,
+                    &mut out,
+                );
             }
             Input::WatchOpRejected { resource, failure } => {
                 self.on_watch_op_rejected(resource, failure, &mut out);
@@ -1497,9 +1503,9 @@ impl AnchorResolution {
 mod tests {
     use super::*;
     use specter_core::{
-        DedupKey, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeOutcome, ProbeResponse,
-        ProfileId, ProfileIdentity, ResourceId, ScanConfig, StepOutput, SubId, TimerId, TimerKind,
-        WatchOp, WatchRegistryDiff,
+        DedupKey, EffectCompletion, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeOutcome,
+        ProbeResponse, ProfileId, ProfileIdentity, ResourceId, ScanConfig, StepOutput, SubId,
+        TimerId, TimerKind, WatchOp, WatchRegistryDiff,
     };
     use std::time::{Duration, Instant};
 
@@ -1568,11 +1574,11 @@ mod tests {
     fn step_effect_complete_unknown_sub_diagnoses() {
         let mut e = Engine::new();
         let out = e.step(
-            Input::EffectComplete {
+            Input::EffectComplete(EffectCompletion {
                 sub: SubId::default(),
                 key: DedupKey::default(),
-                result: EffectOutcome::Ok,
-            },
+                outcome: EffectOutcome::Ok,
+            }),
             Instant::now(),
         );
         let has_diag = out.diagnostics.iter().any(|d| {

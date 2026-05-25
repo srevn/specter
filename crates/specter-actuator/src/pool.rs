@@ -13,8 +13,9 @@
 //! The engine-bound completion edge is a trait
 //! ([`crate::EffectCompleteSender`]) rather than a concrete channel —
 //! the actuator does not name the engine's `Input` vocabulary. The bin
-//! owns the wrapper that lifts `(sub, key, outcome)` into the
-//! engine-facing envelope; this crate only ships the triple.
+//! owns the wrapper that lifts the [`EffectCompletion`] envelope into
+//! `Input::EffectComplete`; this crate ships the envelope unchanged
+//! from the wait thread all the way to the trait boundary.
 //!
 //! Shutdown sequence: SIGTERM all running, drain reaps for 5s,
 //! SIGKILL stragglers, drain remaining reaps.
@@ -24,7 +25,7 @@ use crate::EffectCompleteSender;
 use crate::env::EnvSnapshot;
 use crate::spawner::Spawner;
 use crossbeam::channel::{Receiver, Sender};
-use specter_core::{DedupKey, EffectOp, EffectOutcome, SubId};
+use specter_core::{EffectCompletion, EffectOp};
 use state::ActuatorState;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
@@ -48,12 +49,34 @@ pub const DEFAULT_CONCURRENCY: usize = 0;
 /// [`SubprocessActuator::new_with_grace_and_env`].
 pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
-/// Signal from a wait thread back to the controller.
+/// Channels the actuator's controller owns for the lifetime of
+/// [`SubprocessActuator::run`].
+///
+/// Bundles the four reactive-surface channels — the effects pipe and
+/// the three shutdown-handshake legs — that the bin passes as a unit.
+/// The bin's [`crate::pool`]-paired transport bundle ([`channels::ActuatorIO::pair`]
+/// in `specter-bin`) returns the matching [`RunWiring`] directly so the
+/// actuator's contract is one owned struct, not four positional
+/// arguments.
+///
+/// [`channels::ActuatorIO::pair`]: # "in specter-bin"
 #[derive(Debug)]
-pub struct Reaped {
-    pub key: DedupKey,
-    pub sub: SubId,
-    pub outcome: EffectOutcome,
+#[must_use]
+pub struct RunWiring {
+    /// Effects pipe. The controller drains [`EffectOp`]s via `select!`
+    /// against the shutdown legs.
+    pub effects_rx: Receiver<EffectOp>,
+    /// Soft-shutdown pulse. Drained once at the start of the graceful
+    /// stop arm (SIGTERM-then-wait fanout with the grace window).
+    pub shutdown_rx: Receiver<()>,
+    /// Hard-shutdown pulse. Operator double-Ctrl-C: pre-empts the
+    /// grace window and proceeds directly to phase 3's SIGKILL fanout.
+    pub hard_shutdown_rx: Receiver<()>,
+    /// Phase-3 fanout confirmation. The controller pulses once after
+    /// SIGKILL fanout completes; the bin's hard-exit path waits on the
+    /// paired receiver before `process::exit(130)` so the parent never
+    /// aborts mid-fanout.
+    pub hard_shutdown_done_tx: Sender<()>,
 }
 
 /// Resolve a `concurrency: usize` knob into a [`NonZeroUsize`]:
@@ -70,23 +93,25 @@ fn resolve_concurrency(concurrency: usize) -> NonZeroUsize {
     })
 }
 
-/// Build the [`Reaped`] back-channel sized to the resolved concurrency.
+/// Build the [`EffectCompletion`] back-channel sized to the resolved
+/// concurrency.
 ///
 /// One slot per in-flight [`crate::pool::state::RunningJob`]: every wait
-/// thread sends exactly one [`Reaped`] in its lifetime ([`state::wait_loop`]
-/// after `drop(permit)`), and the live wait-thread count is bounded by
-/// the permit cap. So a fully-saturated pool draining in lock-step never
-/// blocks a permit-released wait thread on `reap_tx.send` waiting for
-/// the controller to consume — backpressure becomes a single-slot
-/// blip only when the controller has fallen behind the spawn rate, and
-/// the bin's bounded(1024) `effects_rx` upstream sets the operator-
-/// visible backpressure ceiling anyway.
+/// thread sends exactly one [`EffectCompletion`] in its lifetime
+/// ([`state::wait_loop`] after `drop(permit)`), and the live wait-thread
+/// count is bounded by the permit cap. So a fully-saturated pool
+/// draining in lock-step never blocks a permit-released wait thread on
+/// `reap_tx.send` waiting for the controller to consume —
+/// backpressure becomes a single-slot blip only when the controller has
+/// fallen behind the spawn rate, and the bin's bounded(1024)
+/// `effects_rx` upstream sets the operator-visible backpressure ceiling
+/// anyway.
 ///
 /// Shared between [`SubprocessActuator::new`] and the test constructors
 /// so the cap stays single-source — the upper bound is a property of
 /// the wait-thread protocol, not the entry point.
-fn reap_channel(resolved: NonZeroUsize) -> (Sender<Reaped>, Receiver<Reaped>) {
-    crossbeam::channel::bounded::<Reaped>(resolved.get())
+fn reap_channel(resolved: NonZeroUsize) -> (Sender<EffectCompletion>, Receiver<EffectCompletion>) {
+    crossbeam::channel::bounded::<EffectCompletion>(resolved.get())
 }
 
 /// The actuator's controller. One per process. Owns the slot map, ready
@@ -95,8 +120,8 @@ fn reap_channel(resolved: NonZeroUsize) -> (Sender<Reaped>, Receiver<Reaped>) {
 #[derive(Debug)]
 pub struct SubprocessActuator {
     state: ActuatorState,
-    reap_tx: Sender<Reaped>,
-    reap_rx: Receiver<Reaped>,
+    reap_tx: Sender<EffectCompletion>,
+    reap_rx: Receiver<EffectCompletion>,
 }
 
 impl SubprocessActuator {
@@ -182,18 +207,18 @@ impl SubprocessActuator {
     }
 
     /// Block until shutdown. Drains [`EffectOp`]s (submit + cancel)
-    /// off `effects_rx`, dispatches to spawner / cancel handler, reaps
-    /// wait threads, propagates effect completions through `engine_in`.
-    /// Returns when `effects_rx` disconnects or `shutdown_rx` signals;
-    /// performs the SIGTERM → 5s grace → SIGKILL sequence on the
-    /// way out. If `hard_shutdown_rx` fires (operator pressed Ctrl-C
-    /// twice within `HARD_EXIT_WINDOW`), the grace is pre-empted: the
-    /// loop breaks immediately, the SIGTERM phase still runs (cheap;
-    /// gives well-behaved children a chance to exit cleanly), then
-    /// phase 2's grace becomes a near-zero wait before phase 3 SIGKILLs
-    /// everything still alive.
+    /// off `wiring.effects_rx`, dispatches to spawner / cancel handler,
+    /// reaps wait threads, propagates [`EffectCompletion`] envelopes
+    /// through `engine_in`. Returns when `wiring.effects_rx` disconnects
+    /// or `wiring.shutdown_rx` signals; performs the SIGTERM → 5s grace
+    /// → SIGKILL sequence on the way out. If `wiring.hard_shutdown_rx`
+    /// fires (operator pressed Ctrl-C twice within `HARD_EXIT_WINDOW`),
+    /// the grace is pre-empted: the loop breaks immediately, the
+    /// SIGTERM phase still runs (cheap; gives well-behaved children a
+    /// chance to exit cleanly), then phase 2's grace becomes a
+    /// near-zero wait before phase 3 SIGKILLs everything still alive.
     ///
-    /// `hard_shutdown_done_tx` is the back-channel to the signal
+    /// `wiring.hard_shutdown_done_tx` is the back-channel to the signal
     /// thread: the actuator pulses it once at the close of phase 3
     /// SIGKILL fanout (trigger-agnostic — pulse fires whenever phase 3
     /// runs, regardless of soft/hard origin). On the hard-exit path
@@ -201,32 +226,35 @@ impl SubprocessActuator {
     /// that follows thread exit) before `process::exit(130)`, so the
     /// parent never aborts mid-fanout and leaves orphans on PID 1.
     ///
-    /// `engine_in` is `Box<dyn>`-in / `&dyn`-internal: the controller
-    /// owns the sink for the duration of [`Self::run`], dereferences
-    /// it once into a `&dyn` local, and threads that reference into
-    /// every state-machine call. The Box-shaped boundary makes the
-    /// ownership transfer truthful (no by-value-but-only-borrowed
-    /// smell) while the trait-object form keeps the controller
-    /// non-generic at the type level — symmetric with the
-    /// `&dyn Spawner` calling convention this function already uses.
-    /// Wait threads send `Reaped` events through `reap_tx` (held on
-    /// `self`); only the controller calls `engine_in.send(...)`, so a
-    /// single-threaded `&dyn` is sufficient.
+    /// `engine_in` is `&dyn` — the controller borrows the sink for the
+    /// duration of [`Self::run`] without owning it. The closure
+    /// surrounding the spawn site in the bin keeps the
+    /// `Box<dyn EffectCompleteSender>` owned for the call's lifetime
+    /// and passes `&*box` here, symmetric with the `&dyn Spawner`
+    /// calling convention this function already uses. Wait threads send
+    /// [`EffectCompletion`] envelopes through `self.reap_tx`; only the
+    /// controller calls `engine_in.send(...)`, so a single-threaded
+    /// `&dyn` is sufficient.
     ///
-    /// Other channels are taken by value: the controller owns them
-    /// for the lifetime of [`Self::run`], so the caller hands off and
-    /// is freed from any borrow-tracking.
+    /// `wiring` is taken by value: the controller owns the channels for
+    /// the lifetime of [`Self::run`], so the caller hands off and is
+    /// freed from any borrow-tracking. The `select!` block borrows
+    /// channels by reference per-iteration, which is what trips
+    /// clippy's `needless_pass_by_value` — keep the allow to express
+    /// "owned by run, used by-ref inside the body" honestly.
     #[allow(clippy::needless_pass_by_value)]
     pub fn run(
         &mut self,
-        effects_rx: Receiver<EffectOp>,
-        shutdown_rx: Receiver<()>,
-        hard_shutdown_rx: Receiver<()>,
-        engine_in: Box<dyn EffectCompleteSender>,
+        wiring: RunWiring,
+        engine_in: &dyn EffectCompleteSender,
         spawner: &dyn Spawner,
-        hard_shutdown_done_tx: Sender<()>,
     ) {
-        let engine_in: &dyn EffectCompleteSender = &*engine_in;
+        let RunWiring {
+            effects_rx,
+            shutdown_rx,
+            hard_shutdown_rx,
+            hard_shutdown_done_tx,
+        } = wiring;
         let mut hard = false;
         loop {
             crossbeam::select! {
@@ -246,7 +274,7 @@ impl SubprocessActuator {
                     Err(_) => break, // bin closed channel
                 },
                 recv(self.reap_rx) -> msg => match msg {
-                    Ok(r)  => self.state.handle_reap(r, engine_in, spawner, &self.reap_tx),
+                    Ok(completion) => self.state.handle_reap(completion, engine_in, spawner, &self.reap_tx),
                     Err(_) => unreachable!(
                         "self.reap_tx keeps reap_rx connected for run's lifetime",
                     ),
@@ -354,6 +382,7 @@ impl SubprocessActuator {
     clippy::too_many_lines
 )]
 mod tests {
+    use super::RunWiring;
     use crate::env::EnvSnapshot;
     use crate::testkit::{MockSpawner, SignalRecord};
     use crate::{EffectCompleteSender, SendError, SubprocessActuator};
@@ -362,25 +391,28 @@ mod tests {
     use specter_core::program::{BranchTarget, MultiStage, ProgramBuilder, SpawnBody};
     use specter_core::testkit::{predicate_then_program, single_exec_program};
     use specter_core::{
-        ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Diff, Effect, EffectCommon,
-        EffectOp, EffectOutcome, EffectTarget, ExecAction, Input, ProfileId, ResourceId,
-        ResourceKind, SubId, Termination,
+        ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon,
+        EffectCompletion, EffectOp, EffectOutcome, EffectTarget, ExecAction, Input, ProfileId,
+        ResourceId, ResourceKind, SubId, Termination,
     };
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
     use std::thread;
     use std::time::{Duration, Instant};
 
-    /// Test adapter that lifts the actuator's `(sub, key, outcome)`
-    /// triple into the engine-side `Input::EffectComplete` envelope so
-    /// the harness's `Receiver<Input>` continues to observe completions
-    /// in the pre-trait shape. Mirrors the bin's `DriverEffectSender`
-    /// without dragging in the bin's transport identity.
+    /// Test adapter that lifts an [`EffectCompletion`] envelope into
+    /// the engine-side `Input::EffectComplete` so the harness's
+    /// `Receiver<Input>` continues to observe completions in the
+    /// engine's vocabulary. Mirrors the bin's
+    /// [`WakingEffectCompleteSender`] without dragging in the bin's
+    /// transport identity.
+    ///
+    /// [`WakingEffectCompleteSender`]: # "in specter-bin"
     struct TestEngineIn(Sender<Input>);
     impl EffectCompleteSender for TestEngineIn {
-        fn send(&self, sub: SubId, key: DedupKey, result: EffectOutcome) -> Result<(), SendError> {
+        fn send(&self, completion: EffectCompletion) -> Result<(), SendError> {
             self.0
-                .send(Input::EffectComplete { sub, key, result })
+                .send(Input::EffectComplete(completion))
                 .map_err(|_| SendError::Disconnected)
         }
     }
@@ -563,14 +595,13 @@ mod tests {
                 .name("test-actuator-controller".into())
                 .spawn(move || {
                     let mut a = build();
-                    a.run(
+                    let wiring = RunWiring {
                         effects_rx,
                         shutdown_rx,
                         hard_shutdown_rx,
-                        engine_in,
-                        spawner_clone.as_ref(),
                         hard_shutdown_done_tx,
-                    );
+                    };
+                    a.run(wiring, &*engine_in, spawner_clone.as_ref());
                 })
                 .expect("spawn controller");
             Self {
@@ -715,8 +746,8 @@ mod tests {
         h.spawner.complete(s[0].pid, EffectOutcome::Ok).unwrap();
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
-            Input::EffectComplete { result, .. } => {
-                assert!(matches!(result, EffectOutcome::Ok));
+            Input::EffectComplete(c) => {
+                assert!(matches!(c.outcome, EffectOutcome::Ok));
             }
             other => panic!("expected EffectComplete; got {other:?}"),
         }
@@ -1000,9 +1031,9 @@ mod tests {
         h.submit(make_effect_perfile(1, 1, 1, 1));
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
-            Input::EffectComplete { result, .. } => {
+            Input::EffectComplete(c) => {
                 assert!(matches!(
-                    result,
+                    c.outcome,
                     EffectOutcome::Failed(Termination::Internal)
                 ));
             }
@@ -1207,8 +1238,8 @@ mod tests {
             "exactly one EffectComplete per Effect"
         );
         match &completions[0] {
-            Input::EffectComplete { result, .. } => {
-                assert!(matches!(result, EffectOutcome::Ok));
+            Input::EffectComplete(c) => {
+                assert!(matches!(c.outcome, EffectOutcome::Ok));
             }
             other => panic!("expected EffectComplete::Ok; got {other:?}"),
         }
@@ -1243,8 +1274,8 @@ mod tests {
 
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
-            Input::EffectComplete { result, .. } => assert!(matches!(
-                result,
+            Input::EffectComplete(c) => assert!(matches!(
+                c.outcome,
                 EffectOutcome::Failed(Termination::Exit(7))
             )),
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
@@ -1459,8 +1490,8 @@ mod tests {
             "exactly one EffectComplete from drained step 0"
         );
         match &received[0] {
-            Input::EffectComplete { result, .. } => {
-                assert!(matches!(result, EffectOutcome::Ok));
+            Input::EffectComplete(c) => {
+                assert!(matches!(c.outcome, EffectOutcome::Ok));
             }
             other => panic!("expected EffectComplete::Ok; got {other:?}"),
         }
@@ -1495,8 +1526,8 @@ mod tests {
         ));
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
-            Input::EffectComplete { result, .. } => assert!(matches!(
-                result,
+            Input::EffectComplete(c) => assert!(matches!(
+                c.outcome,
                 EffectOutcome::Failed(Termination::Internal)
             )),
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
@@ -1732,11 +1763,8 @@ mod tests {
         // cursor 4 is past end → terminate Ok.
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         assert!(matches!(
-            completions[0],
-            Input::EffectComplete {
-                result: EffectOutcome::Ok,
-                ..
-            }
+            &completions[0],
+            Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Ok)
         ));
         // Else-exec was never spawned.
         thread::sleep(Duration::from_millis(50));
@@ -1772,11 +1800,8 @@ mod tests {
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         assert!(
             matches!(
-                completions[0],
-                Input::EffectComplete {
-                    result: EffectOutcome::Ok,
-                    ..
-                }
+                &completions[0],
+                Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Ok)
             ),
             "predicate Failed must not propagate to EffectComplete; got {:?}",
             completions[0],
@@ -1802,11 +1827,8 @@ mod tests {
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         assert!(
             matches!(
-                completions[0],
-                Input::EffectComplete {
-                    result: EffectOutcome::Ok,
-                    ..
-                }
+                &completions[0],
+                Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Ok)
             ),
             "predicate Failed past plan end must terminate Ok; got {:?}",
             completions[0],
@@ -1846,11 +1868,8 @@ mod tests {
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         assert!(
             matches!(
-                completions[0],
-                Input::EffectComplete {
-                    result: EffectOutcome::Ok,
-                    ..
-                }
+                &completions[0],
+                Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Ok)
             ),
             "predicate spawn-failure must terminate Ok via dispatch; got {:?}",
             completions[0],
@@ -1946,11 +1965,8 @@ mod tests {
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         assert!(
             matches!(
-                completions[0],
-                Input::EffectComplete {
-                    result: EffectOutcome::Ok,
-                    ..
-                }
+                &completions[0],
+                Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Ok)
             ),
             "plan terminates Ok — predicate's resolver-failure does not propagate; \
              got {:?}",
@@ -2016,11 +2032,8 @@ mod tests {
             h.spawner.complete(s2[2].pid, EffectOutcome::Ok).unwrap();
             let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
             assert!(matches!(
-                completions[0],
-                Input::EffectComplete {
-                    result: EffectOutcome::Ok,
-                    ..
-                }
+                &completions[0],
+                Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Ok)
             ));
             h.shutdown();
         }
@@ -2045,11 +2058,8 @@ mod tests {
             let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
             assert!(
                 matches!(
-                    completions[0],
-                    Input::EffectComplete {
-                        result: EffectOutcome::Ok,
-                        ..
-                    }
+                    &completions[0],
+                    Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Ok)
                 ),
                 "predicate Failed past plan end ⇒ Ok terminus; got {:?}",
                 completions[0],
@@ -2107,11 +2117,8 @@ mod tests {
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         assert_eq!(completions.len(), 1, "exactly one EffectComplete per pipe");
         assert!(matches!(
-            completions[0],
-            Input::EffectComplete {
-                result: EffectOutcome::Ok,
-                ..
-            }
+            &completions[0],
+            Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Ok)
         ));
         h.shutdown();
     }
@@ -2161,9 +2168,9 @@ mod tests {
             .unwrap();
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         match &completions[0] {
-            Input::EffectComplete { result, .. } => {
+            Input::EffectComplete(c) => {
                 assert!(matches!(
-                    result,
+                    c.outcome,
                     EffectOutcome::Failed(Termination::PipeMixed {
                         last_exit: 7,
                         first_signal: 15,
@@ -2192,11 +2199,8 @@ mod tests {
         h.submit(make_effect_perfile_with_program(52, 52, 52, 1, program));
         let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
         assert!(matches!(
-            completions[0],
-            Input::EffectComplete {
-                result: EffectOutcome::Failed(Termination::Internal),
-                ..
-            }
+            &completions[0],
+            Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Failed(Termination::Internal))
         ));
         // No stages recorded — the inject_spawn_error path short-
         // circuits MockSpawner::spawn_pipe before allocate_spawn.
@@ -2259,11 +2263,8 @@ mod tests {
                 .unwrap();
             let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
             assert!(matches!(
-                completions[0],
-                Input::EffectComplete {
-                    result: EffectOutcome::Ok,
-                    ..
-                }
+                &completions[0],
+                Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Ok)
             ));
             h.shutdown();
         }
@@ -2284,11 +2285,8 @@ mod tests {
                 .unwrap();
             let completions = h.wait_for_effect_completes(1, Duration::from_secs(1));
             assert!(matches!(
-                completions[0],
-                Input::EffectComplete {
-                    result: EffectOutcome::Failed(_),
-                    ..
-                }
+                &completions[0],
+                Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Failed(_))
             ));
             // /bin/after must not have spawned. Recorded spawns = 2
             // (the two pipe stages); a third would mean stop-on-fail

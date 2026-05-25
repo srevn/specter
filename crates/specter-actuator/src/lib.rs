@@ -59,18 +59,27 @@ pub mod testkit;
 
 pub use os::OsSpawner;
 pub use permits::{Permit, Permits};
-pub use pool::{DEFAULT_CONCURRENCY, Reaped, SubprocessActuator};
+pub use pool::{DEFAULT_CONCURRENCY, RunWiring, SubprocessActuator};
 pub use spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
 
-use specter_core::{DedupKey, EffectOutcome, SubId};
+// The actuator's completion envelope and sender-error vocabulary both
+// live on `specter-core` (`EffectCompletion` is the engine-facing
+// envelope; `SendError` is the workspace-shared sender vocabulary
+// shared with the sensor). Re-exported here so callers naming
+// `actuator::EffectCompletion` / `actuator::SendError` keep their path
+// stable across the consolidation — the `Reaped` struct that used to
+// live in this crate is gone; the envelope it carried is the
+// engine-facing `EffectCompletion`.
+pub use specter_core::{EffectCompletion, SendError};
 
 /// Sink for effect completions produced by the actuator.
 ///
-/// The actuator crate owns *what* it delivers (a `(sub, key, outcome)`
-/// triple) — the engine-facing `Input::EffectComplete` envelope is the
-/// concern of whoever wires the actuator into a driver. This trait is
-/// the seam: implementors translate the actuator's completion
-/// vocabulary into whatever transport the bin holds.
+/// The actuator crate owns *what* it delivers (one
+/// [`EffectCompletion`] envelope per completed effect). The bin owns
+/// *where* it lands — the engine's [`specter_core::Input::EffectComplete`]
+/// channel. This trait is the seam: implementors translate the
+/// actuator's completion vocabulary into whatever transport the bin
+/// holds.
 ///
 /// # Threading
 ///
@@ -83,43 +92,20 @@ use specter_core::{DedupKey, EffectOutcome, SubId};
 /// # Semantics
 ///
 /// Fire-and-forget. A successful [`send`](Self::send) leaves no further
-/// obligation on the caller; an [`Err`](SendError) means the consumer
-/// is gone (the engine driver dropped its receiver). The actuator's
-/// terminal arms swallow the error — its own [`SubprocessActuator::run`]
-/// loop will observe the engine teardown via one of its other exit
-/// channels (`effects_rx` disconnect, `shutdown_rx`,
-/// `hard_shutdown_rx`) and break out shortly after. The trait does not
-/// carry the rejected `(sub, key, outcome)` back on error — completions
-/// do not retry once the engine is gone.
+/// obligation on the caller; an [`Err`]([`SendError`]) means the
+/// consumer is gone (the engine driver dropped its receiver). The
+/// actuator's terminal arms swallow the error — its own
+/// [`SubprocessActuator::run`] loop will observe the engine teardown
+/// via one of its other exit channels (`effects_rx` disconnect,
+/// `RunWiring::shutdown_rx`, `RunWiring::hard_shutdown_rx`) and break
+/// out shortly after. The trait does not carry the rejected envelope
+/// back on error — completions do not retry once the engine is gone.
 pub trait EffectCompleteSender: Send + Sync + 'static {
     /// Deliver one effect completion. Returns `Ok(())` on enqueue;
     /// `Err(SendError::Disconnected)` if the engine-side consumer is
     /// gone.
-    fn send(&self, sub: SubId, key: DedupKey, result: EffectOutcome) -> Result<(), SendError>;
+    fn send(&self, completion: EffectCompletion) -> Result<(), SendError>;
 }
-
-/// Sender-side error vocabulary for [`EffectCompleteSender::send`].
-///
-/// One variant today; reserved as an `enum` rather than `()` so future
-/// transports (bounded backpressure, batch submit) can extend the
-/// vocabulary without churning every actuator emit site.
-#[derive(Debug)]
-pub enum SendError {
-    /// The consumer dropped its receiver. No further `send` will
-    /// succeed on this sender; the caller (the controller) will exit
-    /// its loop via one of its other shutdown channels shortly after.
-    Disconnected,
-}
-
-impl std::fmt::Display for SendError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Disconnected => f.write_str("effect-complete consumer disconnected"),
-        }
-    }
-}
-
-impl std::error::Error for SendError {}
 
 /// Construct the platform's default spawner as a `Box<dyn Spawner>`.
 ///

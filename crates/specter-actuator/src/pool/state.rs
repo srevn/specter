@@ -50,7 +50,9 @@ use crate::timer;
 use crate::tmp::DiffTmpFile;
 use crossbeam::channel::Sender;
 use specter_core::program::{BranchTarget, ExecAction, SpawnBody};
-use specter_core::{DedupKey, Effect, EffectOutcome, ProfileId, SubId, Termination};
+use specter_core::{
+    DedupKey, Effect, EffectCompletion, EffectOutcome, ProfileId, SubId, Termination,
+};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
@@ -334,7 +336,7 @@ impl ActuatorState {
         &mut self,
         effect: Effect,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
         engine_in: &dyn EffectCompleteSender,
     ) {
         let key = effect.key();
@@ -361,12 +363,12 @@ impl ActuatorState {
     /// permit before `pump` runs (plan-atomicity under contention).
     pub fn handle_reap(
         &mut self,
-        reaped: super::Reaped,
+        completion: EffectCompletion,
         engine_in: &dyn EffectCompleteSender,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
     ) {
-        self.reap_pump(reaped, engine_in, spawner, reap_tx);
+        self.reap_pump(completion, engine_in, spawner, reap_tx);
         self.pump(spawner, reap_tx, engine_in);
     }
 
@@ -479,22 +481,25 @@ impl ActuatorState {
     /// spawns, so the shutdown caller threads neither.
     pub fn handle_reap_drop(
         &mut self,
-        reaped: super::Reaped,
+        completion: EffectCompletion,
         engine_in: &dyn EffectCompleteSender,
     ) {
-        tracing::trace!(?reaped.key, ?reaped.outcome, "reap drop");
-        let super::Reaped { key, sub, outcome } = reaped;
+        tracing::trace!(?completion.key, ?completion.outcome, "reap drop");
+        // `key` is `Copy` (slotmap handle); read it off the envelope
+        // for the slot lookup, then thread the envelope through
+        // unchanged into the terminal arm — no destructure-and-rebuild.
+        let key = completion.key;
         // Consume the running job (if present). The signaler / effect
         // / waiter fields drop with the job — phase 1 already
         // SIGTERMed; this thread has already reaped the child
         // kernel-side, so dropping the signaler co-owner here is
-        // safe. Stale Reaped (running already taken) routes through
+        // safe. Stale completion (running already taken) routes through
         // `terminate_stale` — same shape as `reap_pump`'s stale arm.
         let Some(job) = self.take_running(&key) else {
-            self.terminate_stale(key, sub, outcome, engine_in);
+            self.terminate_stale(completion, engine_in);
             return;
         };
-        self.terminate_plan(key, sub, outcome, ReapPolicy::Drop, engine_in);
+        self.terminate_plan(completion, ReapPolicy::Drop, engine_in);
         // `job` carries the live-plan's last `Arc<DiffTmpFile>` (the
         // slot's `plan_continue` is structurally `None` while
         // `running` is `Some`, so no second co-owner exists at this
@@ -523,26 +528,28 @@ impl ActuatorState {
     ///    cleans the diff tmp file, and re-queues the slot's `pending`
     ///    (if any) or removes the slot.
     ///
-    /// **Defensive no-job**: a stale Reaped after slot removal routes
-    /// through [`Self::terminate_stale`] (not `terminate_plan`) —
-    /// emits `EffectComplete` for engine accounting without touching
+    /// **Defensive no-job**: a stale completion after slot removal
+    /// routes through [`Self::terminate_stale`] (not `terminate_plan`)
+    /// — emits `EffectComplete` for engine accounting without touching
     /// the per-Sub gate (which a live plan for the same Sub may still
     /// hold at a different key) or the tmp file.
     fn reap_pump(
         &mut self,
-        reaped: super::Reaped,
+        completion: EffectCompletion,
         engine_in: &dyn EffectCompleteSender,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
     ) {
-        tracing::trace!(?reaped.key, ?reaped.outcome, "reap");
-        let super::Reaped { key, sub, outcome } = reaped;
+        tracing::trace!(?completion.key, ?completion.outcome, "reap");
+        // `key` is `Copy`; read off the envelope for the slot lookup
+        // and thread the envelope unchanged into the terminal arm.
+        let key = completion.key;
         let Some(job) = self.take_running(&key) else {
-            // Stale Reaped: slot already removed (or running already
-            // taken). Engine-accounting-only — see `terminate_stale`'s
-            // contract for why this can't go through `terminate_plan`
-            // under the set-membership gate.
-            self.terminate_stale(key, sub, outcome, engine_in);
+            // Stale completion: slot already removed (or running
+            // already taken). Engine-accounting-only — see
+            // `terminate_stale`'s contract for why this can't go
+            // through `terminate_plan` under the set-membership gate.
+            self.terminate_stale(completion, engine_in);
             return;
         };
         let RunningJob {
@@ -552,7 +559,7 @@ impl ActuatorState {
             ..
         } = job;
         self.advance_or_terminate(
-            key, sub, effect, diff_tmp, cursor, outcome, spawner, reap_tx, engine_in,
+            completion, effect, diff_tmp, cursor, spawner, reap_tx, engine_in,
         );
     }
 
@@ -596,27 +603,38 @@ impl ActuatorState {
     /// and the spawn-failure paths in [`Self::start_plan`] /
     /// [`Self::spawn_continuation`]. The shutdown drain
     /// ([`Self::handle_reap_drop`]) bypasses dispatch entirely.
+    ///
+    /// Takes the [`EffectCompletion`] envelope by value so the
+    /// terminate arms thread it through unchanged to
+    /// [`Self::terminate_plan`]. The two synthesising arms (`Escape`
+    /// and the `Continue → Failed` synth loop) mutate
+    /// `completion.outcome` in place — the envelope's identity
+    /// (`(sub, key)`) is preserved, only the carried outcome shifts.
     fn advance_or_terminate(
         &mut self,
-        key: DedupKey,
-        sub: SubId,
+        mut completion: EffectCompletion,
         effect: Arc<Effect>,
         diff_tmp: Option<Arc<DiffTmpFile>>,
         mut cursor: u32,
-        mut outcome: EffectOutcome,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
         engine_in: &dyn EffectCompleteSender,
     ) {
         loop {
             let op = &effect.program.ops()[cursor as usize];
-            match op.target(&outcome) {
+            match op.target(&completion.outcome) {
                 BranchTarget::Terminate => {
-                    self.terminate_plan(key, sub, outcome, ReapPolicy::Pump, engine_in);
+                    self.terminate_plan(completion, ReapPolicy::Pump, engine_in);
                     return;
                 }
                 BranchTarget::Escape => {
-                    self.terminate_plan(key, sub, EffectOutcome::Ok, ReapPolicy::Pump, engine_in);
+                    // "Branch, not guard" outcome elision — the
+                    // predicate's carried outcome is irrelevant; the
+                    // plan terminates Ok. Re-stamp the envelope's
+                    // outcome so the engine receives the synthesised
+                    // verdict, not the raw reap outcome.
+                    completion.outcome = EffectOutcome::Ok;
+                    self.terminate_plan(completion, ReapPolicy::Pump, engine_in);
                     return;
                 }
                 BranchTarget::Continue(next_idx) => {
@@ -630,8 +648,8 @@ impl ActuatorState {
                         "forward-only + in-bounds (builder invariant)",
                     );
                     match self.try_spawn_step(
-                        &key,
-                        sub,
+                        &completion.key,
+                        completion.sub,
                         &effect,
                         next,
                         diff_tmp.as_ref(),
@@ -645,7 +663,7 @@ impl ActuatorState {
                             // permit wait, and the next step's spawn
                             // clones it back out.
                             self.queue_plan_continue(
-                                key,
+                                completion.key,
                                 PlanContinuation {
                                     effect,
                                     cursor: next,
@@ -669,13 +687,13 @@ impl ActuatorState {
                             // line emitted at the spawn boundary
                             // (resolver / OS spawn / wait thread).
                             tracing::warn!(
-                                ?key,
+                                key = ?completion.key,
                                 cursor = next,
                                 ?cause,
                                 "synthesised EffectOutcome::Failed (no clean exit); dispatching on op's on_failed edge",
                             );
                             cursor = next;
-                            outcome = EffectOutcome::Failed(Termination::Internal);
+                            completion.outcome = EffectOutcome::Failed(Termination::Internal);
                         }
                     }
                 }
@@ -733,12 +751,15 @@ impl ActuatorState {
     /// pinning the bump/remove pairing under the set-membership shape.
     fn terminate_plan(
         &mut self,
-        key: DedupKey,
-        sub: SubId,
-        outcome: EffectOutcome,
+        completion: EffectCompletion,
         policy: ReapPolicy,
         engine_in: &dyn EffectCompleteSender,
     ) {
+        // Snapshot the `Copy` identity scalars before the envelope
+        // moves into the wire `send`. Both fields stay on the stack
+        // for the subsequent per-Sub gate remove + slot decision.
+        let key = completion.key;
+        let sub = completion.sub;
         // `let _` deliberately drops the `SendError`: a closed
         // `engine_in` means the engine has been torn down. The
         // actuator's `run` loop observes that fact via one of its own
@@ -749,7 +770,7 @@ impl ActuatorState {
         // policy in `specter-bin`'s `forward.rs`: both directions of
         // the engine ↔ actuator channel degrade rather than escalate,
         // and the actuator cannot persist with the engine dead.
-        let _ = engine_in.send(sub, key, outcome);
+        let _ = engine_in.send(completion);
         // Live-plan teardown: every reachable call site has a paired
         // `start_plan` insert for this Sub. `BTreeSet::remove` returns
         // `false` only on an unpaired remove — a controller accounting
@@ -758,7 +779,7 @@ impl ActuatorState {
         let was_present = self.running_subs.remove(&sub);
         debug_assert!(
             was_present,
-            "per-Sub gate underflow: terminate_plan for Sub not in running_subs (stale-Reaped path must route to terminate_stale)",
+            "per-Sub gate underflow: terminate_plan for Sub not in running_subs (stale completion path must route to terminate_stale)",
         );
         // The slot may still exist (the reap pipeline already took
         // running; spawn-failure paths never installed it). Decide:
@@ -779,15 +800,16 @@ impl ActuatorState {
         }
     }
 
-    /// Engine-accounting-only terminal arm for a [`super::Reaped`] that
-    /// arrives without a paired live `RunningJob` ([`Self::take_running`]
-    /// returned `None` — slot absent or `slot.running` already taken).
-    /// Emits one `EffectComplete` so the engine's outstanding counter
-    /// stays in lockstep, then removes the slot (idempotent).
+    /// Engine-accounting-only terminal arm for an [`EffectCompletion`]
+    /// envelope that arrives without a paired live `RunningJob`
+    /// ([`Self::take_running`] returned `None` — slot absent or
+    /// `slot.running` already taken). Emits one `EffectComplete` so the
+    /// engine's outstanding counter stays in lockstep, then removes the
+    /// slot (idempotent).
     ///
     /// Distinct from [`Self::terminate_plan`] in two ways:
     ///
-    /// 1. **No per-Sub gate touch.** A stale Reaped's `sub` is not
+    /// 1. **No per-Sub gate touch.** A stale completion's `sub` is not
     ///    guaranteed to hold a gate entry. The Sub might own a live
     ///    plan at a *different* `DedupKey` (the per-Sub gate is
     ///    structurally at-most-one across all keys, but the gate's
@@ -809,7 +831,7 @@ impl ActuatorState {
     /// `reap_pump_stale_for_unspawned_slot_clears_state` in the test
     /// module. Production callers (real reap pipeline,
     /// [`Self::handle_reap_drop`]) reach this arm only if the same
-    /// `Reaped` would otherwise have been delivered twice — a
+    /// completion would otherwise have been delivered twice — a
     /// controller invariant violation. The accounting emit + slot
     /// remove keeps the engine in lockstep under that defensive case.
     ///
@@ -817,18 +839,19 @@ impl ActuatorState {
     /// carries pending — so the unconditional `slots.remove` here
     /// drops no live state. `pending` becomes reachable only via
     /// `handle_submit`, which is on the same single controller
-    /// thread; the stale Reaped path is a no-op against that arm.
+    /// thread; the stale-completion path is a no-op against that arm.
     fn terminate_stale(
         &mut self,
-        key: DedupKey,
-        sub: SubId,
-        outcome: EffectOutcome,
+        completion: EffectCompletion,
         engine_in: &dyn EffectCompleteSender,
     ) {
+        // `key` is `Copy`; snapshot before the envelope moves into the
+        // wire send so the slot-remove below stays addressable.
+        let key = completion.key;
         // Same drop-on-disconnect policy as [`Self::terminate_plan`]
         // — see that site's rustdoc for the cross-actor symmetry
         // rationale.
-        let _ = engine_in.send(sub, key, outcome);
+        let _ = engine_in.send(completion);
         self.slots.remove(&key);
     }
 
@@ -852,7 +875,7 @@ impl ActuatorState {
     pub fn pump(
         &mut self,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
         engine_in: &dyn EffectCompleteSender,
     ) {
         debug_assert!(
@@ -961,7 +984,7 @@ impl ActuatorState {
         effect: Arc<Effect>,
         permit: Permit,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
         engine_in: &dyn EffectCompleteSender,
     ) {
         // Materialise the diff tmp file before the first instruction's
@@ -1023,12 +1046,14 @@ impl ActuatorState {
                     "synthesised EffectOutcome::Failed at plan start; dispatching on op 0's on_failed edge",
                 );
                 self.advance_or_terminate(
-                    key,
-                    sub,
+                    EffectCompletion {
+                        sub,
+                        key,
+                        outcome: EffectOutcome::Failed(Termination::Internal),
+                    },
                     effect,
                     diff_tmp,
                     0,
-                    EffectOutcome::Failed(Termination::Internal),
                     spawner,
                     reap_tx,
                     engine_in,
@@ -1056,7 +1081,7 @@ impl ActuatorState {
         cont: PlanContinuation,
         permit: Permit,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
         engine_in: &dyn EffectCompleteSender,
     ) {
         let PlanContinuation {
@@ -1083,12 +1108,14 @@ impl ActuatorState {
                     "synthesised EffectOutcome::Failed at plan continuation; dispatching on op's on_failed edge",
                 );
                 self.advance_or_terminate(
-                    key,
-                    sub,
+                    EffectCompletion {
+                        sub,
+                        key,
+                        outcome: EffectOutcome::Failed(Termination::Internal),
+                    },
                     effect,
                     diff_tmp,
                     cursor,
-                    EffectOutcome::Failed(Termination::Internal),
                     spawner,
                     reap_tx,
                     engine_in,
@@ -1124,7 +1151,7 @@ impl ActuatorState {
         cursor: u32,
         diff_tmp: Option<&Arc<DiffTmpFile>>,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnError> {
         let Some(permit) = self.permits.try_acquire() else {
             return Err(SpawnError::Deferred);
@@ -1165,7 +1192,7 @@ impl ActuatorState {
         diff_tmp: Option<&Arc<DiffTmpFile>>,
         permit: Permit,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
         let now = std::time::SystemTime::now();
         let cwd: &Path = resolve::compute_cwd(effect);
@@ -1255,7 +1282,7 @@ impl ActuatorState {
         diff_tmp: Option<&Arc<DiffTmpFile>>,
         permit: Permit,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
         let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
         let (CommandResolved { argv }, env) =
@@ -1399,7 +1426,7 @@ impl ActuatorState {
         diff_tmp: Option<&Arc<DiffTmpFile>>,
         permit: Permit,
         spawner: &dyn Spawner,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
         let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
         // Resolve every stage's argv + env. The result tuples own
@@ -1567,7 +1594,7 @@ impl ActuatorState {
         waiter: Box<dyn ChildWaiter>,
         signaler: Arc<dyn ChildSignaler>,
         permit: Permit,
-        reap_tx: &Sender<super::Reaped>,
+        reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
         let reap_tx_for_thread = reap_tx.clone();
         let wait_key = *key;
@@ -1690,7 +1717,7 @@ fn wait_loop(
     key: DedupKey,
     sub: SubId,
     permit: Permit,
-    reap_tx: Sender<super::Reaped>,
+    reap_tx: Sender<EffectCompletion>,
 ) {
     let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| waiter.wait())) {
         Ok(Ok(o)) => o,
@@ -1709,7 +1736,7 @@ fn wait_loop(
     // full ordering contract.
     signaler.mark_dead();
     drop(permit);
-    if let Err(e) = reap_tx.send(super::Reaped { key, sub, outcome }) {
+    if let Err(e) = reap_tx.send(EffectCompletion { sub, key, outcome }) {
         // The controller has shut down ahead of us (post-shutdown
         // orphan: shutdown's drain closed `reap_rx`; the wait thread
         // is the only `Reaped` writer). The reap is no longer
@@ -1736,7 +1763,7 @@ mod tests {
     //! wait-thread-spawn-failure inline) are exercised here against
     //! pre-loaded state, since neither has a fault-injection seam in
     //! the controller harness.
-    use super::super::{Reaped, SHUTDOWN_GRACE};
+    use super::super::SHUTDOWN_GRACE;
     use super::{ActuatorState, PlanContinuation, RunningJob, Slot};
     use crate::env::EnvSnapshot;
     use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
@@ -1746,7 +1773,8 @@ mod tests {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
     use specter_core::{
         ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Diff, Effect, EffectCommon,
-        EffectOutcome, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId, Termination,
+        EffectCompletion, EffectOutcome, ExecAction, Input, ProfileId, ResourceId, ResourceKind,
+        SubId, Termination,
     };
     use std::io;
     use std::num::NonZeroUsize;
@@ -1758,16 +1786,19 @@ mod tests {
         NonZeroUsize::new(n).expect("test setup: n must be non-zero")
     }
 
-    /// Test adapter that lifts the actuator's `(sub, key, outcome)`
-    /// triple into the engine-side `Input::EffectComplete` envelope so
-    /// the test's `Receiver<Input>` continues to observe completions
-    /// in the pre-trait shape. Mirrors the bin's `DriverEffectSender`
-    /// without dragging in the bin's transport identity.
+    /// Test adapter that lifts an [`EffectCompletion`] envelope into
+    /// the engine-side `Input::EffectComplete` so the test's
+    /// `Receiver<Input>` continues to observe completions in the
+    /// engine's vocabulary. Mirrors the bin's
+    /// [`WakingEffectCompleteSender`] without dragging in the bin's
+    /// transport identity.
+    ///
+    /// [`WakingEffectCompleteSender`]: # "in specter-bin"
     struct TestEngineIn(Sender<Input>);
     impl EffectCompleteSender for TestEngineIn {
-        fn send(&self, sub: SubId, key: DedupKey, result: EffectOutcome) -> Result<(), SendError> {
+        fn send(&self, completion: EffectCompletion) -> Result<(), SendError> {
             self.0
-                .send(Input::EffectComplete { sub, key, result })
+                .send(Input::EffectComplete(completion))
                 .map_err(|_| SendError::Disconnected)
         }
     }
@@ -2079,7 +2110,10 @@ mod tests {
 
     /// Channel pair sized for the controller's reap channel; rarely
     /// drained in these tests since most paths don't actually spawn.
-    fn reap_channel() -> (Sender<Reaped>, crossbeam::channel::Receiver<Reaped>) {
+    fn reap_channel() -> (
+        Sender<EffectCompletion>,
+        crossbeam::channel::Receiver<EffectCompletion>,
+    ) {
         crossbeam::channel::bounded(64)
     }
 
@@ -2180,7 +2214,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            Reaped {
+            EffectCompletion {
                 key,
                 sub,
                 outcome: EffectOutcome::Failed(Termination::Internal),
@@ -2197,15 +2231,11 @@ mod tests {
         );
         assert!(state.ready_queue.is_empty());
         match rx.try_recv() {
-            Ok(Input::EffectComplete {
-                sub: s,
-                key: k,
-                result,
-            }) => {
-                assert_eq!(s, sub);
-                assert_eq!(k, key);
+            Ok(Input::EffectComplete(c)) => {
+                assert_eq!(c.sub, sub);
+                assert_eq!(c.key, key);
                 assert!(matches!(
-                    result,
+                    c.outcome,
                     EffectOutcome::Failed(Termination::Internal)
                 ));
             }
@@ -2213,7 +2243,7 @@ mod tests {
         }
     }
 
-    /// Stale-Reaped against an empty slot for `Sub A`, while a live
+    /// Stale-completion against an empty slot for `Sub A`, while a live
     /// plan for the *same* `Sub A` holds `running_subs` at a
     /// different (here unrelated) `DedupKey`. The stale arm must NOT
     /// touch `running_subs` — clobbering the live plan's hold here
@@ -2240,7 +2270,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            Reaped {
+            EffectCompletion {
                 key: stale_key,
                 sub,
                 outcome: EffectOutcome::Failed(Termination::Internal),
@@ -2256,15 +2286,11 @@ mod tests {
             "live plan's per-Sub gate hold preserved across stale Reaped",
         );
         match rx.try_recv() {
-            Ok(Input::EffectComplete {
-                sub: s,
-                key: k,
-                result,
-            }) => {
-                assert_eq!(s, sub);
-                assert_eq!(k, stale_key);
+            Ok(Input::EffectComplete(c)) => {
+                assert_eq!(c.sub, sub);
+                assert_eq!(c.key, stale_key);
                 assert!(matches!(
-                    result,
+                    c.outcome,
                     EffectOutcome::Failed(Termination::Internal)
                 ));
             }
@@ -2296,7 +2322,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            Reaped {
+            EffectCompletion {
                 key,
                 sub,
                 outcome: EffectOutcome::Failed(Termination::Internal),
@@ -2345,7 +2371,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            Reaped {
+            EffectCompletion {
                 key,
                 sub,
                 outcome: EffectOutcome::Ok,
@@ -2392,7 +2418,7 @@ mod tests {
         let engine_in = TestEngineIn(tx);
 
         state.handle_reap_drop(
-            Reaped {
+            EffectCompletion {
                 key,
                 sub,
                 outcome: EffectOutcome::Failed(Termination::Internal),
@@ -2438,7 +2464,7 @@ mod tests {
         let spawner = ScriptedSpawner::new();
 
         state.reap_pump(
-            Reaped {
+            EffectCompletion {
                 key,
                 sub,
                 outcome: EffectOutcome::Ok,
@@ -2493,7 +2519,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            Reaped {
+            EffectCompletion {
                 key,
                 sub,
                 outcome: EffectOutcome::Failed(Termination::Exit(2)),
@@ -2506,8 +2532,8 @@ mod tests {
         assert!(state.slots.is_empty(), "slot removed on terminal");
         assert!(state.running_subs.is_empty(), "per-Sub gate cleared");
         match rx.try_recv() {
-            Ok(Input::EffectComplete { result, .. }) => assert!(matches!(
-                result,
+            Ok(Input::EffectComplete(c)) => assert!(matches!(
+                c.outcome,
                 EffectOutcome::Failed(Termination::Exit(2))
             )),
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
@@ -2542,7 +2568,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            Reaped {
+            EffectCompletion {
                 key,
                 sub,
                 outcome: EffectOutcome::Ok,
@@ -2555,8 +2581,8 @@ mod tests {
         assert!(state.slots.is_empty(), "slot removed after last step");
         assert!(state.running_subs.is_empty());
         match rx.try_recv() {
-            Ok(Input::EffectComplete { result, .. }) => {
-                assert!(matches!(result, EffectOutcome::Ok));
+            Ok(Input::EffectComplete(c)) => {
+                assert!(matches!(c.outcome, EffectOutcome::Ok));
             }
             other => panic!("expected EffectComplete::Ok; got {other:?}"),
         }
@@ -2597,7 +2623,7 @@ mod tests {
         let spawner = UnusedSpawner;
 
         state.reap_pump(
-            Reaped {
+            EffectCompletion {
                 key,
                 sub,
                 outcome: EffectOutcome::Ok,
@@ -2695,7 +2721,7 @@ mod tests {
         let engine_in = TestEngineIn(tx);
 
         state.handle_reap_drop(
-            Reaped {
+            EffectCompletion {
                 key,
                 sub,
                 outcome: EffectOutcome::Ok,
@@ -2706,8 +2732,8 @@ mod tests {
         assert!(state.slots.is_empty(), "slot removed under Drop");
         assert!(state.running_subs.is_empty());
         match rx.try_recv() {
-            Ok(Input::EffectComplete { result, .. }) => {
-                assert!(matches!(result, EffectOutcome::Ok));
+            Ok(Input::EffectComplete(c)) => {
+                assert!(matches!(c.outcome, EffectOutcome::Ok));
             }
             other => panic!("expected EffectComplete::Ok; got {other:?}"),
         }
@@ -2743,7 +2769,7 @@ mod tests {
         spawner.inject_spawn_error(io::ErrorKind::NotFound);
 
         state.reap_pump(
-            Reaped {
+            EffectCompletion {
                 key,
                 sub,
                 outcome: EffectOutcome::Ok,
@@ -2756,8 +2782,8 @@ mod tests {
         assert!(state.slots.is_empty(), "slot removed after synth Failed");
         assert!(state.running_subs.is_empty(), "per-Sub gate cleared");
         match rx.try_recv() {
-            Ok(Input::EffectComplete { result, .. }) => assert!(matches!(
-                result,
+            Ok(Input::EffectComplete(c)) => assert!(matches!(
+                c.outcome,
                 EffectOutcome::Failed(Termination::Internal)
             )),
             other => panic!("expected EffectComplete::Failed; got {other:?}"),

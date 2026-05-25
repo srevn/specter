@@ -23,14 +23,14 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, BurstIntent,
     CertifiedPrior, ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta,
-    DirSnapshot, DirtyProvenance, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent,
-    FsIdentity, Input, LeafEntry, OverflowScope, PatternSpec, Placeholder, PostFireBurst,
-    PostFirePhase, PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest,
-    ProbeResponse, ProbeSlot, ProfileIdentity, ProfileState, Promoter, PromoterAttachRequest,
-    PromoterRegistryDiff, PromoterState, ProofAuthority, ProofObligation, QuiescenceVerdict,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
-    SubAttachRequest, SubId, SubParams, Termination, TimerKind, TreeSnapshot, WatchOp,
-    WatchRegistryDiff,
+    DirSnapshot, DirtyProvenance, EffectCompletion, EffectOutcome, EffectScope, EntryKind,
+    FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry, OverflowScope, PatternSpec,
+    Placeholder, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome,
+    ProbeOwner, ProbeRequest, ProbeResponse, ProbeSlot, ProfileIdentity, ProfileState, Promoter,
+    PromoterAttachRequest, PromoterRegistryDiff, PromoterState, ProofAuthority, ProofObligation,
+    QuiescenceVerdict, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
+    SubAttachAnchor, SubAttachRequest, SubId, SubParams, Termination, TimerKind, TreeSnapshot,
+    WatchOp, WatchRegistryDiff,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -2282,14 +2282,14 @@ fn effect_complete_ok_in_idle_diagnoses_outside_awaiting() {
     let (mut e, pid, sid, _root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     let out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: DedupKey::Subtree {
                 sub: sid,
                 profile: pid,
             },
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         Instant::now(),
     );
     let has_diag = out.diagnostics.iter().any(|d| {
@@ -2321,14 +2321,14 @@ fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
     complete_seed_burst(&mut e, pid);
     let pre_baseline = e.profiles.get(pid).unwrap().baseline().is_some();
     let out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: DedupKey::Subtree {
                 sub: sid,
                 profile: pid,
             },
-            result: EffectOutcome::Failed(Termination::Exit(1)),
-        },
+            outcome: EffectOutcome::Failed(Termination::Exit(1)),
+        }),
         Instant::now(),
     );
     let has_diag = out.diagnostics.iter().any(|d| {
@@ -2995,11 +2995,11 @@ fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
     // EffectComplete::Ok → transition_to_rebasing mints a fresh probe
     // and writes Rebasing already armed. No pre-consume follows.
     let _ = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         now + SETTLE * 3,
     );
     let burst = match e.profiles.get(pid).unwrap().state() {
@@ -4475,11 +4475,11 @@ fn clears_fired_subs_on_effect_complete_failed() {
         profile: pid,
     };
     let _ = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: dk,
-            result: EffectOutcome::Failed(Termination::Exit(1)),
-        },
+            outcome: EffectOutcome::Failed(Termination::Exit(1)),
+        }),
         now,
     );
     assert!(
@@ -4753,11 +4753,11 @@ fn drive_to_rebasing(
     );
     let key = stable_out.effects()[0].key();
     let rebase_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         now + SETTLE * 3,
     );
     rebase_out
@@ -5071,11 +5071,11 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
 
     // EffectComplete::Ok → transition_to_rebasing.
     let rebase_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         now + SETTLE * 3,
     );
 
@@ -5133,11 +5133,11 @@ fn rebasing_without_absorbs_still_probes_whole_subtree() {
 
     // No FsEvent during Awaiting — drive directly to EffectComplete.
     let rebase_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         now + SETTLE * 3,
     );
 
@@ -6528,14 +6528,14 @@ mod props {
                 )
             }
             Action::EffectComplete => e.step(
-                Input::EffectComplete {
+                Input::EffectComplete(EffectCompletion {
                     sub: sid,
                     key: DedupKey::Subtree {
                         sub: sid,
                         profile: pid,
                     },
-                    result: EffectOutcome::Ok,
-                },
+                    outcome: EffectOutcome::Ok,
+                }),
                 *t,
             ),
         };

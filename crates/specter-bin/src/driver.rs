@@ -43,6 +43,7 @@ mod ipc;
 mod reload;
 mod state;
 mod tick;
+mod wake;
 
 use crate::app::CliLogOverrides;
 use crate::channels::ActuatorIO;
@@ -60,6 +61,7 @@ use std::time::Instant;
 
 pub(crate) use hub::DriverHub;
 pub(crate) use state::{DriverState, ReloadTrigger};
+pub(crate) use wake::{WakeHandle, WakingSink};
 
 /// Reason the driver loop exited. Returned from [`EngineDriver::run`].
 ///

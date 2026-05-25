@@ -34,11 +34,11 @@
 //!    straggler Source Drop that tries to deregister silently fails
 //!    (mio's contract) — which is fine because every Source above
 //!    already closed its fd; deregistration was best-effort cleanup.
-//!    The `Arc<Waker>` returned from [`DriverHub::new`] is the
-//!    sole anchor — external senders (the Waking* wrappers used
-//!    by the prober pool and actuator thread) hold their own
-//!    clones; those clones outlive the Hub and drop when their
-//!    owners exit. A late `wake()` against a torn-down Poll is
+//!    The [`WakeHandle`] returned from [`DriverHub::new`] is the
+//!    sole anchor — external senders (the [`WakingSink`]-bearing
+//!    adapters used by the prober pool and actuator thread) hold
+//!    their own clones; those clones outlive the Hub and drop when
+//!    their owners exit. A late `wake()` against a torn-down Poll is
 //!    a silent no-op (mio's documented contract).
 //! 8. **`prober_response_rx` / `effect_complete_rx`** drop together
 //!    with the surrounding struct — pure crossbeam Receiver Drop,
@@ -54,6 +54,7 @@
 //! `forward.rs` drives [`DriverHub::apply_watch_ops`], the IPC
 //! handler reaches per-conn helpers.
 
+use crate::driver::WakeHandle;
 use crate::driver::conns::{ConnState, MAX_REQUEST_LINE_BYTES, PushOutcome};
 use crate::ipc::framing::serialize_line;
 use crate::ipc::protocol::{ERR_BUSY, ResponsePayload};
@@ -61,7 +62,7 @@ use crate::ipc::wire::WireDiagnostic;
 use crate::signals::SignalPipe;
 use crossbeam::channel::Receiver;
 use mio::unix::SourceFd;
-use mio::{Events, Interest, Poll, Token, Waker};
+use mio::{Events, Interest, Poll, Token};
 use specter_core::{
     Diagnostic, FsEvent, Input, OverflowScope, ResourceId, SubId, WatchFailure, WatchOp,
 };
@@ -72,7 +73,6 @@ use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::io;
 use std::os::fd::{AsFd, AsRawFd};
-use std::sync::Arc;
 use std::time::{Duration, SystemTime};
 
 /// Static token assignments for the always-present Sources. Per-conn
@@ -276,17 +276,21 @@ impl<W: FsWatcher> DriverHub<W> {
     /// `prober_response_rx` / `effect_complete_rx` are the consumer
     /// halves of the wake'd channels paired with the
     /// `WakingProberResponseSender` / `WakingEffectCompleteSender`
-    /// wrappers (constructed at `App::run` with the Arc<Waker>
-    /// returned from this constructor).
+    /// adapters (constructed at `App::run` with a clone of the
+    /// [`WakeHandle`] returned from this constructor).
     ///
-    /// Returns `(Self, Arc<Waker>)`: the Waker is cloned for every
-    /// external sender that needs to wake the driver. Sharing one
-    /// Waker across senders honors mio's "one Waker per Poll"
-    /// contract.
+    /// Returns `(Self, WakeHandle)`: the [`WakeHandle`] is cloned for
+    /// every external sender that needs to wake the driver. Sharing
+    /// one Waker across senders honors mio's "one Waker per Poll"
+    /// contract — and the [`WakeHandle`] newtype makes that
+    /// invariant structural: [`WakeHandle::new`] is the sole call
+    /// site of [`mio::Waker::new`] in the bin, so a second
+    /// construction site would require a fresh `use mio::Waker`
+    /// import.
     ///
     /// # Errors
     ///
-    /// Propagates [`io::Error`] from `Poll::new`, `Waker::new`,
+    /// Propagates [`io::Error`] from `Poll::new`, [`WakeHandle::new`],
     /// `set_nonblocking`, or any of the four `Source` registrations.
     /// All five are programmer-error or kernel-pressure failures
     /// (`EMFILE` on Waker fd) — the caller treats any error as
@@ -298,9 +302,9 @@ impl<W: FsWatcher> DriverHub<W> {
         signals: SignalPipe,
         prober_response_rx: Receiver<Input>,
         effect_complete_rx: Receiver<Input>,
-    ) -> io::Result<(Self, Arc<Waker>)> {
+    ) -> io::Result<(Self, WakeHandle)> {
         let poll = Poll::new()?;
-        let waker = Arc::new(Waker::new(poll.registry(), TOKEN_WAKER)?);
+        let waker = WakeHandle::new(poll.registry(), TOKEN_WAKER)?;
 
         // Watcher fd registration goes through SourceFd: the watcher
         // owns the kqueue / inotify fd directly via `AsFd`, and mio

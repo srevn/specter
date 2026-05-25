@@ -136,36 +136,50 @@ impl WorkerProber {
     /// Spawn the worker pool. `concurrency.max(1)` workers — a
     /// zero-worker pool would queue requests forever.
     ///
-    /// `out` is `Box<dyn>`-in / `Arc<dyn>`-internal: the constructor
-    /// owns the sink, converts it into an `Arc` once, and then
-    /// `Arc::clone`s per worker. The Box-shaped boundary makes the
-    /// ownership transfer truthful (no by-value-but-only-cloned
-    /// smell) while the trait-object form keeps the pool non-generic
-    /// at the type level — symmetric with the `Arc<dyn Prober>`
-    /// handle the bin clones onto its driver — and lets the
-    /// underlying transport (a crossbeam `Sender<Input>` in
-    /// production; a test wrapper in unit tests) stay invisible to
-    /// the worker loop.
+    /// `out` is `Arc<dyn>`-in: the constructor owns one `Arc<dyn
+    /// ProberResponseSender>` and `Arc::clone`s it into each worker.
+    /// The trait-object form keeps the pool non-generic at the type
+    /// level — symmetric with the `Arc<dyn Prober>` handle the bin
+    /// clones onto its driver — and lets the underlying transport
+    /// (a crossbeam `Sender<Input>` in production; a test wrapper in
+    /// unit tests) stay invisible to the worker loop.
     ///
     /// On any worker spawn failure (typically `EAGAIN` from the
     /// process-wide thread limit), drops the queue sender so
     /// already-spawned workers exit on `Disconnected`, joins them, and
     /// returns the underlying `io::Error`.
-    pub fn new(out: Box<dyn ProberResponseSender>, concurrency: usize) -> io::Result<Self> {
+    pub fn new(out: Arc<dyn ProberResponseSender>, concurrency: usize) -> io::Result<Self> {
         let concurrency = concurrency.max(1);
         let (queue_tx, queue_rx) = crossbeam::channel::unbounded::<ProbeRequest>();
         let expected: ExpectedMap = Arc::new(Mutex::new(BTreeMap::new()));
-        let out: Arc<dyn ProberResponseSender> = Arc::from(out);
+
+        // Distribute the sink across workers: workers 0..N-1 take a
+        // clone, worker N-1 takes the moved original. This honours the
+        // by-value parameter contract ("the function consumes `out`")
+        // rather than letting clippy see N clones + a stale `out`
+        // drop at function-return — and saves one `Arc::clone` per
+        // pool as a side-effect.
+        let mut remaining_out: Option<Arc<dyn ProberResponseSender>> = Some(out);
 
         let mut workers = Vec::with_capacity(concurrency);
         for i in 0..concurrency {
             let rx = queue_rx.clone();
-            let out_clone = Arc::clone(&out);
+            let out_worker = if i + 1 == concurrency {
+                remaining_out
+                    .take()
+                    .expect("present until taken on the final iteration")
+            } else {
+                Arc::clone(
+                    remaining_out
+                        .as_ref()
+                        .expect("present until the final iteration takes it"),
+                )
+            };
             let expected_clone = Arc::clone(&expected);
             let spawned = thread::Builder::new()
                 .name(format!("sp-prober-{i}"))
                 .spawn(move || {
-                    run_worker(&rx, &*out_clone, &expected_clone, run_probe);
+                    run_worker(&rx, &*out_worker, &expected_clone, run_probe);
                 });
             match spawned {
                 Ok(h) => workers.push(h),
@@ -176,7 +190,9 @@ impl WorkerProber {
                     // A panic here means a worker died before it ever
                     // entered its loop body — log it so the operator
                     // sees the real failure alongside the spawn error
-                    // we're about to return.
+                    // we're about to return. The remaining (untaken)
+                    // `out` drops naturally when `remaining_out`
+                    // leaves scope at function return.
                     drop(queue_tx);
                     for (worker, h) in workers.into_iter().enumerate() {
                         if let Err(panic) = h.join() {

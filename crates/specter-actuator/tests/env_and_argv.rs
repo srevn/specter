@@ -74,7 +74,7 @@ fn assert_env_var_received(
     h.submit(e);
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     match &completions[0] {
-        Input::EffectComplete { result, .. } => assert_eq!(*result, EffectOutcome::Ok),
+        Input::EffectComplete(c) => assert_eq!(c.outcome, EffectOutcome::Ok),
         other => panic!("expected Ok; got {other:?}"),
     }
     h.shutdown();
@@ -188,7 +188,7 @@ fn child_receives_specter_created_newline_separated() {
     h.submit(e);
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     match &completions[0] {
-        Input::EffectComplete { result, .. } => assert_eq!(*result, EffectOutcome::Ok),
+        Input::EffectComplete(c) => assert_eq!(c.outcome, EffectOutcome::Ok),
         other => panic!("expected Ok; got {other:?}"),
     }
     h.shutdown();
@@ -240,8 +240,8 @@ fn child_receives_specter_diff_path_when_diff_present() {
     let dbg_content =
         std::fs::read_to_string(&dbg_path).unwrap_or_else(|e| format!("read dbg: {e}"));
     match &completions[0] {
-        Input::EffectComplete { result, .. } => {
-            assert_eq!(*result, EffectOutcome::Ok, "dbg: {dbg_content}");
+        Input::EffectComplete(c) => {
+            assert_eq!(c.outcome, EffectOutcome::Ok, "dbg: {dbg_content}");
         }
         other => panic!("expected Ok; got {other:?}; dbg: {dbg_content}"),
     }
@@ -268,7 +268,7 @@ fn child_does_not_receive_specter_diff_path_without_diff() {
     h.submit(e);
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     match &completions[0] {
-        Input::EffectComplete { result, .. } => assert_eq!(*result, EffectOutcome::Ok),
+        Input::EffectComplete(c) => assert_eq!(c.outcome, EffectOutcome::Ok),
         other => panic!("expected Ok; got {other:?}"),
     }
     h.shutdown();

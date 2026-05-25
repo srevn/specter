@@ -31,8 +31,10 @@ use std::path::Path;
 // the trait + `WatcherEvent` definitions below need. `ProbeResponse` is
 // the payload [`ProberResponseSender::send`] carries — re-exported so
 // implementors don't have to reach across the `specter_core` crate
-// boundary to name the type.
-pub use specter_core::{OverflowScope, ProbeResponse, WatchFailure};
+// boundary to name the type. [`SendError`] is the workspace-shared
+// sender-error vocabulary — re-exported so callers naming
+// `sensor::SendError` keep their path stable across the consolidation.
+pub use specter_core::{OverflowScope, ProbeResponse, SendError, WatchFailure};
 
 /// Sensor-side extension on [`WatchFailure`] that classifies an
 /// `io::Error` from a watch-install syscall.
@@ -408,10 +410,10 @@ pub trait Prober: Send + Sync {
 /// # Semantics
 ///
 /// Fire-and-forget. A successful [`send`](Self::send) leaves no further
-/// obligation on the caller; an [`Err`](SendError) means the consumer
-/// is gone (the engine driver dropped its receiver) and the calling
-/// worker should exit its loop. The trait does not carry the rejected
-/// payload back on error — workers do not retry, the bin owns
+/// obligation on the caller; an [`Err`]([`SendError`]) means the
+/// consumer is gone (the engine driver dropped its receiver) and the
+/// calling worker should exit its loop. The trait does not carry the
+/// rejected payload back on error — workers do not retry, the bin owns
 /// shutdown-cause logging at the appropriate severity, and dropping
 /// the response on the floor is the documented contract once the
 /// receiver disappears.
@@ -421,28 +423,6 @@ pub trait ProberResponseSender: Send + Sync + 'static {
     /// which point the caller (a worker) exits its loop.
     fn send(&self, response: ProbeResponse) -> Result<(), SendError>;
 }
-
-/// Sender-side error vocabulary for [`ProberResponseSender::send`].
-///
-/// One variant today; reserved as an `enum` rather than `()` so future
-/// transports (bounded backpressure, batch submit) can extend the
-/// vocabulary without churning every worker call site.
-#[derive(Debug)]
-pub enum SendError {
-    /// The consumer dropped its receiver. No further `send` will
-    /// succeed on this sender; the calling worker should exit.
-    Disconnected,
-}
-
-impl std::fmt::Display for SendError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Disconnected => f.write_str("prober response consumer disconnected"),
-        }
-    }
-}
-
-impl std::error::Error for SendError {}
 
 #[cfg(any(target_os = "macos", target_os = "freebsd"))]
 mod kqueue;

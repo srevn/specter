@@ -1627,8 +1627,8 @@ fn lock_expected_recovers_from_poisoned_mutex() {
 /// inline (the bin's `DriverProberSender` is the structural twin), so
 /// keeping the helper local to the test module avoids a testkit-feature
 /// dependency for one type.
-fn sink(tx: Sender<Input>) -> Box<dyn ProberResponseSender> {
-    Box::new(TestProberSink { tx })
+fn sink(tx: Sender<Input>) -> Arc<dyn ProberResponseSender> {
+    Arc::new(TestProberSink { tx })
 }
 
 #[test]

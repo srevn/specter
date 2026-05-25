@@ -14,11 +14,12 @@
 use crate::Engine;
 use specter_core::testkit::{enumerated, proven};
 use specter_core::{
-    ActiveBurst, ClassSet, DedupKey, DirSnapshot, EffectOutcome, EffectScope, FS_ROOT_SEGMENT,
-    Input, PatternSpec, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileIdentity, ProfileState,
-    PromoterAttachRequest, PromoterId, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, TimerId, TimerKind, WatchFailure,
+    ActiveBurst, ClassSet, DedupKey, DirSnapshot, EffectCompletion, EffectOutcome, EffectScope,
+    FS_ROOT_SEGMENT, Input, PatternSpec, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase,
+    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileIdentity,
+    ProfileState, PromoterAttachRequest, PromoterId, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, TimerId, TimerKind,
+    WatchFailure,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -461,11 +462,11 @@ pub fn complete_effect_to_rebasing(
 ) -> (StepOutput, ProbeCorrelation) {
     let pid = pid_of(e, sid);
     let out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         at,
     );
     let correlation = e

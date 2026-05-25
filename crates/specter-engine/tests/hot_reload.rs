@@ -5,9 +5,9 @@
 use compact_str::CompactString;
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
-    BurstFinish, DedupKey, Diagnostic, EffectOutcome, EffectScope, FsEvent, Input, ProbeOp,
-    ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, SubRegistryDiff,
-    WatchOp, WatchRegistryDiff,
+    BurstFinish, DedupKey, Diagnostic, EffectCompletion, EffectOutcome, EffectScope, FsEvent,
+    Input, ProbeOp, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest,
+    SubRegistryDiff, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, seed_to_idle, verify_n2};
@@ -540,14 +540,14 @@ fn effect_complete_after_detach_drops_silently() {
 
     // Inject EffectComplete for the now-removed Sub.
     let out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: DedupKey::Subtree {
                 sub: sid,
                 profile: pid,
             },
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         post_seed,
     );
 

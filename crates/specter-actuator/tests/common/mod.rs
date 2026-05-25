@@ -15,13 +15,13 @@
 use compact_str::CompactString;
 use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
 use specter_actuator::{
-    EffectCompleteSender, OsSpawner, SendError as ActSendError, SubprocessActuator,
+    EffectCompleteSender, OsSpawner, RunWiring, SendError as ActSendError, SubprocessActuator,
 };
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::testkit::single_exec_program;
 use specter_core::{
-    ActionProgram, ArgPart, ArgTemplate, CorrelationId, DedupKey, Diff, Effect, EffectCommon,
-    EffectOp, EffectOutcome, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
+    ActionProgram, ArgPart, ArgTemplate, CorrelationId, Diff, Effect, EffectCommon,
+    EffectCompletion, EffectOp, ExecAction, Input, ProfileId, ResourceId, ResourceKind, SubId,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -37,9 +37,9 @@ use std::time::{Duration, Instant};
 struct TestEngineIn(Sender<Input>);
 
 impl EffectCompleteSender for TestEngineIn {
-    fn send(&self, sub: SubId, key: DedupKey, result: EffectOutcome) -> Result<(), ActSendError> {
+    fn send(&self, completion: EffectCompletion) -> Result<(), ActSendError> {
         self.0
-            .send(Input::EffectComplete { sub, key, result })
+            .send(Input::EffectComplete(completion))
             .map_err(|_| ActSendError::Disconnected)
     }
 }
@@ -85,19 +85,21 @@ impl Harness {
         let (hard_shutdown_tx, hard_shutdown_rx) = bounded::<()>(1);
         let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded::<()>(1);
         let (engine_tx, engine_rx) = unbounded::<Input>();
-        let engine_in: Box<dyn EffectCompleteSender> = Box::new(TestEngineIn(engine_tx));
+        let engine_in = TestEngineIn(engine_tx);
         let join = thread::Builder::new()
             .name("test-actuator-controller".into())
             .spawn(move || {
                 let spawner = Arc::new(OsSpawner::new());
                 let mut a = SubprocessActuator::new(concurrency);
                 a.run(
-                    effects_rx,
-                    shutdown_rx,
-                    hard_shutdown_rx,
-                    engine_in,
+                    RunWiring {
+                        effects_rx,
+                        shutdown_rx,
+                        hard_shutdown_rx,
+                        hard_shutdown_done_tx,
+                    },
+                    &engine_in,
                     spawner.as_ref(),
-                    hard_shutdown_done_tx,
                 );
             })
             .expect("spawn controller");

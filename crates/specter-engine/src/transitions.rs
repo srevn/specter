@@ -974,7 +974,7 @@ impl Engine {
         &mut self,
         sub: SubId,
         key: &DedupKey,
-        result: &EffectOutcome,
+        outcome: &EffectOutcome,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -991,7 +991,7 @@ impl Engine {
         // the next stable verdict for it fires fresh even on an
         // unchanged tree. Match `key` (not the `sub` param) for the
         // scope discriminant: only `Subtree` carries fire history.
-        if matches!(result, EffectOutcome::Failed(_)) {
+        if matches!(outcome, EffectOutcome::Failed(_)) {
             match key {
                 DedupKey::Subtree { sub, .. } => self.subs.clear_fired(*sub),
                 // PerFile has no fire history (diff membership is the

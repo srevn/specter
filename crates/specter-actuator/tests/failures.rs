@@ -22,8 +22,8 @@ fn non_existent_command_returns_failed() {
     ));
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(2));
     match &completions[0] {
-        Input::EffectComplete { result, .. } => assert!(matches!(
-            result,
+        Input::EffectComplete(c) => assert!(matches!(
+            c.outcome,
             EffectOutcome::Failed(Termination::Internal)
         )),
         other => panic!("expected EffectComplete::Failed; got {other:?}"),
@@ -44,7 +44,7 @@ fn non_zero_exit_returns_failed_with_exit_code() {
     ));
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     match &completions[0] {
-        Input::EffectComplete { result, .. } => match result {
+        Input::EffectComplete(c) => match &c.outcome {
             EffectOutcome::Failed(Termination::Exit(exit_code)) => {
                 assert_eq!(*exit_code, 42);
             }
@@ -68,7 +68,7 @@ fn zero_exit_returns_ok() {
     ));
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
     match &completions[0] {
-        Input::EffectComplete { result, .. } => assert_eq!(*result, EffectOutcome::Ok),
+        Input::EffectComplete(c) => assert_eq!(c.outcome, EffectOutcome::Ok),
         other => panic!("expected EffectComplete; got {other:?}"),
     }
     h.shutdown();
@@ -87,8 +87,8 @@ fn nonexistent_cwd_returns_failed() {
     ));
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(2));
     match &completions[0] {
-        Input::EffectComplete { result, .. } => assert!(matches!(
-            result,
+        Input::EffectComplete(c) => assert!(matches!(
+            c.outcome,
             EffectOutcome::Failed(Termination::Internal)
         )),
         other => panic!("expected EffectComplete::Failed; got {other:?}"),
@@ -102,8 +102,8 @@ fn empty_argv_returns_failed() {
     h.submit(perfile_effect(1, 1, 1, 1, vec![], std::env::temp_dir()));
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(2));
     match &completions[0] {
-        Input::EffectComplete { result, .. } => assert!(matches!(
-            result,
+        Input::EffectComplete(c) => assert!(matches!(
+            c.outcome,
             EffectOutcome::Failed(Termination::Internal)
         )),
         other => panic!("expected Failed; got {other:?}"),

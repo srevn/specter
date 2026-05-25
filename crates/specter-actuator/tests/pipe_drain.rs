@@ -89,9 +89,9 @@ fn pipe_drain_does_not_block_on_hung_stage_0() {
     );
 
     match &inputs[0] {
-        Input::EffectComplete { sub, result, .. } => {
-            assert_eq!(*sub, unique_sub_id(sub_seed));
-            match result {
+        Input::EffectComplete(c) => {
+            assert_eq!(c.sub, unique_sub_id(sub_seed));
+            match &c.outcome {
                 EffectOutcome::Failed(Termination::PipeMixed {
                     last_exit,
                     first_signal,
@@ -130,8 +130,8 @@ fn pipe_drain_all_ok_completes_ok() {
     ));
     let inputs = harness.wait_for_effect_completes(1, Duration::from_secs(10));
     match &inputs[0] {
-        Input::EffectComplete { result, .. } => {
-            assert_eq!(*result, EffectOutcome::Ok);
+        Input::EffectComplete(c) => {
+            assert_eq!(c.outcome, EffectOutcome::Ok);
         }
         other => panic!("expected EffectComplete, got {other:?}"),
     }

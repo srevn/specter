@@ -11,12 +11,13 @@
 //! race nextest's process-wide handlers), and exercise IPC through a
 //! real bound socket on a tempdir path.
 
+use super::WakeHandle;
 use super::conns::{ConnRole, WRITE_QUEUE_HIGH_WATER};
 use super::hub::{EnqueueOutcome, TOKEN_CONN_BASE};
 use super::state::ReloadTrigger;
 use super::{DriverHub, EngineDriver, TickOutcome};
 use crate::app::CliLogOverrides;
-use crate::channels::{ActuatorIO, ActuatorSide};
+use crate::channels::ActuatorIO;
 use crate::ipc::protocol::{
     ERR_ALREADY_SUBSCRIBED, ERR_DYNAMIC_SUB_NO_OP, ERR_NOT_DISABLED, ERR_TOML_DISABLED,
     ERR_UNKNOWN_SUB, ResponsePayload, WireId, WireRequest,
@@ -24,7 +25,7 @@ use crate::ipc::protocol::{
 use crate::loader::Loader;
 use compact_str::CompactString;
 use crossbeam::channel::Sender;
-use mio::Waker;
+use specter_actuator::RunWiring;
 use specter_config::{Config, FileMeta};
 use specter_core::{Diagnostic, Input, ProbeOwner, ResourceId, StepOutput, SubId};
 use specter_engine::Engine;
@@ -74,7 +75,7 @@ struct TestRig {
     /// `ActuatorIO::pair` returns the consumer halves here; without
     /// holding them, the driver's `effects_tx` senders would observe
     /// Disconnected on the first `try_send`.
-    actuator_side: ActuatorSide,
+    actuator_side: RunWiring,
     /// Shared `Arc<MockProber>` clone the driver received as the
     /// `Arc<dyn Prober>`. Tests use this clone to drain `take_submitted` /
     /// `take_cancelled` recordings.
@@ -87,11 +88,11 @@ struct TestRig {
     /// Producer-side handle for the effect completion channel. Same
     /// send-then-wake protocol as `prober_response_tx`.
     effect_complete_tx: Sender<Input>,
-    /// Shared [`Arc<mio::Waker>`] clone — the Hub holds one clone, the
+    /// Shared [`WakeHandle`] clone — the Hub holds one clone, the
     /// rig holds another. Tests fire `waker.wake()` after writing to
     /// `prober_response_tx` / `effect_complete_tx` to mirror the
     /// production wake-after-send semantics.
-    waker: Arc<Waker>,
+    waker: WakeHandle,
     /// Bound socket path. Tests may [`UnixStream::connect`] here to
     /// drive IPC clients. Lives through the rig's lifetime so the
     /// socket file survives until `_tmp` drops.
@@ -2793,14 +2794,14 @@ fn effect_complete_send_then_wake_drains_through_token_waker() {
     let mut rig = rig_for(config, cfg_path);
 
     rig.effect_complete_tx
-        .send(Input::EffectComplete {
+        .send(Input::EffectComplete(specter_core::EffectCompletion {
             sub: SubId::default(),
             key: specter_core::DedupKey::Subtree {
                 sub: SubId::default(),
                 profile: specter_core::ProfileId::default(),
             },
-            result: specter_core::EffectOutcome::Ok,
-        })
+            outcome: specter_core::EffectOutcome::Ok,
+        }))
         .expect("send into wake'd channel");
     rig.waker.wake().expect("fire wake edge");
 
@@ -2845,14 +2846,14 @@ fn fs_event_and_effect_complete_both_drain_in_one_tick() {
         .inject(r, specter_core::FsEvent::Modified);
     // Queue an EffectComplete via the wake'd channel.
     rig.effect_complete_tx
-        .send(Input::EffectComplete {
+        .send(Input::EffectComplete(specter_core::EffectCompletion {
             sub: SubId::default(),
             key: specter_core::DedupKey::Subtree {
                 sub: SubId::default(),
                 profile: specter_core::ProfileId::default(),
             },
-            result: specter_core::EffectOutcome::Ok,
-        })
+            outcome: specter_core::EffectOutcome::Ok,
+        }))
         .expect("queue effect complete");
     rig.waker.wake().expect("wake");
 

@@ -33,9 +33,9 @@ fn distinct_keys_run_concurrently_under_cap() {
         cwd.clone(),
     ));
     let completions = h.wait_for_effect_completes(2, Duration::from_secs(5));
-    for c in &completions {
-        match c {
-            Input::EffectComplete { result, .. } => assert_eq!(*result, EffectOutcome::Ok),
+    for completion in &completions {
+        match completion {
+            Input::EffectComplete(c) => assert_eq!(c.outcome, EffectOutcome::Ok),
             other => panic!("expected EffectComplete; got {other:?}"),
         }
     }

@@ -20,11 +20,11 @@ use compact_str::CompactString;
 use specter_core::testkit::{dir_snap, empty_program, proven};
 use specter_core::{
     ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DedupKey, Diagnostic, DirMeta,
-    DirSnapshot, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity, Input, LeafEntry,
-    PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp,
-    ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, Termination, TimerKind,
-    TreeSnapshot,
+    DirSnapshot, EffectCompletion, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity,
+    Input, LeafEntry, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation,
+    ProbeOp, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
+    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, Termination,
+    TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -380,11 +380,11 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
     // EffectComplete::Ok → transition_to_rebasing(First): the (empty)
     // residual is cleared, rebase probe #1 armed.
     e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: effect_key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         seed_done + Duration::from_millis(20),
     );
     let corr1 = e
@@ -717,11 +717,11 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
 
     // Late EffectComplete::Ok arrives in Rebasing → diagnoses.
     let late_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: effect_key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         gate_t + Duration::from_millis(1),
     );
     assert!(
@@ -787,11 +787,11 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
 
     // Late EffectComplete → diagnoses (Profile Idle now).
     let late_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: effect_key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         seed_done + Duration::from_millis(20),
     );
     assert!(
@@ -819,11 +819,11 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
 
     // EffectComplete::Ok → Rebasing.
     e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: effect_key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         seed_done + Duration::from_millis(20),
     );
     assert!(matches!(
@@ -1040,11 +1040,11 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
 
     // First completion: Ok → outstanding=1.
     e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: key_a,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         seed_done + Duration::from_millis(20),
     );
     let phase = match e.profiles().get(pid).unwrap().state() {
@@ -1058,11 +1058,11 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
 
     // Second completion: Failed → outstanding=0 → Rebasing.
     let rebase_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: key_b,
-            result: EffectOutcome::Failed(Termination::Exit(1)),
-        },
+            outcome: EffectOutcome::Failed(Termination::Exit(1)),
+        }),
         seed_done + Duration::from_millis(30),
     );
     assert!(matches!(
@@ -1111,11 +1111,11 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     // EffectComplete::Ok → LastReached + BurstFinish::Reap →
     // finish_burst_to_idle → reap_profile.
     let reap_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: effect_key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         seed_done + Duration::from_millis(20),
     );
     assert!(
@@ -1426,11 +1426,11 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
 
     // EffectComplete::Ok → Rebasing.
     let rebase_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: effect_key,
-            result: EffectOutcome::Ok,
-        },
+            outcome: EffectOutcome::Ok,
+        }),
         seed_done + Duration::from_millis(20),
     );
     let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe");

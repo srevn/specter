@@ -11,10 +11,11 @@
 
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
-    ActiveBurst, BurstFinish, BurstIntent, ClassSet, EffectScope, EntryKind, FsEvent, Input,
-    OverflowScope, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeResponse, ProfileId, ProfileState, ProofAuthority, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, TimerKind, WatchOp,
+    ActiveBurst, BurstFinish, BurstIntent, ClassSet, EffectCompletion, EffectScope, EntryKind,
+    FsEvent, Input, OverflowScope, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ProofAuthority,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId,
+    TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -264,11 +265,11 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     // EffectComplete → child transition_to_rebasing(First). No finish,
     // no sweep — the child stays Active(PostFire) for the whole loop.
     let rebase_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid_c,
             key: child_effect.key(),
-            result: specter_core::EffectOutcome::Ok,
-        },
+            outcome: specter_core::EffectOutcome::Ok,
+        }),
         child_parked_at,
     );
     let rebase_corr1 = e
@@ -675,11 +676,11 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         .cloned()
         .expect("child fired one Effect at the stable verdict");
     let rebase_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid_c,
             key: child_effect.key(),
-            result: specter_core::EffectOutcome::Ok,
-        },
+            outcome: specter_core::EffectOutcome::Ok,
+        }),
         child_parked_at,
     );
     assert!(
@@ -944,11 +945,11 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         .cloned()
         .expect("P fired one Effect at the stable verdict");
     let p_rebase_out = e.step(
-        Input::EffectComplete {
+        Input::EffectComplete(EffectCompletion {
             sub: sid_p,
             key: p_effect.key(),
-            result: specter_core::EffectOutcome::Ok,
-        },
+            outcome: specter_core::EffectOutcome::Ok,
+        }),
         p_parked_at,
     );
     assert!(

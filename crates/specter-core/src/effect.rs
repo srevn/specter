@@ -1,10 +1,15 @@
-//! `Effect` and friends.
+//! `Effect`, [`EffectCompletion`], and friends.
 //!
 //! No baseline/current snapshot on `Effect`: the engine re-probes after
 //! `EffectComplete::Ok` rather than trust a snapshot taken at emission
 //! time. A diff is carried only when the Sub's program references
 //! diff-derived placeholders (Subtree, optional) or the fire is
 //! per-stable-file (mandatory).
+//!
+//! [`EffectCompletion`] is the engine-facing envelope for one effect
+//! completion — built once at the actuator's wait thread, threaded
+//! unchanged through the controller, consumed by the engine via
+//! `Input::EffectComplete(EffectCompletion)`.
 
 use crate::diff::Diff;
 use crate::ids::{CorrelationId, ProfileId, ResourceId, SubId};
@@ -326,6 +331,52 @@ pub enum Termination {
     /// signalled (last non-zero exit, first observed signal).
     PipeMixed { last_exit: i32, first_signal: i32 },
 }
+
+/// Engine-facing envelope for one effect completion.
+///
+/// One identity across three layers: the actuator's wait thread builds
+/// it, the controller threads it through unchanged, the engine consumes
+/// it via [`crate::Input::EffectComplete`].
+///
+/// `Clone` is derived so [`crate::Input`] (which the bin's wake-bearing
+/// adapters lift the value into) can stay `Clone` symmetric with every
+/// other variant — production code moves the envelope by value through
+/// each layer, but tests that record `Input` streams need it cloneable.
+#[derive(Debug, Clone)]
+pub struct EffectCompletion {
+    pub sub: SubId,
+    pub key: DedupKey,
+    pub outcome: EffectOutcome,
+}
+
+/// Sender-side error vocabulary for every cross-thread sink that lands
+/// at the engine boundary.
+///
+/// Both the sensor's [`crate::Input::ProbeResponse`] path and the
+/// actuator's [`crate::Input::EffectComplete`] path classify the same
+/// failure mode: "the engine's input consumer is gone." Single shared
+/// vocabulary lets the workspace-wide adapter glue stay symmetric
+/// across both sinks.
+///
+/// One variant today; reserved as an `enum` rather than `()` so future
+/// transports (bounded backpressure, batch submit) can extend the
+/// vocabulary without churning every call site.
+#[derive(Debug)]
+pub enum SendError {
+    /// The consumer dropped its receiver. No further send will
+    /// succeed on this sender; the calling worker should exit.
+    Disconnected,
+}
+
+impl std::fmt::Display for SendError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Disconnected => f.write_str("engine input consumer disconnected"),
+        }
+    }
+}
+
+impl std::error::Error for SendError {}
 
 #[cfg(test)]
 mod dedup_key_tests {

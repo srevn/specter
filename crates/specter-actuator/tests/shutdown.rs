@@ -36,7 +36,7 @@ fn shutdown_sigkills_term_resistant_child() {
     }
     assert_eq!(completions.len(), 1);
     match &completions[0] {
-        Input::EffectComplete { result, .. } => match result {
+        Input::EffectComplete(c) => match &c.outcome {
             EffectOutcome::Failed(
                 Termination::Signal(signal)
                 | Termination::PipeMixed {

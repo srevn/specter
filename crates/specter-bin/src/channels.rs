@@ -7,7 +7,8 @@
 //! actuator thread spawns subprocesses and waits on `waitpid`
 //! synchronously) and the engine ↔ prober seam (see below — the
 //! prober pool's workers block on `lstat` / `readdir` during the
-//! directory walk). Each seam pulses the Hub's [`mio::Waker`] to
+//! directory walk). Each seam pulses the Hub's
+//! [`crate::driver::WakeHandle`] (the bin's sole [`mio::Waker`]) to
 //! lift the reactor out of `Poll::poll` when a response is ready.
 //!
 //! Two channel-bundle types pair through one [`ActuatorIO::pair`]
@@ -19,12 +20,17 @@
 //!   pulses `shutdown_actuator_tx` / `hard_shutdown_actuator_tx` and
 //!   waits on `hard_shutdown_done_rx`. `effects_tx` carries every
 //!   emitted [`EffectOp`].
-//! - [`ActuatorSide`] — actuator-thread handles. Moves into the
-//!   actuator-thread spawn closure. `effect_complete_tx` is wrapped
-//!   into a [`specter_actuator::EffectCompleteSender`] trait object
-//!   (the bin's [`crate::app::WakingEffectCompleteSender`]) that the
-//!   actuator's controller calls via `&dyn` dispatch — the actuator
-//!   never names [`Input`].
+//! - [`RunWiring`] — actuator-thread handles. Owned by the actuator's
+//!   [`specter_actuator::SubprocessActuator::run`] for the lifetime
+//!   of the call. There is no bin-side mirror name: the actuator's
+//!   own contract is the one struct that crosses the seam.
+//!
+//! `effect_complete_tx` is NOT in either struct — it's lifted into a
+//! [`specter_actuator::EffectCompleteSender`] trait object (the bin's
+//! [`crate::app::WakingEffectCompleteSender`]) at `App::run`'s wiring
+//! point so the actuator never names [`specter_core::Input`]. The
+//! trait object is passed alongside the [`RunWiring`] into the
+//! actuator-thread spawn.
 //!
 //! Prober traffic does NOT live here. The prober's response channel
 //! pairs the driver's [`crate::driver::hub::DriverHub`]
@@ -46,6 +52,7 @@
 //!   before the next pulse can land.
 
 use crossbeam::channel::{Receiver, Sender, bounded};
+use specter_actuator::RunWiring;
 use specter_core::EffectOp;
 
 /// Driver-side actuator-coordination channel bundle.
@@ -53,7 +60,7 @@ use specter_core::EffectOp;
 /// Holds the four channel halves the driver thread uses to talk to
 /// the actuator: the effects pipe and the three shutdown-handshake
 /// legs (soft pulse, hard pulse, confirm-receive). Constructed by
-/// [`Self::pair`] paired with [`ActuatorSide`].
+/// [`Self::pair`] paired with [`RunWiring`].
 ///
 /// Threaded into [`crate::driver::EngineDriver::new`] at `App::run`
 /// time; the soft / hard / confirm legs are pulsed from
@@ -87,35 +94,14 @@ pub struct ActuatorIO {
     pub hard_shutdown_done_rx: Receiver<()>,
 }
 
-/// Actuator-thread-side bundle. Owns the receiver halves of the
-/// shutdown handshake, plus the sender half of the hard-shutdown
-/// confirmation. The actuator's controller drains [`Self::effects_rx`]
-/// via crossbeam `select!` against the shutdown legs; on phase 3
-/// completion it pulses `hard_shutdown_done_tx`.
-///
-/// `effect_complete_tx` is NOT in this struct — it's wrapped into a
-/// [`specter_actuator::EffectCompleteSender`] trait object
-/// ([`crate::app::WakingEffectCompleteSender`]) at `App::run`'s
-/// wiring point so the actuator never names [`specter_core::Input`].
-/// The trait object is passed alongside this bundle into the
-/// actuator-thread spawn.
-#[derive(Debug)]
-#[must_use]
-pub struct ActuatorSide {
-    pub effects_rx: Receiver<EffectOp>,
-    pub shutdown_actuator_rx: Receiver<()>,
-    pub hard_shutdown_actuator_rx: Receiver<()>,
-    pub hard_shutdown_done_tx: Sender<()>,
-}
-
 impl ActuatorIO {
     /// Allocate the four channel pairs and distribute halves into
-    /// the driver-side ([`ActuatorIO`]) and actuator-side
-    /// ([`ActuatorSide`]) bundles in one move.
-    pub fn pair() -> (Self, ActuatorSide) {
+    /// the driver-side ([`ActuatorIO`]) and the actuator's owned
+    /// [`RunWiring`] in one move.
+    pub fn pair() -> (Self, RunWiring) {
         let (effects_tx, effects_rx) = bounded::<EffectOp>(1024);
-        let (shutdown_actuator_tx, shutdown_actuator_rx) = bounded::<()>(1);
-        let (hard_shutdown_actuator_tx, hard_shutdown_actuator_rx) = bounded::<()>(1);
+        let (shutdown_actuator_tx, shutdown_rx) = bounded::<()>(1);
+        let (hard_shutdown_actuator_tx, hard_shutdown_rx) = bounded::<()>(1);
         let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded::<()>(1);
         (
             Self {
@@ -124,10 +110,10 @@ impl ActuatorIO {
                 hard_shutdown_actuator_tx,
                 hard_shutdown_done_rx,
             },
-            ActuatorSide {
+            RunWiring {
                 effects_rx,
-                shutdown_actuator_rx,
-                hard_shutdown_actuator_rx,
+                shutdown_rx,
+                hard_shutdown_rx,
                 hard_shutdown_done_tx,
             },
         )
@@ -145,7 +131,7 @@ mod tests {
     /// calibrated around this width.
     #[test]
     fn pair_creates_bounded_effects_at_1024() {
-        let (io, side) = ActuatorIO::pair();
+        let (io, wiring) = ActuatorIO::pair();
         // Saturate via `try_send`s and assert the 1025th rejects.
         for _ in 0..1024 {
             io.effects_tx
@@ -161,7 +147,7 @@ mod tests {
         // Sender → Receiver carries the EffectOp verbatim across the
         // bundle seam.
         assert!(matches!(
-            side.effects_rx.try_recv(),
+            wiring.effects_rx.try_recv(),
             Ok(EffectOp::Cancel { .. })
         ));
     }
@@ -171,7 +157,7 @@ mod tests {
     /// pending slot returns `Full` rather than queueing.
     #[test]
     fn pair_creates_bounded_shutdown_legs_at_1() {
-        let (io, _side) = ActuatorIO::pair();
+        let (io, _wiring) = ActuatorIO::pair();
         io.shutdown_actuator_tx
             .try_send(())
             .expect("first slot fits");
@@ -194,8 +180,9 @@ mod tests {
     /// edge the hard-exit path relies on.
     #[test]
     fn pair_routes_hard_shutdown_confirmation() {
-        let (io, side) = ActuatorIO::pair();
-        side.hard_shutdown_done_tx
+        let (io, wiring) = ActuatorIO::pair();
+        wiring
+            .hard_shutdown_done_tx
             .try_send(())
             .expect("actuator can pulse the confirm leg");
         assert!(io.hard_shutdown_done_rx.try_recv().is_ok());

@@ -31,7 +31,10 @@ pub use diag::{
     BurstHelper, ClaimKind, DetachReason, Diagnostic, PromoterClaimKind, SpliceFailureCause,
 };
 pub use diff::{Diff, EntryRef, Rename};
-pub use effect::{DedupKey, Effect, EffectCommon, EffectOutcome, EffectTarget, Termination};
+pub use effect::{
+    DedupKey, Effect, EffectCommon, EffectCompletion, EffectOutcome, EffectTarget, SendError,
+    Termination,
+};
 pub use fs_id::FsIdentity;
 pub use ids::{CorrelationId, ProbeCorrelation, ProfileId, PromoterId, ResourceId, SubId, TimerId};
 pub use input::{FsEvent, Input, OverflowScope, WatchRegistryDiff};
