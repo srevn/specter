@@ -12,11 +12,14 @@
 //!   operator-meaningful boot display. Both are sampled inside the
 //!   constructor so wall and monotonic agree to within their own
 //!   nanosecond resolution.
-//! - **Reload counters** — bumped by [`Self::record_reload`] on every
-//!   successful reload (i.e., after `read_and_parse_config` returns
-//!   `Some`; covers both empty-diff and apply-diff branches). A
-//!   parse-fail reload short-circuits upstream of the bump site and
-//!   never reaches the record.
+//! - **Reload counter** (`reload_count`) — bumped by
+//!   [`Self::record_reload`] on every successful reload (i.e., after
+//!   `read_and_parse_config` returns `Some`; covers both empty-diff
+//!   and apply-diff branches). A parse-fail reload short-circuits
+//!   upstream of the bump site and never reaches the record.
+//! - **Most-recent reload attribution** (`last_reload`) — wall-clock
+//!   and trigger lifted into a single [`LastReload`] observable;
+//!   `None` before the first reload fires, `Some` after.
 //! - **Socket path** (`socket_path`) — the UNIX-socket path the IPC
 //!   server bound to. Set once in [`Self::new`] from the path
 //!   `App::run` passed to `sockpath::bind_socket_atomic`; invariant
@@ -24,11 +27,13 @@
 //!   projection so operators see the exact path the listener is
 //!   serving.
 //!
-//! **Sole writer:** [`Self::record_reload`]. The three counter fields
-//! (`reload_count` / `last_reload_at` / `last_reload_via`) move
-//! together as one observable transition, so the edge method captures
-//! the wall-clock internally rather than taking it as a parameter —
-//! the three fields cannot diverge.
+//! **Sole writer:** [`Self::record_reload`]. The counter and the
+//! [`LastReload`] pair move together as one observable transition;
+//! the edge method captures the wall-clock internally rather than
+//! taking it as a parameter. The [`LastReload`] sum type makes the
+//! "both attribution fields present together" invariant structural —
+//! the prior `(Option<SystemTime>, Option<ReloadTrigger>)` carried it
+//! as convention.
 //!
 //! # Visibility
 //!
@@ -40,7 +45,8 @@
 //! `&mut DriverState` (it is a field of [`super::EngineDriver`]); a
 //! `&DriverState` borrow handed out cross-module cannot mutate.
 
-use crate::ipc::wire::WireReloadTrigger;
+use crate::ipc::protocol::WireLastReload;
+use crate::ipc::wire::{WireReloadTrigger, WireTime};
 use std::path::PathBuf;
 use std::time::{Instant, SystemTime};
 
@@ -60,12 +66,12 @@ pub(crate) struct DriverState {
     /// Parse-fail does NOT bump (the helper short-circuits before
     /// the record call).
     pub(crate) reload_count: u64,
-    /// Wall-clock of the most recent successful reload, `None` before
-    /// the first one fires.
-    pub(crate) last_reload_at: Option<SystemTime>,
-    /// Trigger of the most recent successful reload, `None` before
-    /// the first one fires.
-    pub(crate) last_reload_via: Option<ReloadTrigger>,
+    /// Most recent successful reload — wall-clock + trigger as one
+    /// observable. `None` before the first reload fires. Lifted from
+    /// the prior `(Option<SystemTime>, Option<ReloadTrigger>)` pair
+    /// so the impossible product `(Some, None)` / `(None, Some)` is
+    /// unconstructable at the type level — see [`LastReload`].
+    pub(crate) last_reload: Option<LastReload>,
     /// UNIX-socket path the IPC server bound to. Set once in
     /// [`Self::new`] from `App::run`'s resolved path (which it also
     /// hands to `sockpath::bind_socket_atomic`); the projection's
@@ -88,17 +94,17 @@ impl DriverState {
             start_instant: Instant::now(),
             start_wall: SystemTime::now(),
             reload_count: 0,
-            last_reload_at: None,
-            last_reload_via: None,
+            last_reload: None,
             socket_path,
         }
     }
 
-    /// Record a successful reload — the three counter fields move
-    /// together. Bumps `reload_count`, stamps `last_reload_at` from
-    /// the wall-clock at *this call*, and overwrites `last_reload_via`
-    /// with `trigger`. `saturating_add` guards the (practically
-    /// unreachable) `u64`-overflow case.
+    /// Record a successful reload — counter + attribution move
+    /// together. Bumps [`Self::reload_count`] (with `saturating_add`
+    /// guarding the practically-unreachable `u64`-overflow case) and
+    /// stamps [`Self::last_reload`] with the wall-clock at *this
+    /// call* plus the caller's `trigger`, packed as one
+    /// [`LastReload`].
     ///
     /// Sole call site is `EngineDriver::dispatch_reload`, immediately
     /// after `read_and_parse_config` returns `Some`. Both the
@@ -109,8 +115,41 @@ impl DriverState {
     /// branch here.
     pub(crate) fn record_reload(&mut self, trigger: ReloadTrigger) {
         self.reload_count = self.reload_count.saturating_add(1);
-        self.last_reload_at = Some(SystemTime::now());
-        self.last_reload_via = Some(trigger);
+        self.last_reload = Some(LastReload {
+            at: SystemTime::now(),
+            via: trigger,
+        });
+    }
+}
+
+/// Most-recent successful reload — wall-clock + attribution as one
+/// observable. The pair carries the invariant "both fields present
+/// iff at least one reload has fired"; lifting the prior pair of
+/// `Option<SystemTime>` / `Option<ReloadTrigger>` into this struct
+/// makes the invariant structural (the impossible
+/// `(Some(at), None)` / `(None, Some(via))` products are no longer
+/// constructable). [`DriverState::record_reload`] is the sole
+/// constructor; the wire-side mirror [`WireLastReload`] keeps the
+/// JSON shape flat via `#[serde(flatten)]`.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct LastReload {
+    /// Wall-clock at the reload-record call site. Sampled with
+    /// `SystemTime::now()` inside [`DriverState::record_reload`].
+    pub(crate) at: SystemTime,
+    /// What drove this reload. See [`ReloadTrigger`].
+    pub(crate) via: ReloadTrigger,
+}
+
+/// Projection lives at the source so the wire layer stays a leaf
+/// (no `crate::driver` import in [`crate::ipc::protocol`]) and a
+/// new field on [`LastReload`] fails compilation here, at the
+/// struct's declaration site.
+impl From<LastReload> for WireLastReload {
+    fn from(lr: LastReload) -> Self {
+        Self {
+            at: WireTime::from(lr.at),
+            via: WireReloadTrigger::from(lr.via),
+        }
     }
 }
 

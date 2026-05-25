@@ -147,8 +147,9 @@ pub struct DaemonArgs {
 #[must_use]
 pub struct ClientArgs {
     /// UNIX socket path. Defaults to the daemon's per-platform default
-    /// (Linux: `$XDG_RUNTIME_DIR/specter.sock` or `/tmp/specter.sock`;
-    /// BSD/macOS: `$TMPDIR/specter-<uid>.sock`).
+    /// (Linux: `$XDG_RUNTIME_DIR/specter.sock`, fallback
+    /// `/tmp/specter.sock`; macOS/BSD: `$TMPDIR/specter.sock`, fallback
+    /// `/tmp/specter.sock`).
     #[arg(long)]
     pub socket: Option<PathBuf>,
 }

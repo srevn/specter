@@ -66,6 +66,26 @@ pub(crate) fn default_socket_path() -> PathBuf {
 /// On success, the returned [`UnlinkGuard`] removes the bound
 /// socket from disk when dropped (panic) or when
 /// [`UnlinkGuard::unlink_now`] is called as part of graceful shutdown.
+///
+/// # Single-instance assumption
+///
+/// `bind_socket_atomic` does NOT defend against two daemons starting
+/// within microseconds of each other against the same `path`. The
+/// caller's [`check_stale_or_remove`] → this fn's `bind` → `chmod` →
+/// `rename` sequence has no kernel-level mutex; a parallel pair can
+/// both pass the staleness check, both bind at distinct staging
+/// names, and both rename onto `path`. The rename is atomic per
+/// POSIX, so one wins; the loser's [`UnlinkGuard`] (still armed
+/// against the well-known `path`) wipes the *winner's* socket when
+/// the loser shuts down. Operators connecting after the loser's
+/// shutdown see `ENOENT` against a daemon that is still running on
+/// the orphaned-inode listen queue.
+///
+/// For single-user alpha this race is operator-discipline-bounded
+/// (one daemon per host). The structural fix is a sibling lockfile
+/// (`fs2::FileExt::try_lock_exclusive` or `rustix::fs::flock`) held
+/// for the daemon's lifetime — deferred until the
+/// multi-daemon-per-host scenario is required.
 pub(crate) fn bind_socket_atomic(path: &Path) -> io::Result<(UnixListener, UnlinkGuard)> {
     let tmp = temp_sibling(path);
     let _ = fs::remove_file(&tmp);

@@ -24,8 +24,8 @@
 //! Pure function: `(&StatusResponse, bool) -> String`. No I/O, no
 //! styling — the current `status` view stays plain text.
 
-use crate::ipc::protocol::StatusResponse;
-use crate::ipc::wire::{WireReloadTrigger, WireTime};
+use crate::ipc::protocol::{StatusResponse, WireLastReload};
+use crate::ipc::wire::WireReloadTrigger;
 use std::fmt::Write as _;
 
 /// Render the status response as one operator-readable block.
@@ -48,11 +48,7 @@ pub(crate) fn render(resp: &StatusResponse, _wide: bool) -> String {
         out,
         "{:LABEL_WIDTH$}{}",
         "reloads",
-        format_reloads(
-            resp.reload_count,
-            resp.last_reload_at.as_ref(),
-            resp.last_reload_via,
-        ),
+        format_reloads(resp.reload_count, resp.last_reload.as_ref()),
     );
     let _ = writeln!(
         out,
@@ -94,20 +90,15 @@ fn format_uptime(uptime_secs: u64) -> String {
     }
 }
 
-/// Render the `reloads` line: count + (optionally) the last reload
-/// timestamp and trigger. A daemon that has never reloaded shows
-/// just the count.
-fn format_reloads(
-    count: u64,
-    last_at: Option<&WireTime>,
-    via: Option<WireReloadTrigger>,
-) -> String {
-    match (last_at, via) {
-        (Some(at), Some(trigger)) => {
-            format!("{count} (last {at} via {})", trigger_label(trigger))
-        }
-        (Some(at), None) => format!("{count} (last {at})"),
-        _ => count.to_string(),
+/// Render the `reloads` line: count + (optionally) the most-recent
+/// reload pair. A daemon that has never reloaded shows just the
+/// count. The lift to a single [`WireLastReload`] collapses the
+/// prior `(Some(at), None)` defensive arm — the impossible product
+/// is no longer constructable, so the match shrinks to two arms.
+fn format_reloads(count: u64, last: Option<&WireLastReload>) -> String {
+    match last {
+        Some(r) => format!("{count} (last {} via {})", r.at, trigger_label(r.via)),
+        None => count.to_string(),
     }
 }
 
@@ -126,7 +117,7 @@ const fn trigger_label(t: WireReloadTrigger) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::{format_reloads, format_uptime, render, trigger_label};
-    use crate::ipc::protocol::StatusResponse;
+    use crate::ipc::protocol::{StatusResponse, WireLastReload};
     use crate::ipc::wire::{WirePath, WireReloadTrigger, WireTime};
     use std::path::Path;
     use std::time::{Duration, UNIX_EPOCH};
@@ -136,8 +127,7 @@ mod tests {
             uptime_secs: 0,
             start_wall: WireTime::from(UNIX_EPOCH),
             reload_count: 0,
-            last_reload_at: None,
-            last_reload_via: None,
+            last_reload: None,
             sub_total: 0,
             sub_disabled_toml: 0,
             sub_disabled_runtime: 0,
@@ -184,16 +174,19 @@ mod tests {
     }
 
     /// Zero reloads renders the bare count; non-zero with attribution
-    /// renders the full `(last ... via X)` parenthetical.
+    /// renders the full `(last ... via X)` parenthetical. The
+    /// impossible-by-construction `(Some(at), None)` arm collapses
+    /// out of the renderer since [`WireLastReload`] holds the pair
+    /// together.
     #[test]
     fn format_reloads_minimal_and_full_lines() {
-        assert_eq!(format_reloads(0, None, None), "0");
+        assert_eq!(format_reloads(0, None), "0");
 
-        let line = format_reloads(
-            3,
-            Some(&WireTime::from(UNIX_EPOCH + Duration::from_mins(2))),
-            Some(WireReloadTrigger::Sighup),
-        );
+        let lr = WireLastReload {
+            at: WireTime::from(UNIX_EPOCH + Duration::from_mins(2)),
+            via: WireReloadTrigger::Sighup,
+        };
+        let line = format_reloads(3, Some(&lr));
         assert!(
             line.starts_with("3 (last ") && line.ends_with(" via sighup)"),
             "got: {line}",

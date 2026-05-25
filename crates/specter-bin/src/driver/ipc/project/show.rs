@@ -79,28 +79,32 @@ pub(crate) fn show(
 
 /// Project a registry-attached `(SubId, &Sub)` into a [`SubDetails`].
 ///
-/// `expect` on the Profile lookup: every attached Sub has a Profile
-/// by construction (`SubRegistry::insert` runs in the same engine
-/// step as `ProfileMap::attach`). A breach surfaces immediately
-/// rather than masking as a silent partial row.
+/// Profile-lookup verdict: graceful, mirroring
+/// [`super::list::project_attached`]. Every attached Sub has a
+/// Profile by engine construction (`SubRegistry::insert` runs in
+/// the same engine step as `ProfileMap::attach`), but the IPC
+/// projection layer never panics on engine-invariant breach — it
+/// surfaces `state: None` / `anchor: None` so the operator's
+/// introspection lifeline keeps serving every other concurrent
+/// session during incidents. The engine's own panic discipline
+/// (the `ProbeSlot` tripwire, the registry `debug_assert!`s)
+/// catches the breach loudly engine-side.
 ///
-/// `anchor: Option<PathBuf>`: `None` signals "anchor vanished /
+/// `anchor: Option<WirePath>`: `None` signals "anchor vanished /
 /// not yet resolved" (a Pending descent in flight, an Unwatch event
-/// that hasn't reconciled). The shape mirrors [`crate::ipc::protocol::ListRow::anchor`].
+/// that hasn't reconciled). The shape mirrors
+/// [`crate::ipc::protocol::ListRow::anchor`].
 fn project_details(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) -> SubDetails {
-    let profile = engine
-        .profiles()
-        .get(sub.profile())
-        .expect("attached Sub's Profile is live — engine invariant");
-    let anchor = engine
-        .tree()
-        .path_of(profile.resource())
+    let profile = engine.profiles().get(sub.profile());
+    let state = profile.map(|p| WireStateLabel::from(p.state().label()));
+    let anchor = profile
+        .and_then(|p| engine.tree().path_of(p.resource()))
         .map(|arc| WirePath::from(&arc));
     SubDetails {
         name: sub.name.to_string(),
         sub: WireId::from(sid),
         profile: WireId::from(sub.profile()),
-        state: WireStateLabel::from(profile.state().label()),
+        state,
         anchor,
         last_fired_at: sub
             .last_fired_at
@@ -224,6 +228,10 @@ mod tests {
         match r {
             ShowResponse::Active(d) => {
                 assert_eq!(d.name, "watched");
+                assert!(
+                    d.state.is_some(),
+                    "attached Sub's Profile lookup populates state",
+                );
                 assert!(d.anchor.is_some(), "attached Sub has resolved anchor path");
                 assert_eq!(d.fire_count, 0, "never fired");
                 assert!(d.last_fired_at.is_none(), "never fired ⇒ None");

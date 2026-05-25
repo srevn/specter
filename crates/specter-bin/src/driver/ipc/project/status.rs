@@ -1,6 +1,6 @@
 use crate::driver::DriverState;
-use crate::ipc::protocol::StatusResponse;
-use crate::ipc::wire::{WirePath, WireReloadTrigger, WireTime};
+use crate::ipc::protocol::{StatusResponse, WireLastReload};
+use crate::ipc::wire::{WirePath, WireTime};
 use compact_str::CompactString;
 use specter_config::Config;
 use specter_engine::Engine;
@@ -30,8 +30,7 @@ pub(crate) fn status(
         uptime_secs: ds.start_instant.elapsed().as_secs(),
         start_wall: WireTime::from(ds.start_wall),
         reload_count: ds.reload_count,
-        last_reload_at: ds.last_reload_at.map(WireTime::from),
-        last_reload_via: ds.last_reload_via.map(WireReloadTrigger::from),
+        last_reload: ds.last_reload.map(WireLastReload::from),
         sub_total: engine.subs().len(),
         // Inline filter+count over `config.watches` rather than
         // `Config::disabled_names()`. The latter allocates two
@@ -81,8 +80,10 @@ mod tests {
         );
 
         assert_eq!(r.reload_count, 0);
-        assert!(r.last_reload_at.is_none());
-        assert!(r.last_reload_via.is_none());
+        assert!(
+            r.last_reload.is_none(),
+            "fresh state has never reloaded ⇒ paired field absent",
+        );
         assert_eq!(r.sub_total, 0);
         assert_eq!(r.sub_disabled_toml, 0);
         assert_eq!(r.sub_disabled_runtime, 0);
@@ -142,13 +143,12 @@ mod tests {
         );
 
         assert_eq!(r.reload_count, 1);
-        assert!(r.last_reload_at.is_some());
         // `WireReloadTrigger::from(ReloadTrigger::Sighup) == Sighup` —
-        // the projection is the structural mapping, not a string.
-        assert!(matches!(
-            r.last_reload_via,
-            Some(crate::ipc::wire::WireReloadTrigger::Sighup),
-        ));
+        // the projection is the structural mapping, not a string. The
+        // single `last_reload` field carries both halves together;
+        // partial (Some(at), None) is unconstructable.
+        let lr = r.last_reload.expect("record_reload populated the pair");
+        assert_eq!(lr.via, crate::ipc::wire::WireReloadTrigger::Sighup);
     }
 
     #[test]
@@ -166,10 +166,8 @@ mod tests {
             &config,
             &PathBuf::from("/etc/specter.toml"),
         );
-        assert!(matches!(
-            r.last_reload_via,
-            Some(crate::ipc::wire::WireReloadTrigger::Ipc),
-        ));
+        let lr = r.last_reload.expect("record_reload populated the pair");
+        assert_eq!(lr.via, crate::ipc::wire::WireReloadTrigger::Ipc);
     }
 
     #[test]

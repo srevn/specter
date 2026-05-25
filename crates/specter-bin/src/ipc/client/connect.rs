@@ -27,10 +27,10 @@ use crate::ipc::protocol::{ResponsePayload, WireRequest};
 use crate::ipc::sockpath;
 
 /// Read deadline — the daemon's mio-reactor tick runs in sub-ms to
-/// ms under healthy load; 5s covers pathological deferred-attach
-/// contention without becoming an operator-visible "hung" feel. The
-/// daemon answers inline on the reactor thread, so every operator
-/// verb has the same horizon regardless of server load.
+/// ms under healthy load; 5s covers mio-tick contention under a
+/// heavily-loaded reactor without becoming an operator-visible "hung"
+/// feel. The daemon answers inline on the reactor thread, so every
+/// operator verb has the same horizon regardless of server load.
 const READ_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Write deadline — the client's outgoing request is small (sub-KB),

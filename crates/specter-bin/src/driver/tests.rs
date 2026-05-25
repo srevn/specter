@@ -1282,8 +1282,7 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.run_initial_attach();
 
     assert_eq!(rig.driver.driver_state.reload_count, 0);
-    assert!(rig.driver.driver_state.last_reload_at.is_none());
-    assert!(rig.driver.driver_state.last_reload_via.is_none());
+    assert!(rig.driver.driver_state.last_reload.is_none());
 
     std::fs::write(&cfg_path, &v2_text).unwrap();
     let _ = rig
@@ -1291,11 +1290,12 @@ actions   = [{{ exec = ["true"] }}]
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert_eq!(rig.driver.driver_state.reload_count, 1);
-    assert!(rig.driver.driver_state.last_reload_at.is_some());
-    assert_eq!(
-        rig.driver.driver_state.last_reload_via,
-        Some(ReloadTrigger::Sighup),
-    );
+    let lr = rig
+        .driver
+        .driver_state
+        .last_reload
+        .expect("record_reload populated the pair");
+    assert_eq!(lr.via, ReloadTrigger::Sighup);
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -1324,7 +1324,7 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.run_initial_attach();
 
     assert_eq!(rig.driver.driver_state.reload_count, 0);
-    assert_eq!(rig.driver.driver_state.last_reload_via, None);
+    assert!(rig.driver.driver_state.last_reload.is_none());
 
     let v2_text = format!(
         r#"
@@ -1350,11 +1350,12 @@ actions   = [{{ exec = ["true"] }}]
         .apply_config_settle_expiry(deadline + Duration::from_millis(1));
 
     assert_eq!(rig.driver.driver_state.reload_count, 1);
-    assert!(rig.driver.driver_state.last_reload_at.is_some());
-    assert_eq!(
-        rig.driver.driver_state.last_reload_via,
-        Some(ReloadTrigger::AutoReload),
-    );
+    let lr = rig
+        .driver
+        .driver_state
+        .last_reload
+        .expect("record_reload populated the pair");
+    assert_eq!(lr.via, ReloadTrigger::AutoReload);
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -1374,8 +1375,7 @@ fn dispatch_reload_does_not_bump_counters_on_parse_fail() {
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
     assert_eq!(rig.driver.driver_state.reload_count, 0);
-    assert!(rig.driver.driver_state.last_reload_at.is_none());
-    assert!(rig.driver.driver_state.last_reload_via.is_none());
+    assert!(rig.driver.driver_state.last_reload.is_none());
 }
 
 // ============================================================
@@ -1481,10 +1481,12 @@ actions   = [{{ exec = ["true"] }}]
     // The trigger surfaces as `Startup` on the next `status` query —
     // operators distinguish boot-time drift apply from a later
     // SIGHUP / IPC reload.
-    assert_eq!(
-        rig.driver.driver_state.last_reload_via,
-        Some(ReloadTrigger::Startup),
-    );
+    let lr = rig
+        .driver
+        .driver_state
+        .last_reload
+        .expect("Startup dispatch_reload populated the pair");
+    assert_eq!(lr.via, ReloadTrigger::Startup);
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -2451,10 +2453,12 @@ fn ipc_reload_via_pipeline_records_ipc_trigger() {
     assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
 
     assert_eq!(rig.driver.driver_state.reload_count, 1);
-    assert!(matches!(
-        rig.driver.driver_state.last_reload_via,
-        Some(ReloadTrigger::Ipc),
-    ));
+    let lr = rig
+        .driver
+        .driver_state
+        .last_reload
+        .expect("IPC reload populated the pair");
+    assert_eq!(lr.via, ReloadTrigger::Ipc);
 }
 
 /// Disable happy path over IPC: removes the Sub from the engine

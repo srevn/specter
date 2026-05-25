@@ -308,14 +308,14 @@ pub(crate) struct StatusResponse {
     pub(crate) start_wall: WireTime,
     /// Cumulative successful reloads (SIGHUP + auto-reload + IPC).
     pub(crate) reload_count: u64,
-    /// Wall-clock of the most recent successful reload, `None`
-    /// before the first one fires.
-    pub(crate) last_reload_at: Option<WireTime>,
-    /// Trigger of the most recent successful reload. Typed enum
-    /// (not `&'static str`) so a future `ReloadTrigger` variant is
-    /// a compile error here, in the same shape as the rest of the
-    /// wire projection layer.
-    pub(crate) last_reload_via: Option<WireReloadTrigger>,
+    /// Most-recent reload — wall-clock + attribution as one
+    /// observable. `None` before the first one fires. Flattens on
+    /// the wire so the JSON form carries `last_reload_at` and
+    /// `last_reload_via` directly alongside the other fields on the
+    /// `Some` side; both keys are omitted entirely when `None`.
+    /// Mirrors the source-side `Option<crate::driver::state::LastReload>`.
+    #[serde(flatten, default, skip_serializing_if = "Option::is_none")]
+    pub(crate) last_reload: Option<WireLastReload>,
     /// `engine.subs().len()` — every currently-attached Sub.
     pub(crate) sub_total: usize,
     /// `config.disabled_names().0.len()` — TOML-disabled rows
@@ -334,6 +334,37 @@ pub(crate) struct StatusResponse {
     pub(crate) config_path: WirePath,
     /// UNIX-socket path the IPC server is bound to.
     pub(crate) socket_path: WirePath,
+}
+
+/// Most-recent successful reload as one wire observable — wall-clock
+/// at the reload-record call site plus the attribution enum that
+/// drove it. Mirrors [`crate::driver::state::LastReload`] on the wire; the
+/// JSON form stays flat (the two inner fields inline directly
+/// alongside [`StatusResponse`]'s siblings via `#[serde(flatten)]`)
+/// so operator scripts that parsed `status.last_reload_at` /
+/// `status.last_reload_via` continue to read the same byte shape on
+/// the `Some` side. The `None` side omits both keys entirely — the
+/// type-driven encoding of "never reloaded yet."
+///
+/// Field renames keep the Rust ergonomics (`lr.at`, `lr.via`)
+/// without touching the JSON contract — see [`Self::at`] and
+/// [`Self::via`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct WireLastReload {
+    /// Wall-clock of the most recent successful reload. Renamed to
+    /// `last_reload_at` on the wire so the JSON form lines up with
+    /// the pre-lift shape on the `Some` side.
+    #[serde(rename = "last_reload_at")]
+    pub(crate) at: WireTime,
+    /// Trigger of the most recent successful reload. Renamed to
+    /// `last_reload_via` on the wire so the JSON form lines up with
+    /// the pre-lift shape on the `Some` side. Typed enum (not
+    /// `&'static str`) so a future variant on
+    /// [`super::wire::WireReloadTrigger`] is a compile error at the
+    /// declaration site, in the same shape as the rest of the wire
+    /// projection layer.
+    #[serde(rename = "last_reload_via")]
+    pub(crate) via: WireReloadTrigger,
 }
 
 /// `specter list` response — every operator-declared Sub keyed by
@@ -375,8 +406,12 @@ pub(crate) struct ListRow {
     pub(crate) fire_count: Option<u64>,
     /// `Sub.dedup_suppressed_count`. `None` for non-attached rows.
     pub(crate) dedup_suppressed_count: Option<u64>,
-    /// `Sub.settle.as_millis()` (or the Profile's settle,
-    /// equivalent). `None` for non-attached rows.
+    /// `Sub.settle.as_millis()` — the per-Sub debounce floor. Distinct
+    /// from `Profile.settle` (engine-recomputed as
+    /// `min(remaining_subs.settles)` across the Profile's attached
+    /// Subs); the wire field is the per-Sub value the operator
+    /// declared, not the Profile-level fold. `None` for non-attached
+    /// rows.
     pub(crate) settle_ms: Option<u64>,
     /// Disable-source discriminator. `None` for attached rows.
     pub(crate) disabled: Option<DisabledSource>,
@@ -447,8 +482,17 @@ pub(crate) struct SubDetails {
     pub(crate) sub: WireId,
     /// Hosting `ProfileId` projection.
     pub(crate) profile: WireId,
-    /// Operator-display state (`StateLabel`).
-    pub(crate) state: WireStateLabel,
+    /// Operator-display state (`StateLabel`). `None` signals the
+    /// same engine-invariant breach [`ListRow::state`] does: the
+    /// attached Sub's Profile is gone. Symmetric across
+    /// `show -o json` and `list -o json` — operators decode the
+    /// breach identically on both verbs, and the IPC layer projects
+    /// the missing Profile as `None` rather than panicking the
+    /// daemon out from under every concurrent operator session.
+    /// The breach loudness lives engine-side (the `ProbeSlot`
+    /// tripwire, the registries' `debug_assert!`), not in the
+    /// projection layer.
+    pub(crate) state: Option<WireStateLabel>,
     /// Anchor path (`engine.tree().path_of(profile.resource)`). `None`
     /// signals "anchor vanished / not yet resolved" — symmetric with
     /// [`ListRow::anchor`], so operators reading `list -o json` and
@@ -479,10 +523,16 @@ pub(crate) struct SubDetails {
 
 #[cfg(test)]
 mod tests {
-    use super::{DisabledSource, ResponsePayload, WireErrorCode, WireId, WireRequest};
+    use super::{
+        DisabledSource, ResponsePayload, StatusResponse, WireErrorCode, WireId, WireLastReload,
+        WireRequest,
+    };
     use crate::ipc::framing::parse_strict;
+    use crate::ipc::wire::{WirePath, WireReloadTrigger, WireTime};
     use slotmap::KeyData;
     use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
+    use std::path::Path;
+    use std::time::{Duration, UNIX_EPOCH};
 
     /// Every slotmap key family projects through `KeyData::as_ffi()`
     /// to the same canonical `WireId(u64)`. A regression in any
@@ -712,5 +762,159 @@ mod tests {
             }
             other => panic!("expected Err(AlreadySubscribed), got {other:?}"),
         }
+    }
+
+    /// `StatusResponse.last_reload` flattens onto the wire — `Some`
+    /// inlines `last_reload_at` and `last_reload_via` next to the
+    /// peer fields; `None` omits both keys entirely. No wrapper key
+    /// (`last_reload`) ever appears in the JSON form, on either
+    /// side. The wire shape is the lift's load-bearing contract:
+    /// operator scripts that read `status.last_reload_at` /
+    /// `status.last_reload_via` keep working unchanged on the
+    /// `Some` side.
+    #[test]
+    fn status_response_flattens_last_reload_pair() {
+        let with = sample_status(Some(WireLastReload {
+            at: WireTime::from(UNIX_EPOCH + Duration::from_mins(2)),
+            via: WireReloadTrigger::Sighup,
+        }));
+        let json = serde_json::to_value(&with).expect("serialize");
+        assert!(
+            json.get("last_reload_at").is_some(),
+            "Some inlines last_reload_at: {json}",
+        );
+        assert!(
+            json.get("last_reload_via").is_some(),
+            "Some inlines last_reload_via: {json}",
+        );
+        assert!(
+            json.get("last_reload").is_none(),
+            "no wrapper key appears: {json}",
+        );
+
+        let without = sample_status(None);
+        let json = serde_json::to_value(&without).expect("serialize");
+        assert!(
+            json.get("last_reload_at").is_none(),
+            "None omits last_reload_at entirely: {json}",
+        );
+        assert!(
+            json.get("last_reload_via").is_none(),
+            "None omits last_reload_via entirely: {json}",
+        );
+    }
+
+    /// `StatusResponse` round-trips through serde with the flattened
+    /// `last_reload` pair preserved on the `Some` side. The
+    /// serialize-deserialize chain reaches the wire field renames
+    /// (`at` ↔ `last_reload_at`, `via` ↔ `last_reload_via`) in
+    /// lockstep — a rename drift on either side fails this test
+    /// rather than silently dropping the value.
+    #[test]
+    fn status_response_round_trips_last_reload_pair() {
+        let original = sample_status(Some(WireLastReload {
+            at: WireTime::from(UNIX_EPOCH + Duration::from_mins(1)),
+            via: WireReloadTrigger::Ipc,
+        }));
+        let json = serde_json::to_string(&original).expect("serialize");
+        let parsed: StatusResponse = serde_json::from_str(&json).expect("deserialize");
+        let lr = parsed
+            .last_reload
+            .as_ref()
+            .expect("Some on the round-trip side too");
+        assert_eq!(lr.via, WireReloadTrigger::Ipc);
+        assert_eq!(lr, original.last_reload.as_ref().expect("Some originally"));
+    }
+
+    /// A partial wire shape — one of the two `last_reload_*` keys
+    /// present, the other absent — fails the strict boundary parse.
+    /// The structural witness operates in two layers:
+    ///
+    /// 1. Bare [`serde_json::from_slice`] over the flattened
+    ///    `Option<WireLastReload>` silently collapses partial input
+    ///    to `None`; serde's `flatten + default` machinery does not
+    ///    surface the missing-sibling as a parse error.
+    /// 2. [`parse_strict`] — the boundary every client response read
+    ///    routes through ([`crate::ipc::client::connect::read_response`])
+    ///    — catches the partial via its round-trip walk: the parsed
+    ///    `StatusResponse` round-trips with the orphan key omitted,
+    ///    so the original's `last_reload_at` (or `last_reload_via`)
+    ///    is reported as `unknown field` at the boundary.
+    ///
+    /// The wire-side invariant therefore holds at the operator-facing
+    /// surface even though the inner deserialize tolerates partial
+    /// input — pinning both behaviors keeps the test honest about
+    /// where the structural gate actually lives.
+    #[test]
+    fn status_response_partial_last_reload_shape_caught_at_boundary() {
+        let at_only = partial_status_bytes("last_reload_via");
+        let via_only = partial_status_bytes("last_reload_at");
+
+        // Layer 1 — bare serde tolerates the partial shape by
+        // collapsing to `None`. The behavior is a serde-flatten
+        // property, not a load-bearing wire invariant.
+        let parsed: StatusResponse =
+            serde_json::from_slice(&at_only).expect("bare serde tolerates partial flatten");
+        assert!(
+            parsed.last_reload.is_none(),
+            "bare serde collapses partial flatten to None",
+        );
+
+        // Layer 2 — `parse_strict` catches it. The boundary gate
+        // every client response read routes through reports the
+        // orphan key as `unknown field` because the parsed
+        // `StatusResponse` round-trips without it.
+        let err = parse_strict::<StatusResponse>(&at_only)
+            .expect_err("parse_strict catches partial last_reload_at");
+        assert!(
+            err.to_string().contains("last_reload_at"),
+            "rejection names the orphan key; got {err}",
+        );
+        let err = parse_strict::<StatusResponse>(&via_only)
+            .expect_err("parse_strict catches partial last_reload_via");
+        assert!(
+            err.to_string().contains("last_reload_via"),
+            "rejection names the orphan key; got {err}",
+        );
+    }
+
+    /// Construct a [`StatusResponse`] with constant scaffolding so the
+    /// flatten / round-trip / partial-shape tests focus on
+    /// `last_reload`. Defaults are minimal — the surrounding fields
+    /// carry no semantic load for these tests.
+    fn sample_status(last_reload: Option<WireLastReload>) -> StatusResponse {
+        StatusResponse {
+            uptime_secs: 0,
+            start_wall: WireTime::from(UNIX_EPOCH),
+            reload_count: 0,
+            last_reload,
+            sub_total: 0,
+            sub_disabled_toml: 0,
+            sub_disabled_runtime: 0,
+            profile_active: 0,
+            promoter_active: 0,
+            config_path: WirePath::from(Path::new("/etc/specter.toml")),
+            socket_path: WirePath::from(Path::new("/tmp/specter.sock")),
+        }
+    }
+
+    /// Serialize a fully-populated [`StatusResponse`] and drop
+    /// `drop_key` from the JSON object, yielding the partial wire
+    /// shape the strict boundary test asserts against. Building the
+    /// bytes through serde rather than hand-typing the JSON keeps
+    /// the test resilient to a future field rename / reorder on
+    /// `StatusResponse`.
+    fn partial_status_bytes(drop_key: &str) -> Vec<u8> {
+        let complete = sample_status(Some(WireLastReload {
+            at: WireTime::from(UNIX_EPOCH + Duration::from_mins(2)),
+            via: WireReloadTrigger::Sighup,
+        }));
+        let mut value = serde_json::to_value(&complete).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("StatusResponse serializes as a JSON object")
+            .remove(drop_key)
+            .unwrap_or_else(|| panic!("complete sample_status must contain {drop_key}"));
+        serde_json::to_vec(&value).expect("re-serialize")
     }
 }

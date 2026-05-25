@@ -39,9 +39,9 @@ mod program;
 mod show;
 mod status;
 
-pub(crate) use list::list;
-pub(crate) use show::show;
-pub(crate) use status::status;
+pub(super) use list::list;
+pub(super) use show::show;
+pub(super) use status::status;
 
 use std::time::{Instant, SystemTime};
 

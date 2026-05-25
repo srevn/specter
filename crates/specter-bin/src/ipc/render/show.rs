@@ -59,7 +59,14 @@ fn render_active(d: &SubDetails) -> String {
         out.push('─');
     }
     out.push('\n');
-    let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "state", state_label_str(d.state));
+    // `state: None` mirrors `anchor: None` / `last_fired_at: None`:
+    // the projection surfaces a missing Profile lookup rather than
+    // panicking the daemon. `-` is the operator-visible "missing"
+    // marker shared with `list -o human`'s `col_state`.
+    let _ = match d.state {
+        Some(s) => writeln!(out, "{:LABEL_WIDTH$}{}", "state", state_label_str(s)),
+        None => writeln!(out, "{:LABEL_WIDTH$}-", "state"),
+    };
     let _ = match d.anchor.as_ref() {
         Some(p) => writeln!(out, "{:LABEL_WIDTH$}{}", "anchor", p),
         None => writeln!(out, "{:LABEL_WIDTH$}-", "anchor"),
@@ -134,7 +141,7 @@ mod tests {
             name: name.to_string(),
             sub: WireId(1),
             profile: WireId(2),
-            state: WireStateLabel::Idle,
+            state: Some(WireStateLabel::Idle),
             anchor,
             last_fired_at: None,
             fire_count: 0,
@@ -187,6 +194,26 @@ mod tests {
         assert!(
             anchor_line.contains('-'),
             "anchor=None must render as '-': {anchor_line:?}",
+        );
+    }
+
+    /// `state: None` renders as `-` — the operator-visible signal for
+    /// the engine-invariant breach the projection surfaces gracefully
+    /// instead of panicking. Mirrors `list -o human`'s `col_state`
+    /// `None → "-"` arm; pinning it on `show` keeps the two verbs'
+    /// vocabulary aligned.
+    #[test]
+    fn show_human_active_state_none_renders_dash() {
+        let mut d = details("foo", None, vec![]);
+        d.state = None;
+        let out = render(&ShowResponse::Active(d));
+        let state_line = out
+            .lines()
+            .find(|l| l.starts_with("state"))
+            .expect("state line present");
+        assert!(
+            state_line.contains('-'),
+            "state=None must render as '-': {state_line:?}",
         );
     }
 

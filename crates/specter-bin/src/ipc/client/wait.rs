@@ -38,6 +38,24 @@
 //! as non-blocking). The handler explicitly maps a zero / past-due
 //! remaining to exit `124` *before* the syscall, so the syscall
 //! never sees a zero argument.
+//!
+//! # Per-recv approximation
+//!
+//! `set_read_timeout(Some(remaining))` writes `SO_RCVTIMEO`, which
+//! the kernel applies per `recv(2)` syscall — every recv that
+//! returns `Ok(n > 0)` resets the per-syscall timer. A daemon
+//! trickling diag bytes one-at-a-time could in principle exceed the
+//! loop's cumulative `remaining` budget by many seconds inside a
+//! single `read_line` (which may issue multiple `recv`s to fill the
+//! line).
+//!
+//! In practice, the daemon's diag emission is one-line-per-write
+//! ([`crate::ipc::framing::encode_line`] returns a single `Vec<u8>`
+//! that `write_all` ships in one syscall), so the per-syscall and
+//! cumulative budgets agree to within scheduler jitter. A
+//! cumulative-deadline implementation (mio on the client side) is
+//! heavyweight for a single-stream client; the per-syscall
+//! approximation is the right shape for the operator's typical use.
 
 use compact_str::CompactString;
 use specter_config::{WaitArgs, WaitKind};

@@ -182,13 +182,22 @@ fn one_shot(socket: &Path, request: &str) -> io::Result<String> {
 /// `protocol::StatusResponse`; a rename or removal on the daemon
 /// side surfaces as a deserialization failure at the integration
 /// boundary.
+///
+/// `last_reload` flattens on the wire — the daemon emits
+/// `last_reload_at` and `last_reload_via` directly alongside the
+/// peer fields on the `Some` side, and omits both entirely on the
+/// `None` side. The snap mirrors that shape via
+/// `#[serde(flatten, default)]` over an `Option<LastReloadSnap>` so
+/// a partial wire form (one of the two keys present) fails the
+/// integration deserialize loudly, just like the daemon-side wire
+/// type.
 #[derive(Debug, Deserialize)]
 struct StatusResponseSnap {
     uptime_secs: u64,
     start_wall: String,
     reload_count: u64,
-    last_reload_at: Option<String>,
-    last_reload_via: Option<ReloadTriggerSnap>,
+    #[serde(flatten, default)]
+    last_reload: Option<LastReloadSnap>,
     sub_total: usize,
     sub_disabled_toml: usize,
     sub_disabled_runtime: usize,
@@ -196,6 +205,18 @@ struct StatusResponseSnap {
     promoter_active: usize,
     config_path: PathBuf,
     socket_path: PathBuf,
+}
+
+/// Mirror of [`WireLastReload`] — the wall-clock + trigger pair the
+/// daemon emits as flattened keys (`last_reload_at`,
+/// `last_reload_via`) on the `Some` side. Defined here so the
+/// integration test's wire-shape pin is independent of the
+/// daemon-side type's `pub(crate)` visibility.
+#[derive(Debug, Deserialize)]
+struct LastReloadSnap {
+    #[allow(dead_code)]
+    last_reload_at: String,
+    last_reload_via: ReloadTriggerSnap,
 }
 
 /// Mirror of `WireReloadTrigger`. Typed mirror (rather than
@@ -299,12 +320,8 @@ fn status_round_trip() {
             assert_eq!(s.promoter_active, 0);
             assert_eq!(s.reload_count, 0, "no reload triggered yet");
             assert!(
-                s.last_reload_at.is_none(),
-                "no reload yet ⇒ no last_reload_at",
-            );
-            assert!(
-                s.last_reload_via.is_none(),
-                "no reload yet ⇒ no last_reload_via",
+                s.last_reload.is_none(),
+                "no reload yet ⇒ paired last_reload absent on the wire",
             );
             assert!(
                 !s.start_wall.is_empty(),
@@ -527,14 +544,14 @@ fn reload_via_ipc_increments_counters() {
         Duration::from_secs(5),
     )
     .unwrap_or_else(|| panic!("reload_count never advanced beyond {initial_reloads}"));
+    let lr = final_status
+        .last_reload
+        .as_ref()
+        .expect("successful reload stamps `last_reload`");
     assert_eq!(
-        final_status.last_reload_via,
-        Some(ReloadTriggerSnap::Ipc),
+        lr.last_reload_via,
+        ReloadTriggerSnap::Ipc,
         "IPC reload attributes the trigger to `ipc`",
-    );
-    assert!(
-        final_status.last_reload_at.is_some(),
-        "successful reload stamps `last_reload_at`",
     );
 
     // Confirm the log carries the reload-pipeline line — the
