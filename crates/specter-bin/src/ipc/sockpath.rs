@@ -64,8 +64,8 @@ pub(crate) fn default_socket_path() -> PathBuf {
 /// entry rather than leaving it behind for the next boot to inherit.
 ///
 /// On success, the returned [`UnlinkGuard`] removes the bound
-/// socket from disk when dropped (panic) or when [`UnlinkGuard::disarm`]
-/// is called as part of graceful shutdown.
+/// socket from disk when dropped (panic) or when
+/// [`UnlinkGuard::unlink_now`] is called as part of graceful shutdown.
 pub(crate) fn bind_socket_atomic(path: &Path) -> io::Result<(UnixListener, UnlinkGuard)> {
     let tmp = temp_sibling(path);
     let _ = fs::remove_file(&tmp);
@@ -165,7 +165,7 @@ pub(crate) fn check_stale_or_remove(path: &Path) -> io::Result<()> {
 }
 
 /// Drop-guard for the bound socket file. Removes the socket from
-/// disk both on graceful shutdown (via [`Self::disarm`]) and on
+/// disk both on graceful shutdown (via [`Self::unlink_now`]) and on
 /// panic (via [`Drop`]). The guard owns the unlink responsibility
 /// for the full lifetime of the bound listener.
 ///
@@ -174,10 +174,10 @@ pub(crate) fn check_stale_or_remove(path: &Path) -> io::Result<()> {
 /// - **Armed** (`path` non-empty) — set on construction. `Drop`
 ///   runs `fs::remove_file`, so a panic anywhere between
 ///   `bind_socket_atomic` returning and the graceful-shutdown
-///   disarm site still cleans up.
-/// - **Consumed** — [`Self::disarm`] takes the guard by value, runs
-///   the same `fs::remove_file` synchronously, and then drops the
-///   internal `path` to suppress a second unlink in `Drop`.
+///   unlink site still cleans up.
+/// - **Consumed** — [`Self::unlink_now`] takes the guard by value,
+///   runs the same `fs::remove_file` synchronously, and then drops
+///   the internal `path` to suppress a second unlink in `Drop`.
 ///
 /// `#[must_use]` lints away the common mistake of constructing and
 /// immediately dropping the guard at a site that didn't intend
@@ -198,9 +198,9 @@ impl UnlinkGuard {
         Self { path }
     }
 
-    /// Graceful-shutdown unlink site. Removes the socket from disk
-    /// synchronously and then consumes the guard so its `Drop` is a
-    /// no-op (avoids a redundant second `remove_file` call).
+    /// Graceful-shutdown unlink site. Performs the unlink
+    /// synchronously and consumes the guard so its `Drop` is a no-op
+    /// (avoids a redundant second `remove_file` call).
     ///
     /// Sole call site is [`crate::app::run`]'s shutdown sequence,
     /// after the IPC server thread has been joined — no surviving
@@ -208,7 +208,7 @@ impl UnlinkGuard {
     /// will not break in-flight per-conn streams (each carries its
     /// own fd referring to the existing inode; the inode persists
     /// until every fd closes).
-    pub(crate) fn disarm(mut self) {
+    pub(crate) fn unlink_now(mut self) {
         // Take the path out so `Drop` (still scheduled on this
         // by-value `self`) sees an empty string and skips its own
         // remove_file call.
@@ -217,7 +217,7 @@ impl UnlinkGuard {
     }
 
     /// Internal `remove_file` with the same NotFound-is-benign
-    /// policy used by both the explicit `disarm` and the `Drop`
+    /// policy used by both the explicit `unlink_now` and the `Drop`
     /// arm. A concurrent operator `rm` or container teardown
     /// race-removing the entry is fine; any other error reaches the
     /// tracing journal so debugging surfaces the cause.
@@ -278,20 +278,20 @@ mod tests {
         );
     }
 
-    /// `UnlinkGuard::disarm` is the graceful-shutdown unlink site —
-    /// it removes the socket synchronously and then consumes the
-    /// guard so the subsequent `Drop` doesn't try to remove the
-    /// (now-missing) entry. After `disarm`, the path is gone.
+    /// `UnlinkGuard::unlink_now` is the graceful-shutdown unlink
+    /// site — it removes the socket synchronously and then consumes
+    /// the guard so the subsequent `Drop` doesn't try to remove the
+    /// (now-missing) entry. After `unlink_now`, the path is gone.
     #[test]
-    fn unlink_guard_disarm_removes_socket() {
+    fn unlink_guard_unlink_now_removes_socket() {
         let tmp = tempfile::TempDir::new().unwrap();
         let path = tmp.path().join("specter.sock");
 
         let (_listener, guard) = bind_socket_atomic(&path).expect("bind on fresh path");
-        guard.disarm();
+        guard.unlink_now();
         assert!(
             !path.exists(),
-            "disarmed guard must remove the socket synchronously",
+            "consumed guard must remove the socket synchronously",
         );
     }
 

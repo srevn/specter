@@ -223,7 +223,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //    atomic-rename + chmod 0600 BEFORE Hub construction (the Hub
     //    takes ownership of the listener fd). The `unlink_guard`
     //    armed here unlinks the socket on graceful shutdown (via
-    //    explicit `disarm` after the driver drops) and on panic
+    //    explicit `unlink_now` after the driver drops) and on panic
     //    (Drop runs unconditionally), so the next boot never trips
     //    over our own residue.
     let socket_path = sockpath::default_socket_path();
@@ -441,7 +441,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     // sees ENOENT, which is structurally correct (the daemon is
     // gone). On panic anywhere between bind and here,
     // `unlink_guard`'s Drop runs and cleans up.
-    unlink_guard.disarm();
+    unlink_guard.unlink_now();
 
     // Actuator: the closure runs `act.run(...)` to clean exit (or
     // panic). On panic the closure unwinds — `SubprocessActuator::drop`

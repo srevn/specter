@@ -119,29 +119,81 @@ pub(super) enum ConnRole {
         /// Resolved server-side at Subscribe time so a typo never
         /// reaches the fan-out path.
         filter: Option<SubId>,
-        /// Back-pressure marker: number of diags dropped since the
-        /// last successful emission. Flushed lazily as a
-        /// `WireDiagnostic::Missed` line before the next `Diag` so
-        /// causal order is preserved on the wire. `saturating_add`
-        /// guards the `u32`-overflow corner (practically unreachable
-        /// — a wedged subscriber dropping `2^32` events would have
-        /// hit the disconnect path first).
-        missed: u32,
-        /// Wall-clock of the first drop in the currently-open `missed`
-        /// window. Captured on the `0 → 1` transition; cleared back to
-        /// `None` when the marker flushes. Threading the first-drop
-        /// time as the marker's `at` gives operators the start-of-
-        /// window timestamp — when the drops actually began — rather
-        /// than the flush-time stamp the marker would otherwise carry
-        /// (the queue has already drained by the time the marker
-        /// reaches the wire, so flush-time is misleading for incident
-        /// forensics).
-        ///
-        /// Two-field invariant: `missed > 0 ⇒ first_dropped_at.is_some()`.
-        /// Upheld by [`ConnState::try_dispatch_diag`] as the sole
-        /// mutator of both fields.
-        first_dropped_at: Option<SystemTime>,
+        /// Back-pressure marker window — count + start-of-window
+        /// timestamp pair, or the closed state. Flushed lazily as a
+        /// `WireDiagnostic::Missed` line before the next dispatched
+        /// diag so causal order is preserved on the wire. Mutated
+        /// exclusively through [`MissedWindow::record_drop`] (capacity
+        /// refusal) and [`MissedWindow::take`] (marker-flushed edge);
+        /// the sum type makes the prior two-field invariant
+        /// (`count > 0 ⇒ since.is_some()`) structurally unrepresentable.
+        missed: MissedWindow,
     },
+}
+
+/// Back-pressure marker window. Either no drops are pending since the
+/// last flush ([`MissedWindow::Closed`]), or one-or-more diags have
+/// been dropped since `since`, the wall-clock the `0 → 1` transition
+/// captured ([`MissedWindow::Open`]).
+///
+/// Replaces the prior convention-enforced
+/// `(missed: u32, first_dropped_at: Option<SystemTime>)` pair where
+/// the rule `missed > 0 ⇒ first_dropped_at.is_some()` lived in a
+/// rustdoc paragraph. With the sum type, the impossible state
+/// (`count > 0 ∧ since.is_none()`) is structurally unrepresentable —
+/// the defensive `unwrap_or(at)` in [`ConnState::try_dispatch_diag`]'s
+/// marker construction is no longer needed.
+///
+/// Operators reading a `_missed` marker see start-of-window time
+/// (when the drops began), not flush time (when the daemon got
+/// around to mentioning them) — the marker's `at` is the captured
+/// `since`, not the dispatch-time stamp.
+#[derive(Debug, Default, Eq, PartialEq)]
+pub(super) enum MissedWindow {
+    /// No drops pending since the last successful marker flush.
+    #[default]
+    Closed,
+    /// `count` diags dropped since `since`, the wall-clock captured
+    /// at the 0→1 transition. `count` is `saturating_add`-bumped on
+    /// every subsequent drop; a wedged subscriber dropping `2^32`
+    /// events would saturate at `u32::MAX`, though in practice the
+    /// per-conn write-side disconnect fires long before.
+    Open {
+        /// Number of diags dropped in the open window.
+        count: u32,
+        /// Wall-clock of the first drop. Threaded as the marker's
+        /// `at` when the window flushes — operators see when drops
+        /// began, not flush time.
+        since: SystemTime,
+    },
+}
+
+impl MissedWindow {
+    /// Record one capacity-refused diag. The `Closed → Open` edge
+    /// captures `at` as `since`; subsequent drops in the same window
+    /// `saturating_add`-bump `count` and preserve `since`.
+    pub(super) const fn record_drop(&mut self, at: SystemTime) {
+        match self {
+            Self::Closed => {
+                *self = Self::Open {
+                    count: 1,
+                    since: at,
+                }
+            }
+            Self::Open { count, .. } => *count = count.saturating_add(1),
+        }
+    }
+
+    /// Take the open window's `(count, since)` and reset to
+    /// [`MissedWindow::Closed`]. Returns `None` when no window was
+    /// open. Callers that only need the reset (the marker bytes
+    /// were pre-built ahead of the capacity gate) may `let _ = .take()`.
+    pub(super) const fn take(&mut self) -> Option<(u32, SystemTime)> {
+        match std::mem::replace(self, Self::Closed) {
+            Self::Closed => None,
+            Self::Open { count, since } => Some((count, since)),
+        }
+    }
 }
 
 /// Outcome of one [`ConnState::try_dispatch_diag`] attempt. The Hub's
@@ -227,8 +279,7 @@ impl ConnState {
         );
         self.role = ConnRole::Sub {
             filter,
-            missed: 0,
-            first_dropped_at: None,
+            missed: MissedWindow::Closed,
         };
     }
 
@@ -250,10 +301,9 @@ impl ConnState {
     /// Try to enqueue `diag_line` (one LF-terminated JSON line) into
     /// this conn's write_queue.
     ///
-    /// Sole mutator of `self.role.Sub.missed` and
-    /// `self.role.Sub.first_dropped_at`; the two-field invariant
-    /// (`missed > 0 ⇒ first_dropped_at.is_some()`) is upheld here as
-    /// long as no other code path writes those fields.
+    /// Sole mutator of [`ConnRole::Sub::missed`]; the open-window
+    /// invariant lives on [`MissedWindow`] itself, so this method's
+    /// concern is the dispatch / capacity verdict, not the field shape.
     ///
     /// Axes evaluated in order:
     /// 1. `close_after_flush` → `Skipped` (closing conn doesn't
@@ -262,18 +312,17 @@ impl ConnState {
     /// 3. Per-Sub `filter` mismatch → `Skipped`.
     /// 4. Capacity gate: combined `(queue_len + marker_bytes + diag_line)`
     ///    must fit under [`WRITE_QUEUE_HIGH_WATER`]. When it does not,
-    ///    the diag drops, `missed` is bumped, and `first_dropped_at`
-    ///    is captured on the `0 → 1` transition.
+    ///    the diag drops and [`MissedWindow::record_drop`] bumps the
+    ///    window — opening one on the `Closed → Open` edge or
+    ///    `saturating_add`-bumping `count` on a subsequent drop.
     /// 5. Otherwise: flush any pending Missed marker (carrying the
-    ///    captured `first_dropped_at` as the marker's `at` so
-    ///    operators see start-of-window time, not flush time), reset
-    ///    the bookkeeping, then push the diag bytes.
+    ///    open window's `since` as the marker's `at` so operators see
+    ///    start-of-window time, not flush time), reset the window via
+    ///    [`MissedWindow::take`], then push the diag bytes.
     ///
     /// `at` threads from the caller so every conn observes a
     /// byte-identical timestamp for one engine emission; the marker
-    /// path uses the previously-captured `first_dropped_at` instead,
-    /// falling back to `at` if the invariant is ever violated by a
-    /// future cross-cutting change.
+    /// path uses the open window's captured `since` instead.
     pub(super) fn try_dispatch_diag(
         &mut self,
         diag_line: &[u8],
@@ -283,12 +332,7 @@ impl ConnState {
         if self.close_after_flush {
             return DispatchOutcome::Skipped;
         }
-        let ConnRole::Sub {
-            filter,
-            missed,
-            first_dropped_at,
-        } = &mut self.role
-        else {
+        let ConnRole::Sub { filter, missed } = &mut self.role else {
             return DispatchOutcome::Skipped;
         };
         if let Some(want) = filter
@@ -298,17 +342,15 @@ impl ConnState {
         }
 
         // Pre-build the marker line if a missed window is open. The
-        // marker carries `first_dropped_at` (set at the 0→1 transition)
-        // as its `at` — the `unwrap_or(at)` fallback is defensive
-        // against a future caller mutating `missed` without capturing
-        // a first-drop time.
-        let marker_bytes: Option<Vec<u8>> = (*missed > 0).then(|| {
-            let marker = WireDiagnostic::Missed {
-                at: first_dropped_at.unwrap_or(at).into(),
-                count: *missed,
-            };
-            encode_line(&marker)
-        });
+        // sum type guarantees `since` is present whenever `count > 0` —
+        // no defensive fallback is needed.
+        let marker_bytes: Option<Vec<u8>> = match missed {
+            MissedWindow::Open { count, since } => Some(encode_line(&WireDiagnostic::Missed {
+                at: (*since).into(),
+                count: *count,
+            })),
+            MissedWindow::Closed => None,
+        };
 
         let marker_len = marker_bytes.as_ref().map_or(0, Vec::len);
         let queue_len = self.write_queue.len();
@@ -316,17 +358,13 @@ impl ConnState {
             .saturating_add(marker_len)
             .saturating_add(diag_line.len());
         if combined > WRITE_QUEUE_HIGH_WATER {
-            if *missed == 0 {
-                *first_dropped_at = Some(at);
-            }
-            *missed = missed.saturating_add(1);
+            missed.record_drop(at);
             return DispatchOutcome::Dropped;
         }
 
         if let Some(mb) = marker_bytes {
             self.write_queue.extend(mb);
-            *missed = 0;
-            *first_dropped_at = None;
+            let _ = missed.take();
         }
         self.write_queue.extend(diag_line);
         DispatchOutcome::Accepted
@@ -367,15 +405,10 @@ impl std::fmt::Debug for ConnRole {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Reqs => f.write_str("Reqs"),
-            Self::Sub {
-                filter,
-                missed,
-                first_dropped_at,
-            } => f
+            Self::Sub { filter, missed } => f
                 .debug_struct("Sub")
                 .field("filter", filter)
                 .field("missed", missed)
-                .field("first_dropped_at", first_dropped_at)
                 .finish(),
         }
     }
@@ -419,21 +452,16 @@ mod tests {
     }
 
     /// `transition_to_sub` flips the role and initializes the Sub-side
-    /// accounting (filter, missed, first_dropped_at) to the
+    /// accounting (filter unset, missed window closed) to the
     /// fresh-window defaults. Pins the post-flip shape.
     #[test]
     fn transition_to_sub_initializes_sub_state() {
         let (mut conn, _peer) = fresh_conn();
         conn.transition_to_sub(None);
         match conn.role {
-            ConnRole::Sub {
-                filter,
-                missed,
-                first_dropped_at,
-            } => {
+            ConnRole::Sub { filter, missed } => {
                 assert_eq!(filter, None);
-                assert_eq!(missed, 0);
-                assert_eq!(first_dropped_at, None);
+                assert_eq!(missed, MissedWindow::Closed);
             }
             ConnRole::Reqs => panic!("expected Sub role after transition"),
         }
@@ -523,13 +551,14 @@ mod tests {
         assert_eq!(outcome, DispatchOutcome::Dropped);
         assert_eq!(conn.write_queue.len(), queue_len_before, "queue untouched");
         match &conn.role {
-            ConnRole::Sub {
-                missed,
-                first_dropped_at,
-                ..
-            } => {
-                assert_eq!(*missed, 1);
-                assert_eq!(*first_dropped_at, Some(SystemTime::UNIX_EPOCH));
+            ConnRole::Sub { missed, .. } => {
+                assert_eq!(
+                    *missed,
+                    MissedWindow::Open {
+                        count: 1,
+                        since: SystemTime::UNIX_EPOCH,
+                    },
+                );
             }
             ConnRole::Reqs => panic!("expected Sub role"),
         }
@@ -564,16 +593,14 @@ mod tests {
             DispatchOutcome::Dropped
         );
         match &conn.role {
-            ConnRole::Sub {
-                missed,
-                first_dropped_at,
-                ..
-            } => {
-                assert_eq!(*missed, 3);
+            ConnRole::Sub { missed, .. } => {
                 assert_eq!(
-                    *first_dropped_at,
-                    Some(at1),
-                    "first_dropped_at sticks to the 0→1 transition's at",
+                    *missed,
+                    MissedWindow::Open {
+                        count: 3,
+                        since: at1,
+                    },
+                    "open window pins count to 3 and since to the 0→1 transition's at",
                 );
             }
             ConnRole::Reqs => panic!("expected Sub role"),
@@ -697,16 +724,15 @@ mod tests {
             "no bytes pushed when combined overflows",
         );
         match &conn.role {
-            ConnRole::Sub {
-                missed,
-                first_dropped_at,
-                ..
-            } => {
-                assert_eq!(*missed, 2, "missed re-accumulates on combined-overflow");
+            ConnRole::Sub { missed, .. } => {
                 assert_eq!(
-                    *first_dropped_at,
-                    Some(at_drop),
-                    "first_dropped_at sticks to the original 0→1 capture",
+                    *missed,
+                    MissedWindow::Open {
+                        count: 2,
+                        since: at_drop,
+                    },
+                    "open window count re-accumulates on combined-overflow; \
+                     since sticks to the original 0→1 capture",
                 );
             }
             ConnRole::Reqs => panic!("expected Sub role"),
@@ -739,13 +765,12 @@ mod tests {
             DispatchOutcome::Accepted
         );
         match &conn.role {
-            ConnRole::Sub {
-                missed,
-                first_dropped_at,
-                ..
-            } => {
-                assert_eq!(*missed, 0);
-                assert_eq!(*first_dropped_at, None);
+            ConnRole::Sub { missed, .. } => {
+                assert_eq!(
+                    *missed,
+                    MissedWindow::Closed,
+                    "window resets to Closed on the flush edge",
+                );
             }
             ConnRole::Reqs => panic!("expected Sub role"),
         }

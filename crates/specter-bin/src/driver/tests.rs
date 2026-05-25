@@ -12,7 +12,7 @@
 //! real bound socket on a tempdir path.
 
 use super::WakeHandle;
-use super::conns::{ConnRole, WRITE_QUEUE_HIGH_WATER};
+use super::conns::{ConnRole, MissedWindow, WRITE_QUEUE_HIGH_WATER};
 use super::hub::{EnqueueOutcome, TOKEN_CONN_BASE};
 use super::state::ReloadTrigger;
 use super::{DriverHub, EngineDriver, TickOutcome};
@@ -2004,7 +2004,7 @@ fn subscribe_twice_returns_err_already_subscribed() {
 
     // First Subscribe: `name = None` → unfiltered tail. The handler
     // acks with `sub = None` and flips the conn role to
-    // `Sub { filter: None, missed: 0, first_dropped_at: None }`.
+    // `Sub { filter: None, missed: MissedWindow::Closed }`.
     let reply1 = ipc_round_trip(
         &mut rig,
         &mut client,
@@ -2028,8 +2028,7 @@ fn subscribe_twice_returns_err_already_subscribed() {
                 conn.role,
                 ConnRole::Sub {
                     filter: None,
-                    missed: 0,
-                    first_dropped_at: None,
+                    missed: MissedWindow::Closed,
                 }
             ),
             "post-first-Subscribe role is fresh Sub state",
@@ -2058,7 +2057,7 @@ fn subscribe_twice_returns_err_already_subscribed() {
     }
 
     // The first subscription's role is untouched — `filter == None`
-    // (not `Some(sid_build)`), `missed == 0` (no window opened).
+    // (not `Some(sid_build)`), missed window still `Closed` (none opened).
     let conn = rig
         .driver
         .hub
@@ -2069,8 +2068,7 @@ fn subscribe_twice_returns_err_already_subscribed() {
             conn.role,
             ConnRole::Sub {
                 filter: None,
-                missed: 0,
-                first_dropped_at: None,
+                missed: MissedWindow::Closed,
             }
         ),
         "the first subscription's state survives; got {:?}",
@@ -2082,10 +2080,9 @@ fn subscribe_twice_returns_err_already_subscribed() {
 
 /// Regression sibling of [`subscribe_twice_returns_err_already_subscribed`]:
 /// when a missed window has accumulated on the first subscription,
-/// a refused second Subscribe must NOT reset `missed` or
-/// `first_dropped_at`. The handler gate fires before any state
-/// mutation, so the back-pressure accounting carries through
-/// unchanged.
+/// a refused second Subscribe must NOT reset the open `missed`
+/// window. The handler gate fires before any state mutation, so
+/// the back-pressure accounting carries through unchanged.
 #[test]
 fn subscribe_after_err_does_not_overwrite_prior_subscription() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2113,13 +2110,11 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
             .conn_mut(token)
             .expect("conn lives after Subscribe ack flushed");
         match &mut conn.role {
-            ConnRole::Sub {
-                missed,
-                first_dropped_at,
-                ..
-            } => {
-                *missed = 7;
-                *first_dropped_at = Some(stamped_at);
+            ConnRole::Sub { missed, .. } => {
+                *missed = MissedWindow::Open {
+                    count: 7,
+                    since: stamped_at,
+                };
             }
             ConnRole::Reqs => panic!("expected Sub after first Subscribe"),
         }
@@ -2139,23 +2134,22 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
     );
 
     // The missed bookkeeping survives the refusal: gate fires
-    // before `transition_to_sub` runs, so neither field is reset.
+    // before `transition_to_sub` runs, so the window is not reset.
     let conn = rig
         .driver
         .hub
         .conn_ref(token)
         .expect("conn still in map after refusal");
     match &conn.role {
-        ConnRole::Sub {
-            missed,
-            first_dropped_at,
-            ..
-        } => {
+        ConnRole::Sub { missed, .. } => {
             assert_eq!(
-                *missed, 7,
-                "missed window preserved across refused Subscribe"
+                *missed,
+                MissedWindow::Open {
+                    count: 7,
+                    since: stamped_at,
+                },
+                "missed window preserved across refused Subscribe",
             );
-            assert_eq!(*first_dropped_at, Some(stamped_at));
         }
         ConnRole::Reqs => panic!("conn unexpectedly fell back to Reqs"),
     }
@@ -2304,10 +2298,10 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
 ///
 /// Drives the full fan-out path via
 /// [`super::hub::DriverHub::dispatch_to_subscribers`]: a saturated
-/// queue throttles the diag (missed = 1, first_dropped_at = at_drop),
-/// the queue clears (simulating drain), a second dispatch lands at
-/// at_flush AND flushes the marker. The marker's wire `at` is
-/// at_drop.
+/// queue throttles the diag (missed window opens with `count = 1`,
+/// `since = at_drop`), the queue clears (simulating drain), a second
+/// dispatch lands at at_flush AND flushes the marker. The marker's
+/// wire `at` is at_drop.
 #[test]
 fn missed_marker_uses_first_dropped_at_when_flushed() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2362,13 +2356,14 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     {
         let conn = rig.driver.hub.conn_ref(token).expect("conn lives");
         match &conn.role {
-            ConnRole::Sub {
-                missed,
-                first_dropped_at,
-                ..
-            } => {
-                assert_eq!(*missed, 1);
-                assert_eq!(*first_dropped_at, Some(at_drop));
+            ConnRole::Sub { missed, .. } => {
+                assert_eq!(
+                    *missed,
+                    MissedWindow::Open {
+                        count: 1,
+                        since: at_drop,
+                    },
+                );
             }
             ConnRole::Reqs => panic!("expected Sub role"),
         }
@@ -2390,13 +2385,12 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
         .dispatch_to_subscribers(&diag, at_flush, &wire_at_flush, None);
     let conn = rig.driver.hub.conn_ref(token).expect("conn lives");
     match &conn.role {
-        ConnRole::Sub {
-            missed,
-            first_dropped_at,
-            ..
-        } => {
-            assert_eq!(*missed, 0, "marker flushed; missed reset");
-            assert_eq!(*first_dropped_at, None, "first_dropped_at reset on flush");
+        ConnRole::Sub { missed, .. } => {
+            assert_eq!(
+                *missed,
+                MissedWindow::Closed,
+                "window resets to Closed on the flush edge",
+            );
         }
         ConnRole::Reqs => panic!("expected Sub role"),
     }
