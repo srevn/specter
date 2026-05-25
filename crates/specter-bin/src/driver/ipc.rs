@@ -43,7 +43,7 @@ use super::EngineDriver;
 use super::conns::ConnRole;
 use super::hub::{EnqueueOutcome, ReadOutcome};
 use super::state::ReloadTrigger;
-use crate::ipc::framing::parse_strict;
+use crate::ipc::framing::{InfallibleSerialize, parse_strict};
 use crate::ipc::project;
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
 use compact_str::CompactString;
@@ -136,6 +136,33 @@ impl<W: FsWatcher> EngineDriver<W> {
         ControlFlow::Continue(())
     }
 
+    /// Enqueue an infallible response to `token`'s write_queue,
+    /// swallowing the [`EnqueueOutcome`].
+    ///
+    /// Every verb handler outside the Subscribe ack flow discards
+    /// the outcome benignly:
+    ///
+    /// - [`EnqueueOutcome::Accepted`] is the happy path.
+    /// - [`EnqueueOutcome::Refused`] is already on the close-after-
+    ///   flush teardown path — the over-water response armed the
+    ///   close, and the Hub either inline-terminated via
+    ///   `try_terminate_if_idle` (queue-empty arm) or queued bytes
+    ///   for the next flush edge to drain-and-terminate. Re-acking
+    ///   would be a no-op against a conn the next pass tears down.
+    /// - [`EnqueueOutcome::ConnGone`] means the read drain observed
+    ///   EOF between the line drain and this dispatch (or a write
+    ///   failure removed the entry mid-tick). Re-acking is
+    ///   impossible — the conn is gone.
+    ///
+    /// The Subscribe ack flow is the lone exception:
+    /// [`Self::handle_subscribe`] gates the
+    /// [`super::conns::ConnState::transition_to_sub`] role flip on
+    /// the `Accepted` discriminant and therefore reaches
+    /// [`super::hub::DriverHub::enqueue_response`] directly.
+    fn respond<T: InfallibleSerialize>(&mut self, token: Token, payload: &T) {
+        let _ = self.hub.enqueue_response(token, payload);
+    }
+
     /// Parse and dispatch one LF-delimited line as a [`WireRequest`].
     ///
     /// Strict parse via [`parse_strict`]: a typoed operator JSON
@@ -168,11 +195,13 @@ impl<W: FsWatcher> EngineDriver<W> {
         let request: WireRequest = match parse_strict(trimmed) {
             Ok(r) => r,
             Err(e) => {
-                let resp = ResponsePayload::Err {
-                    code: WireErrorCode::Malformed,
-                    error: format!("json parse: {e}"),
-                };
-                let _ = self.hub.enqueue_response(token, &resp);
+                self.respond(
+                    token,
+                    &ResponsePayload::Err {
+                        code: WireErrorCode::Malformed,
+                        error: format!("json parse: {e}"),
+                    },
+                );
                 return ControlFlow::Continue(());
             }
         };
@@ -185,9 +214,7 @@ impl<W: FsWatcher> EngineDriver<W> {
                     self.loader.current_config(),
                     &self.config_path,
                 );
-                let _ = self
-                    .hub
-                    .enqueue_response(token, &ResponsePayload::Status(resp));
+                self.respond(token, &ResponsePayload::Status(resp));
                 ControlFlow::Continue(())
             }
             WireRequest::List => {
@@ -197,9 +224,7 @@ impl<W: FsWatcher> EngineDriver<W> {
                     &self.disabled_runtime,
                     self.loader.current_config(),
                 );
-                let _ = self
-                    .hub
-                    .enqueue_response(token, &ResponsePayload::List(resp));
+                self.respond(token, &ResponsePayload::List(resp));
                 ControlFlow::Continue(())
             }
             WireRequest::Show { name } => {
@@ -210,9 +235,7 @@ impl<W: FsWatcher> EngineDriver<W> {
                     self.loader.current_config(),
                     name.as_str(),
                 );
-                let _ = self
-                    .hub
-                    .enqueue_response(token, &ResponsePayload::Show(resp));
+                self.respond(token, &ResponsePayload::Show(resp));
                 ControlFlow::Continue(())
             }
             WireRequest::Subscribe { name } => self.handle_subscribe(token, name.as_ref()),
@@ -223,7 +246,7 @@ impl<W: FsWatcher> EngineDriver<W> {
                 // and bumps `driver_state`'s reload counters with this
                 // trigger.
                 let outcome = self.dispatch_reload(ReloadTrigger::Ipc, now);
-                let _ = self.hub.enqueue_response(token, &ResponsePayload::Ok);
+                self.respond(token, &ResponsePayload::Ok);
                 outcome
             }
             WireRequest::Disable { name } => self.handle_disable(token, name, now),
@@ -257,17 +280,19 @@ impl<W: FsWatcher> EngineDriver<W> {
     fn handle_subscribe(&mut self, token: Token, name: Option<&CompactString>) -> ControlFlow<()> {
         // Gate 1: refuse a second Subscribe with a structured error.
         // `is_some_and` consumes the conn_ref borrow before the
-        // following `enqueue_response`'s `&mut self.hub` reach.
+        // following `respond`'s `&mut self` reach.
         let already_subscribed = self
             .hub
             .conn_ref(token)
             .is_some_and(|c| matches!(c.role, ConnRole::Sub { .. }));
         if already_subscribed {
-            let resp = ResponsePayload::Err {
-                code: WireErrorCode::AlreadySubscribed,
-                error: "conn already in subscribe mode".into(),
-            };
-            let _ = self.hub.enqueue_response(token, &resp);
+            self.respond(
+                token,
+                &ResponsePayload::Err {
+                    code: WireErrorCode::AlreadySubscribed,
+                    error: "conn already in subscribe mode".into(),
+                },
+            );
             return ControlFlow::Continue(());
         }
         // Gate 2: refuse Some(name) that doesn't resolve. None
@@ -276,11 +301,13 @@ impl<W: FsWatcher> EngineDriver<W> {
         if let Some(n) = name
             && resolved.is_none()
         {
-            let resp = ResponsePayload::Err {
-                code: WireErrorCode::UnknownSub,
-                error: format!("no watch named {n}"),
-            };
-            let _ = self.hub.enqueue_response(token, &resp);
+            self.respond(
+                token,
+                &ResponsePayload::Err {
+                    code: WireErrorCode::UnknownSub,
+                    error: format!("no watch named {n}"),
+                },
+            );
             return ControlFlow::Continue(());
         }
         // Ack-then-flip: enqueue the ack while `conn.role == Reqs`
@@ -294,9 +321,19 @@ impl<W: FsWatcher> EngineDriver<W> {
         if matches!(
             self.hub.enqueue_response(token, &ack),
             EnqueueOutcome::Accepted
-        ) && let Some(conn) = self.hub.conn_mut(token)
-        {
-            conn.transition_to_sub(resolved);
+        ) {
+            // Structural invariant: an `Accepted` outcome means the
+            // conn was in the map at enqueue time, and the same
+            // `&mut self.hub` borrow continues here — nothing
+            // between the two reaches has had the opportunity to
+            // remove the entry. A `None` from `conn_mut` here would
+            // be a Hub-internal lifecycle bug; the `expect` documents
+            // the load-bearing reason a defensive Option-branch is
+            // not appropriate at this seam.
+            self.hub
+                .conn_mut(token)
+                .expect("just-Accepted conn must remain in map — same &mut self.hub borrow")
+                .transition_to_sub(resolved);
         }
         ControlFlow::Continue(())
     }
@@ -337,11 +374,13 @@ impl<W: FsWatcher> EngineDriver<W> {
         now: Instant,
     ) -> ControlFlow<()> {
         let Some(sid) = self.engine.subs().find_by_name(name.as_str()) else {
-            let resp = ResponsePayload::Err {
-                code: WireErrorCode::UnknownSub,
-                error: format!("no watch named {name}"),
-            };
-            let _ = self.hub.enqueue_response(token, &resp);
+            self.respond(
+                token,
+                &ResponsePayload::Err {
+                    code: WireErrorCode::UnknownSub,
+                    error: format!("no watch named {name}"),
+                },
+            );
             return ControlFlow::Continue(());
         };
         let sub = self
@@ -350,27 +389,31 @@ impl<W: FsWatcher> EngineDriver<W> {
             .get(sid)
             .expect("by_name resolves to live SubId — registry lockstep invariant");
         if sub.source_promoter.is_some() {
-            let resp = ResponsePayload::Err {
-                code: WireErrorCode::DynamicSubNoOp,
-                error: "cannot disable a promoter-spawned dynamic sub \
-                        (synthesised names cannot persist as runtime overrides)"
-                    .into(),
-            };
-            let _ = self.hub.enqueue_response(token, &resp);
+            self.respond(
+                token,
+                &ResponsePayload::Err {
+                    code: WireErrorCode::DynamicSubNoOp,
+                    error: "cannot disable a promoter-spawned dynamic sub \
+                            (synthesised names cannot persist as runtime overrides)"
+                        .into(),
+                },
+            );
             return ControlFlow::Continue(());
         }
         if self.disabled_runtime.contains(name.as_str()) {
-            let resp = ResponsePayload::Err {
-                code: WireErrorCode::NotDisabled,
-                error: "already disabled at runtime".into(),
-            };
-            let _ = self.hub.enqueue_response(token, &resp);
+            self.respond(
+                token,
+                &ResponsePayload::Err {
+                    code: WireErrorCode::NotDisabled,
+                    error: "already disabled at runtime".into(),
+                },
+            );
             return ControlFlow::Continue(());
         }
         self.disabled_runtime.insert(name);
         let out = self.engine.step(Input::DetachSub(sid), now);
         let outcome = self.forward(out);
-        let _ = self.hub.enqueue_response(token, &ResponsePayload::Ok);
+        self.respond(token, &ResponsePayload::Ok);
         outcome
     }
 
@@ -402,29 +445,33 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// discipline as [`Self::handle_disable`].
     fn handle_enable(&mut self, token: Token, name: &str, now: Instant) -> ControlFlow<()> {
         if !self.disabled_runtime.remove(name) {
-            let resp = ResponsePayload::Err {
-                code: WireErrorCode::NotDisabled,
-                error: "not disabled at runtime".into(),
-            };
-            let _ = self.hub.enqueue_response(token, &resp);
+            self.respond(
+                token,
+                &ResponsePayload::Err {
+                    code: WireErrorCode::NotDisabled,
+                    error: "not disabled at runtime".into(),
+                },
+            );
             return ControlFlow::Continue(());
         }
         let Some(spec) = self.loader.current_config().find_active_watch(name) else {
-            let resp = ResponsePayload::Err {
-                code: WireErrorCode::TomlDisabled,
-                error: "runtime override cleared, but the watch is not active in the \
-                        current TOML (enabled = false or removed); edit config and \
-                        reload to re-attach"
-                    .into(),
-            };
-            let _ = self.hub.enqueue_response(token, &resp);
+            self.respond(
+                token,
+                &ResponsePayload::Err {
+                    code: WireErrorCode::TomlDisabled,
+                    error: "runtime override cleared, but the watch is not active in the \
+                            current TOML (enabled = false or removed); edit config and \
+                            reload to re-attach"
+                        .into(),
+                },
+            );
             return ControlFlow::Continue(());
         };
         let out = self
             .engine
             .step(Input::AttachSub(spec.to_attach_request()), now);
         let outcome = self.forward(out);
-        let _ = self.hub.enqueue_response(token, &ResponsePayload::Ok);
+        self.respond(token, &ResponsePayload::Ok);
         outcome
     }
 }

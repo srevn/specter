@@ -434,7 +434,8 @@ impl InfallibleSerialize for WireRequest {}
 /// or other `Wire*` enums (closed-set derives). Marks the daemon-side
 /// response paths
 /// ([`crate::driver::hub::DriverHub::enqueue_response`] +
-/// `write_busy_then_drop`) safe for the wrapper.
+/// [`crate::driver::hub::DriverHub::drain_accept`]'s cap-arm
+/// best-effort Busy write) safe for the wrapper.
 impl InfallibleSerialize for ResponsePayload {}
 
 /// `specter show <name>` detail block for an attached Sub.

@@ -55,7 +55,7 @@
 //! handler reaches per-conn helpers.
 
 use crate::driver::WakeHandle;
-use crate::driver::conns::{ConnState, PushOutcome};
+use crate::driver::conns::{ConnRole, ConnState, PushOutcome};
 use crate::ipc::framing::{InfallibleSerialize, MAX_LINE_BYTES, encode_line};
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode};
 use crate::ipc::wire::{WireDiagnostic, WireTime};
@@ -154,12 +154,11 @@ pub(crate) struct DriverHub<W: FsWatcher = DefaultWatcher> {
     /// Receiver for the actuator's wake'd channel. Drained on the
     /// `TOKEN_WAKER` arm.
     effect_complete_rx: Receiver<Input>,
-    /// Monotone counter for fresh per-conn Token allocation. Starts at
-    /// [`TOKEN_CONN_BASE`]; wraps back to the base on overflow (a
-    /// purely theoretical concern — `usize::MAX - 0x100` accepts is
-    /// &gt;10^18 on 64-bit; an operator daemon hits the heat death of
-    /// the universe first). The wrap exists so the type-level
-    /// `usize::wrapping_add` doesn't introduce an undefined edge.
+    /// Monotone counter for fresh per-conn Token allocation. Starts
+    /// at [`TOKEN_CONN_BASE`]; [`Self::allocate_conn_token`] panics
+    /// loudly via `checked_add` on the unreachable `usize` overflow
+    /// edge — a silent wrap would alias a new accept against the
+    /// static-token set and misroute kernel events.
     next_conn_token: usize,
 }
 
@@ -563,10 +562,21 @@ impl<W: FsWatcher> DriverHub<W> {
     ///
     /// # Cap behavior
     ///
-    /// On reaching [`MAX_IPC_CONNS`], extra accepts get a structured
-    /// [`WireErrorCode::Busy`] JSON response written best-effort + the stream
-    /// dropped. The cap rejects rather than queues — operator IPC is
-    /// not throughput-sensitive, and a queue would let a misbehaving
+    /// On reaching [`MAX_IPC_CONNS`], extra accepts receive a one-shot
+    /// non-blocking best-effort write of a structured
+    /// [`WireErrorCode::Busy`] JSON line; then the stream drops. The
+    /// stream from [`mio::net::UnixListener::accept`] is already
+    /// non-blocking (mio's `IoSource` convention), so `write(2)` here
+    /// either lands the ~80 bytes into the kernel send buffer
+    /// (healthy peer, microseconds) or returns `WouldBlock` (hostile
+    /// peer with a wedged receive buffer) and we drop without bytes
+    /// on the wire. Either outcome preserves the reactor's
+    /// no-blocking floor — no `set_nonblocking(false)` flip, no
+    /// kernel-level `SO_SNDTIMEO`, no blocking-write fallback that
+    /// could stall the accept loop.
+    ///
+    /// The cap rejects rather than queues — operator IPC is not
+    /// throughput-sensitive, and a queue would let a misbehaving
     /// client wedge the daemon's resource budget.
     ///
     /// # Errors
@@ -579,18 +589,23 @@ impl<W: FsWatcher> DriverHub<W> {
     fn drain_accept(&mut self) -> io::Result<()> {
         loop {
             match self.listener.accept() {
-                Ok((stream, _addr)) => {
+                Ok((mut stream, _addr)) => {
                     if self.conns.len() >= MAX_IPC_CONNS {
-                        // Cap reached. Drop the stream after writing
-                        // a structured error so the client gets a
-                        // clean refusal rather than a connection
-                        // reset.
-                        if let Err(e) = write_busy_then_drop(stream) {
-                            tracing::debug!(
-                                ?e,
-                                "ipc busy-response write failed (peer likely already gone)",
-                            );
-                        }
+                        // Cap reached. One non-blocking write attempt
+                        // against the already-non-blocking mio stream;
+                        // discard the result (WouldBlock against a
+                        // hostile peer is fine — the stream drops next
+                        // either way). The healthy-peer wire surface
+                        // stays a structured Busy line; the hostile-peer
+                        // path takes no bytes but preserves the
+                        // reactor's no-blocking floor.
+                        use std::io::Write;
+                        let resp = ResponsePayload::Err {
+                            code: WireErrorCode::Busy,
+                            error: "max concurrent connections".into(),
+                        };
+                        let _ = stream.write(&encode_line(&resp));
+                        drop(stream);
                         continue;
                     }
                     let token = self.allocate_conn_token();
@@ -609,20 +624,23 @@ impl<W: FsWatcher> DriverHub<W> {
     }
 
     /// Mint a fresh per-conn [`Token`]. Monotone from
-    /// [`TOKEN_CONN_BASE`]; wraps back to the base on overflow (a
-    /// purely theoretical concern at scale, but the wrap exists so
-    /// the type-level `wrapping_add` is structurally bounded).
+    /// [`TOKEN_CONN_BASE`].
+    ///
+    /// `checked_add` is loud on the unreachable overflow edge:
+    /// `usize::MAX - TOKEN_CONN_BASE` accepts is &gt;10^18 on 64-bit, so
+    /// hitting the panic requires either an inflation bug at the
+    /// caller (the accept loop somehow runs without ever
+    /// terminating a conn) or hardware running long enough to outlive
+    /// every realistic deployment. A loud panic on the unreachable
+    /// edge beats a silent wrap-and-alias against the static token
+    /// set (which would collide a new accept with `TOKEN_WATCHER` /
+    /// `TOKEN_SIGNAL` and route fs events into the conn dispatch
+    /// arm).
     const fn allocate_conn_token(&mut self) -> Token {
         let raw = self.next_conn_token;
-        // Wrapping increment: on `usize::MAX → 0`, snap back to
-        // TOKEN_CONN_BASE so a hypothetical wrap doesn't collide with
-        // the static set.
-        let next = raw.wrapping_add(1);
-        self.next_conn_token = if next < TOKEN_CONN_BASE {
-            TOKEN_CONN_BASE
-        } else {
-            next
-        };
+        self.next_conn_token = raw
+            .checked_add(1)
+            .expect("conn token allocation overflowed usize — unreachable in practice");
         Token(raw)
     }
 
@@ -674,7 +692,17 @@ impl<W: FsWatcher> DriverHub<W> {
         wire_at: &WireTime,
         diag_sub: Option<SubId>,
     ) {
-        if self.conns.is_empty() {
+        // Subscriber-empty short-circuit: an operator-quiet daemon
+        // (no `tail` / `wait` session live) skips both the
+        // `WireDiagnostic::from` walk and the `encode_line` alloc.
+        // `MAX_IPC_CONNS = 8` bounds the walk above; reading one
+        // enum-discriminator per conn is cheaper than the
+        // build-then-discard pair below.
+        if self
+            .conns
+            .values()
+            .all(|c| !matches!(c.role, ConnRole::Sub { .. }))
+        {
             return;
         }
         let wire = WireDiagnostic::from((diag, wire_at));
@@ -969,14 +997,20 @@ impl<W: FsWatcher> DriverHub<W> {
             }
         }
         if conn.write_queue.is_empty() {
-            // Disarm WRITABLE — leaving it armed on an empty queue
-            // would fire on every send-buffer-room edge.
-            self.poll
-                .registry()
-                .reregister(&mut conn.stream, token, Interest::READABLE)?;
+            // Close-after-flush short-circuits the reregister: the
+            // caller terminates the conn on the `Ok(true)`, which
+            // deregisters the stream entirely — re-registering with
+            // READABLE-only first would be a wasted syscall on the
+            // close-after-flush edge. The flag is checked BEFORE the
+            // reregister; the survive-this-flush path still disarms
+            // WRITABLE so a future send-buffer-room edge doesn't
+            // fire against an empty queue.
             if conn.close_after_flush {
                 return Ok(true);
             }
+            self.poll
+                .registry()
+                .reregister(&mut conn.stream, token, Interest::READABLE)?;
         }
         Ok(false)
     }
@@ -1079,29 +1113,6 @@ impl<W: FsWatcher> std::fmt::Debug for DriverHub<W> {
             .field("next_conn_token", &self.next_conn_token)
             .finish_non_exhaustive()
     }
-}
-
-/// Best-effort blocking write of a structured `WireErrorCode::Busy`
-/// response to a stream we are about to drop. The conn count is at
-/// the cap; the peer gets one short JSON line and the stream closes.
-///
-/// `set_nonblocking(false)` + `set_write_timeout(Some(500ms))` bounds
-/// the wait: a healthy peer receives ~80 bytes in microseconds; a
-/// wedged peer with a full receive buffer hits the timeout and the
-/// caller logs the failure. The bound is generous enough to ride out
-/// scheduler contention, tight enough that a hostile client cannot
-/// stall the accept path more than half a second.
-fn write_busy_then_drop(stream: mio::net::UnixStream) -> io::Result<()> {
-    use std::io::Write;
-    let mut std_stream: std::os::unix::net::UnixStream = stream.into();
-    std_stream.set_nonblocking(false)?;
-    std_stream.set_write_timeout(Some(Duration::from_millis(500)))?;
-    let resp = ResponsePayload::Err {
-        code: WireErrorCode::Busy,
-        error: "max concurrent connections".into(),
-    };
-    std_stream.write_all(&encode_line(&resp))?;
-    Ok(())
 }
 
 #[cfg(test)]

@@ -141,8 +141,9 @@ pub(crate) trait InfallibleSerialize: serde::Serialize {}
 /// ([`crate::driver::hub::DriverHub::dispatch_to_subscribers`]),
 /// back-pressure `_missed` marker
 /// ([`crate::driver::conns::ConnState::try_dispatch_diag`]), response
-/// enqueue ([`crate::driver::hub::DriverHub::enqueue_response`] +
-/// `write_busy_then_drop`), client request shipping
+/// enqueue ([`crate::driver::hub::DriverHub::enqueue_response`] and
+/// [`crate::driver::hub::DriverHub::drain_accept`]'s cap-arm
+/// best-effort Busy write), client request shipping
 /// ([`super::client::connect::write_request`]), and client `tail -o json`
 /// re-emit ([`super::client::tail`]).
 pub(crate) fn encode_line<T: InfallibleSerialize>(value: &T) -> Vec<u8> {
