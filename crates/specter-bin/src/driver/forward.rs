@@ -27,6 +27,7 @@
 //! to a tracing event; its severities are the operator-facing catalogue.
 
 use super::EngineDriver;
+use crate::ipc::wire::WireTime;
 use crossbeam::channel::TrySendError;
 use specter_core::{Diagnostic, EffectOp, Input, ProbeOp, StepOutput, SubId};
 use specter_sensor::FsWatcher;
@@ -158,18 +159,28 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// client cannot rewrite history; a fast client cannot observe a
     /// slower client's `at`.
     ///
+    /// **`WireTime` projection is also once per call.** The
+    /// `humantime::format_rfc3339_seconds` allocation runs once here;
+    /// every per-diag [`crate::ipc::wire::WireDiagnostic::from`]
+    /// projection bumps the `Arc<str>` refcount instead of
+    /// re-formatting. For a high-fanout `StepOutput` (e.g., a
+    /// 256-fanout `PromoterFanoutThreshold` burst) this collapses N
+    /// format calls into 1 + N atomic refcount bumps.
+    ///
     /// **Empty-slice short-circuit.** Most ticks emit zero
     /// diagnostics; the early return keeps the [`SystemTime::now`]
-    /// syscall off the common path.
+    /// syscall and the `WireTime` projection off the common path.
     fn forward_diagnostics(&mut self, diagnostics: &[Diagnostic]) {
         if diagnostics.is_empty() {
             return;
         }
         let wall_now = SystemTime::now();
+        let wire_at = WireTime::from(wall_now);
         for diag in diagnostics {
             log_diagnostic(diag);
             let diag_sub = diag_sub_id(diag);
-            self.hub.dispatch_to_subscribers(diag, wall_now, diag_sub);
+            self.hub
+                .dispatch_to_subscribers(diag, wall_now, &wire_at, diag_sub);
         }
     }
 }

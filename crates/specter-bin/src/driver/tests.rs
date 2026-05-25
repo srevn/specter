@@ -19,6 +19,7 @@ use super::{DriverHub, EngineDriver, TickOutcome};
 use crate::app::CliLogOverrides;
 use crate::channels::ActuatorIO;
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
+use crate::ipc::wire::WireTime;
 use crate::loader::Loader;
 use compact_str::CompactString;
 use crossbeam::channel::Sender;
@@ -2239,12 +2240,15 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
 
     // Dispatch a diag at at_drop — drops (combined would overflow).
     let at_drop = SystemTime::UNIX_EPOCH + Duration::from_secs(100);
+    let wire_at_drop = WireTime::from(at_drop);
     let diag = Diagnostic::SubAttached {
         sub: sid,
         name: CompactString::const_new("build"),
         source_promoter: None,
     };
-    rig.driver.hub.dispatch_to_subscribers(&diag, at_drop, None);
+    rig.driver
+        .hub
+        .dispatch_to_subscribers(&diag, at_drop, &wire_at_drop, None);
     {
         let conn = rig.driver.hub.conn_ref(token).expect("conn lives");
         match &conn.role {
@@ -2270,9 +2274,10 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     // Dispatch a fresh diag at at_flush — fits, AND the marker
     // flushes ahead of it carrying at_drop as its `at`.
     let at_flush = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
+    let wire_at_flush = WireTime::from(at_flush);
     rig.driver
         .hub
-        .dispatch_to_subscribers(&diag, at_flush, None);
+        .dispatch_to_subscribers(&diag, at_flush, &wire_at_flush, None);
     let conn = rig.driver.hub.conn_ref(token).expect("conn lives");
     match &conn.role {
         ConnRole::Sub {

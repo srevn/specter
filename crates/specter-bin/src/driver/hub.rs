@@ -58,7 +58,7 @@ use crate::driver::WakeHandle;
 use crate::driver::conns::{ConnState, PushOutcome};
 use crate::ipc::framing::{MAX_LINE_BYTES, serialize_line};
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode};
-use crate::ipc::wire::WireDiagnostic;
+use crate::ipc::wire::{WireDiagnostic, WireTime};
 use crate::signals::SignalPipe;
 use crossbeam::channel::Receiver;
 use mio::unix::SourceFd;
@@ -643,6 +643,18 @@ impl<W: FsWatcher> DriverHub<W> {
     /// the resolved value to keep the Diagnostic-walking concern out
     /// of the reactor module.
     ///
+    /// **Time threads through two channels.** `wire_at` is the
+    /// pre-formatted RFC 3339 token the per-diag construction reuses
+    /// across the StepOutput (built once in
+    /// [`crate::driver::EngineDriver::forward_diagnostics`], passed
+    /// by reference here so the `humantime::format_rfc3339_seconds`
+    /// allocation is amortized over the whole batch). `at` is the
+    /// full-precision [`SystemTime`] that
+    /// [`ConnState::try_dispatch_diag`] needs for the per-conn
+    /// `first_dropped_at` back-pressure accounting — distinct
+    /// timestamps (the marker's own `WireTime` is built from
+    /// `first_dropped_at`, not `wire_at`).
+    ///
     /// **One serialize per dispatch.** The JSON bytes are built once
     /// before the conn loop and appended verbatim per subscriber via
     /// [`crate::driver::conns::ConnState::try_dispatch_diag`], which
@@ -659,12 +671,13 @@ impl<W: FsWatcher> DriverHub<W> {
         &mut self,
         diag: &Diagnostic,
         at: SystemTime,
+        wire_at: &WireTime,
         diag_sub: Option<SubId>,
     ) {
         if self.conns.is_empty() {
             return;
         }
-        let wire = WireDiagnostic::from((diag, at));
+        let wire = WireDiagnostic::from((diag, wire_at));
         let line = serialize_line(&wire)
             .expect("WireDiagnostic serialization is infallible by construction");
         for conn in self.conns.values_mut() {

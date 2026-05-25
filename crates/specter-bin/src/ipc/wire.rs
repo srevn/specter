@@ -3,7 +3,7 @@
 //!
 //! # The structural wall
 //!
-//! [`WireDiagnostic`]'s [`From<(&Diagnostic, SystemTime)>`] is an
+//! [`WireDiagnostic`]'s [`From<(&Diagnostic, &WireTime)>`] is an
 //! exhaustive `match` — no wildcard, no fallback. A new
 //! [`specter_core::Diagnostic`] variant is a compile error here, and
 //! the same discipline mirrors out across every per-core-type
@@ -14,7 +14,7 @@
 //! # Deserialize policy
 //!
 //! [`WireDiagnostic`] is **two-way**: the daemon serializes for the
-//! per-conn fan-out (the [`From<(&Diagnostic, SystemTime)>`] projection
+//! per-conn fan-out (the [`From<(&Diagnostic, &WireTime)>`] projection
 //! at write time, called once per dispatch from
 //! [`crate::driver::hub::DriverHub::dispatch_to_subscribers`]), and
 //! operator clients (`specter tail`, `specter wait`) deserialize the
@@ -23,7 +23,7 @@
 //! round-trip is structural over the `#[serde]` tags.
 //!
 //! Adding a [`WireDiagnostic`] variant is a paired edit: declare it,
-//! write its [`From<(&Diagnostic, SystemTime)>`] arm, add the matching
+//! write its [`From<(&Diagnostic, &WireTime)>`] arm, add the matching
 //! arm in [`WireDiagnostic::variant_name`], and add a tag entry in
 //! [`KNOWN_WIRE_VARIANTS`]. The first three edits are exhaustive
 //! `match` arms so the compiler refuses the change without them; the
@@ -31,11 +31,17 @@
 //! diverging from the witness set.
 //!
 //! `WireTime` owns its own formatting via
-//! `humantime::format_rfc3339_seconds` rather than going through
-//! serde for the *outgoing* path; deserialization treats it as the
-//! transparent `String` it serializes to. Pre-epoch `SystemTime` is
-//! clamped to `UNIX_EPOCH` on conversion to defuse `humantime`'s
-//! pre-epoch panic.
+//! `humantime::format_rfc3339_seconds` on the outgoing path and
+//! validates via `humantime::parse_rfc3339` on the incoming path:
+//! every wire value is RFC 3339 by construction in *both*
+//! directions. Pre-epoch `SystemTime` is clamped to `UNIX_EPOCH` on
+//! the server-side projection to defuse `humantime`'s pre-epoch
+//! panic.
+//!
+//! The inner storage is `Arc<str>`. The fan-out path builds one
+//! `WireTime` per `StepOutput` and the `From<(&Diagnostic, &WireTime)>`
+//! projection bumps the refcount per diag — `humantime` formats once
+//! per emission regardless of diag count.
 //!
 //! # Field ordering
 //!
@@ -44,12 +50,24 @@
 //! `jq` filters and operator inspection both benefit from a
 //! predictable timestamp position.
 //!
+//! # Small-string idiom
+//!
+//! `CompactString` is the wire-uniform small-string idiom across the
+//! IPC layer. Request-side fields ([`crate::ipc::protocol`]'s
+//! `WireRequest` Subscribe / Show name) and diag-side fields (the
+//! five name-bearing variants on [`WireDiagnostic`]) both use it, so
+//! a hypothetical shared carrier wouldn't have to pick — and the
+//! source-side core enum stores `CompactString` already, so the
+//! projection is a refcount-free SSO-fit clone rather than a fresh
+//! `String` allocation per emission.
+//!
 //! # Visibility
 //!
 //! Every export is `pub(crate)`. Operator clients ship inside the
 //! same binary, so the wire surface stays a bin-internal contract.
 
-use serde::{Deserialize, Serialize};
+use compact_str::CompactString;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use specter_core::{
     BurstHelper, BurstIntent, ClaimKind, DetachReason, Diagnostic, EffectScope, FsEvent,
     OverflowScope, ProbeOwner, ProfileStateDiscriminant, PromoterClaimKind, ReapTrigger,
@@ -76,16 +94,54 @@ use super::protocol::WireId;
 /// boot can all produce a pre-epoch value in the wild, so the clamp
 /// is defense-in-depth, not a theoretical concern.
 ///
-/// `#[serde(transparent)]` makes the JSON form a bare quoted string
-/// (`"2026-05-23T15:30:00Z"`), not a wrapped object.
+/// # Symmetric validation
 ///
-/// Client-side `Deserialize` recovers the same `String` shape the
-/// server wrote — the round-trip skips re-parsing humantime, treating
-/// the field as an opaque RFC 3339 token the renderer reproduces
-/// verbatim.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(transparent)]
-pub(crate) struct WireTime(String);
+/// Both [`Serialize`] and [`Deserialize`] are manual and both gate
+/// the same RFC 3339 vocabulary. Serialize writes the inner `&str`
+/// verbatim (it is invariant-by-construction UTF-8 RFC 3339 thanks to
+/// [`Self::from(SystemTime)`]). Deserialize takes any JSON string,
+/// validates it with [`humantime::parse_rfc3339`], and stores the
+/// validated bytes. A non-RFC-3339 token fails the boundary — the
+/// wire layer cannot accept opaque text masquerading as a timestamp.
+///
+/// JSON form is a bare quoted string (`"2026-05-23T15:30:00Z"`), not
+/// a wrapped object.
+///
+/// # Shared allocation
+///
+/// The inner storage is `Arc<str>`. The fan-out path
+/// ([`crate::driver::EngineDriver::forward_diagnostics`]) builds a
+/// single `WireTime` per `StepOutput`; every per-diag
+/// [`From<(&Diagnostic, &WireTime)>`] projection bumps the refcount
+/// instead of re-formatting. The `Display` consumer (status / list /
+/// show / tail human renderers) writes the inner `&str` verbatim, so
+/// the only consumer outside the JSON wire path is also zero-alloc.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct WireTime(Arc<str>);
+
+impl Serialize for WireTime {
+    /// Wire form is a bare JSON string — invariant-by-construction
+    /// RFC 3339 second-resolution UTF-8 thanks to [`Self::from`] and
+    /// the matching [`Deserialize`] gate.
+    fn serialize<S: Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        ser.serialize_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for WireTime {
+    /// Parse-on-deserialize: every incoming byte sequence is checked
+    /// against [`humantime::parse_rfc3339`] before it becomes a
+    /// `WireTime`. The shape mirrors the server-side `From` projection
+    /// so the wire vocabulary is invariant in both directions; a
+    /// future malformed daemon emit or a hostile client cannot smuggle
+    /// arbitrary text past this gate.
+    fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(de)?;
+        humantime::parse_rfc3339(&raw)
+            .map_err(|e| serde::de::Error::custom(format!("invalid RFC 3339 timestamp: {e}")))?;
+        Ok(Self(Arc::from(raw)))
+    }
+}
 
 impl From<SystemTime> for WireTime {
     fn from(t: SystemTime) -> Self {
@@ -96,7 +152,9 @@ impl From<SystemTime> for WireTime {
                 "specter ipc: pre-epoch SystemTime clamped to UNIX_EPOCH",
             );
         }
-        Self(humantime::format_rfc3339_seconds(clamped).to_string())
+        Self(Arc::from(
+            humantime::format_rfc3339_seconds(clamped).to_string(),
+        ))
     }
 }
 
@@ -211,15 +269,15 @@ pub(crate) enum WireDiagnostic {
     },
     ConfigDiffUnknownSub {
         at: WireTime,
-        name: String,
+        name: CompactString,
     },
     ConfigDiffUnknownPromoter {
         at: WireTime,
-        name: String,
+        name: CompactString,
     },
     ConfigDiffRebindFallbackAttach {
         at: WireTime,
-        name: String,
+        name: CompactString,
     },
     ProbeVanished {
         at: WireTime,
@@ -363,7 +421,7 @@ pub(crate) enum WireDiagnostic {
     SubAttached {
         at: WireTime,
         sub: WireId,
-        name: String,
+        name: CompactString,
         source_promoter: Option<WireId>,
     },
     SubFired {
@@ -389,7 +447,7 @@ pub(crate) enum WireDiagnostic {
     PromoterAttached {
         at: WireTime,
         promoter: WireId,
-        name: String,
+        name: CompactString,
     },
     PromoterReaped {
         at: WireTime,
@@ -461,50 +519,55 @@ pub(crate) enum WireDiagnostic {
     },
 }
 
-impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
-    fn from((d, at): (&Diagnostic, SystemTime)) -> Self {
-        let at = WireTime::from(at);
+impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
+    /// The wall-clock projection is the caller's concern — the fan-out
+    /// path builds one [`WireTime`] per `StepOutput`
+    /// ([`crate::driver::EngineDriver::forward_diagnostics`]) and threads
+    /// `&WireTime` through every per-diag construction. Each arm bumps
+    /// the `Arc<str>` refcount via [`Clone`] instead of re-formatting,
+    /// so `humantime` runs once per emission regardless of diag count.
+    fn from((d, at): (&Diagnostic, &WireTime)) -> Self {
         match d {
             Diagnostic::StaleProbeResponse { owner, correlation } => Self::StaleProbeResponse {
-                at,
+                at: at.clone(),
                 owner: WireProbeOwner::from(*owner),
                 correlation: correlation.as_u64(),
             },
             Diagnostic::StaleTimer { id } => Self::StaleTimer {
-                at,
+                at: at.clone(),
                 id: id.as_u64(),
             },
             Diagnostic::EffectCompleteOutsideAwaiting { sub, profile } => {
                 Self::EffectCompleteOutsideAwaiting {
-                    at,
+                    at: at.clone(),
                     sub: WireId::from(*sub),
                     profile: WireId::from(*profile),
                 }
             }
             Diagnostic::EffectCompleteForUnknownSub { sub } => Self::EffectCompleteForUnknownSub {
-                at,
+                at: at.clone(),
                 sub: WireId::from(*sub),
             },
             Diagnostic::DetachUnknownSub { sub } => Self::DetachUnknownSub {
-                at,
+                at: at.clone(),
                 sub: WireId::from(*sub),
             },
             Diagnostic::ConfigDiffUnknownSub { name } => Self::ConfigDiffUnknownSub {
-                at,
-                name: name.to_string(),
+                at: at.clone(),
+                name: name.clone(),
             },
             Diagnostic::ConfigDiffUnknownPromoter { name } => Self::ConfigDiffUnknownPromoter {
-                at,
-                name: name.to_string(),
+                at: at.clone(),
+                name: name.clone(),
             },
             Diagnostic::ConfigDiffRebindFallbackAttach { name } => {
                 Self::ConfigDiffRebindFallbackAttach {
-                    at,
-                    name: name.to_string(),
+                    at: at.clone(),
+                    name: name.clone(),
                 }
             }
             Diagnostic::ProbeVanished { profile, intent } => Self::ProbeVanished {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 intent: WireBurstIntent::from(*intent),
             },
@@ -513,7 +576,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 intent,
                 errno,
             } => Self::ProbeFailed {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 intent: WireBurstIntent::from(*intent),
                 errno: *errno,
@@ -523,27 +586,27 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 event,
                 profile,
             } => Self::EventClassDropped {
-                at,
+                at: at.clone(),
                 resource: WireId::from(*resource),
                 event: WireFsEvent::from(*event),
                 profile: WireId::from(*profile),
             },
             Diagnostic::EventOnUnwatchedResource { resource } => Self::EventOnUnwatchedResource {
-                at,
+                at: at.clone(),
                 resource: WireId::from(*resource),
             },
             Diagnostic::EventNoConsumer { resource } => Self::EventNoConsumer {
-                at,
+                at: at.clone(),
                 resource: WireId::from(*resource),
             },
             Diagnostic::WatchOpRejected { resource, failure } => Self::WatchOpRejected {
-                at,
+                at: at.clone(),
                 resource: WireId::from(*resource),
                 failure: WireWatchFailure::from(*failure),
             },
             Diagnostic::PendingPathProbeVanished { profile, prefix } => {
                 Self::PendingPathProbeVanished {
-                    at,
+                    at: at.clone(),
                     profile: WireId::from(*profile),
                     prefix: WireId::from(*prefix),
                 }
@@ -553,17 +616,17 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 prefix,
                 errno,
             } => Self::PendingPathProbeFailed {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 prefix: WireId::from(*prefix),
                 errno: *errno,
             },
             Diagnostic::ReapPendingCancelled { profile } => Self::ReapPendingCancelled {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
             },
             Diagnostic::ProfileReaped { profile, via } => Self::ProfileReaped {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 via: WireReapTrigger::from(*via),
             },
@@ -573,7 +636,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 resource,
                 failure,
             } => Self::ProfileClaimPurged {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 claim: WireClaimKind::from(*claim),
                 resource: WireId::from(*resource),
@@ -585,19 +648,19 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 resource,
                 failure,
             } => Self::PromoterClaimPurged {
-                at,
+                at: at.clone(),
                 promoter: WireId::from(*promoter),
                 claim: WirePromoterClaimKind::from(*claim),
                 resource: WireId::from(*resource),
                 failure: WireWatchFailure::from(*failure),
             },
             Diagnostic::AttachPathInvalid { path, hint } => Self::AttachPathInvalid {
-                at,
+                at: at.clone(),
                 path: WirePath::from(path),
                 hint: (*hint).to_owned(),
             },
             Diagnostic::AttachResourceStale { resource } => Self::AttachResourceStale {
-                at,
+                at: at.clone(),
                 resource: WireId::from(*resource),
             },
             Diagnostic::AnchorKindMismatch {
@@ -605,7 +668,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 prior_kind,
                 response_kind,
             } => Self::AnchorKindMismatch {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 prior_kind: WireResourceKind::from(*prior_kind),
                 response_kind: WireResourceKind::from(*response_kind),
@@ -615,7 +678,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 target,
                 cause,
             } => Self::SpliceCrossedUncovered {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 target: WireId::from(*target),
                 cause: WireSpliceFailureCause::from(*cause),
@@ -625,7 +688,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 resource,
                 event,
             } => Self::EventAbsorbedByFireTail {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 resource: WireId::from(*resource),
                 event: WireFsEvent::from(*event),
@@ -634,7 +697,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 profile,
                 outstanding,
             } => Self::AwaitGateDeadlineForceRebasing {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 outstanding: *outstanding,
             },
@@ -642,7 +705,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 profile,
                 outstanding,
             } => Self::AwaitGateDeadlineReap {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 outstanding: *outstanding,
             },
@@ -651,14 +714,14 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 first_unread,
                 intent,
             } => Self::QuiescenceCeilingUnreadable {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 first_unread: WirePath::from(first_unread),
                 intent: WireBurstIntent::from(*intent),
             },
             Diagnostic::RebaseCeilingStillChanging { profile, intent } => {
                 Self::RebaseCeilingStillChanging {
-                    at,
+                    at: at.clone(),
                     profile: WireId::from(*profile),
                     intent: WireBurstIntent::from(*intent),
                 }
@@ -668,30 +731,30 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 first_unread,
                 intent,
             } => Self::RebaseCeilingUnreadable {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 first_unread: WirePath::from(first_unread),
                 intent: WireBurstIntent::from(*intent),
             },
             Diagnostic::SensorOverflow { scope } => Self::SensorOverflow {
-                at,
+                at: at.clone(),
                 scope: WireOverflowScope::from(*scope),
             },
             Diagnostic::PromoterReseededForOverflow { promoter } => {
                 Self::PromoterReseededForOverflow {
-                    at,
+                    at: at.clone(),
                     promoter: WireId::from(*promoter),
                 }
             }
             Diagnostic::PerFileDriftDroppedOnRecovery { profile } => {
                 Self::PerFileDriftDroppedOnRecovery {
-                    at,
+                    at: at.clone(),
                     profile: WireId::from(*profile),
                 }
             }
             Diagnostic::PerFileFireSkippedOnFreshSeed { profile } => {
                 Self::PerFileFireSkippedOnFreshSeed {
-                    at,
+                    at: at.clone(),
                     profile: WireId::from(*profile),
                 }
             }
@@ -700,9 +763,9 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 name,
                 source_promoter,
             } => Self::SubAttached {
-                at,
+                at: at.clone(),
                 sub: WireId::from(*sub),
-                name: name.to_string(),
+                name: name.clone(),
                 source_promoter: source_promoter.map(WireId::from),
             },
             Diagnostic::SubFired {
@@ -710,7 +773,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 profile,
                 count,
             } => Self::SubFired {
-                at,
+                at: at.clone(),
                 sub: WireId::from(*sub),
                 profile: WireId::from(*profile),
                 count: *count,
@@ -720,31 +783,31 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 profile,
                 reason,
             } => Self::SubDetached {
-                at,
+                at: at.clone(),
                 sub: WireId::from(*sub),
                 profile: WireId::from(*profile),
                 reason: WireDetachReason::from(*reason),
             },
             Diagnostic::SubRebound { sub } => Self::SubRebound {
-                at,
+                at: at.clone(),
                 sub: WireId::from(*sub),
             },
             Diagnostic::RebindUnknownSub { sub } => Self::RebindUnknownSub {
-                at,
+                at: at.clone(),
                 sub: WireId::from(*sub),
             },
             Diagnostic::PromoterAttached { promoter, name } => Self::PromoterAttached {
-                at,
+                at: at.clone(),
                 promoter: WireId::from(*promoter),
-                name: name.to_string(),
+                name: name.clone(),
             },
             Diagnostic::PromoterReaped { promoter } => Self::PromoterReaped {
-                at,
+                at: at.clone(),
                 promoter: WireId::from(*promoter),
             },
             Diagnostic::PromoterDescentVanished { promoter, prefix } => {
                 Self::PromoterDescentVanished {
-                    at,
+                    at: at.clone(),
                     promoter: WireId::from(*promoter),
                     prefix: WireId::from(*prefix),
                 }
@@ -754,7 +817,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 prefix,
                 errno,
             } => Self::PromoterDescentFailed {
-                at,
+                at: at.clone(),
                 promoter: WireId::from(*promoter),
                 prefix: WireId::from(*prefix),
                 errno: *errno,
@@ -764,28 +827,28 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 path,
                 kind,
             } => Self::PromotionKindObserved {
-                at,
+                at: at.clone(),
                 promoter: WireId::from(*promoter),
                 path: WirePath::from(path),
                 kind: WireResourceKind::from(*kind),
             },
             Diagnostic::PromoterFanoutThreshold { promoter, count } => {
                 Self::PromoterFanoutThreshold {
-                    at,
+                    at: at.clone(),
                     promoter: WireId::from(*promoter),
                     count: *count,
                 }
             }
             Diagnostic::PromoterProxyStaleEvent { promoter, resource } => {
                 Self::PromoterProxyStaleEvent {
-                    at,
+                    at: at.clone(),
                     promoter: WireId::from(*promoter),
                     resource: WireId::from(*resource),
                 }
             }
             Diagnostic::PromoterEnumerationVanished { promoter, proxy } => {
                 Self::PromoterEnumerationVanished {
-                    at,
+                    at: at.clone(),
                     promoter: WireId::from(*promoter),
                     proxy: WireId::from(*proxy),
                 }
@@ -795,7 +858,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 proxy,
                 errno,
             } => Self::PromoterEnumerationFailed {
-                at,
+                at: at.clone(),
                 promoter: WireId::from(*promoter),
                 proxy: WireId::from(*proxy),
                 errno: *errno,
@@ -805,7 +868,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 sub,
                 path,
             } => Self::DynamicSubReaped {
-                at,
+                at: at.clone(),
                 promoter: WireId::from(*promoter),
                 sub: WireId::from(*sub),
                 path: WirePath::from(path),
@@ -815,7 +878,7 @@ impl From<(&Diagnostic, SystemTime)> for WireDiagnostic {
                 helper,
                 observed,
             } => Self::InvalidBurstTransition {
-                at,
+                at: at.clone(),
                 profile: WireId::from(*profile),
                 helper: WireBurstHelper::from(*helper),
                 observed: WireProfileStateDiscriminant::from(*observed),
@@ -1321,6 +1384,37 @@ mod tests {
         );
     }
 
+    /// `Deserialize` for [`WireTime`] is the symmetric gate — a
+    /// non-RFC-3339 token is rejected at the boundary, not stored as
+    /// opaque text. Pins the contract change behind the audit's
+    /// F-HIGH-3 finding: the wire layer validates *both* directions
+    /// of the round-trip. One witness covers the gate; humantime's
+    /// internal failure modes are humantime's contract, not ours.
+    #[test]
+    fn wire_time_rejects_malformed_string() {
+        let err = serde_json::from_str::<WireTime>(r#""not a date""#)
+            .expect_err("malformed RFC 3339 must be rejected by WireTime::deserialize");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("RFC 3339"),
+            "rejection message should name the format; got {msg:?}",
+        );
+    }
+
+    /// A well-formed RFC 3339 token round-trips through serde with
+    /// byte-identical output — the deserialize gate accepts valid
+    /// input and the Serialize impl preserves the bytes verbatim. The
+    /// server-emit shape is pinned separately by
+    /// [`wire_time_clamps_pre_epoch_to_unix_epoch`]; this test pins
+    /// the complementary half (Deserialize ↔ Serialize byte stability).
+    #[test]
+    fn wire_time_round_trips_rfc3339() {
+        let bytes = r#""2026-05-23T15:30:00Z""#;
+        let parsed: WireTime = serde_json::from_str(bytes).expect("valid RFC 3339 deserialize");
+        let again = serde_json::to_string(&parsed).expect("serialize");
+        assert_eq!(again, bytes, "round-trip preserves wire bytes");
+    }
+
     /// A non-UTF-8 path projects to U+FFFD-bearing UTF-8 at construct
     /// time and round-trips cleanly through serde — `serde_json` never
     /// sees the offending bytes, so the daemon-panic surface the
@@ -1380,7 +1474,7 @@ mod tests {
     ///    [`KNOWN_WIRE_VARIANTS`] (and vice versa).
     ///
     /// A new [`WireDiagnostic`] variant needs (a) its
-    /// `From<(&Diagnostic, SystemTime)>` arm (compile-time, exhaustive),
+    /// `From<(&Diagnostic, &WireTime)>` arm (compile-time, exhaustive),
     /// (b) its `variant_name` arm (compile-time, exhaustive), (c) a tag
     /// in [`KNOWN_WIRE_VARIANTS`], and (d) a witness here. The drift
     /// test fails when (c) or (d) lag.
