@@ -45,8 +45,8 @@ mod state;
 mod tick;
 mod wake;
 
+use crate::actuator::ActuatorIO;
 use crate::app::CliLogOverrides;
-use crate::channels::ActuatorIO;
 use crate::loader::Loader;
 use crate::observability::ObservabilityHandle;
 use compact_str::CompactString;
@@ -271,16 +271,16 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// `SubAttached` / `PromoterAttached` diagnostics are pure operator
     /// narration, logged via `forward`.
     ///
-    /// Returns [`ControlFlow::Break`] if any `forward` observed
-    /// shutdown (operator pulse mid-attach or `watch_ops_tx`
-    /// disconnect). On `Break` we run [`Self::begin_shutdown`] before
-    /// returning — an attached Sub leaves the Profile in a
-    /// Seed-Verifying state with an armed `ProbeSlot`, and a caller
-    /// that just drops the driver would trip
-    /// `ProbeSlot::drop`'s linear-edge tripwire. Containing the
-    /// probe drain inside `run_initial_attach` keeps the lifecycle
-    /// discipline encapsulated; the caller (`app.rs`) stays a thin
-    /// branch on the `ControlFlow` return.
+    /// Returns [`ControlFlow::Break`] if any `forward` observed a
+    /// downstream channel disconnect (actuator-thread death surfaces
+    /// as `effects_tx` returning `Err(Disconnected)`). On `Break` we
+    /// run [`Self::begin_shutdown`] before returning — an attached Sub
+    /// leaves the Profile in a Seed-Verifying state with an armed
+    /// `ProbeSlot`, and a caller that just drops the driver would trip
+    /// `ProbeSlot::drop`'s linear-edge tripwire. Containing the probe
+    /// drain inside `run_initial_attach` keeps the lifecycle discipline
+    /// encapsulated; the caller (`app.rs`) stays a thin branch on the
+    /// `ControlFlow` return.
     pub(crate) fn run_initial_attach(&mut self) -> ControlFlow<()> {
         let now = Instant::now();
         // Snapshot the active spec lists: `self.engine.step` needs

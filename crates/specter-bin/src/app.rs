@@ -57,7 +57,7 @@
 //! owned by [`DriverHub`]. The driver's `tick` body is one drain
 //! pass over the partitioned ready set.
 
-use crate::channels::ActuatorIO;
+use crate::actuator::ActuatorIO;
 use crate::driver::{DriverHub, EngineDriver, ReloadTrigger, WakingSink};
 use crate::ipc::sockpath;
 use crate::loader::Loader;
@@ -338,35 +338,68 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         hub,
     );
 
-    // 14. Startup-TOCTOU close — config can change between the
-    //     initial `from_path_with_meta` capture and the config
-    //     watcher's registration. A single `lstat` after the
-    //     watcher is registered catches the drift; on inequality
-    //     the driver runs `dispatch_reload(Startup)` directly (no
-    //     bridge-thread pulse) so the first tick observes the
-    //     freshly-applied config.
+    // 14. Initial attach against the boot-parsed config.
     //
-    //     The lstat-Err branch is treated as "no drift": a missing
-    //     config at startup time is unusual but `dispatch_reload`
-    //     handles its own I/O failures (logs + keeps running
-    //     config), so calling it here would add no value over
-    //     letting the auto-reload settle pipeline handle the
-    //     recovery on the next config-watcher pulse.
-    if let Ok(post_meta) = FileMeta::from_path(&args.config)
+    //     MUST precede the startup-TOCTOU close (#15):
+    //     `dispatch_reload`'s contract is "engine and loader are in
+    //     sync; rotate them both forward atomically." Calling it
+    //     before initial-attach violates that precondition — the
+    //     diff's `added` bucket would attach Subs against an empty
+    //     engine, rotate the loader to the post-TOCTOU config, then
+    //     `run_initial_attach` would walk the rotated loader and
+    //     double-attach those Subs, tripping
+    //     `SubRegistry::insert`'s `debug_assert!` (and
+    //     `PromoterRegistry::insert`'s equivalent on a TOML edit
+    //     that adds a Promoter during the boot window).
+    //
+    //     On `Break` (downstream `effects_tx` disconnect mid-attach),
+    //     `run_initial_attach` internally drains in-flight probes
+    //     via `begin_shutdown` before returning — the lifecycle
+    //     discipline lives on the method, not on this caller.
+    let initial_attach_break = driver.run_initial_attach().is_break();
+
+    // 15. Startup-TOCTOU close — the config can change between the
+    //     initial `from_path_with_meta` capture (line 116) and the
+    //     config-watcher's registration (the `DriverHub::new`
+    //     return). A single `lstat` here catches the drift; on
+    //     inequality the driver runs `dispatch_reload(Startup)`
+    //     directly. Initial-attach has already run (#14), so the
+    //     engine is in sync with the loader's pre-rotation state and
+    //     the diff's `added` / `removed` / `modified` buckets
+    //     dispatch cleanly. Attribution via
+    //     [`ReloadTrigger::Startup`] so operators see "boot-time
+    //     drift caught and applied" in `status.last_reload_via`.
+    //
+    //     The lstat-Err branch is "no drift": a missing config at
+    //     startup is unusual but recovers via the auto-reload settle
+    //     pipeline on the next config-watcher pulse.
+    //
+    //     The `!initial_attach_break` guard is load-bearing: the
+    //     prior call drained probes through `begin_shutdown` on its
+    //     `Break` path; re-arming probes mid-shutdown via
+    //     `dispatch_reload` would violate the linear-edge invariant.
+    //     On a `Break` from `dispatch_reload`'s own apply-branch
+    //     `forward`, the inner drain runs symmetrically (see the
+    //     [`EngineDriver::dispatch_reload`] rustdoc).
+    let drift_break = if !initial_attach_break
+        && let Ok(post_meta) = FileMeta::from_path(&args.config)
         && post_meta != initial_meta
     {
         tracing::info!("config changed during startup; running reload now");
-        let _ = driver.dispatch_reload(ReloadTrigger::Startup, Instant::now());
-    }
+        driver
+            .dispatch_reload(ReloadTrigger::Startup, Instant::now())
+            .is_break()
+    } else {
+        false
+    };
 
-    // 15. Run.
-    if driver.run_initial_attach().is_break() {
-        // Shutdown observed during initial attach (operator signal
-        // mid-startup or a downstream channel disconnect). The
-        // driver has already drained its in-flight probes via
-        // `begin_shutdown`, so dropping it below is safe — skip the
-        // main loop and route directly to the shared teardown.
-        tracing::info!("shutdown observed during initial attach; engine drained");
+    // 16. Run. Skip the main loop on any `Break` observed above —
+    //     both `run_initial_attach` and `dispatch_reload` drain
+    //     their own in-flight probes through `begin_shutdown` on
+    //     `Break`, so the engine is probe-free and the driver is
+    //     safe to drop below.
+    if initial_attach_break || drift_break {
+        tracing::info!("shutdown observed during boot; engine drained");
     } else {
         let exit_reason = driver.run();
         tracing::info!(?exit_reason, "engine driver exited");

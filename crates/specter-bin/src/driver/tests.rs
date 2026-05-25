@@ -16,8 +16,8 @@ use super::conns::{ConnRole, WRITE_QUEUE_HIGH_WATER};
 use super::hub::{EnqueueOutcome, TOKEN_CONN_BASE};
 use super::state::ReloadTrigger;
 use super::{DriverHub, EngineDriver, TickOutcome};
+use crate::actuator::ActuatorIO;
 use crate::app::CliLogOverrides;
-use crate::channels::ActuatorIO;
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
 use crate::ipc::wire::WireTime;
 use crate::loader::Loader;
@@ -1374,6 +1374,117 @@ fn dispatch_reload_does_not_bump_counters_on_parse_fail() {
     assert_eq!(rig.driver.driver_state.reload_count, 0);
     assert!(rig.driver.driver_state.last_reload_at.is_none());
     assert!(rig.driver.driver_state.last_reload_via.is_none());
+}
+
+// ============================================================
+// Boot-order lifecycle — initial-attach BEFORE startup-TOCTOU
+// dispatch_reload
+// ============================================================
+
+/// [`EngineDriver::run_initial_attach`] runs against the loader's
+/// initial config *before* any [`EngineDriver::dispatch_reload`]
+/// (`Startup`) call. Initial-attach observes an empty engine and
+/// attaches each Sub / Promoter directly. A subsequent
+/// `dispatch_reload(Startup)` then sees an engine in sync with the
+/// loader — the diff's `added` bucket attaches new entries cleanly,
+/// neither colliding in [`specter_core::SubRegistry::insert`]'s
+/// `by_name` index nor in
+/// [`specter_core::PromoterRegistry::insert`]'s when the TOCTOU
+/// drift added a dynamic `[[watch]]`.
+///
+/// Reversing the order would attach the diff's `added` Subs /
+/// Promoters against an empty engine, rotate the loader to the
+/// post-TOCTOU config, and then `run_initial_attach` would walk the
+/// rotated loader and double-attach those entries — tripping both
+/// registries' `debug_assert!` on the duplicate `by_name` insert.
+///
+/// The test exercises both registry sites in one pass: the initial
+/// config holds one static Sub; the on-disk drift adds another
+/// static Sub AND a dynamic `[[watch]]` (a Promoter). The
+/// `last_reload_via = Startup` assertion is the secondary behavioural
+/// pin on the `Startup` attribution.
+#[test]
+fn startup_drift_after_initial_attach_does_not_double_attach() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let anchor = tmp.path().display();
+
+    // Loader's initial config (pre-TOCTOU read).
+    let boot_text = format!(
+        r#"
+[[watch]]
+name      = "foo"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+"#,
+    );
+    let boot_config = Config::from_str(&boot_text).expect("boot config parses");
+
+    // On-disk config — TOCTOU drift adds a static Sub `bar` AND a
+    // dynamic `[[watch]]` `logs` (lowered to a Promoter). Both kinds
+    // exercise their respective registry `debug_assert!` site under
+    // a buggy boot order.
+    let drift_text = format!(
+        r#"
+[[watch]]
+name      = "foo"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+
+[[watch]]
+name      = "bar"
+path      = "{anchor}"
+actions   = [{{ exec = ["true"] }}]
+
+[[watch]]
+name      = "logs"
+path      = "{anchor}/{{a,b}}/access.log"
+actions   = [{{ exec = ["true"] }}]
+"#,
+    );
+    std::fs::write(&cfg_path, &drift_text).unwrap();
+
+    let mut rig = rig_for(boot_config, cfg_path);
+
+    // Step 1 — initial-attach against the loader's boot config.
+    // Engine ends with just `foo` attached; Promoter registry empty.
+    let _ = rig.driver.run_initial_attach();
+    assert!(rig.driver.engine.subs().find_by_name("foo").is_some());
+    assert!(rig.driver.engine.subs().find_by_name("bar").is_none());
+    assert_eq!(rig.driver.engine.subs().len(), 1);
+    assert!(rig.driver.engine.promoters().is_empty());
+
+    // Step 2 — startup-TOCTOU dispatch_reload sees the drifted file,
+    // computes `diff(boot, drift)` = `{added: [bar], promoters_added:
+    // [logs]}`, and applies. With the engine in sync with the loader's
+    // pre-rotation boot state, the `added` buckets dispatch cleanly.
+    let _ = rig
+        .driver
+        .dispatch_reload(ReloadTrigger::Startup, Instant::now());
+
+    assert!(rig.driver.engine.subs().find_by_name("foo").is_some());
+    assert!(rig.driver.engine.subs().find_by_name("bar").is_some());
+    assert_eq!(
+        rig.driver.engine.subs().len(),
+        2,
+        "foo + bar each attached exactly once",
+    );
+    assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
+    assert_eq!(
+        rig.driver.engine.promoters().len(),
+        1,
+        "logs Promoter registered exactly once",
+    );
+
+    // The trigger surfaces as `Startup` on the next `status` query —
+    // operators distinguish boot-time drift apply from a later
+    // SIGHUP / IPC reload.
+    assert_eq!(
+        rig.driver.driver_state.last_reload_via,
+        Some(ReloadTrigger::Startup),
+    );
+
+    let _ = rig.driver.begin_shutdown();
 }
 
 // ============================================================

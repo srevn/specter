@@ -15,8 +15,8 @@
 // `config`.
 #![forbid(unsafe_code)]
 
+mod actuator;
 mod app;
-mod channels;
 mod driver;
 mod ipc;
 mod loader;

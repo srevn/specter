@@ -52,11 +52,11 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// `tick`, which always passes `Instant::now()`.
     ///
     /// Returns [`ControlFlow::Break`] iff [`Self::dispatch_reload`]
-    /// observed shutdown (its `forward` raced the
-    /// `shutdown_engine_rx` arm, or `watch_ops_tx` disconnected
-    /// mid-apply). The caller is responsible for the probe drain —
-    /// [`super::tick::EngineDriver::tick`] routes the carrier through
-    /// `begin_shutdown`.
+    /// observed shutdown (`forward`'s outbound `effects_tx`
+    /// disconnected mid-apply). `dispatch_reload` drains in-flight
+    /// probes internally on `Break`; the tick-layer outer
+    /// `begin_shutdown` after this returns is redundant but
+    /// idempotent.
     pub(super) fn apply_config_settle_expiry(&mut self, now: Instant) -> ControlFlow<()> {
         let Some(deadline) = self.config_settle_until else {
             return ControlFlow::Continue(());
@@ -145,8 +145,21 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// reload settle expiry).
     ///
     /// Returns the [`ControlFlow`] from the apply-branch `forward` so
-    /// a shutdown observed mid-apply (operator signal or
-    /// `watch_ops_tx` disconnect) propagates back to the caller.
+    /// a shutdown observed mid-apply (`forward`'s outbound `effects_tx`
+    /// disconnect) propagates back to the caller. On `Break` the
+    /// cancel-first probe drain via
+    /// [`super::EngineDriver::begin_shutdown`] runs internally,
+    /// symmetric with [`super::EngineDriver::run_initial_attach`] —
+    /// every engine-mutating entry point that may arm probes (the
+    /// diff's `added` Subs / Promoters enter Seed-Verifying with an
+    /// armed `ProbeSlot`) is responsible for the cleanup of those
+    /// probes on its own `Break`. A caller that drops the driver
+    /// after observing `Break` cannot trip `ProbeSlot::drop`'s
+    /// linear-edge tripwire. The tick-layer outer drain that
+    /// also calls `begin_shutdown` on `Break` propagation is
+    /// redundant for this path but idempotent (the cancel-first
+    /// drain iterates over an already-empty in-flight-probe set).
+    ///
     /// The loader rotation runs even on the `Break` path: the engine
     /// has the diff applied, so the loader matches the engine on the
     /// way out, and the driver is about to shut down anyway — keeping
@@ -240,6 +253,21 @@ impl<W: FsWatcher> EngineDriver<W> {
         // runtime-disabled entry must clear the override on the same
         // pulse, even when no other diff bits moved.
         self.prune_disabled_runtime_against_current_config();
+
+        // Cancel-first probe drain on `Break`, symmetric with
+        // `run_initial_attach`'s internal drain. The apply-branch
+        // `engine.step` may have transitioned freshly-added Subs to
+        // Seed-Verifying with armed `ProbeSlot`s; on a `Break` from
+        // `forward` the engine retains those probes. Without this
+        // drain a caller that does not loop back through `tick` (the
+        // boot-time call from `App::run`) would drop the driver with
+        // armed probes and trip `ProbeSlot::drop`'s linear-edge
+        // tripwire. The drain is idempotent — tick-layer callers
+        // also call `begin_shutdown` on the propagated `Break`, and
+        // the second pass iterates over an empty in-flight set.
+        if outcome.is_break() {
+            let _ = self.begin_shutdown();
+        }
 
         outcome
     }
