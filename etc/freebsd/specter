@@ -22,7 +22,7 @@ procname="@SPECTER_BIN@"
 pidfile="/var/run/${name}.pid"
 
 command="/usr/sbin/daemon"
-command_args="-f -p ${pidfile} -o ${specter_logfile} -u ${specter_user} @SPECTER_BIN@ --config ${specter_config}"
+command_args="-f -p ${pidfile} -o ${specter_logfile} -u ${specter_user} @SPECTER_BIN@ run --config ${specter_config}"
 extra_commands="reload"
 
 run_rc_command "$1"

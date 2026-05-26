@@ -4,7 +4,7 @@ After=network.target
 
 [Service]
 Type=exec
-ExecStart=@SPECTER_BIN@ --config @SPECTER_CONF@
+ExecStart=@SPECTER_BIN@ run --config @SPECTER_CONF@
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5

@@ -2,324 +2,96 @@
 
 > Prove the absence of change.
 
-Specter watches paths and fires commands when the tree settles —
-not when "something happened," but when **nothing has happened for
-long enough** that the tree is observably stable. Commands run
-against a snapshot that includes every change up to the quiescent
-point.
+Specter watches paths and fires commands when the tree settles — not
+when "something happened," but when **nothing has happened for long
+enough** that the tree is observably stable. Commands run against a
+snapshot that includes every change up to the quiescent point.
 
 Conventional file-watch tools fire on every kernel event. The result
-is a flurry of redundant runs against partially-written files.
-Specter inverts that contract:
+is a flurry of redundant runs against partially-written files. Specter
+inverts that contract:
 
 - **Coarse file-tree settling** — no double-fires on `git checkout`,
-  multi-file editor saves, or build outputs writing dozens of
-  artifacts.
+  multi-file editor saves, or build outputs writing dozens of artifacts.
 - **Hierarchical content hashing** — re-running the same edit (saving
   with no changes, touching mtime, idempotent reformatters) does not
   re-fire the command.
-- **Self-event absorption** — the reaction itself usually writes
-  inside the watched tree; Specter folds those events into the
-  post-fire rebase rather than treating them as a fresh burst.
-- **Hot config reload** via SIGHUP, plus supervisor templates for
-  systemd / launchd / FreeBSD `daemon(8)`.
+- **Self-event absorption** — the reaction itself usually writes inside
+  the watched tree; Specter folds those events into the post-fire rebase
+  rather than treating them as a fresh burst.
+- **Hot config reload** — SIGHUP, an operator IPC verb, or
+  edit-and-save against a watched config path.
+- **Operator control surface** — eight client verbs over a UNIX socket
+  (`status`, `list`, `show`, `disable`, `enable`, `reload`, `tail`,
+  `wait`) for live inspection and runtime overrides.
 
 Under the hood, a pure engine drives a kqueue/inotify sensor (BSD,
 macOS, Linux) and a subprocess actuator over bounded channels.
 
-## Build & install
+## Quick start
 
 ```sh
-make build               # cargo build --release
-make install             # → $(BINDIR)/specter (default /usr/local/bin)
-
-# Service template (one of):
-make install-systemd     # → /etc/systemd/system/specter.service
-make install-launchd     # → $(LAUNCHD_DIR)/io.specter.plist
-make install-freebsd     # → $(PREFIX)/etc/rc.d/specter
-
-# All-in-one — auto-detect host OS and pick the right service template:
-make install-all
+make install-all                 # binary + config + host-OS service template
+$EDITOR /usr/local/etc/specter.toml
+# launchd / systemd / FreeBSD rc.d will start the daemon
+specter status                   # confirm it's up
 ```
 
-On macOS, install-launchd / install-config default to **user scope** — the
-plist lands in `~/Library/LaunchAgents/`, the config in `~/.config/specter/`,
-and `launchctl bootstrap`/`bootout` use `gui/<uid>` so no `sudo` is needed.
-Override `LAUNCHD_DIR=/Library/LaunchDaemons LAUNCHD_DOMAIN=system
-SYSCONFDIR=/usr/local/etc` (with `sudo`) for a system install.
+See [docs/install.md](docs/install.md) for variables, scopes, and
+service-template details.
 
-Linux/FreeBSD remain system-scope.
-
-Standard variables — `PREFIX`, `DESTDIR`, `BINDIR`, `SYSCONFDIR`,
-`LAUNCHD_DIR`, `LAUNCHD_DOMAIN` — are honored throughout. See the top of
-`Makefile` for the full list.
-
-## Configuration
-
-A single TOML file. Pass it via `--config` (or `-c`).
-
-```toml
-# Engine telemetry — operator-facing diagnostic stream. The defaults
-# emit `info`-level messages to stderr, which a supervisor (systemd,
-# launchd, FreeBSD daemon(8)) captures into its log facility.
-[log]
-level       = "info"                  # trace | debug | info | warn | error
-destination = "stderr"                # stderr | file
-# path      = "/var/log/specter.log"  # required when destination = "file"
-
-# One [[watch]] block per reaction. Names must be unique. The `actions`
-# array names what should run when the watch settles. Each entry runs
-# in sequence, stop-on-failure: if step N fails, steps N+1..M don't run
-# and the plan reports `Failed`. The engine's outstanding-effect
-# accounting is per-plan (one EffectComplete per plan, regardless of
-# step count).
-[[watch]]
-name      = "rebuild"                 # identifies this watch in logs
-path      = "/srv/repo/src"           # absolute; pending paths supported
-actions   = [{ exec = ["cargo", "build"] }]  # argv-only (no shell expansion)
-
-# Optional knobs (defaults shown).
-# enabled    = true                   # false ⇒ inert at runtime; toggle without deleting
-settle       = "200ms"                # debounce window after the last event
-# max_settle = "1h"                   # forced fire even if events keep arriving (default 1h).
-                                      # If `actions` has multiple steps, `max_settle * 4` is
-                                      # the recovery budget for the whole plan — tune up for
-                                      # long sequences (a 5-step plan that legitimately runs
-                                      # 25 min would otherwise trip the hatch). The same budget
-                                      # bounds the sum of per-step `timeout`s plus the
-                                      # SIGTERM→SIGKILL grace (5s by default per step); a plan
-                                      # whose timeouts can collectively exceed `max_settle * 4`
-                                      # will see the engine force a rebase before every timer
-                                      # has had a chance to fire.
-# scope      = "subtree-root"         # subtree-root | per-stable-file
-# events     = ["structure", "content"]  # default mask depends on scope
-# pattern    = "**/*.rs"              # glob filter
-# exclude    = ["target/**", ".git/**"]
-# hidden     = false                  # scan dotfiles
-# recursive  = true                   # descend into subdirectories
-# max_depth  = 8                      # cap descent depth
-# log_output = false                  # forward child stdout/stderr to specter's stdio
-
-[[watch]]
-name       = "format-each"
-path       = "/srv/repo/docs"
-actions    = [{ exec = ["prettier", "--write", "${specter.path}"] }]
-scope      = "per-stable-file"        # one Effect per stable file
-pattern    = "**/*.md"
-log_output = true                     # send formatter output to the journal
-```
-
-The `actions` array also accepts the equivalent block-table form, which
-reads better for longer watches:
+## A watch
 
 ```toml
 [[watch]]
-name = "format-each"
-path = "/srv/repo/docs"
-
-[[watch.actions]]
-exec = ["prettier", "--write", "${specter.path}"]
+name    = "rebuild"
+path    = "/srv/repo/src"
+actions = [{ exec = ["cargo", "build"] }]
 ```
 
-### Pipelines
+Each `[[watch]]` block declares one reaction: a name, an absolute path,
+and an `actions` array. Optional knobs cover settle window, scope
+(subtree vs per-file), glob filters, event mask, recursion, and child
+stdio routing. The actions array supports sequences, pipes (`a | b | c`
+with pipefail-on), and conditionals (`when` / `then` / `else`). Argv
+slots accept `${specter.*}` and `${env.*}` placeholders; the child
+process receives a matching `SPECTER_*` environment set.
 
-A `pipe` action wires `N` processes stdout→stdin, the same shape as a
-shell pipeline (`a | b | c`). Each stage is a `{ exec = [...] }` table
-with its own argv and optional per-stage `timeout`:
+See:
 
-```toml
-[[watch]]
-name = "find-and-format"
-path = "/srv/repo/src"
+- [docs/configuration.md](docs/configuration.md) — TOML reference,
+  actions, pipes, conditionals, scope, events.
+- [docs/placeholders.md](docs/placeholders.md) — placeholder catalog,
+  environment substitution, child-process env vars.
 
-[[watch.actions]]
-pipe = [
-  { exec = ["find", "${specter.path}", "-name", "*.rs"] },
-  { exec = ["xargs", "rustfmt", "--check"], timeout = "30s" },
-]
-```
-
-Semantics:
-
-- Stages spawn in parallel; the kernel's SIGPIPE chain wires their
-  I/O together.
-- **Pipefail-on:** any stage's non-zero exit fails the whole pipe.
-  Aggregated outcome: `exit_code` is the *last* non-zero exit in
-  spawn order (matches `set -o pipefail`); `signal` is the *first*
-  signal observed (a per-stage timeout's SIGTERM dominates a later
-  natural exit).
-- A failing stage triggers SIGTERM cascade to every alive sibling,
-  so a hung downstream stage can't keep the pipe alive after an
-  upstream failure.
-- Pipes require **at least two stages** — `pipe = [{...}]` is
-  rejected as `single-stage-pipe`; use top-level `exec` directly.
-- Top-level `timeout` on a pipe action is rejected — set the
-  deadline per-stage on the nested `exec`.
-
-### Conditionals
-
-A `when` / `then` / `else` action runs a predicate first and branches
-on its outcome. The predicate's outcome does **not** propagate to the
-plan's terminus — `when` is a branch, not a guard:
-
-```toml
-[[watch]]
-name = "test-then-deploy"
-path = "/srv/repo"
-
-[[watch.actions]]
-when = { exec = ["cargo", "test", "--quiet"], timeout = "5m" }
-then = [{ exec = ["./scripts/deploy.sh"] }]
-else = [{ exec = ["notify-send", "tests failed"] }]
-```
-
-- Predicate `Ok` ⇒ run the `then` body in order with stop-on-failure.
-- Predicate `Failed` (non-zero exit, signal, spawn failure, or
-  predicate timeout) ⇒ run the `else` body (if present); otherwise
-  skip past the conditional entirely.
-- `else` is optional. Without it, predicate `Failed` is a no-op and
-  the plan continues with the next action (or terminates `Ok` if
-  this was the last action).
-- The predicate carries its own `timeout` inside `when`; the action
-  itself does not accept a top-level `timeout`.
-- `then` and `else` are full recursive `[[watch.actions]]` arrays —
-  nested conditionals and pipes are both legal.
-
-### Placeholders
-
-`exec` argv slots reference Specter's substitution catalog through two
-namespaces: `${specter.<name>}` for runtime-derived values and
-`${env.<NAME>}` for operator environment variables. Anything else
-`$`-shaped — bare `$NAME`, `${VAR}`, `$5`, or an unrecognised namespace
-like `${capture.foo}` — passes through to the spawned process verbatim,
-so shell, awk, perl, or make idioms inside an `sh -c` slot keep
-working.
-
-Single-value placeholders render one string into the surrounding argv
-slot:
-
-| Placeholder           | Meaning                                                                |
-|-----------------------|------------------------------------------------------------------------|
-| `${specter.path}`     | Absolute path of the target (`per-stable-file`) or anchor (`subtree-root`) |
-| `${specter.relative}` | Path relative to the watch anchor (empty for `subtree-root`)           |
-| `${specter.anchor}`   | Absolute path of the watch's anchor                                    |
-| `${specter.parent}`   | Parent directory of `${specter.path}` (empty only for a subtree-root anchored at `/`) |
-| `${specter.watch}`    | Watch name (the `[[watch]] name` field)                                |
-| `${specter.time}`     | Wall-clock instant sampled immediately before spawn, RFC 3339 UTC, second-precision (`2026-05-10T12:34:56Z`) |
-
-Multi-value placeholders produce **one argv slot per value**, with any
-surrounding literal prefix tiled into each slot; an empty list drops the
-entire surrounding slot:
-
-| Placeholder                | Source                                       |
-|----------------------------|----------------------------------------------|
-| `${specter.created}`       | New entries (anchor-relative segments)       |
-| `${specter.deleted}`       | Deleted entries                              |
-| `${specter.modified}`      | Entries with changed content                 |
-| `${specter.renamed_from}`  | Source side of each rename                   |
-| `${specter.renamed_to}`    | Target side of each rename                   |
-| `${specter.excluded}`      | The watch's `exclude` patterns               |
-
-Example — `rsync` with one `--exclude=` per pattern:
-
-```toml
-actions = [{ exec = ["rsync", "-av", "--exclude=${specter.excluded}", "${specter.anchor}/", "/backup/"] }]
-# argv = ["rsync", "-av", "--exclude=*.tmp", "--exclude=cache/", "/srv/repo/", "/backup/"]
-```
-
-A literal **after** a multi-value placeholder (e.g. `"--flag=${specter.excluded}-end"`)
-is not appended to each emitted value — when at least one value emits, the trailing
-literal becomes its own standalone argv slot. Place per-value suffixes inside the
-prefix or use a wrapper script.
-
-**Environment variables.** `${env.<NAME>}` substitutes the operator's
-own environment (sampled once at startup, not per spawn). The reference
-is **strict**: a missing variable with no default fails the plan with
-a clear log line — Specter never silently renders the empty string for
-a misconfigured TOML. Opt into lenient explicitly with a `:-` default:
-
-| Form                          | Behaviour                                                 |
-|-------------------------------|-----------------------------------------------------------|
-| `${env.HOME}`                 | strict: unset ⇒ plan fails                                |
-| `${env.HOME:-/tmp}`           | unset ⇒ render `/tmp`                                     |
-| `${env.HOME:-}`               | unset ⇒ render empty string (explicit lenient opt-in)     |
-
-Names must match `[A-Za-z_][A-Za-z0-9_]*`; defaults are frozen literals
-(no nested placeholders). The captured snapshot is immutable for the
-actuator's lifetime — `SIGHUP` does **not** re-read the environment.
-Use `${env.<NAME>}` only when the operator-side env genuinely doesn't
-change at runtime.
-
-Two escape rules round out the grammar:
-
-- `$$` — a literal `$`. Use `$$$$` to pass `$$` through to a shell that
-  wants to expand its PID.
-- `${specter.<unknown>}` and `${env.<INVALID>}` — typo guards fire
-  (fail-loud) only inside the explicit namespaces. `${specter.PATH}`,
-  `${specter.}`, `${env.1FOO}` (digit-first), and unterminated
-  `${specter.path` likewise error during config validation.
-
-Anything that doesn't match `${specter.<name>}` or `${env.<NAME>}`
-exactly — `$path`, `${specter}` (no dot), `${SPECTER.path}` (uppercase
-prefix), `${HOME}` (no namespace) — is literal pass-through. The shell,
-if any, sees those bytes unchanged.
-
-### Environment variables
-
-The spawned child receives a `SPECTER_*` set in addition to the
-inherited parent environment:
-
-| Variable                | Value                                                                |
-|-------------------------|----------------------------------------------------------------------|
-| `SPECTER_PATH`          | mirrors `${specter.path}`                                            |
-| `SPECTER_RELATIVE_PATH` | mirrors `${specter.relative}`                                        |
-| `SPECTER_ANCHOR`        | mirrors `${specter.anchor}`                                          |
-| `SPECTER_PARENT`        | mirrors `${specter.parent}`                                          |
-| `SPECTER_WATCH`         | mirrors `${specter.watch}`                                           |
-| `SPECTER_TIME`          | mirrors `${specter.time}` (same instant — the resolver samples once per spawn) |
-| `SPECTER_EXCLUDED`      | mirrors `${specter.excluded}` (newline-separated, no trailing newline) |
-| `SPECTER_CREATED`       | mirrors `${specter.created}` (newline-separated, empty when no diff) |
-| `SPECTER_DELETED`       | mirrors `${specter.deleted}` (newline-separated, empty when no diff) |
-| `SPECTER_MODIFIED`      | mirrors `${specter.modified}` (newline-separated, empty when no diff) |
-| `SPECTER_RENAMED_FROM`  | mirrors `${specter.renamed_from}` (newline-separated, empty when no diff) |
-| `SPECTER_RENAMED_TO`    | mirrors `${specter.renamed_to}` (newline-separated, empty when no diff) |
-| `SPECTER_EVENT_KIND`    | `dir-subtree` or `file`                                              |
-| `SPECTER_FORCED`        | `0` or `1` — `1` when the burst crossed `max_settle` before settling |
-| `SPECTER_CORRELATION`   | per-Effect monotonic decimal id                                      |
-| `SPECTER_DIFF_PATH`     | absolute path of a tab-separated diff file (set only when the watch's actions reference diff-derived placeholders or `scope = "per-stable-file"`; the same file is shared across every step of a multi-step plan and is removed once the plan exits) |
-
-### CLI flags
+## Commands
 
 ```
-specter run --config <file>          # required
-            --log-level <lvl>        # override [log] level
-            --log-destination <dst>  # override [log] destination
-            --log-path <path>        # override [log] path
-            --concurrency <n>        # global Effect spawn cap (default 2 × CPUs)
-            --probe-concurrency <n>  # walker pool size (default 4)
+specter run --config <file>         # the daemon (typically run by the supervisor)
+specter status                      # daemon snapshot
+specter list                        # every watch + state
+specter show <name>                 # one watch in detail
+specter disable <name>              # runtime override (survives reload)
+specter enable <name>               # clear the runtime override
+specter reload                      # equivalent to SIGHUP
+specter tail [--filter <tag> …]     # stream diagnostics
+specter wait <name> [--timeout …]   # block until the watch fires (or detaches)
 ```
 
-CLI > config > defaults at every layer. SIGHUP triggers a reload of
-the config file; CLI overrides survive.
+`specter --help` prints the full surface; `--socket <path>` overrides
+the default UNIX socket on every client verb.
 
-The other `specter` subcommands (`status`, `list`, `show`, `disable`,
-`enable`, `reload`, `tail`, `wait`) are operator clients that connect
-to the running daemon over a UNIX socket. `specter --help` lists the
-full surface; the implementations land in upcoming phases.
+See [docs/control.md](docs/control.md) for the IPC reference — socket
+path defaults, wire format, error codes, subscribe semantics, exit
+codes.
 
 ## Subprocess output
 
-By default, child stdout/stderr go to `/dev/null` — Specter doesn't
-parse, format, or annotate user command output. Set `log_output =
-true` per watch and the actuator inherits Specter's own stdio fds, so
-the supervisor's log facility captures the bytes.
-
-For more elaborate routing (notifications, conditional teeing), use a
-shell wrapper:
-
-```toml
-actions = [{ exec = ["sh", "-c", "build.sh 2>&1 | tee /tmp/last && curl -d @/tmp/last ntfy.sh/topic"] }]
-```
+Child stdout/stderr go to `/dev/null` by default — Specter doesn't
+parse, format, or annotate user command output. Set `log_output = true`
+per watch and the actuator inherits Specter's own stdio fds, so the
+supervisor's log facility captures the bytes. For richer routing
+(notifications, conditional teeing), wrap the action with `sh -c`.
 
 ## Layout
 
@@ -330,8 +102,9 @@ crates/
   specter-sensor    # kqueue/inotify watcher + worker prober pool
   specter-actuator  # subprocess pool, coalescing, env vars
   specter-config    # TOML + CLI parse / validate / diff
-  specter-bin       # wiring, signals, hot reload, drain order
+  specter-bin       # wiring, signals, hot reload, IPC surface
 etc/                # systemd / launchd / FreeBSD rc.d templates
+docs/               # operator-facing reference
 Makefile            # build + install conventions
 ```
 

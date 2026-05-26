@@ -2,7 +2,7 @@
 #
 # Top-level sections:
 #   [log]     engine telemetry (subprocess output is per-watch — see
-#             log_output below)
+#             `log_output` below)
 #   [[watch]] one entry per filesystem subscription
 
 [log]
@@ -11,24 +11,30 @@ destination = "stderr"   # stderr | file  (when "file", path is required)
 # path      = "/var/log/specter.log"
 
 # Replace this example with one [[watch]] block per subscription. The
-# `name`, `path`, and `command` fields are required; everything else is
+# `name`, `path`, and `actions` fields are required; everything else is
 # optional and shown below with its default.
 [[watch]]
 name    = "example"
-path    = "/srv/data"            # absolute; lenient — pending paths are OK
-command = ["echo", "$path"]      # argv; placeholders:
-                                 # $path $relative $anchor
-                                 # $created $deleted $modified
-                                 # $renamed_from $renamed_to
+path    = "/srv/data"                         # absolute; lenient — pending paths are OK
+actions = [{ exec = ["echo", "${specter.path}"] }]
 
-# enabled    = true                        # false ⇒ inert at runtime; toggle without deleting
-# scope      = "subtree-root"              # | "per-stable-file"
-# recursive  = true
-# hidden     = false
-# settle     = "200ms"                     # quiet window before stable verdict
-# max_settle = "1h"                        # forced-fire deadline (default 1h)
+# enabled    = true                           # false ⇒ inert at runtime; toggle without deleting
+# settle     = "200ms"                        # quiet window before stable verdict
+# max_settle = "1h"                           # forced-fire deadline
+# scope      = "subtree-root"                 # | "per-stable-file"
+# events     = ["structure", "content"]       # default depends on scope
 # pattern    = "**/*.{c,h,rs}"
 # exclude    = ["target/**", "node_modules/**"]
-# max_depth  = 5                           # ≥ 1; omit for unbounded
-# events     = ["structure", "content"]    # default depends on scope
-# log_output = false                       # forward child stdio to specter
+# hidden     = false
+# recursive  = true
+# max_depth  = 8                              # ≥ 1; omit for unbounded
+# log_output = false                          # forward child stdio to specter
+
+# Placeholders inside an exec argv slot:
+#   ${specter.path}     ${specter.relative}   ${specter.anchor}
+#   ${specter.parent}   ${specter.watch}      ${specter.time}
+#   ${specter.created}  ${specter.deleted}    ${specter.modified}
+#   ${specter.renamed_from}  ${specter.renamed_to}  ${specter.excluded}
+#   ${env.NAME}         ${env.NAME:-default}  ${env.NAME:-}
+#
+# See docs/placeholders.md for the full grammar and rendering rules.

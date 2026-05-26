@@ -12,6 +12,7 @@
     <key>ProgramArguments</key>
     <array>
         <string>@SPECTER_BIN@</string>
+        <string>run</string>
         <string>--config</string>
         <string>@SPECTER_CONF@</string>
     </array>
