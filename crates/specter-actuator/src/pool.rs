@@ -266,7 +266,21 @@ impl SubprocessActuator {
                         // completion to EffectCompleteOutsideAwaiting.
                         self.state.handle_cancel(profile);
                     }
-                    Err(_) => break, // bin closed channel
+                    Err(crossbeam::channel::RecvError) => {
+                        // Bin closed `effects_tx` — the driver's
+                        // `ActuatorIO` dropped. Distinct trigger from
+                        // the `shutdown_rx` / `hard_shutdown_rx` arms
+                        // below: those are operator-signal-driven and
+                        // arrive AHEAD of the channel close; this arm
+                        // fires when the driver's shutdown path either
+                        // bypassed the soft-pulse (panic mid-`run`) or
+                        // already drained the pulse before disconnect.
+                        // Logged at info so operators reading the tail
+                        // can disambiguate the shutdown trigger from
+                        // the channel-close vs signal-pulse paths.
+                        tracing::info!("effects_rx disconnected; entering shutdown");
+                        break;
+                    }
                 },
                 recv(self.reap_rx) -> msg => match msg {
                     Ok(completion) => self.state.handle_reap(completion, engine_in, spawner, &self.reap_tx),
@@ -659,6 +673,21 @@ mod tests {
             self.effects_tx.send(EffectOp::Submit(e)).expect("submit");
         }
 
+        /// Drop the controller's `effects_rx` peer by overwriting
+        /// `self.effects_tx` with an orphan sender (one whose receiver
+        /// was immediately dropped). The original tx — the actuator
+        /// thread's only producer — drops here, so the controller's
+        /// `effects_rx` observes `Disconnected` on the next select.
+        ///
+        /// The orphan tx is retained on `self` so an accidental
+        /// subsequent `submit()` fails loudly with `SendError` instead
+        /// of silently succeeding against a dead actuator.
+        fn close_effects_tx_for_test(&mut self) {
+            let (orphan_tx, orphan_rx) = bounded::<EffectOp>(1);
+            drop(orphan_rx);
+            let _orig = std::mem::replace(&mut self.effects_tx, orphan_tx);
+        }
+
         fn shutdown(&mut self) {
             let _ = self.shutdown_tx.send(());
             if let Some(j) = self.join.take() {
@@ -884,6 +913,27 @@ mod tests {
             h.spawner.signals().is_empty(),
             "no signals when nothing is running"
         );
+    }
+
+    // ---------- effects_rx disconnect (engine-thread-exit path) ----------
+
+    #[test]
+    fn effects_rx_disconnect_exits_controller_cleanly() {
+        // The actuator's `effects_rx` observing Disconnected (driver-side
+        // `effects_tx` dropped) routes through the new explicit `Err`
+        // arm. Distinct from the `shutdown_rx` and `hard_shutdown_rx`
+        // arms exercised by the existing shutdown tests. The trigger
+        // is the engine-thread-exit path: production reaches this state
+        // when the driver's `ActuatorIO` drops without a prior soft
+        // pulse (panic mid-`run`, or a future shutdown shape that
+        // bypasses the pulse).
+        let mut h = Harness::new(nz(4));
+        h.close_effects_tx_for_test();
+
+        // Controller exits via the effects_rx Disconnected arm; the
+        // shutdown phase observes no running children and returns fast.
+        let join = h.join.take().expect("controller thread handle");
+        join.join().expect("clean exit on effects_rx disconnect");
     }
 
     #[test]

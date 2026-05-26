@@ -298,11 +298,10 @@ impl<W: FsWatcher> EngineDriver<W> {
         //    bytes this tick (via forward()'s fan-out or the IPC
         //    handler's response enqueue). One re-register pass at
         //    end-of-tick amortizes a per-conn syscall across the
-        //    whole tick.
-        if let Err(e) = self.ipc.arm_writable_interests() {
-            tracing::error!(?e, "interest rearm failed; shutting down");
-            return self.begin_shutdown();
-        }
+        //    whole tick. Per-conn rearm failures terminate the
+        //    failing conn in place ([`Hub::arm_writable_interests`]
+        //    defer-terminates); the daemon stays alive.
+        self.ipc.arm_writable_interests();
 
         TickOutcome::Continue
     }

@@ -234,15 +234,43 @@ impl Hub {
         })
     }
 
-    /// Accept every pending connection up to [`MAX_IPC_CONNS`].
+    /// Accept every pending connection in this tick, bounded above by
+    /// `MAX_IPC_CONNS * 2` iterations (see [`MAX_IPC_CONNS`]).
     ///
-    /// Edge-triggered: loops until `accept()` returns `WouldBlock`.
-    /// New conns are inserted into `self.conns` with a fresh per-conn
-    /// Token registered for `READABLE` against the cloned Registry.
+    /// Edge-triggered: loops `accept(2)` non-blockingly. The natural
+    /// termination is `WouldBlock` (accept queue empty); the per-tick
+    /// cap is the DoS guard for the alternative case where a hostile
+    /// peer keeps the queue continuously non-empty.
     ///
-    /// # Cap behavior
+    /// # Per-tick cap
     ///
-    /// On reaching [`MAX_IPC_CONNS`], extra accepts receive a one-shot
+    /// The bound is `MAX_IPC_CONNS * 2`: enough headroom for
+    /// [`MAX_IPC_CONNS`] legitimate accepts (filling the conn map)
+    /// plus the same again of cap-busy refusals stacked behind them in
+    /// the listen queue. A peer pushing accepts faster than we drain
+    /// would otherwise starve every other Source on the reactor; this
+    /// bound forces a yield to the rest of the tick's drain pass after
+    /// at most `2 * MAX_IPC_CONNS` accepts.
+    ///
+    /// # Cap-hit re-arm (mio EPOLLET / EV_CLEAR contract)
+    ///
+    /// Returning from the loop short of `WouldBlock` leaves the kernel-
+    /// side accept queue non-empty. Under edge-triggered mio (EPOLLET
+    /// on Linux, EV_CLEAR on kqueue — see `mio` 1.2.0
+    /// `sys/unix/selector/{epoll,kqueue}.rs`), no future
+    /// `TOKEN_LISTENER` edge fires until the queue transitions
+    /// empty→non-empty; subsequent SYNs into a non-empty queue do NOT
+    /// re-fire. To preserve forward progress, the cap-hit path
+    /// re-registers the listener: Linux `EPOLL_CTL_MOD` calls
+    /// `ep_modify` which re-checks current readiness and queues a
+    /// wake-up if ready; kqueue's `EV_ADD | EV_CLEAR` re-arms with
+    /// identical semantics. The next `poll` re-fires `TOKEN_LISTENER`
+    /// and the next tick drains another batch.
+    ///
+    /// # Per-conn cap (`MAX_IPC_CONNS`)
+    ///
+    /// Independent of the per-tick bound: on reaching
+    /// [`MAX_IPC_CONNS`] live conns, extra accepts receive a one-shot
     /// non-blocking best-effort write of a structured
     /// [`WireErrorCode::Busy`] JSON line; then the stream drops. The
     /// stream from [`mio::net::UnixListener::accept`] is already
@@ -262,12 +290,14 @@ impl Hub {
     /// # Errors
     ///
     /// Propagates [`io::Error`] from `register` (mio programmer-error;
-    /// always startup-fatal on a fresh fd). `accept()` errors other
-    /// than `WouldBlock` propagate too — under normal operation
-    /// these are `ECONNABORTED` (client closed between SYN and
-    /// accept), which is rare enough to be terminal here.
+    /// always startup-fatal on a fresh fd) and from the cap-hit
+    /// `reregister` (same class — a failure here means the listener
+    /// fd is gone, which is structurally unrecoverable). `accept()`
+    /// errors other than `WouldBlock` propagate too — under normal
+    /// operation these are `ECONNABORTED` (client closed between SYN
+    /// and accept), which is rare enough to be terminal here.
     pub(in crate::driver) fn drain_accept(&mut self) -> io::Result<()> {
-        loop {
+        for _ in 0..MAX_IPC_CONNS.saturating_mul(2) {
             match self.listener.accept() {
                 Ok((mut stream, _addr)) => {
                     if self.conns.len() >= MAX_IPC_CONNS {
@@ -294,12 +324,22 @@ impl Hub {
                         .register(&mut conn.stream, token, Interest::READABLE)?;
                     self.conns.insert(token, conn);
                 }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
                 Err(e) => return Err(e),
             }
         }
-        Ok(())
+        // Hit the per-tick bound without reaching `WouldBlock`. Under
+        // edge-triggered mio the listener won't re-fire until the
+        // accept queue transitions empty→non-empty; force a fresh
+        // readiness evaluation via `reregister` so the next poll
+        // re-fires `TOKEN_LISTENER` and the next tick drains another
+        // batch. See method rustdoc for the kernel-level rationale.
+        self.registry.reregister(
+            &mut self.listener,
+            super::super::reactor::TOKEN_LISTENER,
+            Interest::READABLE,
+        )
     }
 
     /// Mint a fresh per-conn [`Token`]. Monotone from
@@ -799,23 +839,46 @@ impl Hub {
     /// `drain_writable` when the queue empties via a successful
     /// write).
     ///
-    /// # Errors
+    /// # Per-conn failure isolation
     ///
-    /// Propagates [`io::Error`] from `Registry::reregister` — a
-    /// programmer-error class failure (the conn's fd is gone,
-    /// implying we missed a `terminate_conn` somewhere). The tick
-    /// treats the error as terminal.
-    pub(in crate::driver) fn arm_writable_interests(&mut self) -> io::Result<()> {
+    /// A failed `reregister` on a single conn (the conn's fd is gone
+    /// or an out-of-band deregister beat us to it) terminates that
+    /// conn and continues the walk; the daemon stays alive. The
+    /// per-tick failure footprint is therefore at most one conn per
+    /// failing reregister, never the whole reactor.
+    ///
+    /// Failures are deferred to a post-loop drain so the inner walk
+    /// can mutate per-conn fields (`reregister` borrows `&mut
+    /// conn.stream`) without conflicting with the
+    /// [`Self::terminate_conn`] removal it would otherwise need to
+    /// fire inline. Same shape as [`Self::drain_writable`]'s
+    /// `DrainWritableOutcome::Terminate` arm — single-conn failure
+    /// ⇒ single-conn termination, not daemon shutdown.
+    pub(in crate::driver) fn arm_writable_interests(&mut self) {
+        // Collect the tokens that failed; `Vec::new()` doesn't
+        // allocate until the first `push`, so the steady-state cost
+        // is zero for the happy path.
+        let mut to_terminate: Vec<Token> = Vec::new();
         for conn in self.conns.values_mut() {
-            if !conn.write_queue.is_empty() {
-                self.registry.reregister(
-                    &mut conn.stream,
-                    conn.token,
-                    Interest::READABLE | Interest::WRITABLE,
-                )?;
+            if conn.write_queue.is_empty() {
+                continue;
+            }
+            if let Err(e) = self.registry.reregister(
+                &mut conn.stream,
+                conn.token,
+                Interest::READABLE | Interest::WRITABLE,
+            ) {
+                tracing::debug!(
+                    token = ?conn.token,
+                    ?e,
+                    "ipc writable-interest rearm failed; terminating conn",
+                );
+                to_terminate.push(conn.token);
             }
         }
-        Ok(())
+        for token in to_terminate {
+            self.terminate_conn(token);
+        }
     }
 
     /// Test-only read of the conn-map size. Used to assert
@@ -826,6 +889,32 @@ impl Hub {
     #[cfg(test)]
     pub(in crate::driver) fn conn_count(&self) -> usize {
         self.conns.len()
+    }
+
+    /// Test-only: deregister `token`'s stream out-of-band so the next
+    /// [`Self::arm_writable_interests`] call observes a stale
+    /// kernel-side registration and routes that conn through the
+    /// defer-terminate path. The conn entry stays in the map until
+    /// `arm_writable_interests` runs `terminate_conn` against it.
+    ///
+    /// Used by [`super::super::tests::arm_writable_interests_per_conn_failure_terminates_only_failing_conn`]
+    /// to exercise the per-conn failure-isolation contract on Linux,
+    /// where `EPOLL_CTL_MOD` returns `ENOENT` for an unregistered fd.
+    /// macOS's kqueue `EV_ADD | EV_CLEAR` is add-or-modify and would
+    /// succeed on the same surface, so the behavioral test is
+    /// Linux-gated; the cross-platform contract is enforced by the
+    /// signature change ([`Self::arm_writable_interests`] returns
+    /// `()`, not `io::Result`, so per-conn failures cannot propagate
+    /// to daemon shutdown structurally).
+    #[cfg(all(test, target_os = "linux"))]
+    pub(in crate::driver) fn force_deregister_conn_for_test(&mut self, token: Token) {
+        let conn = self
+            .conns
+            .get_mut(&token)
+            .expect("force_deregister_conn_for_test: token must be in map");
+        self.registry
+            .deregister(&mut conn.stream)
+            .expect("test: deregister against live Poll");
     }
 }
 

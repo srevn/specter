@@ -15,7 +15,7 @@
 
 use super::WakeHandle;
 use super::ipc::conns::{ACCEPT_CAP, ConnRole, MissedWindow};
-use super::ipc::hub::{EnqueueOutcome, TOKEN_CONN_BASE};
+use super::ipc::hub::{EnqueueOutcome, MAX_IPC_CONNS, TOKEN_CONN_BASE};
 use super::state::ReloadTrigger;
 use super::{EngineDriver, Hub, Reactor, TickOutcome};
 use crate::actuator::ActuatorIO;
@@ -522,6 +522,143 @@ fn effect_complete_disconnect_with_wake_surfaces_tick_outcome_shutdown() {
     );
     // No `begin_shutdown` call: `TickOutcome::Shutdown` already ran
     // the cancel-first probe drain inside the tick body.
+}
+
+// ============================================================
+// Bounded accept loop — F-MED-1 (cap-hit re-arm under EPOLLET)
+// ============================================================
+
+#[test]
+fn drain_accept_bound_and_rearm_drains_burst_across_ticks() {
+    // 24 clients = 3x MAX_IPC_CONNS — exceeds the per-tick bound (16
+    // iterations) so the cap-hit re-arm path runs. First tick hits
+    // the bound after 16 accepts (8 inserts + 8 Busy refusals against
+    // the now-full conn map); reregister re-fires TOKEN_LISTENER for
+    // the next tick, which drains the remaining 8 (all Busy).
+    const N_CLIENTS: usize = 24;
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let clients: Vec<_> = (0..N_CLIENTS).map(|_| ipc_connect(&rig)).collect();
+
+    // Drive a bounded number of ticks; the cap-hit re-arm guarantees
+    // forward progress within O(N_CLIENTS / MAX_IPC_CONNS) ticks.
+    // Generous deadline because mio's poll latency varies in CI.
+    let mut spins = 0;
+    while spins < 16 {
+        arm_zero_timeout(&mut rig);
+        let _ = rig.driver.tick();
+        spins += 1;
+    }
+
+    // Conn map is bounded by MAX_IPC_CONNS — extra accepts went
+    // through the Busy-then-drop path.
+    assert!(
+        rig.driver.ipc.conn_count() <= MAX_IPC_CONNS,
+        "conn count {} exceeds cap {}",
+        rig.driver.ipc.conn_count(),
+        MAX_IPC_CONNS,
+    );
+    // At least one accept landed — the burst wasn't entirely refused.
+    assert!(rig.driver.ipc.conn_count() > 0, "no accepts landed");
+
+    // Drop all clients; surviving conns terminate via EOF detection.
+    drop(clients);
+    for _ in 0..16 {
+        arm_zero_timeout(&mut rig);
+        let _ = rig.driver.tick();
+        if rig.driver.ipc.conn_count() == 0 {
+            break;
+        }
+    }
+    assert_eq!(
+        rig.driver.ipc.conn_count(),
+        0,
+        "all conns drained after client disconnect",
+    );
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+// ============================================================
+// arm_writable_interests per-conn failure isolation — F-MED-2
+// ============================================================
+
+#[test]
+fn arm_writable_interests_signature_returns_unit_not_io_result() {
+    // Structural contract: the type system enforces that per-conn
+    // rearm failures CANNOT propagate as daemon shutdown. A regression
+    // that restored `-> io::Result<()>` would fail to type-check at
+    // the assignment below.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let _: () = rig.driver.ipc.arm_writable_interests();
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn arm_writable_interests_per_conn_failure_terminates_only_failing_conn() {
+    // Linux-only: relies on `EPOLL_CTL_MOD` returning ENOENT for an
+    // unregistered fd. macOS's kqueue `EV_ADD | EV_CLEAR` is add-or-
+    // modify (silently succeeds), so the failure path is unreachable
+    // there via deregister-then-rearm. The cross-platform contract
+    // is enforced by the signature change pinned by
+    // `arm_writable_interests_signature_returns_unit_not_io_result`.
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let _client_a = ipc_connect(&rig);
+    let _client_b = ipc_connect(&rig);
+    arm_zero_timeout(&mut rig);
+    let _ = rig.driver.tick();
+    assert_eq!(rig.driver.ipc.conn_count(), 2, "both clients accepted");
+
+    let token_a = mio::Token(TOKEN_CONN_BASE);
+    let token_b = mio::Token(TOKEN_CONN_BASE + 1);
+
+    // Push bytes so both conns are eligible for the rearm pass.
+    rig.driver
+        .ipc
+        .conn_mut(token_a)
+        .expect("A in map")
+        .write_queue
+        .push_back(b'x');
+    rig.driver
+        .ipc
+        .conn_mut(token_b)
+        .expect("B in map")
+        .write_queue
+        .push_back(b'x');
+
+    // Force a registry inconsistency on conn A: deregister its stream
+    // out-of-band, leaving the conn entry in the map. The next
+    // `reregister` syscall returns ENOENT, exercising the defer-
+    // terminate path.
+    rig.driver.ipc.force_deregister_conn_for_test(token_a);
+
+    rig.driver.ipc.arm_writable_interests();
+
+    assert!(
+        rig.driver.ipc.conn_ref(token_a).is_none(),
+        "conn A terminated on rearm failure",
+    );
+    assert!(
+        rig.driver.ipc.conn_ref(token_b).is_some(),
+        "conn B unaffected by A's failure",
+    );
+    assert_eq!(rig.driver.ipc.conn_count(), 1, "only conn A removed");
+
+    let _ = rig.driver.begin_shutdown();
 }
 
 /// `Subscribe` stays accessible after the driver observes shutdown
