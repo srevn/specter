@@ -86,7 +86,15 @@ struct TestRig {
     prober_response_tx: Sender<Input>,
     /// Producer-side handle for the effect completion channel. Same
     /// send-then-wake protocol as `prober_response_tx`.
-    effect_complete_tx: Sender<Input>,
+    ///
+    /// Wrapped in [`Option`] so [`TestRig::drop_effect_complete_tx`]
+    /// can take the sender out — simulating the production
+    /// `WakingSink::Drop` close-then-wake edge that closes the channel
+    /// when the actuator thread exits. Production code reaches via
+    /// [`TestRig::effect_complete_tx`]; the take helper drops the
+    /// only sender so the reactor's `effect_complete_rx` observes
+    /// Disconnected on the next `try_recv`.
+    effect_complete_tx: Option<Sender<Input>>,
     /// Shared [`WakeHandle`] clone — the Reactor holds one clone, the
     /// rig holds another. Tests fire `waker.wake()` after writing to
     /// `prober_response_tx` / `effect_complete_tx` to mirror the
@@ -154,10 +162,38 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
         actuator_side,
         prober,
         prober_response_tx,
-        effect_complete_tx,
+        effect_complete_tx: Some(effect_complete_tx),
         waker,
         socket_path,
         _tmp: tmp,
+    }
+}
+
+impl TestRig {
+    /// Borrow the effect-complete sender for test injection. Panics
+    /// if the sender has already been taken via
+    /// [`Self::drop_effect_complete_tx`].
+    fn effect_complete_tx(&self) -> &Sender<Input> {
+        self.effect_complete_tx
+            .as_ref()
+            .expect("effect_complete_tx already taken")
+    }
+
+    /// Simulate the actuator-thread closure exiting: drop the rig's
+    /// `effect_complete_tx` clone, the same edge the production
+    /// [`super::WakingSink::Drop`] lands. The Reactor's
+    /// `effect_complete_rx` observes
+    /// [`crossbeam::channel::TryRecvError::Disconnected`] on the next
+    /// `try_recv`, surfacing as
+    /// [`super::reactor::DrainedTick::actuator_gone`] `== true`.
+    ///
+    /// Call [`super::WakeHandle::wake`] (via `rig.waker.wake()`)
+    /// after this to mirror the Drop-fired wake edge that production's
+    /// `WakingSink::Drop` pulses post-close. Panics if already taken.
+    fn drop_effect_complete_tx(&mut self) {
+        self.effect_complete_tx
+            .take()
+            .expect("effect_complete_tx already taken");
     }
 }
 
@@ -277,12 +313,19 @@ fn ipc_round_trip(
 // Empty-tick + shutdown semantics
 // ============================================================
 
-/// A SIGTERM dispatched directly via [`EngineDriver::dispatch_signal`]
-/// returns [`ControlFlow::Break`]. The pure dispatch path is also
-/// pinned by `dispatch_signal_inner_tests` in `driver.rs`; this test
-/// covers the method-level wrapper from the rig's surface.
+/// First SIGTERM dispatched directly via [`EngineDriver::dispatch_signal`]
+/// returns [`ControlFlow::Continue`] (NOT `Break`) and arms
+/// [`EngineDriver::first_term`]. The driver no longer exits the loop
+/// on the first termination signal — the actuator's grace pipeline
+/// runs to completion, and the loop only closes via the
+/// actuator-gone signal ([`super::reactor::DrainedTick::actuator_gone`]),
+/// surfaced when the actuator-thread's `WakingSink::Drop` closes the
+/// effect-completion channel and `try_recv` observes Disconnected.
+/// The pure dispatch-classification path is also pinned by
+/// `dispatch_signal_inner_tests` in `driver.rs`; this test covers the
+/// method-level wrapper from the rig's surface.
 #[test]
-fn dispatch_signal_sigterm_returns_break() {
+fn dispatch_signal_first_sigterm_continues_loop_and_arms_first_term() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
@@ -291,10 +334,224 @@ fn dispatch_signal_sigterm_returns_break() {
     let outcome = rig
         .driver
         .dispatch_signal(signal_hook::consts::SIGTERM, Instant::now());
-    assert_eq!(outcome, ControlFlow::Break(()));
+    assert_eq!(outcome, ControlFlow::Continue(()));
+    assert!(
+        rig.driver.first_term.is_some(),
+        "first SIGTERM arms first_term (the IPC-mutating-verb gate)",
+    );
     // Probe drain has no work (no Sub attached). begin_shutdown is
     // safe to call regardless — pins that the cancel-first drain is
-    // idempotent when no probes are armed.
+    // idempotent when no probes are armed and silences the linear
+    // ProbeSlot Drop tripwire on rig teardown.
+    let _ = rig.driver.begin_shutdown();
+}
+
+// ============================================================
+// Shutdown lifecycle — driver-owns-grace
+// ============================================================
+
+/// First SIGINT no longer exits the loop. After [`EngineDriver::dispatch_signal`]
+/// arms `first_term` and pulses `shutdown_actuator_tx`, a subsequent
+/// [`EngineDriver::tick`] returns [`TickOutcome::Continue`] (NOT
+/// `Shutdown`) — the driver stays alive through the actuator's grace
+/// pipeline. The shutdown only closes the loop via the actuator-gone
+/// signal ([`super::reactor::DrainedTick::actuator_gone`]), exercised
+/// by [`effect_complete_disconnect_with_wake_surfaces_tick_outcome_shutdown`].
+#[test]
+fn first_sigint_does_not_close_tick_loop() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let outcome = rig
+        .driver
+        .dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
+    assert_eq!(outcome, ControlFlow::Continue(()));
+    assert!(
+        rig.driver.first_term.is_some(),
+        "first SIGINT arms first_term",
+    );
+
+    arm_zero_timeout(&mut rig);
+    let tick_outcome = rig.driver.tick();
+    assert_eq!(
+        tick_outcome,
+        TickOutcome::Continue,
+        "post-SIGINT tick continues — the actuator-gone signal has not landed",
+    );
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// After the driver observes a SIGINT, mutating IPC verbs (`Reload`,
+/// `Disable`, `Enable`) refuse with [`WireErrorCode::ShuttingDown`].
+/// Read-only verbs and `Subscribe` continue working — verifies the
+/// gate is precisely scoped to mutating verbs.
+///
+/// The gate lives at the top of `handle_ipc_line` on
+/// `first_term.is_some()`; the test arms first_term via
+/// `dispatch_signal` then issues a `Reload` request and asserts the
+/// structured `ShuttingDown` reply.
+#[test]
+fn ipc_reload_refused_mid_shutdown_with_shutting_down_code() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let _ = rig
+        .driver
+        .dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
+    assert!(rig.driver.first_term.is_some());
+
+    let mut client = ipc_connect(&rig);
+    let reply = ipc_round_trip(&mut rig, &mut client, &WireRequest::Reload);
+    match reply {
+        ResponsePayload::Err { code, error } => {
+            assert_eq!(code, WireErrorCode::ShuttingDown);
+            assert!(
+                error.contains("shutting down"),
+                "error carries the shutdown detail; got {error:?}",
+            );
+        }
+        other => panic!("expected Err(WireErrorCode::ShuttingDown), got {other:?}"),
+    }
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// `Disable` and `Enable` mid-shutdown both refuse with
+/// [`WireErrorCode::ShuttingDown`]. Pinned together with `Reload`
+/// because the gate matches on the same `WireRequest` variant tuple;
+/// a regression splitting that tuple would surface here.
+///
+/// Setup attaches a real `build` watch so `Disable` has a concrete
+/// target (the gate runs before any name resolution, but pinning
+/// against an attached Sub keeps the test honest against future
+/// refactors that might invert the order).
+#[test]
+fn ipc_disable_and_enable_refused_mid_shutdown_with_shutting_down_code() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_watch(tmp.path());
+    let mut rig = rig_for(config, cfg_path);
+    let _ = rig.driver.run_initial_attach();
+    assert!(rig.driver.engine.subs().find_by_name("build").is_some());
+
+    let _ = rig
+        .driver
+        .dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
+    assert!(rig.driver.first_term.is_some());
+
+    let mut client = ipc_connect(&rig);
+    let disable_reply = ipc_round_trip(
+        &mut rig,
+        &mut client,
+        &WireRequest::Disable {
+            name: CompactString::const_new("build"),
+        },
+    );
+    match disable_reply {
+        ResponsePayload::Err { code, error } => {
+            assert_eq!(code, WireErrorCode::ShuttingDown);
+            assert!(
+                error.contains("shutting down"),
+                "Disable refusal carries the shutdown detail; got {error:?}",
+            );
+        }
+        other => panic!("expected Err(WireErrorCode::ShuttingDown) for Disable, got {other:?}"),
+    }
+    // The Sub stayed attached — the gate refused the verb before the
+    // engine surface mutated.
+    assert!(
+        rig.driver.engine.subs().find_by_name("build").is_some(),
+        "Disable refused without touching engine state",
+    );
+    assert!(
+        rig.driver.disabled_runtime.is_empty(),
+        "Disable refused without recording an override",
+    );
+
+    let enable_reply = ipc_round_trip(
+        &mut rig,
+        &mut client,
+        &WireRequest::Enable {
+            name: CompactString::const_new("build"),
+        },
+    );
+    match enable_reply {
+        ResponsePayload::Err { code, error } => {
+            assert_eq!(code, WireErrorCode::ShuttingDown);
+            assert!(
+                error.contains("shutting down"),
+                "Enable refusal carries the shutdown detail; got {error:?}",
+            );
+        }
+        other => panic!("expected Err(WireErrorCode::ShuttingDown) for Enable, got {other:?}"),
+    }
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// The actuator-gone signal: dropping the effect-completion channel's
+/// last sender (the production `WakingSink::Drop` close edge) and
+/// firing the wake (the production Drop-fired wake edge) surfaces as
+/// [`super::reactor::DrainedTick::actuator_gone`] `== true` on the
+/// next tick, which routes through [`EngineDriver::begin_shutdown`]
+/// and returns [`TickOutcome::Shutdown`]. This is the load-bearing
+/// close edge that makes [`EngineDriver::run`] exit when the actuator
+/// thread terminates — the structural foundation of the
+/// driver-owns-shutdown-lifecycle refactor.
+#[test]
+fn effect_complete_disconnect_with_wake_surfaces_tick_outcome_shutdown() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    rig.drop_effect_complete_tx();
+    rig.waker.wake().expect("fire wake edge");
+
+    arm_zero_timeout(&mut rig);
+    let outcome = rig.driver.tick();
+    assert_eq!(
+        outcome,
+        TickOutcome::Shutdown,
+        "actuator-gone via channel-disconnect resolves to Shutdown",
+    );
+    // No `begin_shutdown` call: `TickOutcome::Shutdown` already ran
+    // the cancel-first probe drain inside the tick body.
+}
+
+/// `Subscribe` stays accessible after the driver observes shutdown
+/// — its mutation is bin-local (flipping `conn.role`) and does not
+/// touch engine state. Operators can `specter tail` a wind-down to
+/// observe the actuator's grace + reap-drain diagnostics.
+#[test]
+fn ipc_subscribe_allowed_mid_shutdown() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_watch(tmp.path());
+    let mut rig = rig_for(config, cfg_path);
+    let _ = rig.driver.run_initial_attach();
+
+    let _ = rig
+        .driver
+        .dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
+    assert!(rig.driver.first_term.is_some());
+
+    let mut client = ipc_connect(&rig);
+    let reply = ipc_round_trip(
+        &mut rig,
+        &mut client,
+        &WireRequest::Subscribe { name: None },
+    );
+    match reply {
+        ResponsePayload::SubscribeAck { sub: None } => {}
+        other => panic!("expected SubscribeAck(None) mid-shutdown, got {other:?}"),
+    }
+
     let _ = rig.driver.begin_shutdown();
 }
 
@@ -2973,7 +3230,7 @@ fn effect_complete_send_then_wake_drains_through_token_waker() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
 
-    rig.effect_complete_tx
+    rig.effect_complete_tx()
         .send(Input::EffectComplete(specter_core::EffectCompletion {
             sub: SubId::default(),
             key: specter_core::DedupKey::Subtree {
@@ -3025,7 +3282,7 @@ fn fs_event_and_effect_complete_both_drain_in_one_tick() {
         .watcher_mut()
         .inject(r, specter_core::FsEvent::Modified);
     // Queue an EffectComplete via the wake'd channel.
-    rig.effect_complete_tx
+    rig.effect_complete_tx()
         .send(Input::EffectComplete(specter_core::EffectCompletion {
             sub: SubId::default(),
             key: specter_core::DedupKey::Subtree {

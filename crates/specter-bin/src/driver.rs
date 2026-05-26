@@ -114,6 +114,29 @@ pub enum TickOutcome {
 /// signal pipe, waker) outlive every channel-sender clone the
 /// driver holds — a stray send-to-disconnected from a midway drop
 /// can't fire on a partially-torn-down reactor.
+///
+/// **Shutdown is co-owned with the actuator.** [`Self::run`] exits
+/// only when (a) `effect_complete_rx` observes
+/// [`crossbeam::channel::TryRecvError::Disconnected`] (the actuator
+/// thread exited — clean or crashed — and its
+/// `Box<dyn EffectCompleteSender>` adapter dropped the inner
+/// [`wake::WakingSink`], which closes its `Sender<Input>` clone via
+/// the [`wake::WakingSink::drop`] close-then-wake protocol), or (b)
+/// the operator escalates a second SIGINT/SIGTERM within
+/// [`crate::signals::HARD_EXIT_WINDOW`] and
+/// [`dispatch_signal_inner`] reaches the `HardExit` arm. The first
+/// SIGINT/SIGTERM pulses `shutdown_actuator_tx` and arms
+/// `first_term` (the IPC-mutating-verb gate); the driver keeps
+/// ticking — mutating IPC verbs refuse with
+/// [`crate::ipc::protocol::WireErrorCode::ShuttingDown`]; effect
+/// completions and probe responses arriving during the actuator's
+/// SIGTERM → grace → SIGKILL → reap-drain pipeline continue to flow
+/// through [`forward::EngineDriver::forward`]. [`crate::signals::SignalPipe`]
+/// lives inside [`reactor::Reactor`] lives inside this driver — all
+/// three stay alive until the actuator-gone signal lands — so the
+/// second-tap hard-exit handshake stays installed across the entire
+/// actuator-grace window, closing the orphan defect the prior
+/// "first signal exits loop" shape opened.
 pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     engine: Engine,
     loader: Loader,
@@ -170,6 +193,18 @@ pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     /// within [`crate::signals::HARD_EXIT_WINDOW`] escalates to
     /// the hard-exit path. Outside the window, the field re-arms
     /// with the new timestamp.
+    ///
+    /// **Dual role: shutdown-in-flight gate.** `first_term.is_some()`
+    /// is the IPC-mutating-verb gate read by
+    /// [`Self::handle_ipc_line`] — `Reload` / `Disable` / `Enable`
+    /// requests arriving after the first termination signal refuse
+    /// with [`crate::ipc::protocol::WireErrorCode::ShuttingDown`].
+    /// Read-only verbs and `Subscribe` (bin-local mutation) stay
+    /// accessible so operators can `specter tail` the wind-down. One
+    /// source of truth — adding a parallel `shutdown_in_flight: bool`
+    /// would shadow this field's semantics; the time-window math and
+    /// the gate share the same `Some(_)` discriminant by
+    /// construction.
     first_term: Option<Instant>,
     /// Replay queue for engine [`Input`]s the driver wants the next
     /// tick to process *before* the mio Poll re-blocks.
@@ -383,10 +418,14 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// the test process survives the assertion.
     ///
     /// Returns [`ControlFlow::Continue`] for SIGHUP (the reload either
-    /// applies or fails — both are non-terminal); [`ControlFlow::Break`]
-    /// for the first SIGINT/SIGTERM (shutdown initiated) and the
-    /// second-within-window (hard-exit escalation, only reachable
-    /// from tests since production's `exit_fn` does not return).
+    /// applies or fails — both are non-terminal) AND for the first
+    /// SIGINT/SIGTERM (shutdown initiated; the driver stays alive
+    /// through the actuator's grace and exits via
+    /// [`super::reactor::DrainedTick::actuator_gone`] when the
+    /// actuator-thread closure drops its sender). Returns
+    /// [`ControlFlow::Break`] only for the second-within-window
+    /// (hard-exit escalation) — only reachable from tests because
+    /// production's `exit_fn` does not return.
     ///
     /// Called from [`tick`]'s signal-drain pass: the Reactor's
     /// `TOKEN_SIGNAL` arm hands every queued signum to this method in
@@ -407,12 +446,30 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// The pure signal-classification work runs in
     /// [`dispatch_signal_inner`] against `&mut self.first_term` and
     /// `&self.actuator_io`; this method then resolves the action's
-    /// outer effect (the SIGHUP arm calls
-    /// [`Self::dispatch_reload`]; the SIGINT/SIGTERM arms return
-    /// `Break`). Splitting the work this way lets the inner function
-    /// take field references that don't conflict with the `&mut self`
-    /// the reload arm needs — the borrow checker is satisfied
-    /// because the two borrows are disjoint in time.
+    /// outer effect (the SIGHUP arm calls [`Self::dispatch_reload`];
+    /// the first SIGINT/SIGTERM arm continues — the driver stays
+    /// alive through the actuator's grace and exits via the
+    /// actuator-gone signal on `effect_complete_rx`; the
+    /// second-within-window arm escalates to `exit_fn` and returns
+    /// `Break` for test sanity). Splitting the work this way lets
+    /// the inner function take field references that don't conflict
+    /// with the `&mut self` the reload arm needs — the borrow checker
+    /// is satisfied because the two borrows are disjoint in time.
+    ///
+    /// **`SignalAction::Shutdown` returns `Continue`.** The first
+    /// termination signal pulses `shutdown_actuator_tx` and arms
+    /// `first_term` (the IPC-mutating-verb gate; see
+    /// [`crate::ipc::protocol::WireErrorCode::ShuttingDown`]) but
+    /// does NOT exit the loop. The driver keeps ticking through the
+    /// actuator's SIGTERM → grace → SIGKILL → reap-drain phases; the
+    /// actuator's eventual exit drops its `WakingSink`'s
+    /// `Sender<Input>` clone, which surfaces on the driver's next
+    /// `try_recv` as Disconnected → `DrainedTick.actuator_gone =
+    /// true` → tick body routes through [`Self::begin_shutdown`].
+    /// `SignalPipe` lives inside the Reactor (inside this driver),
+    /// so the second-tap hard-exit handshake stays installed across
+    /// the entire actuator-grace window — closing the orphan window
+    /// the prior "first signal exits loop" shape opened.
     pub(crate) fn dispatch_signal_with_exit_fn<F: FnOnce(i32)>(
         &mut self,
         sig: i32,
@@ -422,7 +479,7 @@ impl<W: FsWatcher> EngineDriver<W> {
         let action =
             dispatch_signal_inner(sig, now, &mut self.first_term, &self.actuator_io, exit_fn);
         match action {
-            SignalAction::None => ControlFlow::Continue(()),
+            SignalAction::None | SignalAction::Shutdown => ControlFlow::Continue(()),
             SignalAction::Reload => {
                 // SIGHUP routes through the same shared apply path
                 // every other reload source uses. `dispatch_reload`'s
@@ -433,7 +490,7 @@ impl<W: FsWatcher> EngineDriver<W> {
                 // outer tick can resolve to `Shutdown`.
                 self.dispatch_reload(state::ReloadTrigger::Sighup, now)
             }
-            SignalAction::Shutdown | SignalAction::HardExit => ControlFlow::Break(()),
+            SignalAction::HardExit => ControlFlow::Break(()),
         }
     }
 
@@ -495,7 +552,10 @@ enum SignalAction {
     /// [`crate::signals::HARD_EXIT_WINDOW`] expired). The inner
     /// function has already armed `first_term`, logged the
     /// observation, and pulsed `shutdown_actuator_tx`. The dispatch
-    /// caller returns [`ControlFlow::Break`].
+    /// caller returns [`ControlFlow::Continue`] — the driver stays
+    /// alive through the actuator's grace and exits via the
+    /// actuator-gone signal on `effect_complete_rx` (see
+    /// [`super::reactor::DrainedTick::actuator_gone`]).
     Shutdown,
     /// Second SIGINT/SIGTERM within
     /// [`crate::signals::HARD_EXIT_WINDOW`]. The inner function
@@ -504,7 +564,7 @@ enum SignalAction {
     /// does not return; this variant is only reachable from tests
     /// passing a recording closure. The dispatch caller returns
     /// [`ControlFlow::Break`] so the test's outer loop can observe
-    /// the shutdown intent.
+    /// the hard-exit intent and resolve to [`TickOutcome::Shutdown`].
     HardExit,
 }
 

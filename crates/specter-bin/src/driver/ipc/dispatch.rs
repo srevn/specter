@@ -188,6 +188,21 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// LF would mean an upstream framing breach. A loud panic at
     /// this seam beats a misleading "json parse" surfacing one frame
     /// later.
+    ///
+    /// # Mutating-verb shutdown gate
+    ///
+    /// `Reload`, `Disable`, and `Enable` are gated on
+    /// `EngineDriver::first_term.is_none()` — once the driver has
+    /// observed a SIGINT / SIGTERM, mutating verbs refuse with
+    /// [`WireErrorCode::ShuttingDown`]. The actuator is in the middle
+    /// of its grace pipeline; admitting a fresh `engine.step` from
+    /// `Reload` (which can attach new Subs that arm probes) or
+    /// `Disable` / `Enable` (which mutate engine state) would
+    /// invalidate the shutdown's premise that the engine is winding
+    /// down. Read-only verbs (`Status`, `List`, `Show`) and
+    /// `Subscribe` (bin-local mutation only — flips `conn.role`
+    /// without touching engine state) stay accessible so operators
+    /// can `tail` the wind-down.
     fn handle_ipc_line(&mut self, token: Token, line: &[u8], now: Instant) -> ControlFlow<()> {
         let trimmed = line
             .strip_suffix(b"\n")
@@ -205,6 +220,26 @@ impl<W: FsWatcher> EngineDriver<W> {
                 return ControlFlow::Continue(());
             }
         };
+        // Mutating-verb shutdown gate — see the rustdoc above.
+        // Lives at this seam (not on each handler) so the four arms
+        // below stay focused on their happy path; the refusal carries
+        // the structured `ShuttingDown` code so operator scripts can
+        // branch deterministically.
+        if self.first_term.is_some()
+            && matches!(
+                request,
+                WireRequest::Reload | WireRequest::Disable { .. } | WireRequest::Enable { .. }
+            )
+        {
+            self.respond(
+                token,
+                &ResponsePayload::Err {
+                    code: WireErrorCode::ShuttingDown,
+                    error: "daemon shutting down; mutating verbs refused".into(),
+                },
+            );
+            return ControlFlow::Continue(());
+        }
         match request {
             WireRequest::Status => {
                 let resp = project::status(

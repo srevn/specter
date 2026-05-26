@@ -6,11 +6,12 @@
 //! multi-source mio poll, then drains the partitioned
 //! [`super::reactor::DrainedTick`] in canonical order: deferred-replay
 //! → listener accept → sensor inputs → expired timers → signals →
-//! config-event + settle expiry → effect completions → operator-IPC
-//! verbs → WRITABLE drain / interest rearm. The settle-expiry filter
-//! and `dispatch_reload` itself live in [`super::reload`]; downstream
-//! dispatch in [`super::forward`]; IPC dispatch in [`super::ipc`];
-//! per-conn state machinery on [`super::Hub`].
+//! config-event + settle expiry → effect completions → actuator-gone
+//! gate → operator-IPC verbs → WRITABLE drain / interest rearm. The
+//! settle-expiry filter and `dispatch_reload` itself live in
+//! [`super::reload`]; downstream dispatch in [`super::forward`]; IPC
+//! dispatch in [`super::ipc`]; per-conn state machinery on
+//! [`super::Hub`].
 //!
 //! # IPC drain placement
 //!
@@ -77,10 +78,28 @@
 //! this thread — there is no upstream sender that can disconnect.
 //! The two wake'd channels (`prober_response_rx`, `effect_complete_rx`)
 //! and the outbound `effects_tx` are the only producer-driven seams.
-//! A `try_recv` / `try_send` error of `Disconnected` on any of those
-//! means the actuator or prober workers have died — the carrier
-//! propagates `ControlFlow::Break` upward and the tick routes through
-//! [`super::EngineDriver::begin_shutdown`].
+//!
+//! - **`effect_complete_rx` Disconnected** is the load-bearing
+//!   actuator-gone signal. The actuator thread's
+//!   `Box<dyn EffectCompleteSender>` adapter holds a [`super::WakingSink`]
+//!   whose [`Drop`] closes the `Sender<Input>` clone BEFORE pulsing
+//!   the wake edge (the close-then-wake symmetry of the send-then-wake
+//!   protocol). The Reactor's drain surfaces the Disconnected as
+//!   [`super::reactor::DrainedTick::actuator_gone`]; the tick body
+//!   routes through [`super::EngineDriver::begin_shutdown`]. This is
+//!   how a clean actuator exit (its `run` returned) AND a crash
+//!   (panic unwound the closure) converge on one shutdown path.
+//! - **`prober_response_rx` Disconnected** is benign — the prober
+//!   pool's workers disconnect only at pool shutdown, which happens
+//!   during App teardown *after* the driver is gone. The drain
+//!   absorbs the variant silently.
+//! - **`effects_tx` `try_send(Disconnected)`** in
+//!   [`super::EngineDriver::forward`] is the producer-side mirror:
+//!   the actuator's `effects_rx` is gone, so the driver can't ship
+//!   work. Propagates `ControlFlow::Break` upward and the tick
+//!   routes through [`super::EngineDriver::begin_shutdown`] — the
+//!   redundant-but-idempotent path that converges with the
+//!   actuator_gone arm above.
 
 use super::ipc::hub;
 use super::{EngineDriver, TickOutcome};
@@ -231,6 +250,27 @@ impl<W: FsWatcher> EngineDriver<W> {
             if self.forward(out).is_break() {
                 return self.begin_shutdown();
             }
+        }
+
+        // 5b. Actuator-gone signal. The drain above set
+        //     `drained.actuator_gone` iff `effect_complete_rx`
+        //     observed Disconnected (the actuator thread's
+        //     `Box<dyn EffectCompleteSender>` dropped, closing its
+        //     `Sender<Input>` clone via `WakingSink::Drop`). The check
+        //     sits AFTER the completion drain so any in-flight
+        //     completions queued ahead of the disconnect still flow
+        //     through `engine.step` — losing those would orphan
+        //     post-fire transitions on the way out. `begin_shutdown`
+        //     is idempotent over an empty in-flight probe set; the
+        //     same path covers both the clean exit (actuator finished
+        //     shutdown phases naturally) and the crash exit (actuator
+        //     panic). The hard-exit handshake stays installed up to
+        //     and through this point because the SignalPipe lives on
+        //     the Reactor lives on this driver — the second-SIGINT
+        //     escalation reaches `dispatch_signal_inner`'s HardExit
+        //     arm naturally.
+        if drained.actuator_gone {
+            return self.begin_shutdown();
         }
 
         // 6. Operator-IPC verb dispatch — read every ready conn,

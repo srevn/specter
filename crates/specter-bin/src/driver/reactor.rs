@@ -186,6 +186,24 @@ pub(super) struct DrainedTick {
     /// making the accept step explicit in `tick.rs` rather than
     /// implicit inside the dispatch loop here.
     pub(super) listener_ready: bool,
+    /// `true` iff [`Self::drain_effect_completions`] observed
+    /// [`crossbeam::channel::TryRecvError::Disconnected`] this tick.
+    ///
+    /// The actuator thread's `Box<dyn EffectCompleteSender>` adapter
+    /// wraps a [`super::WakingSink`]; when the actuator's `run` closure
+    /// exits (clean or panic), the Box drops, the inner [`super::WakingSink`]
+    /// drops, and its [`Drop`] closes the `Sender<Input>` BEFORE pulsing
+    /// the wake edge. The driver's next `try_recv` on the paired
+    /// `effect_complete_rx` returns Disconnected, surfacing here as
+    /// `true`. The tick body then routes through
+    /// [`super::EngineDriver::begin_shutdown`] — the actuator-gone
+    /// signal that closes the [`super::EngineDriver::run`] loop end-to-end.
+    ///
+    /// `false` in steady state and after a no-op drain (Empty arm). The
+    /// drain visits queued completions FIRST (Ok arm) and only sets
+    /// this flag when the Disconnected variant lands, so a healthy
+    /// pulse-with-completions tick never trips the flag.
+    pub(super) actuator_gone: bool,
     /// Per-conn tokens whose readiness this tick included WRITABLE.
     /// The tick's drain pass walks these calling
     /// [`super::Hub::drain_writable`] on each.
@@ -487,11 +505,39 @@ impl<W: FsWatcher> Reactor<W> {
         }
     }
 
-    /// Drain the effect completion channel. Same semantics as
-    /// [`Self::drain_prober_responses`].
+    /// Drain the effect completion channel.
+    ///
+    /// Mirror-shape of [`Self::drain_prober_responses`] on the Ok /
+    /// Empty arms — both loop `try_recv` until the channel reports no
+    /// more queued items. Diverges on the **Disconnected** arm: a
+    /// disconnect on this channel is the actuator-gone signal (see
+    /// [`DrainedTick::actuator_gone`] for the load-bearing rationale),
+    /// so the drain sets the flag and breaks.
+    ///
+    /// Queued completions drain BEFORE the flag is set — the loop
+    /// continues until `try_recv` reports either `Empty` (steady-state
+    /// pause) or `Disconnected` (actuator's
+    /// `Box<dyn EffectCompleteSender>` adapter has dropped). A
+    /// post-disconnect tick that observes any leftover Ok arms first
+    /// is the correct behavior: the actuator's late completions are
+    /// still valid engine input, and the tick body routes the
+    /// shutdown decision through [`super::EngineDriver::begin_shutdown`]
+    /// after the standard drain pass anyway.
+    ///
+    /// Takes `&self` because [`crossbeam::channel::Receiver::try_recv`]
+    /// only needs a shared borrow — the receiver's internal state is
+    /// thread-safe. The `&mut DrainedTick` is the only mutable surface.
     fn drain_effect_completions(&self, out: &mut DrainedTick) {
-        while let Ok(input) = self.effect_complete_rx.try_recv() {
-            out.effect_completions.push(input);
+        use crossbeam::channel::TryRecvError;
+        loop {
+            match self.effect_complete_rx.try_recv() {
+                Ok(input) => out.effect_completions.push(input),
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    out.actuator_gone = true;
+                    break;
+                }
+            }
         }
     }
 
@@ -582,8 +628,83 @@ mod tests {
         assert!(drained.signals.is_empty());
         assert!(!drained.config_event_pulse);
         assert!(!drained.listener_ready);
+        assert!(!drained.actuator_gone);
         assert!(drained.ready_reads.is_empty());
         assert!(drained.ready_writes.is_empty());
+    }
+
+    /// Dropping the effect-completion channel's last sender clone
+    /// surfaces as `DrainedTick.actuator_gone == true` on the next
+    /// `poll_and_drain`. Models the production actuator-thread closure
+    /// exit: the thread's `Box<dyn EffectCompleteSender>` drops, the
+    /// inner `WakingSink::Drop` closes its `Sender<Input>` clone, and
+    /// the driver-side `try_recv` returns `Disconnected`.
+    #[test]
+    fn drain_effect_completions_sets_actuator_gone_on_disconnect() {
+        let watcher = MockFsWatcher::new();
+        let signals = register_signal_handlers().expect("signal pipe init");
+        let (_prober_tx, prober_rx) = unbounded::<Input>();
+        let (effect_tx, effect_rx) = unbounded::<Input>();
+
+        let (mut reactor, waker, _registry_for_ipc) =
+            Reactor::new(watcher, None, signals, prober_rx, effect_rx).expect("reactor init");
+
+        // Drop the only effect-completion sender. The Reactor-side
+        // receiver has no other senders connected — the next try_recv
+        // returns Disconnected.
+        drop(effect_tx);
+        waker.wake().expect("wake");
+
+        let drained = reactor
+            .poll_and_drain(Some(Duration::from_millis(500)))
+            .expect("poll succeeds after wake");
+        assert!(
+            drained.actuator_gone,
+            "Disconnected on effect_complete_rx surfaces as actuator_gone",
+        );
+        assert!(
+            drained.effect_completions.is_empty(),
+            "no in-flight completions queued before the disconnect",
+        );
+    }
+
+    /// Queued completions drain via the Ok arm BEFORE the
+    /// Disconnected arm sets `actuator_gone`. A clean-but-terminal
+    /// shape: the actuator emits a final completion then exits,
+    /// surfacing both the message AND the disconnect on the same
+    /// drain pass.
+    #[test]
+    fn drain_effect_completions_drains_queued_before_signalling_disconnect() {
+        let watcher = MockFsWatcher::new();
+        let signals = register_signal_handlers().expect("signal pipe init");
+        let (_prober_tx, prober_rx) = unbounded::<Input>();
+        let (effect_tx, effect_rx) = unbounded::<Input>();
+
+        let (mut reactor, waker, _registry_for_ipc) =
+            Reactor::new(watcher, None, signals, prober_rx, effect_rx).expect("reactor init");
+
+        effect_tx
+            .send(Input::TimerExpired {
+                profile: specter_core::ProfileId::default(),
+                kind: specter_core::TimerKind::Settle,
+                id: specter_core::TimerId::default(),
+            })
+            .expect("queue completion");
+        drop(effect_tx);
+        waker.wake().expect("wake");
+
+        let drained = reactor
+            .poll_and_drain(Some(Duration::from_millis(500)))
+            .expect("poll succeeds after wake");
+        assert_eq!(
+            drained.effect_completions.len(),
+            1,
+            "queued completion drained before Disconnected lands",
+        );
+        assert!(
+            drained.actuator_gone,
+            "post-drain try_recv observes Disconnected on the same tick",
+        );
     }
 
     /// `waker.wake()` on an external clone causes the next

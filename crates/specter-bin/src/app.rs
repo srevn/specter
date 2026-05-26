@@ -429,6 +429,20 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //     their own in-flight probes through `begin_shutdown` on
     //     `Break`, so the engine is probe-free and the driver is
     //     safe to drop below.
+    //
+    //     `driver.run()` returns only when (a) the actuator's
+    //     `WakingSink` dropped (closing its `Sender<Input>` clone)
+    //     and the driver's next tick observed
+    //     `DrainedTick.actuator_gone == true`, OR (b) a
+    //     second-within-window SIGINT/SIGTERM escalated through
+    //     `dispatch_signal_inner`'s HardExit arm (production's
+    //     `exit_fn` is `std::process::exit`, which does not return
+    //     — the join below is unreachable in that arm). The first
+    //     SIGINT no longer breaks the loop; the driver keeps ticking
+    //     through the actuator's SIGTERM → grace → SIGKILL →
+    //     reap-drain pipeline so `SignalPipe` stays installed for
+    //     the entire window (closing the orphan defect the old
+    //     "first signal exits loop" shape opened).
     if initial_attach_break || drift_break {
         tracing::info!("shutdown observed during boot; engine drained");
     } else {
@@ -436,28 +450,27 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         tracing::info!(?exit_reason, "engine driver exited");
     }
 
-    // 16. Shutdown sequence — drop the driver first so the reactor
-    //     fds close (listener, watcher, config-watcher, signal pipe,
-    //     waker) before we touch anything else. The driver's field
-    //     order ensures the Hub's Drop runs (deregistering
-    //     listener + conns) before the Reactor's Drop (deregistering
-    //     static sources). The waker drop decrements the Arc
-    //     refcount; the prober + actuator wrappers still hold their
-    //     clones, but they're inert once the Poll is gone (mio's
-    //     `wake()` returns Err on a destroyed Poll, which the
-    //     wrappers ignore).
+    // 17. Shutdown sequence. By the time we get here the actuator
+    //     thread has already exited (its `WakingSink::Drop` was the
+    //     load-bearing edge that unblocked `driver.run()` via
+    //     `DrainedTick.actuator_gone`). The drop chain below is
+    //     pure cleanup — no further cross-thread coordination.
     //
-    //     `drop(driver)` also releases the `Arc<dyn Prober>` clone
-    //     the driver held, leaving only this scope's `prober`
-    //     `Arc`. The `try_unwrap` below succeeds, the workers see
-    //     `Disconnected` on their internal queues, and `shutdown`
-    //     joins them.
+    //     `drop(driver)` runs the driver's field-order drop:
+    //     `actuator_io` (its `effects_tx` clone) → `ipc` (Hub's
+    //     Drop deregisters listener + conns from the still-live
+    //     Poll selector) → `reactor` (deregisters watcher /
+    //     config-watcher / signal pipe; closes the Poll). The
+    //     waker drop decrements the `Arc<Waker>` refcount; the
+    //     prober's wrapper still holds its clone, but it's inert
+    //     once Poll is gone (mio's `wake()` returns Err on a
+    //     destroyed Poll, which the wrapper ignores).
     //
-    //     `effects_tx` lived on `actuator_io`, which moved into the
-    //     driver. Dropping the driver drops that clone — the
-    //     actuator's `effects_rx` sees `Disconnected` and its
-    //     controller exits its `select!` loop, running `shutdown()`
-    //     on the way out.
+    //     `effects_tx` dropping after the actuator already exited
+    //     is moot — there's no receiver to disconnect. The Arc
+    //     refcount on the `Arc<dyn Prober>` clone the driver held
+    //     is released, leaving only this scope's `prober` Arc; the
+    //     `try_unwrap` below succeeds.
     drop(driver);
 
     // Unlink the bound socket path. Safe to do now: the listener fd
@@ -468,12 +481,15 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     // cleans up.
     unlink_guard.unlink_now();
 
-    // Actuator: the closure runs `act.run(...)` to clean exit (or
-    // panic). On panic the closure unwinds — `SubprocessActuator::drop`
-    // fires the SIGTERM+SIGKILL fanout safety net, the `Box<dyn
-    // EffectCompleteSender>` and `RunWiring` locals drop, and the
-    // thread exits with the panic payload. `join()` returns
-    // `Err(payload)` here; extract the string message so the operator
+    // Actuator: `join()` is immediate here on every non-panic path.
+    // The actuator-gone signal that closed `driver.run()` IS the
+    // thread's exit — the closure has already returned by the time
+    // we reach this join. On a panic that unwound the closure, the
+    // unwind also drops the `Box<dyn EffectCompleteSender>` (which
+    // fires the same `WakingSink::Drop`), so the closed-channel
+    // edge surfaces identically and `driver.run()` exits the same
+    // way. Either way, `join()` returns immediately — clean exits
+    // return `Ok(())`; panics return `Err(payload)` so the operator
     // log carries the actual panic text rather than a Debug-formatted
     // `Box<dyn Any>` shell.
     if let Err(payload) = actuator_handle.join() {

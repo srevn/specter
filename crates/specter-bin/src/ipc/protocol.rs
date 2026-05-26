@@ -204,6 +204,24 @@ pub(crate) enum WireErrorCode {
     /// handler-side gate that reaches this variant lives on
     /// [`crate::driver::EngineDriver`]'s Subscribe arm.
     AlreadySubscribed,
+    /// Daemon is winding down — mutating verbs (`Reload`, `Disable`,
+    /// `Enable`) refused. The gate fires iff
+    /// `EngineDriver::first_term.is_some()` — the operator pulsed
+    /// SIGINT / SIGTERM and the actuator is in the middle of its
+    /// SIGTERM → grace → SIGKILL → reap-drain pipeline. Read-only
+    /// verbs (`Status`, `List`, `Show`, `Subscribe`) continue
+    /// working so operators can observe in-flight shutdown via
+    /// `specter tail`; the engine still emits diagnostics during
+    /// shutdown (late effect completions, post-fire rebase ceilings,
+    /// etc.).
+    ///
+    /// Operator-script branch: a `code == "shutting_down"` Err
+    /// surfaces "daemon is going away; don't retry against this PID";
+    /// the operator can re-issue the verb against the next boot.
+    /// Subscribe stays accessible because its mutation is
+    /// bin-local — flipping `conn.role` doesn't touch engine state
+    /// and is safe to enact during shutdown.
+    ShuttingDown,
 }
 
 impl WireErrorCode {
@@ -229,6 +247,7 @@ impl WireErrorCode {
             Self::ResponseTooBig => "response_too_big",
             Self::Malformed => "malformed",
             Self::AlreadySubscribed => "already_subscribed",
+            Self::ShuttingDown => "shutting_down",
         }
     }
 }
@@ -743,6 +762,7 @@ mod tests {
             WireErrorCode::ResponseTooBig,
             WireErrorCode::Malformed,
             WireErrorCode::AlreadySubscribed,
+            WireErrorCode::ShuttingDown,
         ];
         for &code in ALL {
             let json = serde_json::to_string(&code).expect("serialize");
