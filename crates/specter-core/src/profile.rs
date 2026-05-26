@@ -34,27 +34,27 @@ use std::time::{Duration, Instant};
 ///
 /// **Pre-fire** (`Batching | Verifying | Draining`): event-driven
 /// debounce window, in-flight verify or self-stable / descendants-pending
-/// idle. Carries the event-provenance accumulator (`dirty`), the
-/// settle-deadline source of truth (`last_event_time`), and the
-/// quiescence proof (`certified`).
+/// idle. Carries the event-provenance accumulator (`dirty`) and the
+/// settle-deadline source of truth (`last_event_time`). Quiescence is
+/// folded by [`quiescence_verdict`] at the dispatch — the engine's two
+/// observation channels (walker authority C1, event-quiet witness C2,
+/// the `forced` bit) determine the verdict at the floor, so the burst
+/// carries no per-sample fold state.
 ///
-/// **Post-fire** (`Awaiting | Rebasing | RebaseSettling`): the actuator
+/// **Post-fire** (`Awaiting | Rebasing | Settling`): the actuator
 /// gate, then the *structural mirror* of the pre-fire loop —
-/// `RebaseSettling ⇄ Rebasing` is `Batching ⇄ Verifying`, folding
-/// [`PostFireBurst`]'s own [`CertifiedPrior`] N=2 proof, bounded by
+/// `Settling ⇄ Rebasing` is `Batching ⇄ Verifying`, bounded by
 /// its own `rebase_ceiling` (pre-fire's `burst_deadline` analogue),
-/// over the *post-command* tree. The pre-fire fields that encode a
+/// over the *post-command* tree. The same fold floor
+/// ([`quiescence_verdict`]) computes the post-fire verdict from the
+/// rebase response's `(authority, post.forced)` pair — no prior
+/// sample carries across the fire. The pre-fire fields that encode a
 /// fire decision do not cross the boundary — the typed
 /// [`PreFireBurst::into_post_fire`] move drops them, and the
 /// `BurstDeadline` timer becomes structurally irrelevant
 /// ([`PostFireBurst::timer_token`] folds it to `None` for post-fire
 /// phases, so the engine's stale-drain lazily collects the heap
-/// entry). The pre-fire `certified` does **not** carry across: the
-/// post-fire burst opens its own fresh proof, because the tree the
-/// rebase loop must prove quiescent is the one the command just
-/// mutated — and the rebase probe walks `WholeSubtree` (the
-/// post-command tree has no trustworthy prior to skip against, exactly
-/// as Seed). Its one fresh accumulator is the post-fire
+/// entry). Its one fresh accumulator is the post-fire
 /// `dirty`, which `absorb_event_into_fire_tail` feeds; it is
 /// no longer a proof-obligation source (the `WholeSubtree` walk
 /// observes everything regardless), only the fire-tail residual restart
@@ -203,20 +203,20 @@ fn common_prefix<'a>(a: &'a Path, b: &Path) -> &'a Path {
 ///   `transition_to_verifying` for a Standard burst, and live-but-inert
 ///   for a Seed (anchor target + `WholeSubtree`); `last_event_time` is
 ///   the settle deadline's source of truth for both.
-/// - **Quiescence proof** (`certified`): the [`CertifiedPrior`] floor —
-///   the prior certified sample of the N=2 stability sequence, never an
-///   event-accumulator.
 ///
 /// `dirty` is preserved across the burst's pre-fire lifetime because
 /// the obligation + scope are re-projected from it at every reconfirm
 /// (`Draining → Verifying`) — the *projection* mutates, the captured
 /// -path *basis* doesn't.
 ///
-/// `certified` is preserved verbatim across every pre-fire phase swap
-/// (`event_drives_batching`, `transition_to_draining`,
-/// `unstable_response_drives_batching`) so the two samples may straddle
-/// re-batches; its advance/withhold contract lives on
-/// [`CertifiedPrior`].
+/// Quiescence is folded at the dispatch by
+/// [`quiescence_verdict`] over `(authority, forced)` — a pure
+/// projection of `ProofAuthority` (C1, the walker certificate) and
+/// `forced` (C2, the event-quiet witness). The burst carries no
+/// per-sample state for the
+/// fold: the engine's two observation channels determine the verdict at
+/// the floor, and the N=2-era prior-sample carrier the verdict used to
+/// fold against is gone.
 ///
 /// `probe_target` is the resource id of the latest emitted probe.
 /// Initialised to the Profile's anchor at burst start; overwritten by
@@ -299,38 +299,37 @@ pub struct PreFireBurst {
     /// settle` and stays in Batching; otherwise it transitions to
     /// Verifying.
     ///
-    /// **Lifecycle.**
+    /// **Three construction states.** `Option<Instant>` is genuinely
+    /// 2D — `None` is a first-class burst-start shape on the cold
+    /// path, not a defensive fallback only `on_settle_expired` reads:
+    ///
     /// - `Some(now)` from `start_standard_burst` — the burst-start
     ///   `FsEvent` is the first event and seeds the field.
-    /// - `Some(now)` from `start_seed_burst` — both burst constructors
-    ///   are Batching-first, so the Seed burst seeds this with its
-    ///   start instant exactly as Standard does. There is no first
-    ///   `FsEvent` for a Seed, but the burst-start instant is the
-    ///   principled seed: the settle timer was scheduled at `now +
-    ///   settle`, so on its expiry `expiry_now − last_event_time ≥
-    ///   settle` holds by construction and the burst transitions to
-    ///   `Verifying` cleanly; a fresh `FsEvent` during the Seed
-    ///   `Batching` debounces via `event_drives_batching` identically
-    ///   to a Standard burst.
-    /// - Updated by `event_drives_batching` on every event.
-    /// - **Pinned to `Some(now)`** by
-    ///   `unstable_response_drives_batching` — the verify just
-    ///   responded, and pinning the timestamp removes the `Instant`
-    ///   monotonicity dependency from the reschedule correctness
-    ///   argument.
+    /// - `Some(now)` from `start_seed_burst(Some(trigger))` — a
+    ///   triggering `FsEvent` drove the re-Seed (the `drive_burst`
+    ///   Idle+!baseline path). `seed_owes_first_fire` reads the
+    ///   non-empty `dirty` as the activity witness; the burst-start
+    ///   instant seeds the settle deadline exactly as Standard.
+    /// - `None` from `start_seed_burst(None)` — cold attach. No
+    ///   driving event drove this burst; no `Batching` phase exists at
+    ///   construction (the cold path is Verifying-at-construction), so
+    ///   there is no settle deadline to source. An `FsEvent` arriving
+    ///   during the cold walk routes through `event_drives_batching`,
+    ///   which Cancels the verify slot, writes
+    ///   `last_event_time = Some(now)`, schedules a fresh settle_timer,
+    ///   and re-enters `Batching` — the field becomes meaningful
+    ///   exactly when a deadline exists to source.
+    ///
+    /// **Updaters.**
+    /// - `event_drives_batching` on every event (`Some(now)`).
+    /// - `undischarged_drives_batching` **pins to `Some(now)`**
+    ///   — the verify just responded, and pinning the timestamp removes
+    ///   the `Instant` monotonicity dependency from the reschedule
+    ///   correctness argument.
     /// - **Preserved** across `transition_to_verifying` (the reconfirm
     ///   path) and `transition_to_draining` — phase swaps without
     ///   semantic resets.
     pub last_event_time: Option<Instant>,
-    /// The N=2 quiescence proof — the prior `Authoritative` sample.
-    /// Constructed fresh ([`CertifiedPrior::new`]) by the category-(a)
-    /// `burst.rs` constructors (`start_standard_burst`,
-    /// `start_seed_burst`) and reset by
-    /// [`PostFireBurst::into_pre_fire_residual`]; thereafter advanced
-    /// only via [`CertifiedPrior::advance`]. The advance/withhold
-    /// contract and the no-setter invariant live on the type — see
-    /// [`CertifiedPrior`].
-    pub certified: CertifiedPrior,
 }
 
 /// Pre-fire phase discriminator.
@@ -376,34 +375,42 @@ pub enum PreFirePhase {
     /// tree-reconcile / Watch side keeps a faithful baseline. The
     /// reconfirm probe (Draining → Verifying, fired by the
     /// `finish_burst_to_idle` sweep once no covered descendant is still
-    /// in an Active Standard burst) derives its quiescence verdict from
-    /// the carrier proof ([`CertifiedPrior::advance`] over the burst's
-    /// `certified` prior), not from a re-comparison against
-    /// `Profile.current` — the verdict no longer depends on the
-    /// splice-mutated snapshot. Holding a duplicate `TreeSnapshot` on
-    /// the variant would only invite drift between the two references.
+    /// in an Active Standard burst) folds its verdict through
+    /// [`quiescence_verdict`] over the fresh `(authority, forced)` pair
+    /// — never against `Profile.current` — so the verdict does not
+    /// depend on the splice-mutated snapshot. Holding a duplicate
+    /// `TreeSnapshot` on the variant would only invite drift between
+    /// the two references.
     Draining,
 }
 
 /// Post-fire lifecycle — the structural mirror of [`PreFireBurst`].
 ///
 /// Post-fire runs its own quiescence loop over the *post-command*
-/// tree, so it carries the same two invariant-bearing fields pre-fire
-/// does — a [`CertifiedPrior`] N=2 proof (`certified`) and a loop
-/// bound (`rebase_ceiling`, the post-fire analogue of pre-fire's
-/// `burst_deadline`). The pre-fire fields that encode a *fire
-/// decision* genuinely do not cross the boundary, dropped by leaving
-/// them out of [`PreFireBurst::into_post_fire`]:
-/// - No `forced`: the fire already happened — no decision left.
+/// tree, so it mirrors the pre-fire shape: a loop bound
+/// (`rebase_ceiling` + `forced`, the post-fire analogue of pre-fire's
+/// `burst_deadline` + `forced`) and a `last_event_time` (mirror of the
+/// pre-fire field of the same name), captured by
+/// `absorb_event_into_fire_tail` on every absorbed FsEvent. The
+/// pre-fire fields that encode a *fire decision* do not cross the
+/// boundary, dropped by leaving them out of
+/// [`PreFireBurst::into_post_fire`]:
+/// - `forced`: opens fresh on the post-fire side. The pre-fire
+///   `forced` decided the pre-burst fire; the post-fire `forced` is
+///   the rebase-ceiling latch, set by `force_pending_post_fire` when
+///   `RebaseCeiling` expires (or gate-deadline-recovery raises it
+///   without an in-heap ceiling entry). The two are disjoint decisions
+///   over disjoint tree-shapes, so the bit does not carry across.
 /// - No `burst_deadline`: the pre-fire ceiling; `rebase_ceiling` is
 ///   the post-fire one. The stale pre-fire timer lazy-drops via
 ///   [`PostFireBurst::timer_token`]'s `Settle | BurstDeadline` arm.
 /// - No `probe_target`: Rebasing always targets the Profile's anchor.
-/// - No `last_event_time`: the pre-fire settle-deadline source.
 ///
 /// The pre-fire `dirty` (the captured-path basis) also does not cross;
 /// the post-fire `final_window_residual` is a *distinct, freshly-empty*
 /// provenance accumulator, not the pre-fire one carried over.
+/// `last_event_time` likewise opens fresh (`None`) — the absorb tail
+/// reckons from its own first absorbed event.
 ///
 /// `intent: BurstIntent` survives post-fire so
 /// `dispatch_rebase_{vanished,failed}` can tag the `ProbeVanished` /
@@ -418,101 +425,147 @@ pub enum PreFirePhase {
 /// just as a Standard one does.
 ///
 /// **Single construction seam.** Every `PostFireBurst` is born fresh —
-/// `certified` empty, `rebase_ceiling` unstarted — through
-/// [`Self::new`]; [`PreFireBurst::into_post_fire`] (the typed fire
-/// move) is its only production caller. The post-command tree is a
-/// *different tree* than the one the pre-fire carrier proved, so the
-/// rebase loop opens its own N=2 sequence rather than inheriting the
-/// pre-fire `certified` — the no-cross-fire-carry the typed move
-/// exists to enforce.
+/// `rebase_ceiling: None`, `forced: false` — through [`Self::new`];
+/// [`PreFireBurst::into_post_fire`] (the typed fire move) is its only
+/// production caller. The post-command tree is a *different tree* than
+/// the one the pre-fire burst observed, so the rebase loop's verdict
+/// is computed fresh by [`quiescence_verdict`] over each post-fire
+/// probe response — no prior sample carries across the fire.
 #[derive(Debug)]
 pub struct PostFireBurst {
     pub intent: BurstIntent,
     pub phase: PostFirePhase,
-    /// Events absorbed during the post-fire tail
-    /// (`Awaiting | Rebasing | RebaseSettling`), captured `(slot, path)`
-    /// by `absorb_event_into_fire_tail` in `drive_burst`'s post-fire arm.
+    /// The final-window restart seed — events absorbed during the
+    /// post-fire tail (`Awaiting | Rebasing | Settling`), captured
+    /// `(slot, path)` by `absorb_event_into_fire_tail` in
+    /// `drive_burst`'s post-fire arm. Single-purpose: when the rebase
+    /// loop terminates `Authoritative` on a `ReturnToIdle` burst with
+    /// a non-empty residual, restart a fresh debounced Standard burst
+    /// seeded from it (`into_pre_fire_residual` moves the whole
+    /// provenance, so the restarted burst's first verify has its
+    /// captured paths intact). A zombie (`Reap`) burst, an empty
+    /// residual, or a ceiling terminal (no restart) drops it at
+    /// `finish_burst_to_idle`. The restarted burst's settle window
+    /// reckons from the rebase-response instant, not the absorbed
+    /// events', a bounded ≤ one-`settle` extra re-fire latency.
+    ///
+    /// **Per-entry reset.** Cleared at *every* `Rebasing` entry
+    /// (`transition_to_rebasing`, both the first `Awaiting → Settling
+    /// → Rebasing` walk and each `Settling → Rebasing` re-arm), so
+    /// when the loop terminates the residual holds only events from
+    /// the **final** probe round-trip — the genuine final-window race
+    /// (a change observed by the sensor's certifying walk's instant
+    /// but after the engine could fold it). Without this per-entry
+    /// reset, any tree-touching command would leave a non-empty
+    /// residual and spuriously restart; with it the restart fires
+    /// only for the real race.
     ///
     /// **Not a proof-obligation source.** The rebase probe walks
-    /// `WholeSubtree` (the post-command tree has no trustworthy prior),
-    /// so it re-observes the whole anchor subtree regardless of this
-    /// accumulator — every absorbed event is folded into the rebase
-    /// verdict by the next `WholeSubtree` read whether or not it is
-    /// recorded here. It is reset at *every* `Rebasing` entry
-    /// (`transition_to_rebasing`, the first `Awaiting → Rebasing` edge
-    /// and each `RebaseSettling → Rebasing` re-arm), so when the rebase
-    /// loop terminates it holds only the events that landed during the
-    /// **final** probe round-trip — the genuine final-window race
-    /// (a change observed by the sensor's `Stable`-producing walk's
-    /// instant but after the engine could fold it).
-    ///
-    /// **Sole consumer: the final-window restart seed.** At
-    /// `dispatch_rebase_ok`'s `Stable` terminal a non-empty residual on
-    /// a `ReturnToIdle` burst restarts a fresh debounced burst seeded
-    /// from it (`into_pre_fire_residual` moves the whole provenance, so
-    /// the restarted Standard burst's first verify has its captured
-    /// paths intact), so that final-window change is not lost. A zombie
-    /// (`Reap`) burst, an empty residual, or a ceiling terminal (no
-    /// restart) drops it at `finish_burst_to_idle`. Without the
-    /// per-entry reset, any tree-touching command would leave a
-    /// non-empty residual and spuriously restart; with it the restart
-    /// fires only for the real race. The restarted burst's settle
-    /// window reckons from the rebase-response instant, not the absorbed
-    /// events', a bounded ≤ one-`settle` extra re-fire latency.
+    /// `WholeSubtree`, so earlier-round absorbs are folded into the
+    /// rebase verdict directly by the walk — never read off this
+    /// accumulator.
     pub final_window_residual: DirtyProvenance,
-    /// The post-fire rebase loop's N=2 quiescence proof — the prior
-    /// `Authoritative` sample of the *post-command* tree. Born fresh
-    /// ([`CertifiedPrior::new`]) at [`Self::new`]; advanced only via
-    /// [`CertifiedPrior::advance`] when the rebase verify folds a
-    /// verdict. Disjoint from the pre-fire carrier's `certified` by
-    /// construction (the typed fire move does not carry it across — the
-    /// tree the rebase loop proves is the one the command just
-    /// mutated). The advance/withhold contract and the no-setter
-    /// invariant live on the type — see [`CertifiedPrior`].
-    pub certified: CertifiedPrior,
-    /// The rebase loop's ceiling-timer lifecycle. Module-private: the
-    /// 3-state `armed-once / never (Reached, timer-still-armed)`
-    /// invariant is load-bearing, so the only mutators are the typed
-    /// edge-methods [`Self::arm_rebase_ceiling`] (NotStarted → Armed,
-    /// arm-once) and [`Self::mark_rebase_ceiling_reached`] (Armed →
-    /// Reached); the only reader is [`Self::rebase_ceiling_reached`]
-    /// plus the in-module `timer_token` projection. No public setter —
-    /// the [`CertifiedPrior`] / [`Self::note_effect_completion`]
-    /// no-bypass discipline, applied to the ceiling.
-    rebase_ceiling: RebaseCeilingState,
+    /// Wall-clock instant of the most recent `FsEvent` absorbed into
+    /// this post-fire burst by `absorb_event_into_fire_tail` (or the
+    /// `Awaiting | Rebasing → Settling` transition instant — the
+    /// settle-debounce window's deadline source of truth). The
+    /// post-fire mirror of [`PreFireBurst::last_event_time`]; born
+    /// `None` (the absorb tail reckons from its own first absorbed
+    /// event, not from the fire instant).
+    ///
+    /// **Writers** (cat-a, both `engine/burst.rs`):
+    /// - `absorb_event_into_fire_tail` — on every absorbed event,
+    ///   exactly mirroring `event_drives_batching`'s pre-fire write.
+    /// - `transition_to_settling` — at both Settling entries
+    ///   (`Awaiting → Settling` natural and `Rebasing → Settling`
+    ///   undischarged loop-back), pinning `Some(now)` so the settle
+    ///   window's quiet-check is anchored on the transition instant
+    ///   rather than a stale absorb instant.
+    ///
+    /// **Reader.** `handle_post_fire_settle_expired` consumes the
+    /// timestamp to decide reschedule vs transition, mirroring
+    /// `on_settle_expired`'s pre-fire fork.
+    pub last_event_time: Option<Instant>,
+    /// The rebase-loop ceiling latch — the post-fire mirror of
+    /// [`PreFireBurst::forced`]. Born `false`; raised to `true` by
+    /// the `force_pending_post_fire` engine helper when `RebaseCeiling`
+    /// expires (or gate-deadline-recovery latches `forced` without an
+    /// in-heap ceiling entry). The next probe response folds through
+    /// [`quiescence_verdict`] over `(authority, forced=true)` and
+    /// dispatches as the ceiling terminal.
+    ///
+    /// **Single production writer.** `Engine::force_pending_post_fire`
+    /// (cat-a, `engine/burst.rs`). The lockstep with
+    /// [`Self::rebase_ceiling`] is enforced at the writer.
+    pub forced: bool,
+    /// The rebase-loop ceiling timer lifecycle. `Some(timer)` ⇔
+    /// armed (timer live in the heap), `None` otherwise. Combined
+    /// with [`Self::forced`], three valid pairs:
+    ///
+    /// - `(None,    false)` — NotStarted (the loop has not entered
+    ///   `Settling`; no ceiling timer exists yet).
+    /// - `(Some(t), false)` — Armed (the ceiling timer is live).
+    /// - `(None,    true)`  — Reached (the ceiling fired; the timer
+    ///   was consumed by `pop_expired`; `forced` carries the terminal
+    ///   bit through to the next `Rebasing` response).
+    ///
+    /// `(Some(_), true)` is algorithmically unreachable: the
+    /// `force_pending_post_fire` engine helper drops the timer
+    /// reference in the same step it raises `forced`, so the illegal
+    /// pair never exists.
+    ///
+    /// **Two production writers**, both cat-a in `engine/burst.rs`:
+    /// - `Engine::arm_rebase_loop_ceiling` — `(None, false) →
+    ///   (Some(t), false)`, the arm-once edge at the natural
+    ///   `Awaiting → Settling` entry. Single caller:
+    ///   `on_effect_complete::LastReached + ReturnToIdle`.
+    /// - `Engine::force_pending_post_fire` — `(Some(t), false) →
+    ///   (None, true)` (natural ceiling expiry) or `(None, false) →
+    ///   (None, true)` (gate-deadline-recovery latches `forced`
+    ///   without an in-heap ceiling entry).
+    ///
+    /// The `(Some(_), true)` unreachability is an algorithmic
+    /// invariant on the writer, not a type-system property. The
+    /// single-source falsifiability grep is one line:
+    /// `rg '\.rebase_ceiling =' --type rust crates/` — expect exactly
+    /// two production hits, both in `engine/burst.rs`.
+    pub rebase_ceiling: Option<TimerId>,
 }
 
 /// Post-fire phase discriminator — the structural mirror of
 /// [`PreFirePhase`].
 ///
-/// `Awaiting` has no pre-fire peer (the actuator gate);
-/// `RebaseSettling ⇄ Rebasing` is the post-fire `Batching ⇄ Verifying`
-/// loop, settle-spaced over the burst's `certified` proof.
+/// `Awaiting` has no pre-fire peer (the actuator gate); `Settling ⇄
+/// Rebasing` is the post-fire `Batching ⇄ Verifying` loop, bounded by
+/// `rebase_ceiling`.
 ///
 /// `Awaiting { outstanding, gate_deadline }`: effects emitted, counter
 /// decrements on each `EffectComplete` for this Profile's `DedupKey`s.
-/// Reaching zero advances to `Rebasing` (or, when the burst carries
+/// Reaching zero advances to `Settling` (or, when the burst carries
 /// [`BurstFinish::Reap`], finishes the burst directly). `gate_deadline`
 /// is the recovery timer for an actuator that never reports completion
-/// — its expiry forces the burst into `Rebasing` (or, on a zombie
-/// burst, directly into [`crate::ProfileState::Idle`] via reap).
+/// — its expiry forces the burst into `Rebasing` (skipping `Settling`:
+/// the bounded wait has already elapsed) or, on a zombie burst,
+/// directly into [`crate::ProfileState::Idle`] via reap.
 ///
 /// `Rebasing` carries a [`ProbeSlot`]: the post-fire baseline-capture
 /// probe's liveness *and* identity live on the phase, so a rebase in
 /// flight without its correlation is unconstructable. The rebase
-/// response folds the burst's `certified` N=2 proof; a `Stable`
+/// response folds through [`quiescence_verdict`]; an `Authoritative`
 /// verdict rebases `baseline := current` and finishes (or restarts on
-/// a non-empty residual), an unstable / unread verdict loops back
-/// through `RebaseSettling`.
+/// a non-empty residual), an `Undischarged + !terminal` verdict loops
+/// back through `Settling`.
 ///
-/// `RebaseSettling { spacing_timer }`: the spacing wait between two
-/// `Rebasing` samples — the post-fire analogue of
-/// [`PreFirePhase::Batching`]. No probe is in flight (the slot lives
-/// on `Rebasing`), only the settle-spacing timer, so two consecutive
-/// rebase reads are separated by ≥ `settle` and a writer slower than
-/// the probe round-trip but faster than `settle` cannot produce a
-/// premature `Stable`. `spacing_timer` is the phase's correlation
-/// token, exactly as `Batching`'s `settle_timer` is.
+/// `Settling { settle_timer }`: settle-debounce wait for the
+/// post-command kernel-event tail to quiet — the post-fire mirror of
+/// [`PreFirePhase::Batching`]. No [`ProbeSlot`]: no probe is in flight
+/// during the settle window (the slot lives on `Rebasing`), only the
+/// settle-debounce timer. `absorb_event_into_fire_tail` updates
+/// [`PostFireBurst::last_event_time`] on every absorbed `FsEvent`;
+/// `handle_post_fire_settle_expired` reads the same field on expiry
+/// and either reschedules (events arrived since the timer was
+/// scheduled) or transitions to `Rebasing`. `settle_timer` is the
+/// phase's correlation token, exactly as `Batching`'s is.
 #[derive(Debug)]
 pub enum PostFirePhase {
     Awaiting {
@@ -530,41 +583,16 @@ pub enum PostFirePhase {
     /// let _: PostFirePhase = PostFirePhase::Rebasing;
     /// ```
     Rebasing(ProbeSlot),
-    /// Settle-spacing wait between two `Rebasing` samples — the
-    /// post-fire `Batching`. `spacing_timer` is the armed spacing
-    /// timer; its expiry re-enters `Rebasing` for the next sample.
-    /// No [`ProbeSlot`]: no probe is in flight during the spacing
-    /// window, so a stray `EffectComplete` / probe response here is a
-    /// late, untracked arrival (folded to the same routing as
-    /// `Rebasing`).
-    RebaseSettling { spacing_timer: TimerId },
-}
-
-/// The post-fire rebase loop's ceiling-timer lifecycle — the
-/// post-fire analogue of pre-fire's `burst_deadline`, made a 3-state
-/// sum so the illegal combinations a `(Option<TimerId>, bool)` pair
-/// would admit are unconstructable.
-///
-/// - [`Self::NotStarted`]: the loop has not begun (`Awaiting`). No
-///   ceiling timer exists yet — arming it during `Awaiting` would let
-///   a slow-but-finite command burn the rebase budget against the
-///   actuator gate (a different, `gate_deadline`-bounded concern).
-/// - [`Self::Armed`]: the ceiling timer is live, scheduled once at the
-///   first `Awaiting → Rebasing` edge. The `RebaseSettling → Rebasing`
-///   re-entry does **not** re-arm — *armed once* per loop.
-/// - [`Self::Reached`]: the ceiling fired. The terminal is applied
-///   with the verdict in hand at the next `Rebasing` response (the
-///   forced-mirror of pre-fire `burst_deadline → forced`), so the
-///   `(Reached, timer-still-armed)` state a flag-pair would make
-///   representable never exists.
-///
-/// Module-private; mutated only through [`PostFireBurst`]'s typed
-/// edge-methods (no public setter — the [`CertifiedPrior`] discipline).
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-enum RebaseCeilingState {
-    NotStarted,
-    Armed(TimerId),
-    Reached,
+    /// Settle-debounce wait for the post-command kernel-event tail to
+    /// quiet — the post-fire mirror of [`PreFirePhase::Batching`].
+    /// `settle_timer` is the live settle deadline; absorbed `FsEvent`s
+    /// update [`PostFireBurst::last_event_time`], and on expiry
+    /// `handle_post_fire_settle_expired` reschedules if events arrived
+    /// since, otherwise drives `Settling → Rebasing` for the next
+    /// sample. No [`ProbeSlot`]: a stray `EffectComplete` / probe
+    /// response here is a late, untracked arrival (folded to the same
+    /// routing as `Rebasing`).
+    Settling { settle_timer: TimerId },
 }
 
 /// Verdict of one `EffectComplete` against the post-fire counter.
@@ -582,96 +610,76 @@ pub enum AwaitVerdict {
     NotAwaiting,
 }
 
-/// Verdict of one certified probe response against the carrier's
-/// accumulated quiescence proof.
+/// Verdict of one certified probe response — the pure projection of
+/// the engine's two-axis dispatch decision `(ProofAuthority × forced)`
+/// onto the verdict floor.
 ///
-/// Three variants, not a `bool`, because the route is resolved from the
-/// same fold: "two settle-spaced equal samples — fire" vs "the tree is
-/// still moving — re-batch" vs "the probe could not discharge its
-/// obligation — refuse to fire and surface the unread path" must each
-/// be representable. The `Undischarged` payload lifts `first_unread`
-/// onto the verdict so the engine switches on the verdict alone and has
-/// a single diagnostic source.
+/// Two variants, not three: the old N=2-era `Stable / Unstable` split
+/// flattened `(authority = Authoritative, forced)` onto one axis.
+/// Lifting `forced` onto the [`Self::Authoritative`] payload keeps the
+/// projection un-flattened — the unrepresentable `(Unstable, !forced)`
+/// arm the old shape needed an `unreachable!` for ceases to exist at
+/// the type level.
 ///
-/// Not `Copy` (unlike [`AwaitVerdict`]) — `Undischarged` carries an
-/// `Arc<Path>`. Produced solely by [`CertifiedPrior::advance`]; the
-/// engine maps it to a consequence privately and never reconstructs it.
+/// - [`Self::Authoritative`] — the walker certified every obligation
+///   chain. `forced` distinguishes:
+///   - `false` ⇒ the response arrived on an event-quiet path (settle
+///     expiry or Draining-sweep reconfirm). Quiescence holds by the
+///     event channel; the burst may fire (Standard) or pin
+///     (Seed-baseline) cleanly.
+///   - `true` ⇒ the `BurstDeadline` / `RebaseCeiling` fallback
+///     fired. Fire / rebase anyway against the freshest observation;
+///     a deadline diagnostic is owed downstream.
+/// - [`Self::Undischarged`] — the walker refused on some chain
+///   (`first_unread`). `terminal`:
+///   - `false` ⇒ the carrier may re-try (Batching / Settling).
+///   - `true` ⇒ the bounded ceiling already fired; abandon, no
+///     commit, diagnose `*CeilingUnreadable`.
+///
+/// Constructed solely by [`quiescence_verdict`]; the dispatch site
+/// consumes the variants and never re-constructs. Not `Copy` —
+/// `Undischarged` carries an `Arc<Path>`.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum QuiescenceVerdict {
-    /// Two consecutive settle-spaced `Authoritative` samples hashed
-    /// equal — the tree is observably quiescent; the burst may fire.
-    Stable,
-    /// No prior sample, or the latest `Authoritative` sample differs
-    /// from the prior — the tree is still changing; re-batch.
-    Unstable,
-    /// The probe returned `Undischarged`: a non-observation lies on an
-    /// obligation chain at `first_unread`. No verdict can be derived;
-    /// the burst must not fire and the carrier proof is not advanced.
-    Undischarged { first_unread: Arc<Path> },
+    /// Walker certified every obligation chain. `forced` distinguishes
+    /// natural fire (event-quiet witness held) from `max_settle` ceiling-
+    /// fallback (fire-anyway with diagnostic).
+    Authoritative { forced: bool },
+    /// Walker refused on some chain. `terminal: false` ⇒ retry;
+    /// `terminal: true` ⇒ ceiling-bound no-fire diagnostic + finish.
+    Undischarged {
+        first_unread: Arc<Path>,
+        terminal: bool,
+    },
 }
 
-/// The N=2 quiescence floor — the prior `Authoritative` sample plus the
-/// one operation that folds a fresh certified response into it.
+/// Fold a `(ProofAuthority, forced)` pair into a [`QuiescenceVerdict`].
+/// Total, pure, side-effect-free — the verdict floor under the
+/// post-refactor fold contract.
 ///
-/// The type *is* the invariant. The inner `Option<u128>` is private and
-/// there is no setter: the sole mutator is [`Self::advance`], and a
-/// fresh value ([`Self::new`]) is the only other way to obtain one, so
-/// no call site can write an arbitrary hash past the floor. The
-/// quiescence proof a burst carries is therefore exactly "what
-/// `advance` recorded", with no bypass — the
-/// [`PostFireBurst::note_effect_completion`] category-(b) pattern (a
-/// total edge-method owning its field's invariant), inverted to the
-/// certified-sample side.
+/// **No prior sample.** The `(authority, forced)` pair fully determines
+/// the verdict at the floor: the event-quiet witness (`!forced`)
+/// discharges the quiescence contract that the old N=2 sample-spacing
+/// carrier proved. The two arms project onto:
 ///
-/// `None` until the first `Authoritative` sample, so the first verify
-/// of a sequence is `Unstable` by construction. Advanced only on an
-/// `Authoritative` response; an `Undischarged` response leaves it
-/// untouched (an unread region must never become the comparison
-/// baseline). The carrier preserves it verbatim across every phase
-/// swap, so two settle-spaced samples compare to each other rather than
-/// to a splice-mutated live snapshot.
-#[derive(Debug, Default, Clone, Copy, Eq, PartialEq)]
-pub struct CertifiedPrior(Option<u128>);
-
-impl CertifiedPrior {
-    /// A fresh floor — no certified sample yet. `const` for the
-    /// category-(a) burst constructors and fixture sites; equivalent to
-    /// [`Default::default`].
-    #[must_use]
-    pub const fn new() -> Self {
-        Self(None)
-    }
-
-    /// Fold one certified probe response into the proof and return the
-    /// verdict — the floor lives here, not at the call site.
-    ///
-    /// - `Undischarged` ⇒ [`QuiescenceVerdict::Undischarged`] carrying
-    ///   `first_unread`; the prior is **not** advanced (an unread
-    ///   region must never become the comparison baseline).
-    /// - `Authoritative` ⇒ compare `response` to the prior, then record
-    ///   `response` as the new prior **unconditionally** (a stable pair
-    ///   re-records the same value harmlessly; an unstable sample
-    ///   becomes the prior the next probe compares against). `Stable`
-    ///   iff a prior sample existed and hashed equal, else `Unstable`
-    ///   (a `None` prior ⇒ `Unstable` by construction).
-    ///
-    /// Total, holds no engine state.
-    #[must_use]
-    pub fn advance(&mut self, authority: ProofAuthority, response: u128) -> QuiescenceVerdict {
-        match authority {
-            ProofAuthority::Undischarged { first_unread } => {
-                QuiescenceVerdict::Undischarged { first_unread }
-            }
-            ProofAuthority::Authoritative => {
-                let stable = self.0 == Some(response);
-                self.0 = Some(response);
-                if stable {
-                    QuiescenceVerdict::Stable
-                } else {
-                    QuiescenceVerdict::Unstable
-                }
-            }
-        }
+/// - [`ProofAuthority::Authoritative`] ⇒
+///   [`QuiescenceVerdict::Authoritative`] carrying `forced` verbatim.
+///   The dispatch site reads the bit to choose between the natural-fire
+///   path (`!forced`) and the bounded-fallback path (`forced`).
+/// - [`ProofAuthority::Undischarged`] ⇒
+///   [`QuiescenceVerdict::Undischarged`] carrying `first_unread`
+///   verbatim and `terminal = forced`. `forced` projects to two
+///   different consequence axes inside the dispatch (fire-anyway
+///   vs. abandon-with-diagnostic), but the source is one engine-side
+///   flag — set by `BurstDeadline` / `RebaseCeiling` expiry.
+#[must_use]
+pub fn quiescence_verdict(authority: ProofAuthority, forced: bool) -> QuiescenceVerdict {
+    match authority {
+        ProofAuthority::Authoritative => QuiescenceVerdict::Authoritative { forced },
+        ProofAuthority::Undischarged { first_unread } => QuiescenceVerdict::Undischarged {
+            first_unread,
+            terminal: forced,
+        },
     }
 }
 
@@ -686,10 +694,10 @@ impl PreFireBurst {
     /// - [`TimerKind::BurstDeadline`] — non-Optional on
     ///   [`PreFireBurst`]; always `Some(self.burst_deadline)`.
     /// - [`TimerKind::AwaitGateDeadline`] /
-    ///   [`TimerKind::RebaseSettle`] / [`TimerKind::RebaseCeiling`] —
-    ///   type-impossible here (these fields live on [`PostFireBurst`]
-    ///   only); the arms return `None` to encode the structural
-    ///   absence.
+    ///   [`TimerKind::PostFireSettle`] / [`TimerKind::RebaseCeiling`]
+    ///   — type-impossible here (these fields live on
+    ///   [`PostFireBurst`] only); the arms return `None` to encode
+    ///   the structural absence.
     ///
     /// Consumed via the [`ActiveBurst`] / [`ProfileState`] delegation
     /// chain by the engine's stale-timer filter; each layer only
@@ -704,7 +712,7 @@ impl PreFireBurst {
                 PreFirePhase::Verifying(_) | PreFirePhase::Draining => None,
             },
             TimerKind::BurstDeadline => Some(self.burst_deadline),
-            TimerKind::AwaitGateDeadline | TimerKind::RebaseSettle | TimerKind::RebaseCeiling => {
+            TimerKind::AwaitGateDeadline | TimerKind::PostFireSettle | TimerKind::RebaseCeiling => {
                 None
             }
         }
@@ -717,20 +725,24 @@ impl PreFireBurst {
     /// - `burst_deadline` — lazy-dropped by
     ///   [`PostFireBurst::timer_token`]'s `None` arm once it expires
     ///   post-fire; the post-fire loop has its own ceiling.
-    /// - `forced` — no fire decision left in the post-fire lifecycle.
+    /// - `forced` — the pre-fire `forced` bit decided the pre-burst
+    ///   fire. The post-fire side opens its own `forced: false`; the
+    ///   rebase-loop ceiling latch ([`PostFireBurst::forced`]) is a
+    ///   disjoint decision over the post-command tree.
     /// - `probe_target` — Rebasing always targets the anchor.
-    /// - `last_event_time` / `dirty` — pre-fire-only event state.
-    ///   Post-fire opens a *fresh, empty* `final_window_residual` (the
-    ///   fire-tail residual), not the pre-fire captured-path provenance.
-    /// - `certified` — the pre-fire proof is **not** carried across:
-    ///   the post-command tree the rebase loop must prove quiescent is
-    ///   a different tree than the one the pre-fire carrier proved, so
-    ///   `into_post_fire` opens a fresh [`CertifiedPrior`] sequence on
-    ///   the post-fire burst (this no-cross-fire-carry is *why* the
-    ///   move is typed).
+    /// - `dirty` — pre-fire-only event state. Post-fire opens a
+    ///   *fresh, empty* `final_window_residual` (the fire-tail
+    ///   residual), not the pre-fire captured-path provenance.
+    /// - `last_event_time` — the pre-fire settle-deadline source.
+    ///   Post-fire opens its own `last_event_time = None`; the absorb
+    ///   tail reckons from its own first absorbed event, not the fire
+    ///   instant.
     ///
     /// `intent` is preserved (read by `dispatch_rebase_*` for the
-    /// diagnostic).
+    /// diagnostic). Quiescence is no longer carrier-resident — the
+    /// post-fire rebase folds each response through
+    /// [`quiescence_verdict`] over `(authority, post.forced)`, so the
+    /// move drops nothing for the proof.
     ///
     /// Sole production caller: `transition_to_awaiting` in `burst.rs`.
     #[must_use]
@@ -754,10 +766,10 @@ impl PostFireBurst {
     /// - [`TimerKind::AwaitGateDeadline`] — lives on
     ///   [`PostFirePhase::Awaiting`]'s `gate_deadline` field; `None`
     ///   once the burst leaves `Awaiting` (the field doesn't exist on
-    ///   `Rebasing` / `RebaseSettling`).
-    /// - [`TimerKind::RebaseSettle`] — lives on
-    ///   [`PostFirePhase::RebaseSettling`]'s `spacing_timer` field;
-    ///   `None` in `Awaiting` / `Rebasing` (no spacing wait in flight).
+    ///   `Rebasing` / `Settling`).
+    /// - [`TimerKind::PostFireSettle`] — lives on
+    ///   [`PostFirePhase::Settling`]'s `settle_timer` field; `None`
+    ///   in `Awaiting` / `Rebasing` (no settle window in flight).
     /// - [`TimerKind::RebaseCeiling`] — lives on the `rebase_ceiling`
     ///   lifecycle, `Some` only while `Armed`; `NotStarted` (the loop
     ///   has not begun) and `Reached` (the terminal already latched)
@@ -771,35 +783,34 @@ impl PostFireBurst {
         match kind {
             TimerKind::AwaitGateDeadline => match &self.phase {
                 PostFirePhase::Awaiting { gate_deadline, .. } => Some(*gate_deadline),
-                PostFirePhase::Rebasing(_) | PostFirePhase::RebaseSettling { .. } => None,
+                PostFirePhase::Rebasing(_) | PostFirePhase::Settling { .. } => None,
             },
-            TimerKind::RebaseSettle => match &self.phase {
-                PostFirePhase::RebaseSettling { spacing_timer } => Some(*spacing_timer),
+            TimerKind::PostFireSettle => match &self.phase {
+                PostFirePhase::Settling { settle_timer } => Some(*settle_timer),
                 PostFirePhase::Awaiting { .. } | PostFirePhase::Rebasing(_) => None,
             },
-            TimerKind::RebaseCeiling => match self.rebase_ceiling {
-                RebaseCeilingState::Armed(t) => Some(t),
-                RebaseCeilingState::NotStarted | RebaseCeilingState::Reached => None,
-            },
+            TimerKind::RebaseCeiling => self.rebase_ceiling,
             TimerKind::Settle | TimerKind::BurstDeadline => None,
         }
     }
 
     /// Construct a post-fire burst — the single construction seam.
     ///
-    /// Born fresh, always: `certified` is an empty [`CertifiedPrior`]
-    /// (the rebase loop opens its own N=2 sequence over the
-    /// post-command tree) and `rebase_ceiling` is `NotStarted` (the
-    /// loop has not begun). Those two invariant-bearing fields take no
-    /// parameter precisely because *no* construction path may seed them
-    /// — the only mutations are the typed edge-methods, the
-    /// [`CertifiedPrior`] no-bypass discipline applied to construction.
+    /// Born fresh, always: `rebase_ceiling` is `None` (no ceiling
+    /// timer armed yet), `forced` is `false` (the latch carrying the
+    /// ceiling terminal has not fired), and `last_event_time` is
+    /// `None` (the absorb tail reckons from its own first absorbed
+    /// event, not from the fire instant). Those invariant-bearing
+    /// fields take no parameter precisely because *no* construction
+    /// path may seed them — the only mutations are the cat-a
+    /// engine helpers (`arm_rebase_loop_ceiling`,
+    /// `force_pending_post_fire`, `transition_to_settling`,
+    /// `absorb_event_into_fire_tail` — each documented at its
+    /// production writer), the no-bypass discipline applied to
+    /// construction.
     ///
     /// Sole production caller: [`PreFireBurst::into_post_fire`] (the
-    /// typed fire move). A private `rebase_ceiling` makes a struct
-    /// literal unconstructable outside this module, so this is also the
-    /// only cross-crate construction path (fixtures included) — there is
-    /// exactly one place a `PostFireBurst` is born.
+    /// typed fire move).
     #[must_use]
     pub const fn new(
         intent: BurstIntent,
@@ -810,64 +821,10 @@ impl PostFireBurst {
             intent,
             phase,
             final_window_residual,
-            certified: CertifiedPrior::new(),
-            rebase_ceiling: RebaseCeilingState::NotStarted,
+            last_event_time: None,
+            forced: false,
+            rebase_ceiling: None,
         }
-    }
-
-    /// Arm the rebase-loop ceiling at the first `Awaiting → Rebasing`
-    /// edge. `NotStarted → Armed(timer)`; returns `true` iff it armed.
-    ///
-    /// **Arm-once.** The `RebaseSettling → Rebasing` re-entry finds
-    /// `Armed` (or `Reached`) and is a `false` no-op — the ceiling
-    /// bounds the loop from its *start*, not from each sample. The
-    /// caller (`transition_to_rebasing`) schedules the timer only when
-    /// this returns `true`, so a redundant heap entry is never minted.
-    ///
-    /// Category-(b) typed edge-method: total, no public setter, returns
-    /// the edge — the sibling of [`Self::note_effect_completion`] /
-    /// [`CertifiedPrior::advance`] on the ceiling field.
-    #[must_use]
-    pub const fn arm_rebase_ceiling(&mut self, timer: TimerId) -> bool {
-        if matches!(self.rebase_ceiling, RebaseCeilingState::NotStarted) {
-            self.rebase_ceiling = RebaseCeilingState::Armed(timer);
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Latch the rebase-loop ceiling terminal. `Armed → Reached`;
-    /// returns `true` iff it latched (the prior state was `Armed`).
-    ///
-    /// The terminal is *recorded*, not *acted on*, here: the forced
-    /// rebase is applied with the verdict in hand at the next
-    /// `Rebasing` response (the forced-mirror of pre-fire
-    /// `burst_deadline → forced`), so the illegal `(Reached,
-    /// timer-still-armed)` state never exists. A `false` return
-    /// (`NotStarted` / already `Reached`) is the loud-regression signal
-    /// the caller debug-asserts against — `RebaseCeiling` only fires
-    /// from `Armed` (`timer_token` filters the other states).
-    ///
-    /// Category-(b) sibling of [`Self::arm_rebase_ceiling`].
-    #[must_use]
-    pub const fn mark_rebase_ceiling_reached(&mut self) -> bool {
-        if let RebaseCeilingState::Armed(_) = self.rebase_ceiling {
-            self.rebase_ceiling = RebaseCeilingState::Reached;
-            true
-        } else {
-            false
-        }
-    }
-
-    /// Whether the rebase-loop ceiling has latched (`Reached`). The
-    /// sole public read of the private `rebase_ceiling` lifecycle —
-    /// `dispatch_rebase_ok` consults it to route the verdict to a
-    /// looping vs a terminal consequence. `NotStarted` / `Armed` are
-    /// both "ceiling not yet reached" ⇒ `false`.
-    #[must_use]
-    pub const fn rebase_ceiling_reached(&self) -> bool {
-        matches!(self.rebase_ceiling, RebaseCeilingState::Reached)
     }
 
     /// Apply one `EffectComplete`, returning the zero-edge verdict. The
@@ -875,10 +832,10 @@ impl PostFireBurst {
     /// `outstanding`: floor and decrement live here on the owner — a
     /// total fn with no public setter that returns the edge, so the
     /// invariant cannot be enforced at a distance. `Rebasing` /
-    /// `RebaseSettling` ⇒ [`AwaitVerdict::NotAwaiting`] (the counter
-    /// drained at the `Awaiting → Rebasing` edge; a completion arriving
-    /// in the rebase loop is a late, untracked arrival). Underflow
-    /// (more completions than emitted Effects) trips a `debug_assert!`,
+    /// `Settling` ⇒ [`AwaitVerdict::NotAwaiting`] (the counter drained
+    /// at the `Awaiting → Settling` edge; a completion arriving in the
+    /// rebase loop is a late, untracked arrival). Underflow (more
+    /// completions than emitted Effects) trips a `debug_assert!`,
     /// saturates in release.
     #[must_use]
     pub fn note_effect_completion(&mut self) -> AwaitVerdict {
@@ -897,7 +854,7 @@ impl PostFireBurst {
                     AwaitVerdict::Decremented
                 }
             }
-            PostFirePhase::Rebasing(_) | PostFirePhase::RebaseSettling { .. } => {
+            PostFirePhase::Rebasing(_) | PostFirePhase::Settling { .. } => {
                 AwaitVerdict::NotAwaiting
             }
         }
@@ -940,11 +897,10 @@ impl PostFireBurst {
     /// never losing the residual. `probe_target` is the anchor
     /// placeholder, overwritten by the next `transition_to_verifying`
     /// exactly as in a fresh `start_standard_burst`. The post-fire
-    /// `certified` proof and the `rebase_ceiling` lifecycle are dropped
-    /// by omission — they are post-fire-only, and the restarted pre-fire
-    /// burst opens its own fresh [`CertifiedPrior`] N=2 sequence and
-    /// pre-fire `burst_deadline`, exactly as a fresh
-    /// `start_standard_burst`.
+    /// `forced` ceiling latch and `rebase_ceiling` timer lifecycle are
+    /// dropped by omission — they are post-fire-only, and the restarted
+    /// pre-fire burst opens its own fresh `burst_deadline`, exactly as
+    /// a fresh `start_standard_burst`.
     ///
     /// Sole production caller: `restart_burst_from_fire_tail_residual`
     /// in `burst.rs`.
@@ -970,7 +926,6 @@ impl PostFireBurst {
             dirty: residual,
             probe_target: anchor,
             last_event_time: Some(now),
-            certified: CertifiedPrior::new(),
         }
     }
 }
@@ -1011,49 +966,6 @@ impl ActiveBurst {
         match self {
             Self::PostFire(post) => post.note_effect_completion(),
             Self::PreFire(_) => AwaitVerdict::NotAwaiting,
-        }
-    }
-
-    /// Delegate the quiescence fold to whichever carrier holds the
-    /// burst. Both [`Self::PreFire`] and [`Self::PostFire`] carry their
-    /// own [`CertifiedPrior`] N=2 proof — the pre-fire verify loop and
-    /// the post-fire rebase loop are the same loop shape over disjoint
-    /// carriers — so an Active burst *always* folds a verdict (`Some`
-    /// on both arms). The `None ⇔ Idle | Pending` boundary lives one
-    /// layer up at [`ProfileState::advance_quiescence`] (no burst ⇒ no
-    /// proof to fold), not here.
-    ///
-    /// The post-fire arm is a legitimate fold site, not a weaker one:
-    /// the verdict folds the freshly-walked *response* hash through the
-    /// shared [`CertifiedPrior`] floor (never `current` / `baseline`),
-    /// so the rebase loop has the same splice-independence the pre-fire
-    /// loop does — the floor *carries* the property rather than each
-    /// carrier re-deriving it. Same wildcard-free PreFire/PostFire
-    /// delegation shape as [`Self::timer_token`].
-    #[must_use]
-    pub fn advance_quiescence(
-        &mut self,
-        authority: ProofAuthority,
-        response: u128,
-    ) -> Option<QuiescenceVerdict> {
-        match self {
-            Self::PreFire(pre) => Some(pre.certified.advance(authority, response)),
-            Self::PostFire(post) => Some(post.certified.advance(authority, response)),
-        }
-    }
-
-    /// Latch the post-fire rebase-loop ceiling terminal — delegate to
-    /// the post-fire side's owner-resident edge. [`Self::PreFire`]
-    /// carries no ceiling (the pre-fire loop bounds itself with
-    /// `burst_deadline`), so it folds to `false` — same wildcard-free
-    /// PreFire/PostFire delegation as [`Self::note_effect_completion`].
-    /// The floor (the `Armed → Reached` invariant, no public setter)
-    /// lives on the owner, [`PostFireBurst::mark_rebase_ceiling_reached`].
-    #[must_use]
-    pub const fn mark_rebase_ceiling_reached(&mut self) -> bool {
-        match self {
-            Self::PostFire(post) => post.mark_rebase_ceiling_reached(),
-            Self::PreFire(_) => false,
         }
     }
 }
@@ -1246,7 +1158,7 @@ impl ProfileState {
     /// phase. Distinct from [`Self::discriminant`]: the discriminant
     /// names the four *routing classes* the burst helpers branch on
     /// (collapsing `Batching | Verifying | Draining` to `ActivePreFire`
-    /// and `Awaiting | Rebasing | RebaseSettling` to `ActivePostFire`),
+    /// and `Awaiting | Rebasing | Settling` to `ActivePostFire`),
     /// whereas this projection names the eight *phases* an operator
     /// reading `specter status` / `specter list` would expect to see
     /// — every leaf of the [`PreFirePhase`] / [`PostFirePhase`] split,
@@ -1268,7 +1180,7 @@ impl ProfileState {
             Self::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
                 PostFirePhase::Awaiting { .. } => StateLabel::Awaiting,
                 PostFirePhase::Rebasing(_) => StateLabel::Rebasing,
-                PostFirePhase::RebaseSettling { .. } => StateLabel::RebaseSettling,
+                PostFirePhase::Settling { .. } => StateLabel::Settling,
             },
         }
     }
@@ -1392,42 +1304,6 @@ impl ProfileState {
         }
     }
 
-    /// Delegate the quiescence fold to the active burst. This is the
-    /// **sole** `None` site in the chain: `Active` (either side of the
-    /// fire boundary) always folds a verdict through its own
-    /// [`CertifiedPrior`], so `None ⇔ Idle | Pending` — "no Active
-    /// burst", not "not in pre-fire". Same layered, wildcard-free
-    /// delegation as [`Self::note_effect_completion`]. The verify /
-    /// rebase chokes run only with the carrier proven `Active`, so a
-    /// `None` reaching them is a loud structural regression (the
-    /// Profile left the burst between the gate and the fold), not a
-    /// pre-fire-vs-post-fire distinction.
-    #[must_use]
-    pub fn advance_quiescence(
-        &mut self,
-        authority: ProofAuthority,
-        response: u128,
-    ) -> Option<QuiescenceVerdict> {
-        match self {
-            Self::Active(burst, _) => burst.advance_quiescence(authority, response),
-            Self::Idle | Self::Pending(_) => None,
-        }
-    }
-
-    /// Latch the active burst's post-fire rebase-loop ceiling terminal.
-    /// `Idle` / `Pending` own no burst (so `false`); the burst routes
-    /// `PostFire` to its owner-resident edge and `PreFire` to `false`.
-    /// Same layered, wildcard-free delegation as
-    /// [`Self::note_effect_completion`]; the no-public-setter floor
-    /// lives on [`PostFireBurst::mark_rebase_ceiling_reached`].
-    #[must_use]
-    pub const fn mark_rebase_ceiling_reached(&mut self) -> bool {
-        match self {
-            Self::Active(burst, _) => burst.mark_rebase_ceiling_reached(),
-            Self::Idle | Self::Pending(_) => false,
-        }
-    }
-
     /// True iff the state is `Active(PreFire(Draining))`. The
     /// reconfirm cascade (the `Draining → Verifying` re-probe) keys off
     /// this predicate: at every `finish_burst_to_idle` the engine
@@ -1447,8 +1323,8 @@ impl ProfileState {
 
     /// True iff the state is an Active **Standard** burst, in *any*
     /// phase — pre-fire (`Batching | Verifying | Draining`) or post-fire
-    /// (`Awaiting | Rebasing | RebaseSettling`). Wildcard-free,
-    /// mirroring [`Self::is_draining`].
+    /// (`Awaiting | Rebasing | Settling`). Wildcard-free, mirroring
+    /// [`Self::is_draining`].
     ///
     /// This is the per-Profile half of the derived replacement for the
     /// old `dirty_descendants` refcount. The refcount's `+1`
@@ -1515,7 +1391,7 @@ impl ProfileState {
             },
             Self::Active(ActiveBurst::PostFire(burst), _) => match &burst.phase {
                 PostFirePhase::Rebasing(slot) => slot.correlation(),
-                PostFirePhase::Awaiting { .. } | PostFirePhase::RebaseSettling { .. } => None,
+                PostFirePhase::Awaiting { .. } | PostFirePhase::Settling { .. } => None,
             },
             Self::Pending(d) => d.probe_correlation(),
             Self::Idle => None,
@@ -1540,7 +1416,7 @@ impl ProfileState {
             },
             Self::Active(ActiveBurst::PostFire(burst), _) => match &mut burst.phase {
                 PostFirePhase::Rebasing(slot) => slot.disarm(),
-                PostFirePhase::Awaiting { .. } | PostFirePhase::RebaseSettling { .. } => None,
+                PostFirePhase::Awaiting { .. } | PostFirePhase::Settling { .. } => None,
             },
             Self::Pending(d) => d.disarm_probe(),
             Self::Idle => None,
@@ -1578,7 +1454,7 @@ pub enum ProfileStateDiscriminant {
 /// Two enums, two consumers — diagnostics keep their stable
 /// `ActivePreFire` / `ActivePostFire` tag, operator surfaces print the
 /// phase (`Batching` / `Verifying` / `Draining` / `Awaiting` /
-/// `Rebasing` / `RebaseSettling`).
+/// `Rebasing` / `Settling`).
 ///
 /// Constructed via [`ProfileState::label`]; the projection is
 /// exhaustive over the type space, so a future phase addition is a
@@ -1599,8 +1475,9 @@ pub enum StateLabel {
     Awaiting,
     /// [`PostFirePhase::Rebasing`] — post-fire baseline-capture probe.
     Rebasing,
-    /// [`PostFirePhase::RebaseSettling`] — spacing wait between rebase samples.
-    RebaseSettling,
+    /// [`PostFirePhase::Settling`] — settle-debounce wait for the
+    /// post-command kernel-event tail to quiet.
+    Settling,
 }
 
 /// State for a Profile undergoing pending-path descent.
@@ -1925,14 +1802,17 @@ pub enum BurstIntent {
 /// taking longer than expected (likely a hung child); the engine
 /// force-transitions to `Rebasing` to re-establish a baseline against
 /// disk reality.
-/// `RebaseSettle` — the post-fire mirror of `Settle`: the spacing wait
-/// armed during [`PostFirePhase::RebaseSettling`]. Expiry drives
-/// `RebaseSettling → Rebasing` for the next N=2 sample. Carried on
-/// [`PostFireBurst`]; structurally `None` on pre-fire (the post-fire
-/// analogue of how `Settle` is `None` on `Verifying`/`Draining`).
+/// `PostFireSettle` — the post-fire mirror of `Settle`: the
+/// settle-debounce wait armed during [`PostFirePhase::Settling`]. On
+/// expiry, [`crate::Engine::handle_post_fire_settle_expired`] decides
+/// whether to reschedule (events arrived since the timer was
+/// scheduled) or drive `Settling → Rebasing` for the next sample —
+/// the post-fire analogue of pre-fire's `on_settle_expired`. Carried
+/// on [`PostFireBurst`]; structurally `None` on pre-fire (the post-
+/// fire analogue of how `Settle` is `None` on `Verifying`/`Draining`).
 /// `RebaseCeiling` — the post-fire mirror of `BurstDeadline`: the
-/// rebase loop's max bound, armed once at the first `Awaiting →
-/// Rebasing` edge and tracked on the `rebase_ceiling` lifecycle.
+/// rebase loop's max bound, armed once at the natural `Awaiting →
+/// Settling` entry and tracked on the `rebase_ceiling` lifecycle.
 /// Expiry latches the loop's terminal, applied with the verdict in
 /// hand at the next `Rebasing` response (the forced-mirror of
 /// `BurstDeadline → forced`). Like `BurstDeadline`, it is filtered to
@@ -1950,7 +1830,7 @@ pub enum TimerKind {
     Settle,
     BurstDeadline,
     AwaitGateDeadline,
-    RebaseSettle,
+    PostFireSettle,
     RebaseCeiling,
 }
 
@@ -2473,7 +2353,7 @@ impl Profile {
     ///   post-command samples) or `Unstable + ceiling Reached` (the
     ///   bounded rebase-loop terminal — pin the freshest observation).
     /// - the Seed-Ok recovery pin — the `EmitMode::SeedDrift` seal in
-    ///   the engine's `fire_and_settle`, and the silent `RecoverySeal`
+    ///   the engine's `fire_and_settle`, and the silent `SilentPin`
     ///   pin — reached from the `Stable` / `Unstable + forced` Seed
     ///   verdicts.
     ///
@@ -3072,39 +2952,6 @@ impl Profile {
     #[must_use]
     pub fn note_effect_completion(&mut self) -> AwaitVerdict {
         self.state.note_effect_completion()
-    }
-
-    /// The single in-life mutator of the active burst's `certified`
-    /// proof — pure delegation through the state machine, the
-    /// no-public-setter seam shared with [`Self::note_effect_completion`].
-    /// The certified-sample floor is enforced by the owner,
-    /// [`CertifiedPrior::advance`]; an `Active` burst folds through
-    /// whichever side (pre-fire verify or post-fire rebase) it is on.
-    /// `None` ⇒ the Profile was `Idle` / `Pending` (no Active burst)
-    /// when a verdict choke folded a response — a structural regression
-    /// the caller surfaces loudly (a choke runs only with its carrier
-    /// proven Active).
-    #[must_use]
-    pub fn advance_quiescence(
-        &mut self,
-        authority: ProofAuthority,
-        response: u128,
-    ) -> Option<QuiescenceVerdict> {
-        self.state.advance_quiescence(authority, response)
-    }
-
-    /// Latch the post-fire rebase-loop ceiling terminal — pure
-    /// delegation through the state machine, the no-public-setter seam
-    /// shared with [`Self::note_effect_completion`]. The `Armed →
-    /// Reached` floor is enforced by the owner,
-    /// [`PostFireBurst::mark_rebase_ceiling_reached`]; `true` iff the
-    /// latch landed (the ceiling was `Armed`). Any non-`Active(PostFire)`
-    /// state yields `false` — the loud-regression signal the timer arm
-    /// debug-asserts against (the ceiling fires only from `Armed`,
-    /// which `timer_token` filters to `Active(PostFire)`).
-    #[must_use]
-    pub const fn mark_rebase_ceiling_reached(&mut self) -> bool {
-        self.state.mark_rebase_ceiling_reached()
     }
 
     /// Take the live `current` snapshot, leaving the arm's `current`
@@ -3946,8 +3793,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use super::{
-        ActiveBurst, AwaitVerdict, BurstFinish, BurstIntent, CertifiedPrior, DirtyProvenance,
-        PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, QuiescenceVerdict, TimerKind,
+        ActiveBurst, AwaitVerdict, BurstFinish, BurstIntent, DirtyProvenance, PostFireBurst,
+        PostFirePhase, PreFireBurst, PreFirePhase, QuiescenceVerdict, TimerKind,
+        quiescence_verdict,
     };
     use crate::ids::{ProbeCorrelation, TimerId};
     use crate::op::ProofAuthority;
@@ -4056,7 +3904,6 @@ mod tests {
             intent: BurstIntent::Standard,
             forced: false,
             dirty: DirtyProvenance::new(),
-            certified: CertifiedPrior::new(),
             probe_target: anchor,
             last_event_time: None,
         }
@@ -4069,7 +3916,6 @@ mod tests {
             intent: BurstIntent::Standard,
             forced: false,
             dirty: DirtyProvenance::new(),
-            certified: CertifiedPrior::new(),
             probe_target: anchor,
             last_event_time: None,
         }
@@ -4165,8 +4011,8 @@ mod tests {
                 gate_deadline: tid(99),
             },
             PostFirePhase::Rebasing(ProbeSlot::empty()),
-            PostFirePhase::RebaseSettling {
-                spacing_timer: tid(77),
+            PostFirePhase::Settling {
+                settle_timer: tid(77),
             },
         ] {
             let post = PostFireBurst::new(BurstIntent::Standard, phase, DirtyProvenance::new());
@@ -4175,18 +4021,21 @@ mod tests {
         }
     }
 
-    /// `RebaseSettle` is the post-fire `Settle`: it lives only on
-    /// `RebaseSettling`'s `spacing_timer`, `None` on the other phases.
+    /// `PostFireSettle` is the post-fire `Settle`: it lives only on
+    /// `Settling`'s `settle_timer`, `None` on the other phases.
     #[test]
-    fn timer_token_rebase_settle_lives_only_on_rebase_settling() {
+    fn timer_token_post_fire_settle_lives_only_on_settling() {
         let settling = PostFireBurst::new(
             BurstIntent::Standard,
-            PostFirePhase::RebaseSettling {
-                spacing_timer: tid(31),
+            PostFirePhase::Settling {
+                settle_timer: tid(31),
             },
             DirtyProvenance::new(),
         );
-        assert_eq!(settling.timer_token(TimerKind::RebaseSettle), Some(tid(31)));
+        assert_eq!(
+            settling.timer_token(TimerKind::PostFireSettle),
+            Some(tid(31)),
+        );
 
         for phase in [
             PostFirePhase::Awaiting {
@@ -4196,197 +4045,44 @@ mod tests {
             PostFirePhase::Rebasing(ProbeSlot::empty()),
         ] {
             let post = PostFireBurst::new(BurstIntent::Standard, phase, DirtyProvenance::new());
-            assert!(post.timer_token(TimerKind::RebaseSettle).is_none());
+            assert!(post.timer_token(TimerKind::PostFireSettle).is_none());
         }
     }
 
-    /// The ceiling edge-methods are the no-bypass seam: `RebaseCeiling`
-    /// projects `Some` only while `Armed`, and the two typed edges
-    /// (`arm` once, `mark_reached`) are the sole way to move the
-    /// lifecycle — exactly the [`CertifiedPrior`] / `note_effect_completion`
-    /// discipline applied to the ceiling.
+    /// The post-refactor verdict-fold floor [`quiescence_verdict`] folds
+    /// `(authority, forced)` into the 2D `QuiescenceVerdict` shape —
+    /// total, side-effect-free, four cases. The `forced` bit projects
+    /// onto two different consequence axes inside the dispatch (the
+    /// `Authoritative` arm's fire-anyway vs. natural-fire split, and
+    /// the `Undischarged` arm's abandon-with-diagnostic vs. retry
+    /// split), but the floor's job is one bit-faithful projection.
     #[test]
-    fn rebase_ceiling_lifecycle_is_arm_once_no_bypass() {
-        let mut post = PostFireBurst::new(
-            BurstIntent::Standard,
-            PostFirePhase::Rebasing(ProbeSlot::empty()),
-            DirtyProvenance::new(),
-        );
-
-        // Born NotStarted: no timer, not reached.
-        assert!(post.timer_token(TimerKind::RebaseCeiling).is_none());
-        assert!(!post.rebase_ceiling_reached());
-
-        // NotStarted → Armed: the edge lands, the timer projects.
-        assert!(post.arm_rebase_ceiling(tid(64)));
-        assert_eq!(post.timer_token(TimerKind::RebaseCeiling), Some(tid(64)));
-        assert!(!post.rebase_ceiling_reached());
-
-        // Arm-once: a second arm is a `false` no-op, the original
-        // timer is preserved (the `RebaseSettling → Rebasing` re-entry
-        // must not mint a redundant heap entry).
-        assert!(!post.arm_rebase_ceiling(tid(99)));
-        assert_eq!(post.timer_token(TimerKind::RebaseCeiling), Some(tid(64)));
-
-        // Armed → Reached: the terminal latches, the stale timer
-        // stops projecting (it lazy-drops), `reached` flips true.
-        assert!(post.mark_rebase_ceiling_reached());
-        assert!(post.rebase_ceiling_reached());
-        assert!(post.timer_token(TimerKind::RebaseCeiling).is_none());
-
-        // Idempotent terminal: re-marking is a `false` no-op; arming a
-        // Reached ceiling is rejected (no Reached → Armed regression).
-        assert!(!post.mark_rebase_ceiling_reached());
-        assert!(!post.arm_rebase_ceiling(tid(7)));
-        assert!(post.rebase_ceiling_reached());
-
-        // `mark_reached` from `NotStarted` is the loud-regression
-        // signal (`false`) — the ceiling only latches from `Armed`.
-        let mut fresh = PostFireBurst::new(
-            BurstIntent::Standard,
-            PostFirePhase::Rebasing(ProbeSlot::empty()),
-            DirtyProvenance::new(),
-        );
-        assert!(!fresh.mark_rebase_ceiling_reached());
-        assert!(!fresh.rebase_ceiling_reached());
-    }
-
-    /// An `Active(PostFire)` burst folds its own `certified` N=2 proof
-    /// (`Some`, never `None`) — the post-fire rebase loop is a
-    /// legitimate fold site, not a regression. `None ⇔ Idle | Pending`
-    /// is produced only one layer up, at `ProfileState`.
-    #[test]
-    fn post_fire_advance_quiescence_folds_its_own_certified() {
-        let h = 0xabc1_u128;
-        let mut burst = ActiveBurst::PostFire(PostFireBurst::new(
-            BurstIntent::Standard,
-            PostFirePhase::Rebasing(ProbeSlot::empty()),
-            DirtyProvenance::new(),
-        ));
-
-        // First Authoritative sample: no prior ⇒ Unstable (`Some`, not
-        // a `None` structural-regression).
-        assert_eq!(
-            burst.advance_quiescence(ProofAuthority::Authoritative, h),
-            Some(QuiescenceVerdict::Unstable),
-        );
-        // Second equal Authoritative sample: N=2 settled ⇒ Stable.
-        assert_eq!(
-            burst.advance_quiescence(ProofAuthority::Authoritative, h),
-            Some(QuiescenceVerdict::Stable),
-        );
-
-        // The fold lives on the post-fire burst's own `certified`
-        // (a fresh PostFireBurst opens a fresh N=2 sequence).
-        let mut fresh = ActiveBurst::PostFire(PostFireBurst::new(
-            BurstIntent::Standard,
-            PostFirePhase::Rebasing(ProbeSlot::empty()),
-            DirtyProvenance::new(),
-        ));
-        assert_eq!(
-            fresh.advance_quiescence(ProofAuthority::Authoritative, h),
-            Some(QuiescenceVerdict::Unstable),
-            "a fresh post-fire burst does not inherit the prior carrier's sample",
-        );
-
-        // The only `None` is `Idle | Pending` at the ProfileState
-        // layer; `Active(PostFire)` always folds `Some`.
-        let mut idle = ProfileState::Idle;
-        assert!(
-            idle.advance_quiescence(ProofAuthority::Authoritative, h)
-                .is_none()
-        );
-        let mut active = ProfileState::Active(
-            ActiveBurst::PostFire(PostFireBurst::new(
-                BurstIntent::Standard,
-                PostFirePhase::Rebasing(ProbeSlot::empty()),
-                DirtyProvenance::new(),
-            )),
-            BurstFinish::ReturnToIdle,
-        );
-        assert_eq!(
-            active.advance_quiescence(ProofAuthority::Authoritative, h),
-            Some(QuiescenceVerdict::Unstable),
-        );
-    }
-
-    /// `CertifiedPrior::advance` exhaustively — the N=2 quiescence
-    /// floor shared by both carriers. Covers `authority × prior ×
-    /// response`: the `None`-prior bootstrap, the equal/changed
-    /// `Authoritative` verdicts, and the load-bearing `Undischarged`
-    /// **withhold** (the prior is never advanced by an unread sample,
-    /// so the next sample is never compared against an unread hash).
-    #[test]
-    fn certified_prior_advance_is_the_n2_floor() {
-        let h1 = 0x1111_u128;
-        let h2 = 0x2222_u128;
+    fn quiescence_verdict_folds_authority_forced_pair() {
         let unread: std::sync::Arc<std::path::Path> =
             std::sync::Arc::from(std::path::Path::new("first/unread"));
         let undischarged = || ProofAuthority::Undischarged {
             first_unread: std::sync::Arc::clone(&unread),
         };
 
-        // Fresh: no public setter; `== new()` ⟺ no Authoritative
-        // sample recorded yet.
-        let mut c = CertifiedPrior::new();
-        assert_eq!(c, CertifiedPrior::default());
-
-        // Bootstrap: prior `None` ⇒ first Authoritative sample is
-        // `Unstable` by construction, and records the response.
         assert_eq!(
-            c.advance(ProofAuthority::Authoritative, h1),
-            QuiescenceVerdict::Unstable,
-        );
-        assert_ne!(
-            c,
-            CertifiedPrior::new(),
-            "an Authoritative sample advanced the prior"
-        );
-        // Equal next sample ⇒ Stable (the N=2 close).
-        assert_eq!(
-            c.advance(ProofAuthority::Authoritative, h1),
-            QuiescenceVerdict::Stable,
-        );
-        // Changed sample ⇒ Unstable, and the prior re-bases to it.
-        assert_eq!(
-            c.advance(ProofAuthority::Authoritative, h2),
-            QuiescenceVerdict::Unstable,
+            quiescence_verdict(ProofAuthority::Authoritative, false),
+            QuiescenceVerdict::Authoritative { forced: false },
         );
         assert_eq!(
-            c.advance(ProofAuthority::Authoritative, h2),
-            QuiescenceVerdict::Stable,
+            quiescence_verdict(ProofAuthority::Authoritative, true),
+            QuiescenceVerdict::Authoritative { forced: true },
         );
-
-        // Undischarged **withhold**: returns the verdict carrying
-        // `first_unread` verbatim, and does NOT advance the prior — the
-        // following equal-to-the-pre-withhold-prior sample is still
-        // `Stable`, proving the unread `h1` never became the prior.
-        let v = c.advance(undischarged(), h1);
+        let v = quiescence_verdict(undischarged(), false);
         assert!(
-            matches!(&v, QuiescenceVerdict::Undischarged { first_unread }
+            matches!(&v, QuiescenceVerdict::Undischarged { first_unread, terminal: false }
                 if first_unread.as_ref() == std::path::Path::new("first/unread")),
-            "Undischarged carries first_unread verbatim; got {v:?}",
+            "Undischarged + !forced carries first_unread verbatim and projects terminal=false; got {v:?}",
         );
-        assert_eq!(
-            c.advance(ProofAuthority::Authoritative, h2),
-            QuiescenceVerdict::Stable,
-            "the Undischarged sample did not advance the prior off h2",
-        );
-
-        // Undischarged on a fresh prior leaves it `None` (still
-        // `== new()`): the next Authoritative sample is `Unstable`, not
-        // compared against the unread hash.
-        let mut fresh = CertifiedPrior::new();
-        let _ = fresh.advance(undischarged(), h1);
-        assert_eq!(
-            fresh,
-            CertifiedPrior::new(),
-            "Undischarged on a None prior is a pure withhold — prior unchanged",
-        );
-        assert_eq!(
-            fresh.advance(ProofAuthority::Authoritative, h1),
-            QuiescenceVerdict::Unstable,
-            "post-withhold the prior is still None ⇒ bootstrap Unstable, not a false Stable",
+        let v = quiescence_verdict(undischarged(), true);
+        assert!(
+            matches!(&v, QuiescenceVerdict::Undischarged { first_unread, terminal: true }
+                if first_unread.as_ref() == std::path::Path::new("first/unread")),
+            "Undischarged + forced carries first_unread verbatim and projects terminal=true; got {v:?}",
         );
     }
 
@@ -4421,7 +4117,7 @@ mod tests {
             TimerKind::Settle,
             TimerKind::BurstDeadline,
             TimerKind::AwaitGateDeadline,
-            TimerKind::RebaseSettle,
+            TimerKind::PostFireSettle,
             TimerKind::RebaseCeiling,
         ] {
             assert!(s.timer_token(k).is_none());
@@ -4441,7 +4137,7 @@ mod tests {
             TimerKind::Settle,
             TimerKind::BurstDeadline,
             TimerKind::AwaitGateDeadline,
-            TimerKind::RebaseSettle,
+            TimerKind::PostFireSettle,
             TimerKind::RebaseCeiling,
         ] {
             assert!(s.timer_token(k).is_none());
@@ -4524,8 +4220,8 @@ mod tests {
             ProfileState::Active(
                 ActiveBurst::PostFire(PostFireBurst::new(
                     BurstIntent::Standard,
-                    PostFirePhase::RebaseSettling {
-                        spacing_timer: tid(4),
+                    PostFirePhase::Settling {
+                        settle_timer: tid(4),
                     },
                     DirtyProvenance::new(),
                 )),
@@ -4791,11 +4487,6 @@ mod tests {
         );
         assert_eq!(pre.probe_target, anchor);
         assert_eq!(pre.last_event_time, Some(now));
-        assert_eq!(
-            pre.certified,
-            CertifiedPrior::new(),
-            "a restarted burst opens a fresh N=2 quiescence sequence",
-        );
     }
 
     /// A Seed-origin residual restarts just as a Standard one does: the
@@ -4834,11 +4525,6 @@ mod tests {
             pre.dirty.chains(),
             expected_chains(&["/w/c1"]),
             "the move preserves the residual's captured path across origins",
-        );
-        assert_eq!(
-            pre.certified,
-            CertifiedPrior::new(),
-            "a restarted burst opens a fresh N=2 quiescence sequence",
         );
     }
 

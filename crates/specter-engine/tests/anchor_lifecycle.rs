@@ -87,9 +87,8 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::File);
 
-    // Q first — completes its N=2 Seed (File anchor → AnchorOk both
-    // samples) → Idle, kind=Some(File). The immediate Seed is
-    // Batching-first: no probe at attach.
+    // Q first — completes its Seed (File anchor → AnchorOk) → Idle,
+    // kind=Some(File).
     let t_q = Instant::now();
     let (_sid_q, pid_q, out_q) = attach_at(
         &mut e,
@@ -100,8 +99,8 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         t_q,
     );
     assert!(
-        first_probe_correlation(&out_q).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&out_q).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     let _ = seed_to_idle_with(
         &mut e,
@@ -119,8 +118,8 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     let t_p = t_q + SETTLE * 3;
     let (_sid_p, pid_p, out_p) = attach_at(&mut e, "P", anchor, ClassSet::EMPTY, MAX_SETTLE, t_p);
     assert!(
-        first_probe_correlation(&out_p).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&out_p).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     // `Profile.kind` is pinned at construction from the anchor's
     // classified kind, independent of the Batching-first Seed.
@@ -135,7 +134,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     // Expire P's first settle window → first Seed probe, then drive it
     // to Vanished. discard_anchor_state clears P.kind, P.current,
     // P.baseline, P.anchor_claim. Vanished terminates the Seed on its
-    // first response — N=2's second cycle is never reached.
+    // first response.
     let (p_corr, p_at) = seed_settle_to_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -234,8 +233,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
 
-    // Q's N=2 Seed (Dir anchor → SubtreeProven both samples) → Idle.
-    // The immediate Seed is Batching-first: no probe at attach.
+    // Q's Seed (Dir anchor → SubtreeProven) → Idle.
     let t_q = Instant::now();
     let (_sid_q, pid_q, out_q) = attach_at(
         &mut e,
@@ -246,8 +244,8 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         t_q,
     );
     assert!(
-        first_probe_correlation(&out_q).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&out_q).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     let _ = seed_to_idle(&mut e, pid_q, &dir_snap(&[]), t_q);
 
@@ -257,8 +255,8 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     let t_p = t_q + SETTLE * 3;
     let (_sid_p, pid_p, out_p) = attach_at(&mut e, "P", anchor, ClassSet::EMPTY, MAX_SETTLE, t_p);
     assert!(
-        first_probe_correlation(&out_p).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&out_p).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     assert_eq!(
         e.profiles().get(pid_p).unwrap().kind(),
@@ -344,8 +342,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         .expect("test live parent");
     e.tree_mut().set_kind(anchor, ResourceKind::File);
 
-    // Q's N=2 Seed (File anchor → AnchorOk both samples) → Idle.
-    // The immediate Seed is Batching-first: no probe at attach.
+    // Q's Seed (File anchor → AnchorOk) → Idle.
     let t_q = Instant::now();
     let (_sid_q, pid_q, out_q) = attach_at(
         &mut e,
@@ -356,8 +353,8 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         t_q,
     );
     assert!(
-        first_probe_correlation(&out_q).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&out_q).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     let _ = seed_to_idle_with(
         &mut e,
@@ -370,14 +367,13 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     let t_p = t_q + SETTLE * 3;
     let (_sid_p, pid_p, out_p) = attach_at(&mut e, "P", anchor, ClassSet::EMPTY, MAX_SETTLE, t_p);
     assert!(
-        first_probe_correlation(&out_p).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&out_p).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
 
     // Expire P's first settle window → first Seed probe; drive it to
     // Failed. dispatch_seed_failed clears P.kind and terminates the
-    // Seed on its first response (the N=2 second cycle is never
-    // reached).
+    // Seed on its first response.
     let (p_corr, p_at) = seed_settle_to_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {

@@ -19,8 +19,8 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, rebase_loop_to_idle, reconfirm_probed, seed_to_idle,
-    verify_n2,
+    MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, post_fire_settle_id, rebase_post_fire_to_idle,
+    reconfirm_probed, seed_to_idle, verify_n2,
 };
 use std::time::{Duration, Instant};
 
@@ -85,11 +85,11 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     // `coverage::has_active_standard_descendant` sweep run at every
     // `finish_burst_to_idle` — a query, not a cached counter. The parent
     // must NOT reconfirm while the child cycles Verifying → Awaiting →
-    // Rebasing → (residual restart) → Batching → Verifying: the child
-    // never leaves the Active Standard burst — the residual restart is
-    // an in-place PostFire→PreFire move, so there is no finish-then-start
-    // flicker for the sweep to misread as a gap — and the parent
-    // reconfirms exactly once, at the restarted burst's single
+    // Settling → Rebasing → (residual restart) → Batching → Verifying:
+    // the child never leaves the Active Standard burst — the residual
+    // restart is an in-place PostFire→PreFire move, so there is no
+    // finish-then-start flicker for the sweep to misread as a gap — and
+    // the parent reconfirms exactly once, at the restarted burst's single
     // `finish_burst_to_idle`.
     let mut e = Engine::new();
     let src = e.tree_mut().ensure_root("src", ResourceRole::User);
@@ -135,9 +135,9 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     );
     let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_p).unwrap().profile();
-    // The parent's Seed is Batching-first; drive its N=2
-    // quiescence proof to a pinned `Idle` baseline (per-Profile, by-id
-    // timer steps so the child Seed below is untouched).
+    // The parent's cold-arm Seed pins on one Authoritative response —
+    // drive it to a settled `Idle` baseline before the child attach so
+    // the child's Seed has a clean settle window.
     let parent_seed_done = seed_to_idle(&mut e, pid_parent, &dir_snap(&[]), now);
 
     // Child: recursive @ /src/foo, CONTENT mask so a Modified at
@@ -158,15 +158,14 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     );
     let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_c).unwrap().profile();
-    // Drive the child's Seed N=2, rebased strictly past the parent
-    // Seed's consumed settle windows. The child attached at `now` so
-    // its Batching settle id is read fresh from its still-Batching
-    // state; stepping it at a later instant is quiet-window-clean.
+    // Drive the child's cold-arm Seed to Idle past the parent's
+    // consumed settle windows so the Standard timeline below is
+    // quiet-window-clean.
     let child_seed_done = seed_to_idle(&mut e, pid_child, &child_snap, parent_seed_done);
 
     // Child Standard burst FIRST (so it gates the parent), then the
-    // parent's own Standard burst. The Seed N=2 drives pushed the clock
-    // ~4·SETTLE past `now`; rebase the Standard timeline past them.
+    // parent's own Standard burst. Both Seeds consumed their settle
+    // windows above; rebase the Standard timeline past them.
     let t1 = child_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
@@ -201,14 +200,10 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         )
     };
 
-    // ── N=2 #1: parent stabilises while the child is mid-Standard-burst
-    // → Draining. Layer B opens a fresh Standard burst with
-    // a fresh `CertifiedPrior`, so the parent's first Verify sample
-    // is `Unstable` by construction (prime ⇒ re-batch); only the
-    // second settle-spaced hash-equal sample is `Stable`. The child is
-    // parked in Verifying with no expirable settle timer, so draining
-    // the parent's re-armed settle does not advance it — it keeps
-    // gating.
+    // Parent verifies first and stabilises while the child is still
+    // mid-Standard-burst → `Draining` (gated by the covered child). One
+    // `Authoritative` sample folds to a fire decision; the gate diverts
+    // it to Draining because `has_active_standard_descendant` is true.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -218,21 +213,19 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         "child gates the parent before the parent stabilises",
     );
     let n2_p = verify_n2(&mut e, pid_parent, &dir_snap(&[]), t2);
-    assert!(
-        n2_p.primed.effects().is_empty() && !reconfirm_probed(&n2_p.primed, pid_parent),
-        "parent prime sample (prior == None ⇒ Unstable) must not fire",
-    );
     let parent_parked_at = n2_p.confirm_at;
     assert!(
+        !reconfirm_probed(&n2_p.confirmed, pid_parent),
+        "Draining-divert emits no reconfirm probe (parent went Verifying → Draining)",
+    );
+    assert!(
         parent_is_draining(&e),
-        "parent enters Draining (stable verdict, child still gating)",
+        "parent enters Draining (stable verdict gated by the child)",
     );
 
-    // ── N=2 #2: child Verifying stable → fires (Awaiting). The child's
-    // burst is also fresh (its carrier opened `None` at the FsEvent),
-    // so it too needs prime → drain → confirm. The parent is parked in
-    // Draining holding only its 6 s BurstDeadline, so draining the
-    // child's re-armed settle does not disturb it.
+    // Child verifies stable → fires (`Awaiting`). The parent is parked
+    // in Draining holding only its `BurstDeadline`, so the child's
+    // verify response leaves the parent untouched.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -242,29 +235,25 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         "child still gates the parent before it stabilises",
     );
     let n2_c = verify_n2(&mut e, pid_child, &child_snap, parent_parked_at);
-    assert!(
-        n2_c.primed.effects().is_empty()
-            && !reconfirm_probed(&n2_c.primed, pid_parent)
-            && parent_is_draining(&e),
-        "child prime sample must not fire and must not disturb the Draining parent",
-    );
     let child_parked_at = n2_c.confirm_at;
-    let stable_out = n2_c.confirmed;
-    let child_effect = stable_out
+    let child_effect = n2_c
+        .confirmed
         .effects()
         .first()
         .cloned()
         .expect("child fired one Effect at the stable verdict");
     assert!(
-        !reconfirm_probed(&stable_out, pid_parent) && parent_is_draining(&e),
+        !reconfirm_probed(&n2_c.confirmed, pid_parent) && parent_is_draining(&e),
         "parent does not reconfirm at the child's stable verdict",
     );
 
     // Rebase tail kept inline (irregular: final-window absorb + residual
-    // restart — not the clean rebase_loop_to_idle shape).
-    // EffectComplete → child transition_to_rebasing(First). No finish,
-    // no sweep — the child stays Active(PostFire) for the whole loop.
-    let rebase_out = e.step(
+    // restart — not the clean rebase_post_fire_to_idle shape).
+    //
+    // EffectComplete (last completion) routes Awaiting → Settling; the
+    // rebase probe is minted on PostFireSettle expiry. No finish, no
+    // sweep — the child stays Active(PostFire) for the whole loop.
+    let settle_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid_c,
             key: child_effect.key(),
@@ -272,71 +261,49 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         }),
         child_parked_at,
     );
-    let rebase_corr1 = e
-        .pending_probe_for(ProbeOwner::Profile(pid_child))
-        .expect("child rebase probe #1 in flight");
+    let settle_timer = post_fire_settle_id(&e, pid_child);
     assert!(
-        !reconfirm_probed(&rebase_out, pid_parent) && parent_is_draining(&e),
-        "parent does not reconfirm during child Rebasing #1",
+        !reconfirm_probed(&settle_out, pid_parent) && parent_is_draining(&e),
+        "parent does not reconfirm at EffectComplete (Settling has no probe)",
     );
 
-    // Sample 1 (prior `None`) ⇒ Unstable ⇒ RebaseSettling. An absorb
-    // here would be cleared by the next transition_to_rebasing re-arm,
-    // so the residual that drives the restart must land in the FINAL
-    // round-trip.
-    let s1 = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_child),
-            correlation: rebase_corr1,
-            outcome: ProbeOutcome::SubtreeProven {
-                snapshot: child_snap.clone(),
-                authority: ProofAuthority::Authoritative,
-            },
-        }),
-        child_parked_at,
-    );
-    assert!(
-        !reconfirm_probed(&s1, pid_parent) && parent_is_draining(&e),
-        "parent does not reconfirm across the child's first rebase sample",
-    );
-    let spacing_timer = match e.profiles().get(pid_child).unwrap().state() {
-        ProfileState::Active(
-            ActiveBurst::PostFire(PostFireBurst {
-                phase: PostFirePhase::RebaseSettling { spacing_timer },
-                ..
-            }),
-            _,
-        ) => *spacing_timer,
-        other => {
-            panic!(
-                "child rebase sample 1 must loop to Active(PostFire(RebaseSettling)); got {other:?}"
-            )
-        }
-    };
-
-    // RebaseSettle expiry (by id — scoped to the child, parent
-    // untouched) → Rebasing #2, the FINAL round-trip.
-    let t_respace = child_parked_at + SETTLE;
-    let s2 = e.step(
+    // PostFireSettle expiry (by id — scoped to the child, parent
+    // untouched) → child enters Rebasing with a fresh probe in flight.
+    let t_rebase = child_parked_at + SETTLE;
+    let rebase_out = e.step(
         Input::TimerExpired {
             profile: pid_child,
-            kind: TimerKind::RebaseSettle,
-            id: spacing_timer,
+            kind: TimerKind::PostFireSettle,
+            id: settle_timer,
         },
-        t_respace,
+        t_rebase,
     );
-    let rebase_corr2 = e
+    let rebase_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
-        .expect("RebaseSettle re-arms the child's Rebasing probe #2");
+        .expect("PostFireSettle expiry mints the child's Rebasing probe");
     assert!(
-        !reconfirm_probed(&s2, pid_parent) && parent_is_draining(&e),
-        "parent does not reconfirm across the child's settle-spaced re-arm",
+        !reconfirm_probed(&rebase_out, pid_parent) && parent_is_draining(&e),
+        "parent does not reconfirm across PostFireSettle → Rebasing",
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid_child).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PostFire(PostFireBurst {
+                    phase: PostFirePhase::Rebasing(_),
+                    ..
+                }),
+                _,
+            ),
+        ),
+        "child entered Active(PostFire(Rebasing)) on PostFireSettle expiry",
     );
 
-    // Descendant edit absorbed during the FINAL Rebasing round-trip —
-    // the genuine final-window residual (no further loop entry clears
-    // it).
-    let t_absorb = t_respace + Duration::from_millis(5);
+    // Descendant edit absorbed during the Rebasing round-trip — the
+    // final-window residual that seeds the restart. `last_event_time`
+    // is also updated; no PostFireSettle is in flight while Rebasing,
+    // so the absorb writes purely into the residual.
+    let t_absorb = t_rebase + Duration::from_millis(5);
     let absorb_out = e.step(
         Input::FsEvent {
             resource: bar,
@@ -349,15 +316,16 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         "parent does not reconfirm while the residual is absorbed",
     );
 
-    // Sample 2 hash-equal ⇒ Stable; non-empty final-window residual ⇒
-    // child restarts in-place. THE key assertion: the child never
-    // leaves the Active Standard burst (no finish-then-start flicker),
-    // so the parent must not reconfirm in this step and stays Draining.
+    // Authoritative ⇒ commit + rebase_baseline; non-empty residual +
+    // ReturnToIdle ⇒ restart_burst_from_fire_tail_residual. THE key
+    // assertion: the child never leaves the Active Standard burst (no
+    // finish-then-start flicker), so the parent must not reconfirm in
+    // this step and stays Draining.
     let t_restart = t_absorb + Duration::from_millis(5);
     let restart_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
-            correlation: rebase_corr2,
+            correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: child_snap.clone(),
                 authority: ProofAuthority::Authoritative,
@@ -391,33 +359,23 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         "parent stays gated across the in-place restart — no flicker",
     );
 
-    // ── N=2 #3: drive the restarted burst to its single finish. The
-    // restart is a fresh PreFireBurst (`into_pre_fire_residual` reset
-    // a fresh `CertifiedPrior`), so it too is N=2: Batching →
-    // Verifying → prime (Unstable ⇒ re-batch) → drain → confirm
-    // (Stable; baseline == current, Sub already fired ⇒ B1 dedup, zero
-    // effects) → finish_burst_to_idle. This restarted burst carries an
-    // EMPTY fire-tail residual, so its finish is the plain
-    // direct-finish path: this single test therefore exercises BOTH the
-    // residual-restart edge (no finish-then-start flicker) AND the
-    // empty-residual "child settles → parent reconfirms at the one
-    // finish_burst_to_idle" case. The sweep runs here for the first
-    // time since the parent entered Draining; the child is now Idle, so
-    // the parent's fresh covered-descendant query is false → reconfirm.
-    // The prime sample must NOT finish, sweep, or disturb the Draining
-    // parent.
-    // Kept inline (not verify_n2): an interleaved mid-N=2 state assert
-    // sits between prime and confirm; only the two settle drains
-    // collapse to drain_due.
-    let t_rdrain = t_restart + SETTLE * 2;
+    // Drive the restarted burst to its single finish. The restarted
+    // Standard burst's first Authoritative response folds to a single
+    // fire decision: baseline.hash() == current.hash() (the rebase
+    // just synced them) AND Sub.has_fired == true ⇒ every Sub
+    // suppresses via B1 dedup, emit_effects returns count == 0, and
+    // fire_and_settle short-circuits to finish_burst_to_idle. One
+    // walk, one response, then finish. The Draining sweep at that
+    // finish flips the parent Draining → Verifying.
+    let t_rdrain = t_restart + SETTLE;
     drain_due(&mut e, t_rdrain);
-    let restart_prime = e
+    let verify_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
-        .expect("restarted burst's Verifying probe in flight (prime sample)");
-    let restart_primed = e.step(
+        .expect("restarted burst's Verifying probe in flight");
+    let finish_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_child),
-            correlation: restart_prime,
+            correlation: verify_corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: child_snap.clone(),
                 authority: ProofAuthority::Authoritative,
@@ -426,41 +384,15 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         t_rdrain,
     );
     assert!(
-        restart_primed.effects().is_empty()
-            && !reconfirm_probed(&restart_primed, pid_parent)
-            && parent_is_draining(&e),
-        "restarted-burst prime must not fire, sweep, or disturb the Draining parent",
-    );
-    assert!(
-        e.profiles()
-            .get(pid_child)
-            .unwrap()
-            .state()
-            .in_active_standard_burst(),
-        "restarted burst still Active after its prime sample re-batches",
-    );
-    let t_rconfirm = t_rdrain + SETTLE * 2;
-    drain_due(&mut e, t_rconfirm);
-    let restart_verify_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid_child))
-        .expect("restarted burst's Verifying probe in flight (confirm sample)");
-    let finish_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_child),
-            correlation: restart_verify_corr,
-            outcome: ProbeOutcome::SubtreeProven {
-                snapshot: child_snap.clone(),
-                authority: ProofAuthority::Authoritative,
-            },
-        }),
-        t_rconfirm,
+        finish_out.effects().is_empty(),
+        "restarted-burst Authoritative is B1-dedup-suppressed (baseline == current)",
     );
     assert!(
         matches!(
             e.profiles().get(pid_child).unwrap().state(),
             ProfileState::Idle
         ),
-        "restarted burst dedup-suppressed (baseline == current) and finished",
+        "restarted burst finished to Idle (zero effects ⇒ direct finish)",
     );
     assert!(
         reconfirm_probed(&finish_out, pid_parent),
@@ -530,9 +462,8 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     );
     let sid_p = specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_p).unwrap().profile();
-    // The parent's Seed is Batching-first; drive its N=2
-    // quiescence proof to a pinned `Idle` baseline (per-Profile, by-id
-    // timer steps so the child Seed below stays untouched).
+    // Drive the parent's Seed to a pinned `Idle` baseline (per-Profile,
+    // by-id timer steps so the child Seed below stays untouched).
     let parent_seed_done = seed_to_idle(&mut e, pid_parent, &dir_snap(&[]), now);
 
     let out_c = e.step(
@@ -551,13 +482,13 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     );
     let sid_c = specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_c).unwrap().profile();
-    // Drive the child's Seed N=2, rebased strictly past the parent
-    // Seed's consumed settle windows.
+    // Drive the child's Seed, rebased strictly past the parent
+    // Seed's consumed settle window.
     let child_seed_done = seed_to_idle(&mut e, pid_child, &dir_snap(&[]), parent_seed_done);
 
     // Child Standard burst FIRST (so it gates the parent), then parent's.
-    // The Seed N=2 drives pushed the clock ~4·SETTLE past `now`; rebase
-    // the Standard timeline past them.
+    // The Seed drives pushed the clock past `now`; rebase the Standard
+    // timeline past them.
     let t1 = child_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
@@ -577,13 +508,10 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
 
-    // ── N=2 #1: parent stabilises while the child gates it → Draining.
-    // Layer B opens the parent's fresh Standard burst with
-    // a fresh `CertifiedPrior`, so its first Verify sample is
-    // `Unstable` by construction (prime ⇒ re-batch); the second
-    // settle-spaced hash-equal sample is `Stable`. The child is parked
-    // in Verifying with no expirable settle timer, so draining the
-    // parent's re-armed settle keeps it gating.
+    // Parent stabilises while the child gates it → Draining. The parent's
+    // Standard burst folds its single Authoritative verify response to
+    // `Stable` directly, and the child still being mid-burst routes the
+    // parent through `transition_to_draining` instead of firing.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -593,10 +521,6 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         "child gates the parent before the parent stabilises",
     );
     let n2_parent = verify_n2(&mut e, pid_parent, &dir_snap(&[]), t2);
-    assert!(
-        n2_parent.primed.effects().is_empty() && !reconfirm_probed(&n2_parent.primed, pid_parent),
-        "parent prime sample (prior == None ⇒ Unstable) must not fire",
-    );
     let parent_parked_at = n2_parent.confirm_at;
     assert!(
         matches!(
@@ -649,12 +573,11 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
             .in_active_standard_burst(),
     );
 
-    // ── N=2 #2: drive the child through its full fire cycle. Its burst
-    // is also fresh (carrier opened `None`), so it needs prime → drain
-    // → confirm. The parent is parked in Draining holding only its 6 s
-    // BurstDeadline, and the interposed `mid` Profile sits in Seed with
-    // no expirable settle timer, so draining the child's re-armed
-    // settle disturbs neither. No reconfirm until the child finishes.
+    // Drive the child through its full fire cycle. The parent is parked
+    // in Draining holding only its BurstDeadline, and the interposed
+    // `mid` Profile sits in Seed with no expirable settle timer, so the
+    // child's settle drain disturbs neither. No reconfirm until the
+    // child finishes.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -664,10 +587,6 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         "child still gates the Draining parent before it stabilises",
     );
     let n2_child = verify_n2(&mut e, pid_child, &dir_snap(&[]), parent_parked_at);
-    assert!(
-        n2_child.primed.effects().is_empty() && !reconfirm_probed(&n2_child.primed, pid_parent),
-        "child prime sample must not fire or reconfirm the parent",
-    );
     let child_parked_at = n2_child.confirm_at;
     let stable_out = n2_child.confirmed;
     let child_effect = stable_out
@@ -688,21 +607,18 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         "parent does not reconfirm until the child's burst finishes",
     );
 
-    // Child post-fire N=2 rebase loop. The child stays Active(PostFire)
-    // for the whole loop, so the parent does not reconfirm until the
-    // child's single finish_burst_to_idle (the Stable verdict).
-    let r = rebase_loop_to_idle(&mut e, pid_child, &dir_snap(&[]), child_parked_at);
+    // Child post-fire rebase loop: PostFireSettle expiry → Rebasing →
+    // response → commit. The child stays Active(PostFire) for the whole
+    // loop, so the parent does not reconfirm until the child's single
+    // finish_burst_to_idle.
+    let r = rebase_post_fire_to_idle(&mut e, pid_child, &dir_snap(&[]), child_parked_at);
     assert!(
-        !reconfirm_probed(&r.s1, pid_parent),
-        "parent does not reconfirm across the child's first rebase sample",
-    );
-    // RebaseSettle expiry (by id — scoped to the child) → Rebasing #2.
-    assert!(
-        !reconfirm_probed(&r.rearm, pid_parent),
-        "parent does not reconfirm across the child's settle-spaced re-arm",
+        !reconfirm_probed(&r.settle, pid_parent),
+        "parent does not reconfirm across the child's PostFireSettle expiry \
+         (Settling → Rebasing)",
     );
 
-    // Sample 2 hash-equal ⇒ Stable → child finish_burst_to_idle. The
+    // Response Authoritative ⇒ commit → child finish_burst_to_idle. The
     // sweep re-evaluates the parent's fresh query (child now Idle,
     // interposed Profile only Seed) → false → parent reconfirms. No
     // panic (the old `dirty_descendants underflow` debug_assert is
@@ -784,9 +700,8 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     );
     let sid_a = specter_core::testkit::first_attached_sub(&out_a).expect("attach_sub succeeded");
     let pid_a = e.subs().get(sid_a).unwrap().profile();
-    // Every Seed is Batching-first; drive A's N=2 quiescence
-    // proof to a pinned `Idle` baseline (per-Profile, by-id timer steps
-    // so the B and P Seeds below stay untouched).
+    // Drive A's Seed to a pinned `Idle` baseline (per-Profile, by-id
+    // timer steps so the B and P Seeds below stay untouched).
     let a_seed_done = seed_to_idle(&mut e, pid_a, &dir_snap(&[]), now);
 
     // B @ /src/mid (recursive): covers /src/mid/foo, so it sits on P's
@@ -809,8 +724,8 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     );
     let sid_b = specter_core::testkit::first_attached_sub(&out_b).expect("attach_sub succeeded");
     let pid_b = e.subs().get(sid_b).unwrap().profile();
-    // Drive B's Seed N=2, rebased strictly past A's consumed settle
-    // windows. B then sits pinned at `Idle` — exactly the state the
+    // Drive B's Seed, rebased strictly past A's consumed settle
+    // window. B then sits pinned at `Idle` — exactly the state the
     // later immediate-reap detach requires.
     let b_seed_done = seed_to_idle(&mut e, pid_b, &dir_snap(&[]), a_seed_done);
 
@@ -831,14 +746,13 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     );
     let sid_p = specter_core::testkit::first_attached_sub(&out_pp).expect("attach_sub succeeded");
     let pid_p = e.subs().get(sid_p).unwrap().profile();
-    // Drive P's Seed N=2, rebased strictly past B's consumed settle
-    // windows.
+    // Drive P's Seed, rebased strictly past B's consumed settle window.
     let p_seed_done = seed_to_idle(&mut e, pid_p, &dir_snap(&[]), b_seed_done);
 
     // P's Standard burst from its own anchor `foo` (drives only P), then
-    // A's own Standard burst from its anchor `src`. The three Seed N=2
-    // drives pushed the clock ~6·SETTLE past `now`; rebase the Standard
-    // timeline past them.
+    // A's own Standard burst from its anchor `src`. The three Seed
+    // drives pushed the clock past `now`; rebase the Standard timeline
+    // past them.
     let t1 = p_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
@@ -863,13 +777,10 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
 
-    // ── N=2 #1: A stabilises while P gates it through the chain
-    // P → B → A → A enters Draining. Layer B opens A's fresh Standard
-    // burst with a fresh `CertifiedPrior`, so its first Verify
-    // sample is `Unstable` by construction (prime ⇒ re-batch); the
-    // second settle-spaced hash-equal sample is `Stable`. P is parked
-    // in Verifying with no expirable settle timer, so draining A's
-    // re-armed settle keeps it gating.
+    // A stabilises while P gates it through the chain P → B → A →
+    // A enters Draining. A's single Authoritative verify response
+    // folds to `Stable` directly; P still being mid-burst routes A
+    // through `transition_to_draining` instead of firing.
     assert!(
         e.profiles()
             .get(pid_p)
@@ -879,10 +790,6 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         "P gates A (via the intermediate B) before A stabilises",
     );
     let n2_a = verify_n2(&mut e, pid_a, &dir_snap(&[]), t2);
-    assert!(
-        n2_a.primed.effects().is_empty() && !reconfirm_probed(&n2_a.primed, pid_a),
-        "A prime sample (prior == None ⇒ Unstable) must not fire",
-    );
     let a_parked_at = n2_a.confirm_at;
     assert!(
         matches!(
@@ -913,15 +820,13 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
          still-bursting P, just no longer through a chain that reaches it",
     );
 
-    // ── N=2 #2: drive P through its full fire cycle. P's burst is also
-    // fresh (carrier opened `None`), so it needs prime → drain →
-    // confirm. A is parked in Draining holding only its 6 s
-    // BurstDeadline, so draining P's re-armed settle does not disturb
-    // it (and no `finish_burst_to_idle` runs in a drain, so the sweep
-    // cannot fire early). At P's single finish the sweep re-checks
-    // *every* Draining Profile; A is found and reconfirmed even though
-    // P's chain no longer reaches it. (A chain-coupled trigger would
-    // strand A here forever.)
+    // Drive P through its full fire cycle. A is parked in Draining
+    // holding only its BurstDeadline, so P's settle drain does not
+    // disturb it (and no `finish_burst_to_idle` runs in a drain, so
+    // the sweep cannot fire early). At P's single finish the sweep
+    // re-checks *every* Draining Profile; A is found and reconfirmed
+    // even though P's chain no longer reaches it. (A chain-coupled
+    // trigger would strand A here forever.)
     assert!(
         e.profiles()
             .get(pid_p)
@@ -931,12 +836,6 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         "P still gates the Draining A before it stabilises",
     );
     let n2_p = verify_n2(&mut e, pid_p, &dir_snap(&[]), a_parked_at);
-    assert!(
-        n2_p.primed.effects().is_empty()
-            && !reconfirm_probed(&n2_p.primed, pid_a)
-            && e.profiles().get(pid_a).unwrap().state().is_draining(),
-        "P prime sample must not fire or reconfirm/disturb the Draining A",
-    );
     let p_parked_at = n2_p.confirm_at;
     let p_stable = n2_p.confirmed;
     let p_effect = p_stable
@@ -956,21 +855,17 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         !reconfirm_probed(&p_stable, pid_a) && !reconfirm_probed(&p_rebase_out, pid_a),
         "A does not reconfirm until P's burst actually finishes",
     );
-    // P's post-fire N=2 rebase loop. P stays Active(PostFire) for the
-    // whole loop, so A does not reconfirm until P's single
-    // finish_burst_to_idle (the Stable verdict).
-    let p_r = rebase_loop_to_idle(&mut e, pid_p, &dir_snap(&[]), p_parked_at);
+    // P's post-fire rebase loop: PostFireSettle expiry → Rebasing →
+    // response → commit. P stays Active(PostFire) for the whole loop,
+    // so A does not reconfirm until P's single finish_burst_to_idle.
+    let p_r = rebase_post_fire_to_idle(&mut e, pid_p, &dir_snap(&[]), p_parked_at);
     assert!(
-        !reconfirm_probed(&p_r.s1, pid_a),
-        "A does not reconfirm across P's first rebase sample",
-    );
-    // RebaseSettle expiry (by id — scoped to P) → Rebasing #2.
-    assert!(
-        !reconfirm_probed(&p_r.rearm, pid_a),
-        "A does not reconfirm across P's settle-spaced re-arm",
+        !reconfirm_probed(&p_r.settle, pid_a),
+        "A does not reconfirm across P's PostFireSettle expiry \
+         (Settling → Rebasing)",
     );
 
-    // Sample 2 hash-equal ⇒ Stable → P finish_burst_to_idle → the
+    // Response Authoritative ⇒ commit → P finish_burst_to_idle → the
     // sweep re-checks every Draining Profile.
     assert!(
         reconfirm_probed(&p_r.finish, pid_a),
@@ -1053,19 +948,18 @@ fn co_located_profiles_independently_record_shared_resource_obligation() {
         "both Profiles contribute the shared resource's watch",
     );
 
-    // Drive both Seeds → Idle with a baseline. Each Seed is
-    // Batching-first and pins only on its own N=2 proof. Driving A's
-    // full N=2 by *A's own* by-id settle steps does not touch B's
-    // independent Seed (per-Profile correlation + per-Profile timer
-    // id); B is then driven by *B's own* fresh Batching settle id,
-    // rebased strictly past A's consumed windows — `seed_to_idle`
+    // Drive both Seeds → Idle with a baseline. Each Seed pins only on
+    // its own Authoritative response. Driving A by *A's own* settle id
+    // does not touch B's independent Seed (per-Profile correlation +
+    // per-Profile timer id); B is then driven by its own fresh probe,
+    // rebased strictly past A's consumed window — `seed_to_idle`
     // asserts each `pid` independently reaches `Idle`.
     let a_seed_done = seed_to_idle(&mut e, pid_a, &dir_snap(&[]), now);
     let b_seed_done = seed_to_idle(&mut e, pid_b, &dir_snap(&[]), a_seed_done);
 
     // One FsEvent on the shared anchor fans to both Profiles; each
     // opens its own Standard burst seeded with the resource. The Seed
-    // N=2 drives pushed the clock ~4·SETTLE past `now`; rebase past them.
+    // drives pushed the clock past `now`; rebase past them.
     let t0 = b_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
@@ -1130,7 +1024,7 @@ struct DrainingFixture {
     pid_child: ProfileId,
     sid_parent: SubId,
     /// The fixture clock at the point the parent reached `Draining`
-    /// (after the N=2 quiescence confirm); subsequent steps reuse it so
+    /// (after the quiescence confirm); subsequent steps reuse it so
     /// the scenario stays deterministic.
     parked_at: Instant,
 }
@@ -1175,9 +1069,8 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     let sid_child =
         specter_core::testkit::first_attached_sub(&out_c).expect("attach_sub succeeded");
     let pid_child = e.subs().get(sid_child).unwrap().profile();
-    // The child's Seed is Batching-first; drive its N=2
-    // quiescence proof to a pinned `Idle` baseline (per-Profile, by-id
-    // timer steps so the parent Seed below stays untouched).
+    // Drive the child's Seed to a pinned `Idle` baseline (per-Profile,
+    // by-id timer steps so the parent Seed below stays untouched).
     let child_seed_done = seed_to_idle(&mut e, pid_child, &dir_snap(&[]), now);
 
     // Parent `A` @ /src — recursive, so it covers /src/child.
@@ -1198,8 +1091,8 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     let sid_parent =
         specter_core::testkit::first_attached_sub(&out_p).expect("attach_sub succeeded");
     let pid_parent = e.subs().get(sid_parent).unwrap().profile();
-    // Drive the parent's Seed N=2, rebased strictly past the child
-    // Seed's consumed settle windows.
+    // Drive the parent's Seed, rebased strictly past the child Seed's
+    // consumed settle window.
     let parent_seed_done = seed_to_idle(&mut e, pid_parent, &dir_snap(&[]), child_seed_done);
 
     // The descendant-before-ancestor premise — asserted, not assumed.
@@ -1220,8 +1113,8 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     // Child Standard burst from its own anchor `child_dir`; parent
     // Standard burst from its own anchor `src`. A NO_EVENTS Profile
     // only bursts from an event at its own anchor, so the two events
-    // stay isolated. The Seed N=2 drives pushed the clock ~4·SETTLE
-    // past `now`; rebase the Standard timeline past them.
+    // stay isolated. The Seed drives pushed the clock past `now`;
+    // rebase the Standard timeline past them.
     let t1 = parent_seed_done + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
@@ -1243,13 +1136,9 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     drain_due(&mut e, t2);
 
     // Parent stabilises while the child still gates it → Draining.
-    // N=2 quiescence: the parent's prime sample (prior == None ⇒
-    // Unstable) re-arms its settle timer. The child is parked in
-    // Verifying with no expirable timer, so draining the parent's
-    // re-armed settle does not advance it — it keeps gating. The
-    // hash-equal confirm sample is the Stable verdict that, with the
-    // child still in an active Standard burst, parks the parent in
-    // Draining.
+    // The parent's single Authoritative verify response folds to
+    // `Stable` directly; the child still being mid-burst routes the
+    // parent through `transition_to_draining` instead of firing.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -1259,10 +1148,6 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
         "child gates the parent before the parent stabilises",
     );
     let n2 = verify_n2(&mut e, pid_parent, &dir_snap(&[]), t2);
-    assert!(
-        n2.primed.effects().is_empty(),
-        "parent prime sample (prior == None ⇒ Unstable) must not fire",
-    );
     let parked_at = n2.confirm_at;
     assert!(
         matches!(

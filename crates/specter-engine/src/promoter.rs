@@ -698,7 +698,7 @@ impl Engine {
                 }
             },
 
-            ProbeRoute::Verifying { .. } | ProbeRoute::Rebasing => {
+            ProbeRoute::Verifying { .. } | ProbeRoute::Rebasing { .. } => {
                 // `Verifying` / `Rebasing` are Profile-only routing
                 // classes — unconstructable for a Promoter owner, whose
                 // gated correlation lives on exactly one Promoter

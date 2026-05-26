@@ -20,8 +20,8 @@ use specter_core::{
     Tree, WatchOp,
 };
 use specter_engine::testkit::{
-    anchor_dir, attach_promoter, attach_returning, complete_effect_to_rebasing,
-    first_probe_correlation, pre_place_dir, rebase_loop_to_idle, seed_settle_to_verifying,
+    anchor_dir, attach_promoter, attach_returning, complete_effect_to_settling,
+    first_probe_correlation, pre_place_dir, rebase_post_fire_to_idle, seed_settle_to_verifying,
     seed_to_idle,
 };
 use specter_engine::{Engine, covers};
@@ -180,19 +180,19 @@ fn golden_path_full_lifecycle() {
             .any(|op| matches!(op, WatchOp::Watch { .. }))
     );
     assert!(
-        first_probe_correlation(&attach_out).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&attach_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     assert!(attach_out.effects().is_empty());
 
-    // Seed N=2 quiescence proof → baseline = current = empty snapshot;
+    // Seed quiescence proof → baseline = current = empty snapshot;
     // → Idle. Never emits Effects (fresh Profile).
     let snap_seed = dir_snap(&[]);
     let _ = seed_to_idle(&mut e, pid, &snap_seed, t0);
 
-    // FsEvent on anchor → Standard Settling. The Seed consumed two
-    // settle windows (`t0 + SETTLE*2`); keep instants monotonic by
-    // opening the Standard burst strictly after.
+    // FsEvent on anchor → Standard Settling. The Seed consumed its
+    // settle window; keep instants monotonic by opening the Standard
+    // burst strictly after.
     let t1 = t0 + SETTLE * 2 + Duration::from_millis(10);
     let fs_out = e.step(
         Input::FsEvent {
@@ -214,11 +214,11 @@ fn golden_path_full_lifecycle() {
     // Rebasing — a fresh probe is emitted at the anchor to capture the
     // post-command tree.
     let _ =
-        complete_effect_to_rebasing(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
+        complete_effect_to_settling(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
 
-    // Post-fire N=2 rebase loop (idempotent — same snapshot) → Idle;
+    // Post-fire rebase (idempotent — same snapshot) → Idle;
     // baseline := current (the post-command tree).
-    let _ = rebase_loop_to_idle(
+    let _ = rebase_post_fire_to_idle(
         &mut e,
         pid,
         &snap_seed,
@@ -252,19 +252,18 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
         t0,
     );
 
-    // Seed → Idle with an empty baseline. The Seed is
-    // Batching-first (no probe at attach) and runs an N=2 quiescence
-    // proof before pinning the empty baseline.
+    // Seed → Idle with an empty baseline. The cold-arm Seed answers
+    // its in-flight probe and pins the empty baseline directly.
     assert!(
-        first_probe_correlation(&attach_out).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&attach_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     let snap = dir_snap(&[]);
     let _ = seed_to_idle(&mut e, pid, &snap, t0);
 
     // First fire cycle: FsEvent → Standard → Effect → EffectComplete →
     // Rebase Ok → Idle. The Sub's has_fired is set by the emission.
-    // Open the Standard burst after the Seed's two settle windows so
+    // Open the Standard burst after the Seed's settle window so
     // instants stay monotonic.
     let t1 = t0 + SETTLE * 2 + Duration::from_millis(10);
     e.step(
@@ -277,11 +276,11 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
     let stable_out = drive_standard_burst_to_stable(&mut e, pid, &snap, t1);
     assert_eq!(stable_out.effects().len(), 1, "first fire emits one Effect");
     let _ =
-        complete_effect_to_rebasing(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
-    // Post-fire N=2 rebase loop (idempotent) → Idle; baseline := the
+        complete_effect_to_settling(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
+    // Post-fire rebase (idempotent) → Idle; baseline := the
     // post-command tree. The loop closes to Idle before the trailing
     // event below.
-    let _ = rebase_loop_to_idle(
+    let _ = rebase_post_fire_to_idle(
         &mut e,
         pid,
         &snap,
@@ -354,12 +353,11 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         t0,
     );
 
-    // The Seed is Batching-first; the first Seed probe fires
-    // only after the initial settle expiry. The Vanished arrives on
-    // that first probe — terminal, no second N=2 cycle.
+    // The cold-arm Seed answers its in-flight Verify probe with a
+    // Vanished — terminal, no further sample needed.
     assert!(
-        first_probe_correlation(&out).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     let (correlation, _) = seed_settle_to_verifying(&mut e, pid, t0);
 
@@ -401,8 +399,8 @@ fn pending_event_race_late_probe_response_discarded() {
     // expiry; its correlation is the one the intervening FsEvent will
     // render stale.
     assert!(
-        first_probe_correlation(&attach_out).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&attach_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     let (stale_correlation, _) = seed_settle_to_verifying(&mut e, pid, t0);
 
@@ -469,8 +467,8 @@ fn seed_burst_descendants_watched_via_first_probe() {
     // Unstable (no prior), but `apply_snapshot` still runs the
     // reconcile / Watch side effects on that first response.
     assert!(
-        first_probe_correlation(&attach_out).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&attach_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     let (correlation, _) = seed_settle_to_verifying(&mut e, pid, t0);
 
@@ -510,18 +508,17 @@ fn force_fire_emits_effect_with_forced_true() {
         t0,
     );
 
-    // Complete the Seed burst with an empty baseline. The Seed
-    // is Batching-first (no probe at attach) and runs an N=2 quiescence
-    // proof before pinning.
+    // Complete the Seed burst with an empty baseline. The cold-arm Seed
+    // answers its in-flight Verify probe and pins directly.
     assert!(
-        first_probe_correlation(&attach_out).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&attach_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     let snap = dir_snap(&[]);
     let _ = seed_to_idle(&mut e, pid, &snap, t0);
 
-    // FsEvent → Standard Settling. Open it after the Seed's two settle
-    // windows so instants stay monotonic.
+    // FsEvent → Standard Settling. Open it after the Seed's settle
+    // window so instants stay monotonic.
     let t1 = t0 + SETTLE * 2 + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
@@ -578,8 +575,8 @@ fn step_output_is_sorted() {
     // the *first* Seed probe response (post initial settle expiry),
     // where descendants reconcile — assert sortedness there.
     assert!(
-        first_probe_correlation(&attach_out).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&attach_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     let (correlation, _) = seed_settle_to_verifying(&mut e, pid, t0);
     let leaves: Vec<(String, EntryKind, u64)> = (0..5)
@@ -709,4 +706,13 @@ fn reap_promoter_active_returns_sealed_output() {
             .any(|d| matches!(d, Diagnostic::PromoterReaped { promoter } if *promoter == pid)),
         "PromoterReaped diagnostic emitted",
     );
+    // Under the cold-arm Verifying-first contract, each dynamic Sub's
+    // Profile lands in `Active(PreFire(Verifying))` with the cold-walk
+    // probe armed. `reap_promoter`'s `detach_sub_inner` routes each
+    // Active Profile through `DeferToBurstEnd` (marks for reap, keeps
+    // the burst alive for its Draining-sweep reconfirm). The Profiles
+    // outlive `reap_promoter` with armed slots until a fresh input
+    // drives them. Drop the test engine's Profiles cleanly via the
+    // engine-wide probe cancel.
+    let _ = e.cancel_all_in_flight_probes();
 }

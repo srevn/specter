@@ -111,9 +111,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile();
 
-    // Drive Seed → Idle. The Seed is Batching-first with an
-    // N=2 settle-spaced quiescence proof (no probe at attach); the
-    // helper runs both settle-spaced equal samples to Idle.
+    // Drive Seed → Idle.
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
 

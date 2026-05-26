@@ -22,7 +22,6 @@
 //! the Rebase arm maps it to the rebase-loop consequence.
 
 use crate::Engine;
-use crate::burst::RebaseEntry;
 use crate::engine::is_timer_referenced;
 use crate::path::empty_path;
 use crate::probe::ProbeRoute;
@@ -38,6 +37,7 @@ use specter_core::{
     ProbeSlot, Profile, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState,
     ProofAuthority, QuiescenceVerdict, ReapTrigger, Resource, ResourceId, ResourceKind, StepOutput,
     SubAttachRequest, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchRegistryDiff,
+    quiescence_verdict,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -494,15 +494,21 @@ impl Engine {
                 );
             }
 
-            ProbeRoute::Rebasing => {
+            ProbeRoute::Rebasing { forced } => {
                 // Same certifier as the Verifying choke — the post-fire
-                // rebase loop folds its own N=2 quiescence proof over
+                // rebase response folds through `quiescence_verdict` over
                 // the post-command tree. The verdict drives the
                 // rebase-loop consequence table; `Vanished` / `Failed`
                 // route to the rebase-specific cleanup; `Regressed`
-                // (kind mismatch, DirEnumerated, or no Active carrier)
-                // was already handled inside the certifier.
-                match self.certify_probe_response(profile_id, response.outcome, received, out) {
+                // (kind mismatch, DirEnumerated) was already handled
+                // inside the certifier.
+                match self.certify_probe_response(
+                    profile_id,
+                    response.outcome,
+                    received,
+                    forced,
+                    out,
+                ) {
                     CertifiedResponse::Proceed { snapshot, verdict } => {
                         self.dispatch_rebase_ok(profile_id, snapshot, verdict, now, out);
                     }
@@ -591,25 +597,24 @@ impl Engine {
     /// [`specter_core::Profile::install_dir_current`] /
     /// [`specter_core::Profile::install_file_current`] commit.
     ///
-    /// **Verdict fold.** The carrier folds the certified sample and
-    /// returns the verdict via
-    /// [`specter_core::Profile::advance_quiescence`] —
-    /// [`specter_core::CertifiedPrior::advance`] is the floor (the
-    /// certified-sample invariant lives there, not at this call site).
-    /// `None` means the Profile was `Idle` / `Pending` — no Active burst
-    /// — between the gate and the fold: structurally unreachable (both
-    /// the Verifying and the Rebasing routes guarantee an `Active`
-    /// carrier, and the disarm plus the kind-check-on-success leave the
-    /// variant intact), so a loud regression mapped to `Regressed`, not
-    /// a silent drop. Both carriers fold `Some` (each holds its own
-    /// [`specter_core::CertifiedPrior`]), so the post-fire rebase
-    /// response folds here exactly as the pre-fire verify does — the
-    /// callers diverge only on the *consequence*.
+    /// **Verdict fold.** [`specter_core::quiescence_verdict`] is the
+    /// floor — a pure, total `(ProofAuthority, forced) → QuiescenceVerdict`
+    /// projection. The fold needs no prior sample: the engine's two
+    /// observation channels (walker authority C1, event-quiet witness C2
+    /// — the `forced` bit) fully determine the verdict at the floor.
+    /// `forced` arrives from the caller (read off the burst by
+    /// [`Engine::probe_gate`], packed onto the [`crate::probe::ProbeRoute`]'s
+    /// `Verifying { forced }` / `Rebasing { forced }` payload, threaded
+    /// here); both carriers — pre-fire `PreFireBurst.forced` and
+    /// post-fire `PostFireBurst.forced` — pass through this one site
+    /// symmetrically. The callers diverge only on the *consequence*
+    /// (per-intent fire/pin vs. the rebase-loop table).
     fn certify_probe_response(
         &mut self,
         profile_id: ProfileId,
         outcome: ProbeOutcome,
         correlation: ProbeCorrelation,
+        forced: bool,
         out: &mut StepOutput,
     ) -> CertifiedResponse {
         let (snap, authority) = match outcome {
@@ -641,36 +646,14 @@ impl Engine {
         // `kind_agrees_or_finalize` already tore the burst down via
         // `finalize_anchor_lost`, so the caller does nothing
         // (`Regressed`). Folding a verdict over a soon-discarded
-        // snapshot (and advancing the carrier with its hash) would be
-        // meaningless.
+        // snapshot would be meaningless.
         if !self.kind_agrees_or_finalize(profile_id, &snap, out) {
             return CertifiedResponse::Regressed;
         }
 
-        // The fold is over the freshly-walked *response* hash, never
-        // `current` / `baseline` — the carrier's `advance` is the floor.
-        let response = snap.hash();
-        let Some(verdict) = self
-            .profiles
-            .get_mut(profile_id)
-            .and_then(|p| p.advance_quiescence(authority, response))
-        else {
-            debug_assert!(
-                false,
-                "verdict choke: advance_quiescence yielded None — the \
-                 Profile was Idle/Pending (no Active burst) between the \
-                 gate and the fold (profile = {profile_id:?})",
-            );
-            out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                owner: ProbeOwner::Profile(profile_id),
-                correlation,
-            });
-            return CertifiedResponse::Regressed;
-        };
-
         CertifiedResponse::Proceed {
             snapshot: snap,
-            verdict,
+            verdict: quiescence_verdict(authority, forced),
         }
     }
 
@@ -699,11 +682,9 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        match self.certify_probe_response(profile_id, outcome, correlation, out) {
+        match self.certify_probe_response(profile_id, outcome, correlation, forced, out) {
             CertifiedResponse::Proceed { snapshot, verdict } => {
-                self.dispatch_quiescence_ok(
-                    profile_id, snapshot, verdict, forced, intent, now, out,
-                );
+                self.dispatch_quiescence_ok(profile_id, snapshot, verdict, intent, now, out);
             }
             CertifiedResponse::Vanished => match intent {
                 BurstIntent::Seed => self.dispatch_seed_vanished(profile_id, out),
@@ -846,10 +827,12 @@ impl Engine {
     /// test or fuzzer falls through the same gate.
     ///
     /// `now` flows through to every handler that schedules a follow-up:
-    /// [`Engine::on_settle_expired`]'s reschedule, and
-    /// [`Engine::handle_gate_deadline`] / [`Engine::handle_rebase_settle`]
-    /// / [`Engine::handle_rebase_ceiling`] → `transition_to_rebasing`
-    /// (the rebase-loop ceiling is scheduled at `now + max_settle`).
+    /// [`Engine::on_settle_expired`]'s reschedule,
+    /// [`Engine::handle_post_fire_settle_expired`]'s reschedule fork
+    /// (the post-fire symmetric mirror of pre-fire's),
+    /// [`Engine::handle_gate_deadline`] (drives `Awaiting → Rebasing`
+    /// skip), and [`Engine::handle_rebase_ceiling`] (sets `forced` and
+    /// drives `Settling → Rebasing` now if no probe is in flight).
     /// `BurstDeadline` is the only arm that ignores `now` —
     /// `handle_burst_deadline` sets `forced` and re-points the phase,
     /// scheduling nothing.
@@ -868,9 +851,9 @@ impl Engine {
         match kind {
             TimerKind::Settle => self.on_settle_expired(profile, now, out),
             TimerKind::BurstDeadline => self.handle_burst_deadline(profile, out),
-            TimerKind::AwaitGateDeadline => self.handle_gate_deadline(profile, now, out),
-            TimerKind::RebaseSettle => self.handle_rebase_settle(profile, now, out),
-            TimerKind::RebaseCeiling => self.handle_rebase_ceiling(profile, now, out),
+            TimerKind::AwaitGateDeadline => self.handle_gate_deadline(profile, out),
+            TimerKind::PostFireSettle => self.handle_post_fire_settle_expired(profile, now, out),
+            TimerKind::RebaseCeiling => self.handle_rebase_ceiling(profile, out),
         }
     }
 
@@ -958,18 +941,21 @@ impl Engine {
     /// and zero-edge ([`specter_core::Profile::note_effect_completion`]);
     /// this only routes the verdict:
     /// - `LastReached` ⇒ route on [`BurstFinish`]: `ReturnToIdle` →
-    ///   `transition_to_rebasing` ([`RebaseEntry::First`] — this is the
-    ///   `Awaiting → Rebasing` edge, so `now` threads through for the
-    ///   `RebaseCeiling` scheduled at `now + max_settle`), `Reap` →
+    ///   arm the rebase-loop ceiling at the `Awaiting → Settling` edge
+    ///   ([`Engine::arm_rebase_loop_ceiling`], scheduled at `now +
+    ///   max_settle`), then [`Engine::transition_to_settling`] to open
+    ///   the settle-debounce window (the `Settling → Rebasing` advance
+    ///   lands at settle expiry via
+    ///   `handle_post_fire_settle_expired`); `Reap` →
     ///   `finish_burst_to_idle`.
     /// - `Decremented` ⇒ stay Awaiting.
     /// - else (non-Awaiting, stale, `NotAwaiting`) ⇒ late completion:
     ///   `EffectCompleteForUnknownSub` / `EffectCompleteOutsideAwaiting`.
     ///
-    /// `now` is the wall-clock instant of this completion. It was
-    /// unused before the rebase loop carried a ceiling; reviving it
-    /// (rather than re-deriving an instant) keeps the ceiling deadline
-    /// anchored to the actual `Awaiting → Rebasing` edge.
+    /// `now` is the wall-clock instant of this completion. The
+    /// ceiling timer's deadline (`now + max_settle`) and the
+    /// `Settling` window's `last_event_time` both anchor on this
+    /// instant — the actual `Awaiting → Settling` edge.
     pub(crate) fn on_effect_complete(
         &mut self,
         sub: SubId,
@@ -1011,11 +997,11 @@ impl Engine {
         {
             Some(ProfileState::Active(ActiveBurst::PostFire(post), finish)) => match &post.phase {
                 PostFirePhase::Awaiting { .. } => CompletionRoute::CountDown(*finish),
-                // The counter drained at the `Awaiting → Rebasing`
+                // The counter drained at the `Awaiting → Settling`
                 // edge; a completion arriving anywhere in the rebase
-                // loop (probe in flight or its spacing wait) is a late,
-                // untracked arrival.
-                PostFirePhase::Rebasing(_) | PostFirePhase::RebaseSettling { .. } => {
+                // loop (Settling-debounce or in-flight Rebasing probe)
+                // is a late, untracked arrival.
+                PostFirePhase::Rebasing(_) | PostFirePhase::Settling { .. } => {
                     CompletionRoute::Diagnose
                 }
             },
@@ -1036,7 +1022,12 @@ impl Engine {
                 Some(AwaitVerdict::Decremented) => {}
                 Some(AwaitVerdict::LastReached) => match finish {
                     BurstFinish::ReturnToIdle => {
-                        self.transition_to_rebasing(profile_id, RebaseEntry::First, now, out);
+                        // Arm the loop's ceiling at its start (this is
+                        // the only natural arming site post-§7.2), then
+                        // open the settle-debounce window. The Settling
+                        // → Rebasing advance lands at the settle expiry.
+                        self.arm_rebase_loop_ceiling(profile_id, now);
+                        self.transition_to_settling(profile_id, now, out);
                     }
                     // No Subs left to rebase for; finish_burst_to_idle
                     // runs the burst-end Draining-sweep reconfirm then
@@ -1826,6 +1817,7 @@ impl Engine {
                     event_resource,
                     event_path,
                     event,
+                    now,
                     out,
                 );
             }
@@ -2059,55 +2051,6 @@ impl Engine {
         }
     }
 
-    /// The shared `Undischarged` consequence — the **single source** of
-    /// the liveness terminal for every `dispatch_quiescence_ok` intent
-    /// (one audit site, not divergent per-intent copies of a locked,
-    /// load-bearing path).
-    ///
-    /// A non-observation lies on an obligation chain at `first_unread`,
-    /// so this response cannot certify quiescence. **Never commit** it
-    /// (an unread region must never become the dedup / Seed baseline)
-    /// and **never advance** the carrier (already withheld by
-    /// `advance`):
-    /// - `!forced` ⇒ retry via a fresh settle window
-    ///   ([`Engine::unstable_response_drives_batching`]). No per-tick
-    ///   wedge — a transient cause (e.g. an `EACCES` later cleared)
-    ///   clears on its own.
-    /// - `forced` (max-settle) ⇒ the liveness terminal: surface
-    ///   `first_unread` via [`Diagnostic::QuiescenceCeilingUnreadable`]
-    ///   and `finish_burst_to_idle` **without** `apply_snapshot` and
-    ///   **without** advancing the carrier. The probe slot was disarmed
-    ///   by the response dispatcher before this arm, so the
-    ///   finish-to-Idle precondition holds and the next `FsEvent` opens
-    ///   a fresh burst.
-    ///
-    /// `intent` is a diagnostic *data* field — there is **no**
-    /// control-flow branch on it. It threads onto the ceiling
-    /// diagnostic so the operator story ("a Seed could not establish a
-    /// baseline" vs "a Standard could not reconfirm") survives, exactly
-    /// as on `ProbeVanished` / `ProbeFailed`.
-    fn undischarged_consequence(
-        &mut self,
-        profile_id: ProfileId,
-        first_unread: Arc<Path>,
-        forced: bool,
-        intent: BurstIntent,
-        now: Instant,
-        out: &mut StepOutput,
-    ) {
-        if forced {
-            out.diagnostics
-                .push(Diagnostic::QuiescenceCeilingUnreadable {
-                    profile: profile_id,
-                    first_unread,
-                    intent,
-                });
-            self.finish_burst_to_idle(profile_id, out);
-        } else {
-            self.unstable_response_drives_batching(profile_id, now, out);
-        }
-    }
-
     /// Emit [`Diagnostic::PerFileDriftDroppedOnRecovery`] iff a live
     /// survival witness exists, the post-graft `current` drifted from
     /// it, and the Profile carries a `PerStableFile` Sub. A Seed-Ok
@@ -2119,7 +2062,7 @@ impl Engine {
     ///
     /// Standalone witness-drift predicate, **not** folded into the
     /// drift fork: a PerFile-only recovery never records a fire (so it
-    /// classifies [`Consequence::RecoverySeal`], never
+    /// classifies [`Consequence::SilentPin`], never
     /// [`Consequence::RecoveryFire`]) yet is precisely this signal's
     /// target, so the condition cannot piggy-back on the fork. Invoked
     /// while the witness is still live — at the recovery fire
@@ -2176,12 +2119,12 @@ impl Engine {
                     // `!drifted.is_empty()` guard did.
                     let drifted = self.subs.fired_in(profile_id);
                     if drifted.is_empty() {
-                        Consequence::RecoverySeal
+                        Consequence::SilentPin
                     } else {
                         Consequence::RecoveryFire(drifted)
                     }
                 } else {
-                    Consequence::RecoverySeal
+                    Consequence::SilentPin
                 }
             }
         }
@@ -2199,7 +2142,7 @@ impl Engine {
     /// invariant under the graft, so the classification is
     /// order-stable.
     ///
-    /// [`Consequence::RecoverySeal`] is the only non-firing arm: it has
+    /// [`Consequence::SilentPin`] is the only non-firing arm: it has
     /// no Effect to defer, so it never consults the Draining gate. It
     /// flags the per-file drop *while the witness is still live*, seals
     /// `baseline := observed` (consuming the witness — the structural
@@ -2250,7 +2193,7 @@ impl Engine {
                     out,
                 );
             }
-            Consequence::RecoverySeal => {
+            Consequence::SilentPin => {
                 // Witness-drift honesty BEFORE the rebase consumes the
                 // witness; the predicate self-gates to a live witness +
                 // a `PerStableFile` Sub.
@@ -2311,78 +2254,84 @@ impl Engine {
     }
 
     /// (Seed | Standard, Ok) — map the quiescence `verdict` to its
-    /// consequence. One router for both intents: the verdict is the
-    /// carrier's intent-agnostic fold over two settle-spaced certified
-    /// samples ([`specter_core::CertifiedPrior::advance`], invoked at
-    /// the `dispatch_burst_outcome` choke), so `intent` only selects
+    /// consequence. One router for both intents: `intent` only selects
     /// the [`Consequence`] split in [`Engine::classify_consequence`]
-    /// and threads onto the [`Engine::undischarged_consequence`]
-    /// diagnostic — there is no forked path.
+    /// and threads onto the [`Diagnostic::QuiescenceCeilingUnreadable`]
+    /// payload — there is no forked path.
     ///
-    /// - [`QuiescenceVerdict::Stable`], or [`QuiescenceVerdict::Unstable`]
-    ///   `+ forced` — the fireable verdict: [`Engine::fire_or_seal`]
-    ///   (commit, classify, then the gated fire or the silent
-    ///   witness-sealing pin). `Unstable + forced` is the bounded
-    ///   `max_settle` fallback over a still-moving tree; it fires
-    ///   through the Draining gate by the `forced` disjunct, symmetric
-    ///   with the `Stable` deadline case.
-    /// - [`QuiescenceVerdict::Unstable`] + `!forced` — still moving (or
-    ///   sample 1): `apply_snapshot` for the reconcile / Watch side
-    ///   effects only (new descendants get FDs), **no `rebase_baseline`**
-    ///   (the witness must survive an unbounded re-batch loop), then
-    ///   re-batch.
-    /// - [`QuiescenceVerdict::Undischarged`] — the shared
-    ///   [`Engine::undischarged_consequence`] terminal (never commit,
-    ///   never advance; `!forced` re-batch / `forced` ceiling
-    ///   diagnostic + finish), `intent` preserved on the diagnostic.
+    /// - [`QuiescenceVerdict::Authoritative`] — the fireable verdict.
+    ///   [`Engine::fire_or_seal`] commits, classifies, then either
+    ///   gated-fires or silently seals the witness. `forced = false` is
+    ///   the natural-fire case (event-quiet witness held); `forced =
+    ///   true` is the bounded `max_settle` fallback over a still-moving
+    ///   tree, fired through the Draining gate by the `forced`
+    ///   disjunct in [`Engine::gated_fire`]. `forced` propagates onto
+    ///   [`specter_core::Effect::forced`] via
+    ///   [`crate::effect::EmitMode::Standard`]; no diagnostic is owed
+    ///   on this arm (the bit is operator-visible on the emitted Effect).
+    /// - [`QuiescenceVerdict::Undischarged`] with `terminal = true` —
+    ///   the bounded ceiling already fired and the probe could not
+    ///   discharge its obligation. Surface `first_unread` via
+    ///   [`Diagnostic::QuiescenceCeilingUnreadable`] and finish the
+    ///   burst **without** committing — an unread region must never
+    ///   become the dedup / Seed baseline.
+    /// - [`QuiescenceVerdict::Undischarged`] with `terminal = false` —
+    ///   transient non-observation (`EACCES`, a chmod-000 chain). Loop
+    ///   back through a fresh settle window via
+    ///   [`Engine::undischarged_drives_batching`]; never
+    ///   commit, never re-emit a diagnostic per round (the eventual
+    ///   ceiling terminal surfaces the wedge).
     fn dispatch_quiescence_ok(
         &mut self,
         profile_id: ProfileId,
         snapshot: TreeSnapshot,
         verdict: QuiescenceVerdict,
-        forced: bool,
         intent: BurstIntent,
         now: Instant,
         out: &mut StepOutput,
     ) {
         // Profile-presence guard + the snapshot-commit target (the
-        // latest emitted probe target; the `p.resource` fallback on the
-        // structurally-unreachable non-PreFire arm matches the prior
-        // `unwrap_or(anchor)`). `None` ⇒ the Profile is gone and every
-        // arm returns. The covered-descendant fire-gate is no longer
-        // computed here: it lives at the single gate site
-        // (`gated_fire`), reached only when a fire actually arrives and
+        // latest emitted probe target). The covered-descendant fire-gate
+        // lives at the single gate site ([`Engine::gated_fire`]),
         // short-circuited by `forced`.
         let Some(target) = self.pre_fire_target(profile_id) else {
             return;
         };
 
         match verdict {
-            QuiescenceVerdict::Undischarged { first_unread } => {
-                self.undischarged_consequence(profile_id, first_unread, forced, intent, now, out);
-            }
-
-            QuiescenceVerdict::Stable => {
+            QuiescenceVerdict::Authoritative { forced } => {
+                // Single fire path. `fire_or_seal` branches on `forced`
+                // internally (for the dedup-suppress override and the
+                // Effect.forced propagation); the Draining gate uses
+                // the same bit to fire-anyway on a still-moving tree.
                 self.fire_or_seal(profile_id, snapshot, target, forced, intent, now, out);
             }
-
-            QuiescenceVerdict::Unstable if forced => {
-                // Bounded `max_settle` deadline-fire over a still-moving
-                // tree — the same consequence as `Stable`, fired
-                // through the Draining gate by the `forced` disjunct in
-                // `gated_fire`.
-                self.fire_or_seal(profile_id, snapshot, target, forced, intent, now, out);
+            QuiescenceVerdict::Undischarged {
+                first_unread,
+                terminal: true,
+            } => {
+                // Bounded terminal: the ceiling already fired and the
+                // walker still refused. No commit; surface the unread
+                // path with the burst's `intent` so operators can
+                // distinguish a Seed-baseline failure from a Standard
+                // reconfirm failure.
+                out.diagnostics
+                    .push(Diagnostic::QuiescenceCeilingUnreadable {
+                        profile: profile_id,
+                        first_unread,
+                        intent,
+                    });
+                self.finish_burst_to_idle(profile_id, out);
             }
-
-            QuiescenceVerdict::Unstable => {
-                // Still moving (or sample 1). Graft for the reconcile /
-                // Watch side effects only (new descendants get FDs); do
-                // NOT `rebase_baseline` (the witness must survive the
-                // re-batch loop) and do NOT advance the carrier (the
-                // preserved prior sample is what the next settle-spaced
-                // verify compares against).
-                self.apply_snapshot(profile_id, target, snapshot, out);
-                self.unstable_response_drives_batching(profile_id, now, out);
+            QuiescenceVerdict::Undischarged {
+                first_unread: _,
+                terminal: false,
+            } => {
+                // Transient refusal — re-arm the settle window for the
+                // next attempt. No commit (an unread region must not
+                // poison `current`); the eventual `BurstDeadline`
+                // ceiling surfaces the operator-visible terminal.
+                self.undischarged_drives_batching(profile_id, now, out);
             }
         }
     }
@@ -2443,11 +2392,11 @@ impl Engine {
     ///    baseline).
     /// 2. `!any_fired && dirty.is_empty()` ⇒ false — a fresh Seed over
     ///    a static tree (a daemon restart; Specter persists no
-    ///    baseline). Restart-safe silent [`Consequence::RecoverySeal`].
+    ///    baseline). Restart-safe silent [`Consequence::SilentPin`].
     /// 3. `any_fired` ⇒ false — a recovery Seed:
     ///    [`Consequence::RecoveryFire`] ([`Self::seed_drift_observed`]
     ///    re-fires the drifted Subs from the survival witness) or, with
-    ///    no drift, the silent [`Consequence::RecoverySeal`].
+    ///    no drift, the silent [`Consequence::SilentPin`].
     ///
     /// Mutually exclusive with [`Self::seed_drift_observed`] by
     /// construction (that predicate is `false` whenever `!any_fired`),
@@ -2646,32 +2595,29 @@ impl Engine {
 
     /// (Rebase, Ok). The carrier folded its own N=2 quiescence verdict
     /// over the *post-command* tree at the shared certifier; this
-    /// routine maps `(verdict, ceiling-reached?)` to a consequence. The
+    /// routine maps the post-fire `verdict` to a consequence. The
     /// Rebasing probe always targets the anchor (set by
-    /// `transition_to_rebasing`).
+    /// [`Engine::transition_to_rebasing`]).
     ///
-    /// - `Stable` (ceiling-agnostic): two settle-spaced equal
-    ///   post-command reads — genuinely quiescent. `apply_snapshot` +
+    /// - [`QuiescenceVerdict::Authoritative`] with `forced = false` —
+    ///   genuinely quiescent post-command tree. `apply_snapshot` +
     ///   `rebase_baseline` (`baseline := current`), then restart from
     ///   the fire-tail residual or finish to Idle.
-    /// - `Unstable`, ceiling not reached: still moving. `apply_snapshot`
-    ///   keeps `current` the freshest observation (what a later ceiling
-    ///   terminal pins) but does **not** rebase; loop through
-    ///   `RebaseSettling` for the next settle-spaced sample.
-    /// - `Unstable`, ceiling reached: the bounded terminal — the
-    ///   post-command tree never settled. `apply_snapshot` +
-    ///   `rebase_baseline` (pin the freshest observation anyway) +
-    ///   [`Diagnostic::RebaseCeilingStillChanging`] + finish.
-    /// - `Undischarged`, ceiling not reached: a non-observation lies on
-    ///   an obligation chain — **never commit** (an unread region must
-    ///   not poison `current`) and the carrier was not advanced; loop
-    ///   through `RebaseSettling`.
-    /// - `Undischarged`, ceiling reached: refuse to rebase blind —
-    ///   [`Diagnostic::RebaseCeilingUnreadable`] + finish, no commit, no
-    ///   rebase, the prior baseline left in place.
+    /// - [`QuiescenceVerdict::Authoritative`] with `forced = true` —
+    ///   the bounded `RebaseCeiling` fired but the walker still
+    ///   certified. Pin the freshest observation anyway with
+    ///   [`Diagnostic::RebaseCeilingStillChanging`], then finish.
+    /// - [`QuiescenceVerdict::Undischarged`] with `terminal = false` —
+    ///   transient non-observation. Never commit (an unread region
+    ///   must not poison `current`); loop back through the settle
+    ///   window for another sample.
+    /// - [`QuiescenceVerdict::Undischarged`] with `terminal = true` —
+    ///   ceiling reached on an unread response. Refuse to rebase
+    ///   blind: surface [`Diagnostic::RebaseCeilingUnreadable`] and
+    ///   finish without committing.
     ///
-    /// **Post-rebase residual.** On the `Stable` terminal a
-    /// [`BurstFinish::ReturnToIdle`] burst with a non-empty fire-tail
+    /// **Post-rebase residual.** On the natural `Authoritative` terminal
+    /// a [`BurstFinish::ReturnToIdle`] burst with a non-empty fire-tail
     /// residual restarts a fresh debounced burst over the rebased
     /// baseline (`restart_burst_from_fire_tail_residual`) so a
     /// final-window change is not lost — origin-agnostic (a Seed-origin
@@ -2681,19 +2627,12 @@ impl Engine {
     /// or a zombie `Reap` burst finishes to Idle. The ceiling terminals
     /// never restart (the loop is bounded, not raced).
     ///
-    /// **Why the verdict applies (the old "no drift check" objection
-    /// does not).** An earlier design refused a post-fire stability
-    /// check, arguing it would fire-loop (every fire writes a new hash,
-    /// so the next rebase always "drifts") or be a silent no-op (the
-    /// post-fire hash matches itself). That assumed a check re-derived
-    /// from `current` / `baseline` — the snapshots the fire just
-    /// mutated. This verdict is instead the carrier-resident two-sample
-    /// [`specter_core::CertifiedPrior`] fold over two settle-spaced
-    /// *response* hashes, independent of the splice-mutated `current`:
-    /// the post-fire half of the same N=2 proof the pre-fire verify
-    /// runs, so acting on it is sound. Kind agreement and the fold are
-    /// owned upstream by the shared certifier — this routine no longer
-    /// kind-checks.
+    /// **Why the verdict applies.** Kind agreement and the verdict fold
+    /// are owned upstream by the shared certifier
+    /// ([`Engine::certify_probe_response`]). The verdict is a pure
+    /// projection of `(ProofAuthority, forced)` — independent of
+    /// `current` / `baseline`, so acting on it is sound even though the
+    /// fire just mutated those snapshots.
     fn dispatch_rebase_ok(
         &mut self,
         profile_id: ProfileId,
@@ -2709,22 +2648,9 @@ impl Engine {
         let Some(target) = self.profiles.get(profile_id).map(Profile::resource) else {
             return;
         };
-        // The rebase-loop ceiling latch, read off the public `state()`
-        // surface (no dedicated accessor) — the same idiom as
-        // `should_restart` below. `Reached` arms the bounded terminal.
-        let reached = match self
-            .profiles
-            .get(profile_id)
-            .map(specter_core::Profile::state)
-        {
-            Some(ProfileState::Active(ActiveBurst::PostFire(post), _)) => {
-                post.rebase_ceiling_reached()
-            }
-            _ => false,
-        };
 
         match verdict {
-            QuiescenceVerdict::Stable => {
+            QuiescenceVerdict::Authoritative { forced: false } => {
                 self.apply_snapshot(profile_id, target, snapshot, out);
                 if let Some(p) = self.profiles.get_mut(profile_id) {
                     p.rebase_baseline();
@@ -2751,10 +2677,12 @@ impl Engine {
                 }
             }
 
-            QuiescenceVerdict::Unstable if reached => {
-                // Bounded terminal: the post-command tree never settled.
-                // Pin the freshest observation anyway (a deliberate,
-                // loud terminal — not a wedge).
+            QuiescenceVerdict::Authoritative { forced: true } => {
+                // Bounded terminal: the `RebaseCeiling` already fired
+                // but the walker certified anyway (the post-command
+                // tree was still changing under the loop, but this
+                // sample read clean). Pin the freshest observation —
+                // a deliberate, loud terminal, not a wedge.
                 self.apply_snapshot(profile_id, target, snapshot, out);
                 if let Some(p) = self.profiles.get_mut(profile_id) {
                     p.rebase_baseline();
@@ -2768,16 +2696,10 @@ impl Engine {
                 self.finish_burst_to_idle(profile_id, out);
             }
 
-            QuiescenceVerdict::Unstable => {
-                // Still moving, ceiling not reached. Keep `current` the
-                // freshest observation (a later ceiling terminal pins
-                // it) but do NOT rebase — the survival witness must
-                // outlive the loop. Loop for the next sample.
-                self.apply_snapshot(profile_id, target, snapshot, out);
-                self.rebase_unstable_loops_settling(profile_id, now, out);
-            }
-
-            QuiescenceVerdict::Undischarged { first_unread } if reached => {
+            QuiescenceVerdict::Undischarged {
+                first_unread,
+                terminal: true,
+            } => {
                 // Ceiling reached on an unread response: refuse to
                 // rebase blind. No commit, no rebase — the prior
                 // baseline stays in place. Safe to keep it on a
@@ -2797,12 +2719,16 @@ impl Engine {
                 self.finish_burst_to_idle(profile_id, out);
             }
 
-            QuiescenceVerdict::Undischarged { .. } => {
+            QuiescenceVerdict::Undischarged {
+                first_unread: _,
+                terminal: false,
+            } => {
                 // An unread region must never poison `current`: no
-                // `apply_snapshot`. The carrier was not advanced
-                // (withheld by `CertifiedPrior::advance`); loop for
-                // another settle-spaced sample.
-                self.rebase_unstable_loops_settling(profile_id, now, out);
+                // `apply_snapshot`. Loop back through the settle window
+                // for another sample (`Rebasing → Settling`); the
+                // `RebaseCeiling` (armed at the loop's start) eventually
+                // surfaces the operator-visible terminal.
+                self.transition_to_settling(profile_id, now, out);
             }
         }
     }
@@ -2913,10 +2839,20 @@ impl Engine {
     }
 
     /// `gate_deadline` row — actuator-hang recovery. Force-transitions
-    /// the burst from `Awaiting` to `Rebasing` — the loop's
-    /// [`RebaseEntry::First`] entry, so `now` threads through for the
-    /// `RebaseCeiling` scheduled at `now + max_settle`. Late
-    /// `EffectComplete` arrivals (after this transition) land in
+    /// the burst from `Awaiting` directly to `Rebasing`, skipping the
+    /// `Settling` debounce window: the actuator has already hung for
+    /// 4× max_settle, so the bounded wait is spent. Raises `forced`
+    /// via [`Engine::force_pending_post_fire`] (the symmetric mirror
+    /// of pre-fire's `handle_burst_deadline → force_pending`), then
+    /// drives [`Engine::transition_to_rebasing`] for the final walk.
+    ///
+    /// The next probe response folds through `quiescence_verdict
+    /// (authority, forced=true)`: an `Authoritative` certifies and
+    /// commits on the first walk, an `Undischarged` surfaces
+    /// `RebaseCeilingUnreadable` and finishes. No ceiling timer is
+    /// armed — the loop has no second sample to bound against.
+    ///
+    /// Late `EffectComplete` arrivals (after this transition) land in
     /// [`Diagnostic::EffectCompleteOutsideAwaiting`].
     ///
     /// **Zombie burst short-circuit.** A burst carrying
@@ -2935,7 +2871,7 @@ impl Engine {
     ///
     /// The `Awaiting.outstanding` access below is a diagnostic-only
     /// *read*; the field's sole writer is `Profile::note_effect_completion`.
-    fn handle_gate_deadline(&mut self, profile_id: ProfileId, now: Instant, out: &mut StepOutput) {
+    fn handle_gate_deadline(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
@@ -2980,75 +2916,116 @@ impl Engine {
         if zombie {
             self.finish_burst_to_idle(profile_id, out);
         } else {
-            self.transition_to_rebasing(profile_id, RebaseEntry::First, now, out);
+            // Symmetric mirror of pre-fire's `handle_burst_deadline →
+            // force_pending → drive Verifying now`. No follow-up
+            // timer is scheduled — the `forced` bit drives the next
+            // probe response to a commit terminal in one walk.
+            self.force_pending_post_fire(profile_id);
+            self.transition_to_rebasing(profile_id, out);
         }
     }
 
-    /// `RebaseSettle` row — the rebase loop's spacing-timer expiry.
-    /// Re-enters `Rebasing` for the next settle-spaced sample
-    /// ([`RebaseEntry::LoopReArm`]: the ceiling was armed at the loop's
-    /// first entry and is not re-armed). The post-fire analogue of
-    /// [`Engine::on_settle_expired`]'s transition path, minus the
-    /// reschedule fork — the rebase loop has no `last_event_time`, the
-    /// spacing timer *is* the deadline, so the expiry re-enters
-    /// `Rebasing` unconditionally. Staleness is filtered upstream by
-    /// `is_timer_referenced` (the `RebaseSettle` token lives only on
-    /// `RebaseSettling`); `transition_to_rebasing`'s gate absorbs a
-    /// vanished Profile, so this stays a one-line delegator.
-    fn handle_rebase_settle(&mut self, profile_id: ProfileId, now: Instant, out: &mut StepOutput) {
-        self.transition_to_rebasing(profile_id, RebaseEntry::LoopReArm, now, out);
+    /// `PostFireSettle` row — the post-fire settle-debounce expiry. The
+    /// symmetric mirror of [`Engine::on_settle_expired`] on the
+    /// pre-fire side, including the reschedule fork.
+    ///
+    /// **Reschedule path**: `now − last_event_time < settle`.
+    /// `absorb_event_into_fire_tail` updated `last_event_time` after
+    /// the settle timer was scheduled; the quiet window is not yet
+    /// closed. Schedules a fresh `TimerKind::PostFireSettle` at
+    /// `last_event_time + settle` and routes the new id through
+    /// [`Engine::reschedule_settling`] (the single-source phase
+    /// mutator) — the old (just-expired) id is no longer referenced
+    /// and lazily drops on a subsequent `pop_expired`. The phase stays
+    /// `Settling`.
+    ///
+    /// **Transition path**: `now − last_event_time ≥ settle` (or
+    /// `last_event_time` is `None`, a defensive fall-through —
+    /// production `transition_to_settling` pins it to `Some(now)`, so
+    /// this case is structurally unreachable in production). Forwards
+    /// to [`Engine::transition_to_rebasing`] for the next sample.
+    ///
+    /// **Preconditions** (guaranteed by [`is_timer_referenced`]
+    /// upstream): `Profile.state == Active(PostFire(Settling {
+    /// settle_timer == popped_id }))`. The defensive early returns
+    /// below cover direct `step(Input::TimerExpired)` calls that bypass
+    /// `pop_expired`.
+    fn handle_post_fire_settle_expired(
+        &mut self,
+        profile_id: ProfileId,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        let Some(p) = self.profiles.get(profile_id) else {
+            return;
+        };
+        let ProfileState::Active(ActiveBurst::PostFire(post), _) = p.state() else {
+            return;
+        };
+        if !matches!(post.phase, PostFirePhase::Settling { .. }) {
+            return;
+        }
+        let settle = p.settle;
+        let last = post.last_event_time;
+
+        // saturating_duration_since handles `now < last` (test mockclock
+        // rewind / non-monotonic clocks): returns Duration::ZERO, which
+        // satisfies `< settle` and triggers a reschedule. Safe under any
+        // clock skew the harness can produce.
+        if let Some(last) = last
+            && now.saturating_duration_since(last) < settle
+        {
+            let new_deadline = last + settle;
+            let new_timer =
+                self.timers
+                    .schedule(new_deadline, profile_id, TimerKind::PostFireSettle);
+            self.reschedule_settling(profile_id, new_timer);
+            return;
+        }
+
+        // Quiet for ≥ settle (or last_event_time is None — defensive):
+        // proceed with `Settling → Rebasing`.
+        self.transition_to_rebasing(profile_id, out);
     }
 
     /// `RebaseCeiling` row — the rebase loop's bound, the forced-mirror
-    /// of [`Engine::handle_burst_deadline`]. The terminal is *latched*
-    /// here, not applied: `mark_rebase_ceiling_reached` flips
-    /// `Armed → Reached` through the owner-resident edge (the
-    /// no-public-setter chain — never `post_fire_burst_mut` from this
-    /// module), and the next `Rebasing` response applies the
-    /// consequence with the verdict in hand (`dispatch_rebase_ok` reads
-    /// `rebase_ceiling_reached`), so the illegal `(Reached,
-    /// timer-still-armed)` state never exists.
-    ///
-    /// Then mirrors `handle_burst_deadline`'s phase routing exactly: in
-    /// `RebaseSettling` no probe is in flight (the `Batching`
-    /// analogue), so drive the final sample *now*; in `Rebasing` a
-    /// probe is already in flight (the `Verifying` analogue), so
-    /// set-only — its response carries the terminal. `Awaiting` is
-    /// unreachable (the ceiling is armed only at the first
-    /// `Awaiting → Rebasing` edge) and folds to the no-op default, as
-    /// does a vanished Profile.
-    fn handle_rebase_ceiling(&mut self, profile_id: ProfileId, now: Instant, out: &mut StepOutput) {
-        // Latch Armed → Reached via the owner-resident category-(b)
-        // edge. `is_timer_referenced` only routes `RebaseCeiling` here
-        // while `Armed`, so the latch lands in production; a `Some(false)`
-        // / `None` is the loud-regression signal (the ceiling fires only
-        // from `Armed`, which `timer_token` filters to Active(PostFire)).
-        let latched = self
-            .profiles
-            .get_mut(profile_id)
-            .map(specter_core::Profile::mark_rebase_ceiling_reached);
-        debug_assert!(
-            matches!(latched, Some(true)),
-            "handle_rebase_ceiling: RebaseCeiling fired but the ceiling did \
-             not latch Armed → Reached (profile = {profile_id:?})",
-        );
+    /// of [`Engine::handle_burst_deadline`]. Sets `forced := true` via
+    /// [`Engine::force_pending_post_fire`] (the single-source mutator
+    /// of `post.forced` and lockstep dropper of `post.rebase_ceiling
+    /// = None`), then mirrors `handle_burst_deadline`'s phase routing
+    /// exactly: in `Settling` no probe is in flight (the `Batching`
+    /// analogue), so drive the final sample *now* via
+    /// [`Engine::transition_to_rebasing`]; in `Rebasing` a probe is
+    /// already in flight (the `Verifying` analogue), so set-only — its
+    /// response carries the terminal. `Awaiting` is unreachable (the
+    /// ceiling is armed only at the natural `Awaiting → Settling`
+    /// entry) and folds to the no-op default, as does a vanished
+    /// Profile.
+    fn handle_rebase_ceiling(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        // Single-source latch: `forced = true; rebase_ceiling = None;`
+        // in one lockstep write. `is_timer_referenced` only routes
+        // `RebaseCeiling` here while `Armed`, so the live timer entry
+        // we just popped is dropped from the phase reference in the
+        // same move that raises `forced`.
+        self.force_pending_post_fire(profile_id);
 
         // Mirror `handle_burst_deadline`: drive the final sample now iff
-        // no probe is in flight (`RebaseSettling` — the `Batching`
-        // analogue). In `Rebasing` the in-flight response applies the
-        // terminal via `dispatch_rebase_ok`'s ceiling read.
-        let drive_now = match self
+        // no probe is in flight (`Settling` — the `Batching` analogue).
+        // In `Rebasing` the in-flight response applies the terminal
+        // via `dispatch_rebase_ok`'s `Authoritative { forced: true }` /
+        // `Undischarged { terminal: true }` arms.
+        let needs_rebase = self
             .profiles
             .get(profile_id)
-            .map(specter_core::Profile::state)
-        {
-            Some(ProfileState::Active(ActiveBurst::PostFire(post), _)) => {
-                matches!(post.phase, PostFirePhase::RebaseSettling { .. })
-            }
-            _ => false,
-        };
-        if drive_now {
-            self.transition_to_rebasing(profile_id, RebaseEntry::LoopReArm, now, out);
+            .and_then(|p| match p.state() {
+                ProfileState::Active(ActiveBurst::PostFire(post), _) => {
+                    Some(matches!(&post.phase, PostFirePhase::Settling { .. }))
+                }
+                _ => None,
+            })
+            .unwrap_or(false);
+        if needs_rebase {
+            self.transition_to_rebasing(profile_id, out);
         }
     }
 
@@ -3583,8 +3560,8 @@ impl EmitMode<'_> {
 }
 
 /// The consequence of a fireable quiescence verdict
-/// ([`QuiescenceVerdict::Stable`], or [`QuiescenceVerdict::Unstable`] +
-/// `forced`) for a burst whose [`specter_core::BurstIntent`] is known —
+/// ([`N2Verdict::Stable`], or [`N2Verdict::Unstable`] + `forced`) for
+/// a burst whose [`specter_core::BurstIntent`] is known —
 /// computed once by [`Engine::classify_consequence`] *after* the
 /// observed tree is committed, so the drift read sees the post-graft
 /// `current`.
@@ -3621,13 +3598,16 @@ enum Consequence {
     /// certified-recovery decision** (pre-`Awaiting`);
     /// [`Diagnostic::PerFileDriftDroppedOnRecovery`] post-gate.
     RecoveryFire(SmallVec<[SubId; 2]>),
-    /// Fresh-static daemon restart, a no-drift recovery, or a recovery
-    /// whose fired set is empty (PerFile-only, or all Subs detached).
-    /// No emission; rebases the baseline (consuming a live witness if
-    /// any) and finishes; **never Draining-gated** — no Effect to
-    /// defer. [`Diagnostic::PerFileDriftDroppedOnRecovery`]
-    /// (self-gating predicate) before the rebase.
-    RecoverySeal,
+    /// The only non-firing arm. Four disjoint origins reach it: a
+    /// fresh-static daemon restart (no witnessed activity, no baseline
+    /// to drift against), a no-drift recovery, a recovery whose fired
+    /// set is empty (PerFile-only), or a recovery whose fired set is
+    /// empty (all Subs detached). No emission; rebases the baseline
+    /// (consuming a live witness if any) and finishes; **never
+    /// Draining-gated** — no Effect to defer.
+    /// [`Diagnostic::PerFileDriftDroppedOnRecovery`] (self-gating
+    /// predicate) before the rebase.
+    SilentPin,
 }
 
 /// One Sub's fire verdict in an [`Engine::emit_effects`] pass — the

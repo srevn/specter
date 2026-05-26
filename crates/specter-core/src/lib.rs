@@ -46,10 +46,10 @@ pub use output::{CancelEffects, ProbeOps, SortedEffects, StepOutput, StepOutputP
 pub use pattern::{PatternComponent, PatternError, PatternSpec};
 pub use probe::ProbeSlot;
 pub use profile::{
-    ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, CertifiedPrior,
-    DescentRemaining, DescentState, DetachLifecycle, DirtyProvenance, PostFireBurst, PostFirePhase,
-    PreFireBurst, PreFirePhase, Profile, ProfileMap, ProfileState, ProfileStateDiscriminant,
-    QuiescenceVerdict, ReapTrigger, StateLabel, TimerKind,
+    ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, DescentRemaining,
+    DescentState, DetachLifecycle, DirtyProvenance, PostFireBurst, PostFirePhase, PreFireBurst,
+    PreFirePhase, Profile, ProfileMap, ProfileState, ProfileStateDiscriminant, QuiescenceVerdict,
+    ReapTrigger, StateLabel, TimerKind, quiescence_verdict,
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use promoter::{

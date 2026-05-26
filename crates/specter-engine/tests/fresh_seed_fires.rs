@@ -13,48 +13,24 @@
 //! restart over a static tree must not re-fire); a recovery Seed
 //! drift-fires.
 
-use compact_str::CompactString;
 use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
-    ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DedupKey, DirMeta, DirSnapshot,
-    EntryKind, FsEvent, FsIdentity, Input, LeafEntry, PreFireBurst, PreFirePhase, ProbeCorrelation,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ProofAuthority,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubId,
-    TimerKind,
+    ActiveBurst, BurstFinish, BurstIntent, ClassSet, DedupKey, DirSnapshot, EntryKind, FsEvent,
+    Input, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
+    ProbeResponse, ProfileId, ProfileState, ProofAuthority, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, StepOutput, SubAttachAnchor, SubId, TimerKind,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    anchor_dir, attach_returning, batching_settle_id, complete_effect_to_rebasing,
-    first_probe_correlation, rebase_loop_to_idle,
+    anchor_dir, attach_returning, batching_settle_id, complete_effect_to_settling,
+    first_probe_correlation, rebase_post_fire_to_idle,
 };
-use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
-
-/// Like [`dir_snap`] but the lone file carries an explicit `size`, so
-/// two snapshots of the same shape but different sizes hash distinctly
-/// (mirrors a growing-in-place file across N=2 reads).
-fn dir_snap_sized_file(name: &str, inode: u64, size: u64) -> Arc<DirSnapshot> {
-    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
-    map.insert(
-        CompactString::new(name),
-        ChildEntry::Leaf(LeafEntry::synthetic(
-            EntryKind::File,
-            size,
-            UNIX_EPOCH,
-            FsIdentity::synthetic(inode, 0),
-        )),
-    );
-    Arc::new(DirSnapshot::new(
-        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-        0,
-        map,
-    ))
-}
 
 /// `pid`'s pre-fire `burst_deadline` (`BurstDeadline`) timer id, or
 /// panic with the actual state. Used to fire the max-settle ceiling
@@ -66,22 +42,39 @@ fn burst_deadline_id(e: &Engine, pid: ProfileId) -> specter_core::TimerId {
     }
 }
 
-/// One Seed N=2 cycle scoped to `pid`: expire its own Batching settle
-/// timer (Batching → Verifying, Seed probe emitted) then answer the
-/// probe with `snap`. Returns the response `StepOutput`.
+/// Deliver one Seed probe response for `pid`: if the burst is in
+/// Batching, expire its own settle timer to advance Batching →
+/// Verifying (emits the Seed probe); if already in cold-arm
+/// Verifying, deliver the response directly. Returns the response
+/// `StepOutput`.
 fn seed_cycle(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Instant) -> StepOutput {
-    let settle_id = batching_settle_id(e, pid);
-    e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::Settle,
-            id: settle_id,
-        },
-        at,
-    );
+    // Cold-arm Verifying-first: the first Seed sample is delivered
+    // directly to the construct-armed slot — no Batching to expire.
+    // A Batching re-entry (e.g. after an Undischarged !terminal retry)
+    // needs the settle-timer expiry to advance back to Verifying.
+    if !matches!(
+        e.profiles().get(pid).unwrap().state(),
+        ProfileState::Active(
+            ActiveBurst::PreFire(PreFireBurst {
+                phase: PreFirePhase::Verifying(_),
+                ..
+            }),
+            _,
+        )
+    ) {
+        let settle_id = batching_settle_id(e, pid);
+        e.step(
+            Input::TimerExpired {
+                profile: pid,
+                kind: TimerKind::Settle,
+                id: settle_id,
+            },
+            at,
+        );
+    }
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Seed Verifying probe in flight after settle expiry");
+        .expect("Seed Verifying probe in flight");
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -93,9 +86,9 @@ fn seed_cycle(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Insta
 }
 
 /// Drive a settled, idle Profile through one full Standard fire→rebase
-/// cycle (event → settle → N=2 verify → fire → EffectComplete → rebase
-/// N=2 → Idle). Asserts exactly one Effect fired. Used post-baseline to
-/// prove the Profile now behaves as a Standard burst. `snap_new` differs
+/// cycle (event → settle → verify → fire → EffectComplete → rebase →
+/// Idle). Asserts exactly one Effect fired. Used post-baseline to prove
+/// the Profile now behaves as a Standard burst. `snap_new` differs
 /// from the established baseline so the Standard verdict is a genuine
 /// fire (not B1-dedup-suppressed).
 fn drive_standard_fire_once(
@@ -113,9 +106,9 @@ fn drive_standard_fire_once(
         },
         t0,
     );
-    // Standard burst is also N=2 here: first verify diffs the fresh
-    // response against the seed baseline (Unstable ⇒ re-batch), the
-    // second hash-equal sample stabilises and fires.
+    // The verify response against the seed baseline fires directly on
+    // its first Authoritative sample. The drain loop is defensive in
+    // case the first response routes through an Undischarged retry.
     let mut t = t0;
     let mut stable_out: Option<StepOutput> = None;
     for _ in 0..8 {
@@ -156,23 +149,17 @@ fn drive_standard_fire_once(
         "post-baseline Standard burst fires exactly one Effect (now behaves as Standard)",
     );
     let key = stable_out.effects()[0].key();
-    let (_co, _cc) = complete_effect_to_rebasing(e, sid, key, t + Duration::from_millis(1));
-    let _r = rebase_loop_to_idle(e, pid, snap_new, t + Duration::from_millis(2));
+    let _co = complete_effect_to_settling(e, sid, key, t + Duration::from_millis(1));
+    let _r = rebase_post_fire_to_idle(e, pid, snap_new, t + Duration::from_millis(2));
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
         "idempotent rebase loop closes Stable → Idle",
     );
 }
 
-/// Shared body for test (a): fresh attach (SubtreeRoot,
-/// NO_EVENTS), an anchor `FsEvent::Modified` injected during the Seed
-/// Batching window (anchor events bypass the class filter, so NO_EVENTS
-/// still records the event into `dirty`), then the N=2 proof
-/// driven to `Stable` with the two supplied reads. Asserts exactly one
-/// Effect fired at the stable verdict, then completes the fire cycle and
-/// asserts the Profile established a baseline + fired + now behaves as a
-/// Standard burst.
-fn fresh_seed_with_activity_fires_one(read1: &Arc<DirSnapshot>, read2: &Arc<DirSnapshot>) {
+#[test]
+fn fresh_seed_with_activity_fires_exactly_one_effect() {
+    let snap = dir_snap(&[("a.rs", EntryKind::File, 11)]);
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -186,17 +173,19 @@ fn fresh_seed_with_activity_fires_one(read1: &Arc<DirSnapshot>, read2: &Arc<DirS
         now,
     );
     assert!(
-        first_probe_correlation(&out).is_none(),
-        "Seed is Batching-first: attach emits no probe",
+        first_probe_correlation(&out).is_some(),
+        "cold-arm Seed: attach emits the cold walk probe at burst construction",
     );
     assert!(
         !e.profiles().get(pid).unwrap().baseline_is_some(),
         "fresh attach has no baseline yet",
     );
 
-    // Witness real activity: an anchor Modified during Batching. Anchor
-    // events bypass the class filter, so the NO_EVENTS mask still routes
-    // it through `event_drives_batching`, populating `dirty`.
+    // Witness real activity: an anchor Modified during the cold-arm
+    // Verifying phase. Anchor events bypass the class filter, so the
+    // NO_EVENTS mask still routes it through `event_drives_batching`,
+    // which Cancels the cold-arm verify slot and reschedules Batching
+    // with the trigger in `dirty`.
     let act_out = e.step(
         Input::FsEvent {
             resource: r,
@@ -216,30 +205,23 @@ fn fresh_seed_with_activity_fires_one(read1: &Arc<DirSnapshot>, read2: &Arc<DirS
                 _
             )
         ),
-        "anchor event keeps the fresh Seed in PreFire(Batching) (re-armed settle)",
+        "anchor event during cold-arm Verifying re-enters PreFire(Batching) (Cancel + re-armed settle)",
     );
     assert!(
         act_out.effects().is_empty(),
         "the bare event does not itself fire",
     );
 
-    // N=2 proof. read1 (prior None ⇒ Unstable) re-batches; read2
-    // hash-equal-to-read1 ⇒ Stable ⇒ the Seed pins. Sequenced strictly
-    // past the re-armed settle window so each cycle's settle expiry is
-    // clean.
+    // The first Authoritative response fires: `seed_owes_first_fire`
+    // reads `!dirty.is_empty()`, routing the fresh-with-activity Seed
+    // through `FreshSeedFire`.
     let t1 = now + Duration::from_millis(1) + SETTLE;
-    let _ = seed_cycle(&mut e, pid, read1, t1);
-    let t2 = t1 + SETTLE;
-    let stable_out = seed_cycle(&mut e, pid, read2, t2);
+    let stable_out = seed_cycle(&mut e, pid, &snap, t1);
 
-    // A fresh Seed that witnessed activity fires exactly one Effect at
-    // the stable verdict: `seed_owes_first_fire` consults `dirty`
-    // and routes the fresh-with-activity Seed through the Standard
-    // fire path (`FreshSeedFire`).
     assert_eq!(
         stable_out.effects().len(),
         1,
-        "fresh Seed that witnessed an FsEvent fires exactly one Effect at the stable verdict",
+        "fresh Seed that witnessed an FsEvent fires exactly one Effect on the Authoritative verdict",
     );
     let eff = &stable_out.effects()[0];
     assert!(
@@ -250,8 +232,8 @@ fn fresh_seed_with_activity_fires_one(read1: &Arc<DirSnapshot>, read2: &Arc<DirS
     // Complete the fire cycle and prove the post-fire baseline is now
     // established and the Profile behaves as Standard thereafter.
     let key = eff.key();
-    let (_co, _cc) = complete_effect_to_rebasing(&mut e, sid, key, t2 + Duration::from_millis(1));
-    let _r = rebase_loop_to_idle(&mut e, pid, read2, t2 + Duration::from_millis(2));
+    let _co = complete_effect_to_settling(&mut e, sid, key, t1 + Duration::from_millis(1));
+    let _r = rebase_post_fire_to_idle(&mut e, pid, &snap, t1 + Duration::from_millis(2));
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
         "idempotent rebase loop closes Stable → Idle",
@@ -269,92 +251,21 @@ fn fresh_seed_with_activity_fires_one(read1: &Arc<DirSnapshot>, read2: &Arc<DirS
     // A subsequent FsEvent + settle now drives a *Standard* fire (a
     // second Effect), proving the Profile is no longer fresh.
     let snap_changed = dir_snap(&[("late.rs", EntryKind::File, 77)]);
-    drive_standard_fire_once(&mut e, pid, sid, r, &snap_changed, t2 + SETTLE * 4);
+    drive_standard_fire_once(&mut e, pid, sid, r, &snap_changed, t1 + SETTLE * 4);
 }
 
-/// (a) Core repro: fresh attach + anchor activity, equal N=2 reads.
-#[test]
-fn fresh_seed_with_activity_fires_exactly_one_effect() {
-    let snap = dir_snap(&[("a.rs", EntryKind::File, 11)]);
-    fresh_seed_with_activity_fires_one(&snap, &snap);
-}
-
-/// (b) Growing-leaf scp variant: the N=2 reads differ first (smaller
-/// file) then stabilise on the larger snapshot, mirroring an in-place
-/// growing file. `CertifiedPrior::advance` is `Stable` iff the prior ==
-/// the response hash, else `Unstable` (and re-bases the prior). So:
-/// read1=S1 (prior None ⇒ Unstable, prior:=S1); read2=S2≠S1 (prior S1 ⇒
-/// Unstable, prior:=S2); read3=S2 (prior S2 ⇒ Stable ⇒ pin).
-#[test]
-fn fresh_seed_with_activity_growing_leaf_fires_one() {
-    let mut e = Engine::new();
-    let r = anchor_dir(&mut e, "src");
-    let now = Instant::now();
-    let (sid, pid, _) = attach_returning(
-        &mut e,
-        "scp",
-        SubAttachAnchor::Resource(r),
-        ScanConfig::builder().recursive(true).build(),
-        NO_EVENTS,
-        MAX_SETTLE,
-        now,
-    );
-
-    // Anchor activity during Batching populates `dirty`.
-    e.step(
-        Input::FsEvent {
-            resource: r,
-            event: FsEvent::Modified,
-        },
-        now + Duration::from_millis(1),
-    );
-
-    let s1 = dir_snap_sized_file("big.bin", 21, 10);
-    let s2 = dir_snap_sized_file("big.bin", 21, 4096);
-    assert_ne!(
-        s1.dir_hash(),
-        s2.dir_hash(),
-        "the growing-file reads must hash distinctly so read2 stays Unstable",
-    );
-
-    // Three samples: read1=S1 (prior None ⇒ Unstable, prior:=S1),
-    // read2=S2 (≠S1 ⇒ Unstable, prior:=S2), read3=S2 (prior S2 ⇒
-    // Stable ⇒ pin). The two re-batch samples are still-moving (no
-    // fire); the stable one is the pin.
-    let mut at = now + Duration::from_millis(1);
-    for read in [&s1, &s2] {
-        at += SETTLE;
-        let out = seed_cycle(&mut e, pid, read, at);
-        assert!(
-            out.effects().is_empty(),
-            "no fire before the tree stabilises (still moving)",
-        );
-    }
-    at += SETTLE;
-    let stable_out = seed_cycle(&mut e, pid, &s2, at);
-
-    assert_eq!(
-        stable_out.effects().len(),
-        1,
-        "fresh Seed that witnessed activity fires exactly one Effect once the growing file stabilises",
-    );
-    assert!(
-        matches!(stable_out.effects()[0].key(), DedupKey::Subtree { sub, .. } if sub == sid),
-        "the single Effect is the SubtreeRoot Sub's Subtree effect",
-    );
-}
-
-/// (c) post-ceiling single-event. Drive a fresh Seed to the
+/// Drive a fresh Seed to the
+/// `Undischarged + forced` ceiling terminal so the Profile ends Idle
 /// `Undischarged + forced` ceiling terminal so the Profile ends Idle
 /// with NO baseline (no FsEvents, expire the BurstDeadline so
 /// `forced=true`, answer the verify with an `Undischarged` authority —
 /// `undischarged_consequence` + `forced` ⇒ `finish_burst_to_idle`
 /// WITHOUT `apply_snapshot` / `rebase_baseline`). Then inject a *single*
 /// `FsEvent` (Idle + `!baseline_is_some()` ⇒ `start_seed_burst`) and
-/// drive a clean N=2 to `Stable`. Asserts exactly one Effect — this
-/// pins the constructor-symmetry contract specifically: a fresh Seed
-/// re-opened by a single event after a forced-ceiling terminal still
-/// carries its witnessed activity into the fire path.
+/// drive a clean Seed proof to `Stable`. Asserts exactly one Effect —
+/// this pins the constructor-symmetry contract specifically: a fresh
+/// Seed re-opened by a single event after a forced-ceiling terminal
+/// still carries its witnessed activity into the fire path.
 #[test]
 fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
     let mut e = Engine::new();
@@ -370,21 +281,12 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
         now,
     );
 
-    // No FsEvents. Expire the settle window → Verifying (Seed probe in
-    // flight, not yet forced).
-    let settle_id = batching_settle_id(&e, pid);
-    e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::Settle,
-            id: settle_id,
-        },
-        now + SETTLE,
-    );
-    // Expire the BurstDeadline (max-settle ceiling) while the verify is
-    // in flight → `force_pending` sets `forced=true`; the phase stays
-    // Verifying (a probe is in flight) and the in-flight response will
-    // dispatch with `forced` observed.
+    // Cold-arm: the Seed verify probe is in flight at burst
+    // construction (no settle window to expire). Expire the
+    // BurstDeadline (max-settle ceiling) while the verify is in flight
+    // → `force_pending` sets `forced=true`; the phase stays Verifying
+    // (a probe is in flight) and the in-flight response will dispatch
+    // with `forced` observed.
     let bd_id = burst_deadline_id(&e, pid);
     e.step(
         Input::TimerExpired {
@@ -457,12 +359,10 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
         "the single event re-opened a fresh Seed burst (Idle + !baseline → start_seed_burst)",
     );
 
-    // Clean N=2 (no further events) → Stable.
+    // settle expiry → Verifying → Authoritative response → fire.
+    // Single sample.
     let snap = dir_snap(&[("post.rs", EntryKind::File, 31)]);
-    let c1 = trigger_at + SETTLE;
-    let _ = seed_cycle(&mut e, pid, &snap, c1);
-    let c2 = c1 + SETTLE;
-    let stable_out = seed_cycle(&mut e, pid, &snap, c2);
+    let stable_out = seed_cycle(&mut e, pid, &snap, trigger_at + SETTLE);
 
     assert_eq!(
         stable_out.effects().len(),
@@ -520,19 +420,16 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         now,
     );
 
-    // Drive the child's Seed N=2 to a pinned Idle baseline (scoped by
-    // its own settle timer so the parent's Seed is untouched).
-    let mut child_at = now;
-    for _ in 0..2 {
-        child_at += SETTLE;
-        let _ = seed_cycle(&mut e, pid_child, &child_snap, child_at);
-    }
+    // Drive the child's Seed to a pinned Idle baseline (a single
+    // Authoritative sample pins → SilentPin → Idle).
+    let child_at = now + SETTLE;
+    let _ = seed_cycle(&mut e, pid_child, &child_snap, child_at);
     assert!(
         matches!(
             e.profiles().get(pid_child).unwrap().state(),
             ProfileState::Idle
         ),
-        "child Seed N=2 pinned → Idle",
+        "child Seed pinned → Idle",
     );
     assert!(
         e.profiles().get(pid_child).unwrap().baseline_is_some(),
@@ -569,7 +466,8 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     );
 
     // The parent witnesses activity (anchor Modified during its Seed
-    // Batching), then its N=2 is driven to Stable while the child gates.
+    // Batching), then its verify is driven to Stable while the child
+    // gates.
     let t_parent_act = t_child_burst + SETTLE + Duration::from_millis(1);
     e.step(
         Input::FsEvent {
@@ -593,12 +491,10 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         "parent witnessed activity and is a fresh Seed in Batching",
     );
 
-    // Parent N=2 (prime ⇒ re-batch; confirm ⇒ Stable). The child has no
-    // expirable settle timer, so stepping the parent's own settle id
-    // does not advance it.
-    let p1 = t_parent_act + SETTLE;
-    let _ = seed_cycle(&mut e, pid_parent, &parent_snap, p1);
-    let p2 = p1 + SETTLE;
+    // The parent's single Authoritative response folds to fire-or-park
+    // via the Draining gate. The child has no expirable settle timer,
+    // so stepping the parent's own settle id does not advance it.
+    let p2 = t_parent_act + SETTLE;
     let parent_stable_out = seed_cycle(&mut e, pid_parent, &parent_snap, p2);
 
     // The parent's Stable Seed step itself emits NO Effect: the fire is
@@ -685,52 +581,23 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         // then expired at exactly `p2 + SETTLE` (== `last_event_time +
         // SETTLE`), which satisfies `now − last ≥ settle`.
 
-        // Child Standard sample 1 (prior None ⇒ Unstable ⇒ re-batch).
-        let child_prime = e
+        // A single Authoritative verify response fires the child's
+        // Effect. The child never fired ⇒ Emit (not B1 dedup).
+        let child_corr = e
             .pending_probe_for(ProbeOwner::Profile(pid_child))
-            .expect("child Verifying probe in flight (prime sample)");
-        let cp = e.step(
+            .expect("child Verifying probe in flight");
+        let child_fire_out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: ProbeOwner::Profile(pid_child),
-                correlation: child_prime,
+                correlation: child_corr,
                 outcome: proven(child_snap.clone()),
             }),
             p2,
         );
-        assert!(
-            !parent_reconfirmed(&cp),
-            "parent does not reconfirm at the child's prime sample",
-        );
-
-        // Re-arm the child's settle (instant == last_event_time + SETTLE
-        // ⇒ Batching → Verifying, no reschedule) then answer the confirm
-        // sample. Hash-equal ⇒ Stable; the child never fired ⇒ `Emit`
-        // (NOT B1 `SuppressDedup`) ⇒ the child fires one Subtree Effect
-        // and enters the post-fire tail (still gating the parent).
-        let child_settle2 = batching_settle_id(&e, pid_child);
-        e.step(
-            Input::TimerExpired {
-                profile: pid_child,
-                kind: TimerKind::Settle,
-                id: child_settle2,
-            },
-            p2 + SETTLE,
-        );
-        let child_confirm = e
-            .pending_probe_for(ProbeOwner::Profile(pid_child))
-            .expect("child Verifying probe in flight (confirm sample)");
-        let child_fire_out = e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid_child),
-                correlation: child_confirm,
-                outcome: proven(child_snap.clone()),
-            }),
-            p2 + SETTLE,
-        );
         assert_eq!(
             child_fire_out.effects().len(),
             1,
-            "never-fired child Standard Stable fires one Subtree Effect (Emit, not B1 dedup)",
+            "never-fired child Standard Authoritative fires one Subtree Effect (Emit, not B1 dedup)",
         );
         assert!(
             !parent_reconfirmed(&child_fire_out),
@@ -743,7 +610,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         );
 
         // Child EffectComplete::Ok → Rebasing (idempotent `/bin/true`).
-        let (child_rebase_out, _cc) = complete_effect_to_rebasing(
+        let child_rebase_out = complete_effect_to_settling(
             &mut e,
             sid_c,
             child_effect_key,
@@ -754,12 +621,12 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
             "parent does not reconfirm while the child is still Rebasing (gate held)",
         );
 
-        // Post-fire N=2 rebase loop → child Idle. The terminal `Stable`
-        // step calls `finish_burst_to_idle`, whose Draining sweep
+        // Post-fire rebase → child Idle. The terminal `Stable` step
+        // calls `finish_burst_to_idle`, whose Draining sweep
         // re-evaluates the parent's now-false covered-descendant query
         // and transitions the parent Draining → Verifying *in the same
         // step* — the reconfirm probe is read back off this output.
-        let child_terminal_out = rebase_loop_to_idle(
+        let child_terminal_out = rebase_post_fire_to_idle(
             &mut e,
             pid_child,
             &child_snap,
@@ -829,14 +696,13 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
             p2 + SETTLE * 3,
         );
 
-        // The reconfirm may itself be N=2 (fresh `CertifiedPrior` on
-        // the reconfirm carrier ⇒ first sample Unstable ⇒ re-batch).
-        // Drive to the firing stable verdict. The `pop_expired` drain
-        // advances `t` by `SETTLE * 4` per iteration — always well past
-        // `last_event_time + SETTLE` (set by
-        // `unstable_response_drives_batching` to the prior response
-        // instant), so each re-armed settle expiry transitions to
-        // Verifying rather than rescheduling.
+        // Defensive: if the reconfirm did not fire on its first
+        // Authoritative response (e.g. a transient re-Draining or an
+        // Undischarged retry), drive successive settle windows until
+        // an Effect is emitted. The `pop_expired` drain advances `t`
+        // by `SETTLE * 4` per iteration, always well past
+        // `last_event_time + SETTLE`, so each re-armed settle expiry
+        // transitions to Verifying rather than rescheduling.
         let mut fire_out = if reconfirm_out.effects().is_empty() {
             None
         } else {

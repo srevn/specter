@@ -193,15 +193,9 @@ fn config_diff_mid_burst_remove_defers_reap() {
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
 
-    // N=2 quiescence: the prime sample (prior == None ⇒ Unstable) is
-    // re-batched even though the burst is reap-pending (reap deferred);
-    // the hash-equal confirm sample is the Stable verdict at which
+    // The single Authoritative verify response folds to `Stable`;
     // reap-pending suppresses the Effect and finishes by reaping.
     let n2 = verify_n2(&mut e, pid, &dir_snap(&[]), t2);
-    assert!(
-        n2.primed.effects().is_empty(),
-        "prime sample (prior == None ⇒ Unstable) must not fire",
-    );
     let out = n2.confirmed;
     assert!(out.effects().is_empty(), "reap_pending suppresses Effect");
     assert!(

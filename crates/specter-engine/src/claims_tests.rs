@@ -57,46 +57,31 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     ))
 }
 
-/// Drive a fresh-attach Seed burst from `Active(PreFire(Batching))`
-/// through the N=2 quiescence proof to pinned `Idle`, committing `snap`
-/// as `current` + `baseline`.
+/// Drive a fresh-attach cold Seed burst from
+/// `Active(PreFire(Verifying))` through its quiescence verdict to
+/// pinned `Idle`, committing `snap` as `current` + `baseline`.
 ///
-/// A Seed burst is Batching-first and pins only on the *second*
-/// settle-spaced equal `Authoritative` sample — `CertifiedPrior::advance`
-/// returns `Unstable` on the first by construction (no prior
-/// `certified`). Each cycle drains the due settle timer
-/// (`Batching → Verifying`, Seed probe emitted) then answers it with
-/// `snap`; the equal second hash is `Stable` ⇒ pin. `t0` is the attach
-/// instant — settle deadlines fall at `t0 + SETTLE` and `t0 + 2·SETTLE`,
-/// both well inside `MAX_SETTLE` (never forced). The setup builds one
-/// Profile, so draining all due timers at each deadline is `pid`-exact.
+/// The cold-arm Seed burst pins on the first `Authoritative` sample:
+/// `quiescence_verdict(Authoritative, !forced)` folds to `Authoritative
+/// { forced: false }`, dispatch reaches `SilentPin` (no fired Subs, no
+/// drift) and finishes to Idle. The cold-arm Verifying-first contract
+/// puts the probe in flight at burst construction, so this helper
+/// answers it directly — no settle expiry step.
 fn drive_fresh_seed_to_idle(e: &mut Engine, pid: ProfileId, snap: Arc<DirSnapshot>, t0: Instant) {
-    for at in [t0 + SETTLE, t0 + SETTLE * 2] {
-        while let Some(entry) = e.pop_expired(at) {
-            e.step(
-                Input::TimerExpired {
-                    profile: entry.profile,
-                    kind: entry.kind,
-                    id: entry.id,
-                },
-                at,
-            );
-        }
-        let corr = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .expect("Seed Verifying probe in flight after settle expiry");
-        e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
-                correlation: corr,
-                outcome: ProbeOutcome::SubtreeProven {
-                    snapshot: Arc::clone(&snap),
-                    authority: ProofAuthority::Authoritative,
-                },
-            }),
-            at,
-        );
-    }
+    let corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("cold-arm Seed Verifying probe in flight at burst construction");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: Arc::clone(&snap),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t0 + SETTLE,
+    );
     assert!(
         matches!(
             e.profiles().get(pid).unwrap().state(),
@@ -138,7 +123,7 @@ fn engine_with_materialised_profile(
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile();
 
-    // Drive the Batching-first Seed through its N=2 proof so `current`
+    // Drive the cold-arm Seed through its quiescence proof so `current`
     // and `baseline` pin to the empty-dir observation.
     drive_fresh_seed_to_idle(&mut e, pid, dir_snap(vec![]), t0);
 

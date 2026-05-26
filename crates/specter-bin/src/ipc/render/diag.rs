@@ -551,12 +551,12 @@ const fn burst_helper_str(h: WireBurstHelper) -> &'static str {
         WireBurstHelper::StartSeedBurst => "start_seed_burst",
         WireBurstHelper::StartStandardBurst => "start_standard_burst",
         WireBurstHelper::EventDrivesBatching => "event_drives_batching",
-        WireBurstHelper::UnstableResponseDrivesBatching => "unstable_response_drives_batching",
+        WireBurstHelper::UndischargedDrivesBatching => "undischarged_drives_batching",
         WireBurstHelper::TransitionToVerifying => "transition_to_verifying",
         WireBurstHelper::TransitionToDraining => "transition_to_draining",
         WireBurstHelper::TransitionToAwaiting => "transition_to_awaiting",
         WireBurstHelper::TransitionToRebasing => "transition_to_rebasing",
-        WireBurstHelper::RebaseUnstableLoopsSettling => "rebase_unstable_loops_settling",
+        WireBurstHelper::TransitionToSettling => "transition_to_settling",
         WireBurstHelper::AbsorbEventIntoFireTail => "absorb_event_into_fire_tail",
         WireBurstHelper::RestartBurstFromFireTailResidual => {
             "restart_burst_from_fire_tail_residual"

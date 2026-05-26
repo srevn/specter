@@ -88,20 +88,20 @@ pub fn batching_settle_id(e: &Engine, pid: ProfileId) -> TimerId {
     }
 }
 
-/// Read `pid`'s `Active(PostFire(RebaseSettling))` spacing-timer id, or
-/// panic with the actual state — the post-fire sibling of
+/// Read `pid`'s `Active(PostFire(Settling))` settle-timer id, or panic
+/// with the actual state — the post-fire sibling of
 /// [`batching_settle_id`].
 #[must_use]
-pub fn rebase_settling_spacing_id(e: &Engine, pid: ProfileId) -> TimerId {
+pub fn post_fire_settle_id(e: &Engine, pid: ProfileId) -> TimerId {
     match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
-                phase: PostFirePhase::RebaseSettling { spacing_timer },
+                phase: PostFirePhase::Settling { settle_timer },
                 ..
             }),
             _,
-        ) => *spacing_timer,
-        other => panic!("expected {pid:?} in Active(PostFire(RebaseSettling)), got {other:?}"),
+        ) => *settle_timer,
+        other => panic!("expected {pid:?} in Active(PostFire(Settling)), got {other:?}"),
     }
 }
 
@@ -197,51 +197,54 @@ pub fn attach_seeded(
     (sid, pid, done)
 }
 
-/// Expire `pid`'s own Batching `Settle` window, advancing
-/// `Active(PreFire(Batching)) → Verifying` and emitting the probe.
+/// Read `pid`'s cold-arm `Active(PreFire(Verifying))` slot.
 ///
-/// Steps by the settle's *own* id (not a blanket drain — sibling
-/// Profiles in a multi-Profile setup stay untouched). Returns the
-/// in-flight probe correlation and the post-expiry instant. The
-/// non-atomic primitive [`seed_to_idle_with`] composes twice; callers
-/// that terminate the burst on its *first* response (Vanished /
-/// Failed) or inspect the intermediate probe shape use it directly.
+/// Post-`start_seed_burst(None)` shape under the cold-arm Verifying-
+/// first contract: the in-flight correlation is on the Verifying slot,
+/// fetched via `pending_probe_for`. Returns the in-flight probe
+/// correlation and `at` unchanged — under the cold-arm shape there is
+/// no settle expiry to advance through; the probe is already in flight
+/// at attach.
+///
+/// Retained as `seed_settle_to_verifying` for call-site parity with the
+/// prior Batching-first helper; the body is now a state projection
+/// rather than a timer driver.
 #[must_use]
 pub fn seed_settle_to_verifying(
     e: &mut Engine,
     pid: ProfileId,
     at: Instant,
 ) -> (ProbeCorrelation, Instant) {
-    let at = at + SETTLE;
-    let settle_id = batching_settle_id(e, pid);
-    e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::Settle,
-            id: settle_id,
-        },
-        at,
-    );
+    match e.profiles().get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => assert!(
+            matches!(pre.phase, PreFirePhase::Verifying(_)),
+            "expected {pid:?} in cold-arm Active(PreFire(Verifying)), got phase {:?}",
+            pre.phase,
+        ),
+        other => panic!("expected {pid:?} Active(PreFire(Verifying)), got {other:?}"),
+    }
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Seed Verifying probe in flight after settle expiry");
+        .expect("cold-arm Seed Verifying probe in flight at burst construction");
     (correlation, at)
 }
 
-/// Drive a fresh Batching-first Seed burst for `pid` through its N=2
-/// quiescence proof to pinned `Idle`, answering each probe with
+/// Drive a fresh cold-arm Seed burst for `pid` through its quiescence
+/// verdict to pinned `Idle`, answering the cold walk probe with
 /// `make_outcome()`.
 ///
-/// `make_outcome` is invoked once per sample, so the prime and confirm
-/// outcomes are equal **by construction** — `proven(snap)` for a Dir
-/// anchor, `anchor_ok(file_leaf(..))` for a File anchor, both folding
-/// through the N=2 proof identically; the `Stable` requirement cannot
-/// be accidentally violated. The first sample is `Unstable` (no prior
-/// certified) → graft + re-batch; the second hash-equal sample is
-/// `Stable` → pin → `Idle`. A fresh Seed emits no Effects. `start` is
-/// the instant the Seed burst's debounce began; returns the final
-/// instant (two settle windows later) so the caller rebases later
-/// bursts past it.
+/// The cold-arm Seed burst pins on the first `Authoritative` response:
+/// `quiescence_verdict(Authoritative, !forced)` folds to
+/// `Authoritative { forced: false }`, dispatch reaches `SilentPin` (a
+/// fresh Seed with no activity), and the burst finishes to Idle. The
+/// cold-arm Verifying-first contract puts the probe in flight at burst
+/// construction — no Batching settle to drain on the way in.
+///
+/// `start` is the instant the Seed burst was constructed; the probe
+/// response steps at `start + SETTLE` (one settle window past the
+/// cold-arm so later bursts get a clean rebase window). Returns the
+/// step instant so the caller rebases later bursts past it. A fresh
+/// Seed emits no Effects.
 #[must_use]
 pub fn seed_to_idle_with(
     e: &mut Engine,
@@ -249,26 +252,25 @@ pub fn seed_to_idle_with(
     make_outcome: impl Fn() -> ProbeOutcome,
     start: Instant,
 ) -> Instant {
-    let mut at = start;
-    for _ in 0..2 {
-        let (correlation, sample_at) = seed_settle_to_verifying(e, pid, at);
-        at = sample_at;
-        let out = e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
-                correlation,
-                outcome: make_outcome(),
-            }),
-            at,
-        );
-        assert!(
-            out.effects().is_empty(),
-            "a fresh Seed never fires an Effect (N=2 establishment)",
-        );
-    }
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("cold-arm Seed Verifying probe in flight at burst construction");
+    let at = start + SETTLE;
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation,
+            outcome: make_outcome(),
+        }),
+        at,
+    );
+    assert!(
+        out.effects().is_empty(),
+        "a fresh Seed never fires an Effect (single Authoritative pin)",
+    );
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
-        "two settle-spaced hash-equal Seed samples pin the baseline → Idle for {pid:?}",
+        "one Authoritative Seed sample pins the baseline → Idle for {pid:?}",
     );
     at
 }
@@ -285,13 +287,17 @@ pub fn seed_to_idle(
     seed_to_idle_with(e, pid, || proven(Arc::clone(snap)), start)
 }
 
-/// The pre-fire Standard N=2 dance for `pid`.
+/// The pre-fire Standard verify response for `pid`.
 ///
-/// `pid` is already in `Verifying` with a probe in flight at `start`:
-/// prime (prior `None` ⇒ `Unstable` ⇒ re-batch) → drain the re-armed
-/// settle at `start + SETTLE*2` → confirm (hash-equal ⇒ `Stable`).
-/// Returns both step outputs and the confirm instant; the caller
-/// asserts context-specifically on each.
+/// A Standard burst's first `Authoritative` probe response fires (or
+/// routes to Draining via the gate) directly — there is no prime/confirm
+/// pair. `primed` is retained as an empty placeholder
+/// `StepOutput::default()` so legacy assertions like
+/// `n2.primed.effects().is_empty()` (a fresh placeholder has no
+/// effects) and `!reconfirm_probed(&n2.primed, _)` (an empty
+/// placeholder probes nothing) stay vacuously true. The single
+/// dispatch response lives on [`Self::confirmed`]; [`Self::confirm_at`]
+/// is its step instant.
 #[derive(Debug)]
 pub struct N2 {
     pub primed: StepOutput,
@@ -299,13 +305,16 @@ pub struct N2 {
     pub confirm_at: Instant,
 }
 
-/// The pre-fire Standard N=2 dance for `pid`, answering both samples
-/// with `make_outcome()`.
+/// The pre-fire Standard verify dispatch for `pid`, answering the
+/// single in-flight probe with `make_outcome()`.
 ///
-/// `make_outcome` is invoked once per sample, so prime and confirm are
-/// hash-equal **by construction** (`proven(snap)` for a Dir anchor,
-/// `anchor_ok(file_leaf(..))` for a File anchor) — the `Stable`
-/// requirement cannot be accidentally violated.
+/// The verify response folds through `quiescence_verdict(Authoritative,
+/// !forced)` to `QuiescenceVerdict::Authoritative { forced: false }` —
+/// single sample, single dispatch. The helper returns the response
+/// step output as [`N2::confirmed`] and an empty placeholder on
+/// [`N2::primed`] (kept for legacy callers that assert
+/// `primed.effects().is_empty()` and `!reconfirm_probed(&primed, …)` —
+/// both vacuously true on a fresh `StepOutput::default()`).
 #[must_use]
 pub fn verify_n2_with(
     e: &mut Engine,
@@ -313,107 +322,84 @@ pub fn verify_n2_with(
     make_outcome: impl Fn() -> ProbeOutcome,
     start: Instant,
 ) -> N2 {
-    let prime_corr = e
+    let corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Verifying probe in flight (prime sample)");
-    let primed = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: prime_corr,
-            outcome: make_outcome(),
-        }),
-        start,
-    );
+        .expect("Verifying probe in flight at verify_n2_with entry");
     let confirm_at = start + SETTLE * 2;
-    drain_due(e, confirm_at);
-    let confirm_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Verifying probe in flight (confirm sample)");
     let confirmed = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
-            correlation: confirm_corr,
+            correlation: corr,
             outcome: make_outcome(),
         }),
         confirm_at,
     );
     N2 {
-        primed,
+        primed: StepOutput::default(),
         confirmed,
         confirm_at,
     }
 }
 
-/// [`verify_n2_with`] answering both samples with `proven(snap)` — the
-/// Subtree common case (every pre-fire Standard N=2 site today).
+/// [`verify_n2_with`] answering the sample with `proven(snap)` — the
+/// Subtree common case for the pre-fire Standard verify dispatch.
 #[must_use]
 pub fn verify_n2(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, start: Instant) -> N2 {
     verify_n2_with(e, pid, || proven(Arc::clone(snap)), start)
 }
 
-/// The clean post-fire rebase N=2 loop for `pid`.
+/// The clean post-fire rebase to Idle for `pid`.
 ///
-/// `pid` is already in `Active(PostFire(Rebasing))` with probe #1 in
-/// flight (the caller has stepped `EffectComplete`): sample 1 (prior
-/// `None` ⇒ `Unstable` ⇒ `RebaseSettling`) → `RebaseSettle` spacing
-/// expiry by id (re-arm `Rebasing`) → sample 2 (hash-equal ⇒ `Stable`
-/// ⇒ finish/restart).
+/// `pid` is already in `Active(PostFire(Settling))` (the caller has
+/// stepped `EffectComplete`, which advances `Awaiting → Settling` via
+/// `on_effect_complete::LastReached`). Drives `PostFireSettle` expiry
+/// by id (`Settling → Rebasing` via `handle_post_fire_settle_expired`),
+/// then answers the in-flight rebase probe with `proven(snap)`. The
+/// response folds through `quiescence_verdict(Authoritative, !forced)`
+/// → commit + finish (or restart on a non-empty residual).
 ///
-/// Returns every step output (`s1`, `rearm`, `finish`) and the finish
+/// Returns every step output (`settle`, `finish`) and the finish
 /// instant so the caller can assert co-Profile state between each.
 /// **Carve-out:** a test that injects a custom absorb in the final
-/// window or restarts from a fire-tail residual is *not* the clean
-/// loop — it composes the finer primitives inline.
+/// window or exercises the Undischarged loop-back composes the finer
+/// primitives inline.
 #[derive(Debug)]
-pub struct RebaseN2 {
-    pub s1: StepOutput,
-    pub rearm: StepOutput,
+pub struct RebasePostFire {
+    pub settle: StepOutput,
     pub finish: StepOutput,
     pub finish_at: Instant,
 }
 
 #[must_use]
-pub fn rebase_loop_to_idle(
+pub fn rebase_post_fire_to_idle(
     e: &mut Engine,
     pid: ProfileId,
     snap: &Arc<DirSnapshot>,
     start: Instant,
-) -> RebaseN2 {
-    let corr1 = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("rebase probe #1 in flight");
-    let s1 = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: corr1,
-            outcome: proven(Arc::clone(snap)),
-        }),
-        start,
-    );
-    let spacing = rebase_settling_spacing_id(e, pid);
+) -> RebasePostFire {
+    let settle_id = post_fire_settle_id(e, pid);
     let finish_at = start + SETTLE;
-    let rearm = e.step(
+    let settle = e.step(
         Input::TimerExpired {
             profile: pid,
-            kind: TimerKind::RebaseSettle,
-            id: spacing,
+            kind: TimerKind::PostFireSettle,
+            id: settle_id,
         },
         finish_at,
     );
-    let corr2 = e
+    let corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("RebaseSettle re-arms the Rebasing probe #2");
+        .expect("PostFireSettle drives Settling → Rebasing with probe in flight");
     let finish = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
-            correlation: corr2,
+            correlation: corr,
             outcome: proven(Arc::clone(snap)),
         }),
         finish_at,
     );
-    RebaseN2 {
-        s1,
-        rearm,
+    RebasePostFire {
+        settle,
         finish,
         finish_at,
     }
@@ -445,34 +431,37 @@ pub fn descent_advance(
     )
 }
 
-/// Drive the burst's single completed Effect (`key`) into the post-fire
-/// rebase loop: step `EffectComplete::Ok`, returning the step output
-/// and the fresh rebase probe correlation.
+/// Drive the burst's single completed Effect (`key`) into Settling.
 ///
-/// The single-`Ok`, single-effect prologue before
-/// [`rebase_loop_to_idle`]. Multi-effect / `Failed`-mix awaiting tests
-/// keep their explicit loop inline (they assert the
+/// Steps `EffectComplete::Ok`; the burst advances `Awaiting → Settling`
+/// via `on_effect_complete::LastReached + ReturnToIdle` and the step
+/// output is returned. The rebase probe is minted later, on
+/// `PostFireSettle` expiry, inside [`rebase_post_fire_to_idle`]. This
+/// is the single-`Ok`, single-effect prologue before
+/// [`rebase_post_fire_to_idle`]. Multi-effect / `Failed`-mix awaiting
+/// tests keep their explicit loop inline (they assert the
 /// outstanding-count decrement).
+///
+/// **Carve-out callers** that need the rebase probe correlation
+/// (e.g. answering with a custom `Vanished` / `Failed` outcome) compose
+/// inline: step the `EffectComplete::Ok`, drive `PostFireSettle`
+/// expiry by id (`post_fire_settle_id` reads the live token), then
+/// `pending_probe_for` returns the freshly-minted correlation.
 #[must_use]
-pub fn complete_effect_to_rebasing(
+pub fn complete_effect_to_settling(
     e: &mut Engine,
     sid: SubId,
     key: DedupKey,
     at: Instant,
-) -> (StepOutput, ProbeCorrelation) {
-    let pid = pid_of(e, sid);
-    let out = e.step(
+) -> StepOutput {
+    e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
             key,
             outcome: EffectOutcome::Ok,
         }),
         at,
-    );
-    let correlation = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("rebase probe in flight after single-Ok effect completion");
-    (out, correlation)
+    )
 }
 
 /// The fixture `PromoterAttachRequest`: `recursive`, `ClassSet::EMPTY`,

@@ -269,7 +269,7 @@ impl Engine {
     ///   ([`Engine::seed_drift_observed`] reads it via
     ///   [`specter_core::Profile::settled_hash`]). `dispatch_rebase_ok`
     ///   and the Seed-Ok recovery pin only (the `EmitMode::SeedDrift`
-    ///   seal in `fire_and_settle`, or the silent `RecoverySeal` arm of
+    ///   seal in `fire_and_settle`, or the silent `SilentPin` arm of
     ///   `fire_or_seal`, reached from the `Stable` / `Unstable + forced`
     ///   Seed verdicts) call
     ///   [`specter_core::Profile::rebase_baseline`], which consumes it

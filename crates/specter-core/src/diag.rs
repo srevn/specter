@@ -46,9 +46,10 @@ pub enum BurstHelper {
     StartStandardBurst,
     /// `Engine::event_drives_batching` — pre-fire FsEvent absorb.
     EventDrivesBatching,
-    /// `Engine::unstable_response_drives_batching` — unstable verify
-    /// response re-arms Batching.
-    UnstableResponseDrivesBatching,
+    /// `Engine::undischarged_drives_batching` — Undischarged
+    /// verify response (transient non-observation, ceiling not yet
+    /// fired) re-arms Batching for the next sample.
+    UndischargedDrivesBatching,
     /// `Engine::transition_to_verifying` — Batching/Draining → Verifying.
     TransitionToVerifying,
     /// `Engine::transition_to_draining` — Verifying → Draining.
@@ -56,14 +57,22 @@ pub enum BurstHelper {
     /// `Engine::transition_to_awaiting` — fire transition
     /// (PreFire → PostFire).
     TransitionToAwaiting,
-    /// `Engine::transition_to_rebasing` — Awaiting → Rebasing (first
-    /// entry) or RebaseSettling → Rebasing (rebase-loop re-arm).
+    /// `Engine::transition_to_rebasing` — Settling → Rebasing
+    /// (natural settle-expiry or ceiling-driven force) or Awaiting →
+    /// Rebasing (gate-deadline-recovery skip). Rebase-loop ceiling
+    /// arming lives separately on `Engine::arm_rebase_loop_ceiling`
+    /// (the natural `Awaiting → Settling` entry only); this helper is
+    /// single-purpose (mint correlation, clear residual, write phase,
+    /// emit probe).
     TransitionToRebasing,
-    /// `Engine::rebase_unstable_loops_settling` — an unstable / unread
-    /// rebase response loops back through the spacing wait
-    /// (Rebasing → RebaseSettling), the post-fire analogue of
-    /// `unstable_response_drives_batching`.
-    RebaseUnstableLoopsSettling,
+    /// `Engine::transition_to_settling` — post-fire settle-debounce
+    /// entry. Reached from the natural `Awaiting → Settling` advance
+    /// (`on_effect_complete::LastReached + ReturnToIdle`) and the
+    /// `Rebasing → Settling` undischarged loop-back
+    /// (`dispatch_rebase_ok::Undischarged + !terminal`); the post-fire
+    /// mirror of pre-fire's `event_drives_batching` /
+    /// `undischarged_drives_batching` pair on the Settling side.
+    TransitionToSettling,
     /// `Engine::absorb_event_into_fire_tail` — post-fire FsEvent absorb.
     AbsorbEventIntoFireTail,
     /// `Engine::restart_burst_from_fire_tail_residual` — post-rebase

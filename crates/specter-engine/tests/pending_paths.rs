@@ -92,27 +92,27 @@ fn attach_sub_path_pending_then_anchor_appears() {
     assert_eq!(e.tree().get(myapp).unwrap().kind(), Some(ResourceKind::Dir));
 
     // Profile is now in Active(PreFire(Seed)) — the Seed burst was
-    // started at materialization. A Seed is Batching-first:
-    // the materializing step opens the burst in
-    // `Batching { settle_timer }` and emits NO probe; the first Seed
-    // probe materializes only after the initial settle window expires.
+    // started at materialization. Under the cold-arm Verifying-first
+    // contract, the materializing step opens the burst in
+    // `Verifying(ProbeSlot::armed(corr, ()))` and emits the cold-walk
+    // Probe directly.
     match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
             assert_eq!(pre.intent, specter_core::BurstIntent::Seed);
             assert!(
-                matches!(pre.phase, specter_core::PreFirePhase::Batching { .. }),
-                "Seed opens Batching-first; got {:?}",
+                matches!(pre.phase, specter_core::PreFirePhase::Verifying(_)),
+                "cold-arm Seed opens Verifying-first; got {:?}",
                 pre.phase,
             );
         }
         s => panic!("expected Active(PreFire(Seed)), got {s:?}"),
     }
     assert!(
-        first_probe_correlation(&myapp_materialize).is_none(),
-        "Batching-first Seed emits no probe at materialization",
+        first_probe_correlation(&myapp_materialize).is_some(),
+        "cold-arm Seed: probe emitted at burst construction (materialization)",
     );
 
-    // Drive the N=2 Seed proof. `t0` is the instant the Seed burst
+    // Drive the Seed proof. `t0` is the instant the Seed burst
     // started — the step that materialized the anchor (`now`), not the
     // original attach.
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
@@ -258,10 +258,10 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     let pid = e.subs().get(sid).unwrap().profile();
     // The immediate Seed is Batching-first: no probe at attach.
     assert!(
-        first_probe_correlation(&attach_out).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&attach_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
-    // Drive the N=2 Seed proof → Idle (`t0` is the attach instant).
+    // Drive the Seed proof → Idle (`t0` is the attach instant).
     let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
@@ -539,11 +539,11 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         specter_core::testkit::first_attached_sub(&attach_b_out).expect("attach_sub succeeded");
     let pid_b = e.subs().get(sid_b).unwrap().profile();
     assert!(
-        first_probe_correlation(&attach_b_out).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&attach_b_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
-    // Drive B's N=2 Seed proof → Idle (`t0` is B's attach instant). A
-    // is Pending with an empty descent slot (no settle timer), so its
+    // Drive B's Seed proof → Idle (`t0` is B's attach instant). A is
+    // Pending with an empty descent slot (no settle timer), so its
     // timers do not interfere with B's settle drain.
     let b_seed_done = seed_to_idle(&mut e, pid_b, &dir_snap(&[]), now);
     assert_eq!(
@@ -584,10 +584,10 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         specter_core::testkit::first_attached_sub(&attach_c_out).expect("attach_sub succeeded");
     let pid_c = e.subs().get(sid_c).unwrap().profile();
     assert!(
-        first_probe_correlation(&attach_c_out).is_none(),
-        "Batching-first Seed emits no probe at attach",
+        first_probe_correlation(&attach_c_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
-    // Drive C's N=2 Seed proof → Idle (`t0` is C's attach instant).
+    // Drive C's Seed proof → Idle (`t0` is C's attach instant).
     let c_seed_done = seed_to_idle(&mut e, pid_c, &dir_snap(&[]), c_attach);
     assert!(matches!(
         e.profiles().get(pid_c).unwrap().state(),

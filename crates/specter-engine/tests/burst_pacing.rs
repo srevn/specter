@@ -48,13 +48,13 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).expect("sub").profile();
     assert!(
-        first_probe_correlation(&attach_out).is_none(),
-        "Batching-first Seed emits no probe at attach (no probe at attach)",
+        first_probe_correlation(&attach_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
     let snap = dir_snap(&[]);
-    // Drive the N=2 Batching-first Seed burst to Idle; the Standard
-    // burst under test starts strictly after the Seed's two settle
-    // windows (`now + SETTLE*2`) to keep instants monotonic.
+    // Drive the cold-arm Seed burst to Idle; the Standard burst under
+    // test starts strictly after the Seed's settle window to keep
+    // instants monotonic.
     let seed_settled = seed_to_idle(&mut e, pid, &snap, now);
 
     // Storm: 8 modify events at 100 ms intervals, rebased past the
@@ -98,55 +98,13 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         }
     };
 
-    // N=2 quiescence: the prime sample (prior == None ⇒ Unstable)
-    // re-arms the debounce at `prime_t + SETTLE`; it must not fire.
-    let prime_t = probe_emit + Duration::from_millis(1);
-    let primed = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: probe_correlation,
-            outcome: ProbeOutcome::SubtreeProven {
-                snapshot: snap.clone(),
-                authority: ProofAuthority::Authoritative,
-            },
-        }),
-        prime_t,
-    );
-    assert!(
-        primed.effects().is_empty(),
-        "prime sample (prior == None ⇒ Unstable) must not fire",
-    );
-
-    // Drain the re-armed debounce to the confirm Verifying probe. The
-    // hash-equal confirm sample is the Stable verdict. The Effect is
-    // NOT forced — the burst converged naturally over the N=2
-    // quiescence (prime + confirm settle cycles), nowhere near the
-    // exponential-backoff regression or the forced burst_deadline.
-    let confirm_emit = prime_t + SETTLE;
-    let confirm_correlation = loop {
-        let Some(entry) = e.pop_expired(confirm_emit) else {
-            panic!(
-                "re-armed settle timer did not fire within `prime + settle`; \
-                 the N=2 quiescence re-batch regressed."
-            )
-        };
-        let out = e.step(
-            Input::TimerExpired {
-                profile: entry.profile,
-                kind: entry.kind,
-                id: entry.id,
-            },
-            confirm_emit,
-        );
-        if let Some(c) = first_probe_correlation(&out) {
-            break c;
-        }
-    };
-    let resp_t = confirm_emit + Duration::from_millis(1);
+    // The verify response folds to `Authoritative { forced: false }`
+    // on the first sample — single dispatch fires the Effect.
+    let resp_t = probe_emit + Duration::from_millis(1);
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
-            correlation: confirm_correlation,
+            correlation: probe_correlation,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: snap,
                 authority: ProofAuthority::Authoritative,
@@ -157,7 +115,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     assert_eq!(
         stable_out.effects().len(),
         1,
-        "quiescence-confirmed stable verdict fires Effect",
+        "Authoritative stable verdict fires one Effect",
     );
     assert!(
         !stable_out.effects()[0].forced,
@@ -166,34 +124,35 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     );
 
     // The Effect must arrive well below the Standard burst's
-    // `burst_deadline`. The Seed runs first (its own burst,
-    // `now..now+SETTLE*2`); the Standard burst under test starts at
-    // its first storm event (`storm_start`), so its deadline is
-    // `storm_start + MAX_SETTLE`. Natural N=2 convergence costs two
-    // settle cycles (prime + confirm); the bound tracks
-    // `last_event + 2·SETTLE` with a 0.5×SETTLE slop margin, still
-    // far below the forced `burst_deadline`.
+    // `burst_deadline`. The Seed runs first (its own burst, single
+    // settle window); the Standard burst under test starts at its
+    // first storm event (`storm_start`), so its deadline is
+    // `storm_start + MAX_SETTLE`. Natural convergence costs one
+    // settle cycle; the bound tracks `last_event + SETTLE` with a
+    // 0.5×SETTLE slop margin, well below the forced `burst_deadline`.
     let burst_deadline = storm_start + MAX_SETTLE;
-    let upper_bound = last_event + SETTLE * 2 + SETTLE / 2 + Duration::from_millis(2);
+    let upper_bound = last_event + SETTLE + SETTLE / 2 + Duration::from_millis(2);
     assert!(
         resp_t < upper_bound,
         "Effect fired at {:?} relative to the Standard burst start; \
-         expected near `last_event + 2·settle` ({:?}), well below \
+         expected near `last_event + settle` ({:?}), well below \
          `burst_deadline` ({:?})",
         resp_t.duration_since(storm_start),
-        (last_event + SETTLE * 2).duration_since(storm_start),
+        (last_event + SETTLE).duration_since(storm_start),
         burst_deadline.duration_since(storm_start),
     );
 }
 
 #[test]
-fn sustained_unstable_response_storm_paces_at_settle() {
-    // Verify the second leg of the conflation fix: the probe-unstable
-    // path schedules the next attempt at `now + settle`, not at the
-    // exponential-backoff curve. We reproduce a sustained-instability
-    // burst: every probe response shows a different snapshot, no events
-    // arrive in between. Each cycle's next-probe deadline must equal
-    // `last_response + settle`, regardless of how many cycles preceded.
+fn sustained_undischarged_response_storm_paces_at_settle() {
+    // Verify the second leg of the conflation fix: the
+    // `Undischarged + !terminal` retry path routes via
+    // `undischarged_drives_batching`, which schedules the next attempt
+    // at `now + settle`, not at the exponential-backoff curve. We
+    // reproduce a sustained-undischarged burst: every probe response
+    // refuses the obligation; no events arrive in between. Each cycle's
+    // next-probe deadline must equal `last_response + settle`,
+    // regardless of how many cycles preceded.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -219,12 +178,12 @@ fn sustained_unstable_response_storm_paces_at_settle() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).expect("sub").profile();
     assert!(
-        first_probe_correlation(&attach_out).is_none(),
-        "Batching-first Seed emits no probe at attach (no probe at attach)",
+        first_probe_correlation(&attach_out).is_some(),
+        "cold-arm Seed: probe emitted at burst construction",
     );
-    // Drive the N=2 Batching-first Seed burst to Idle; the Standard
-    // burst under test starts strictly after the Seed's two settle
-    // windows to keep instants monotonic.
+    // Drive the cold-arm Seed burst to Idle; the Standard burst under
+    // test starts strictly after the Seed's settle window to keep
+    // instants monotonic.
     let seed_settled = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Kick off a Standard burst with one event, rebased past the
@@ -238,9 +197,12 @@ fn sustained_unstable_response_storm_paces_at_settle() {
         t_event,
     );
 
-    // Three consecutive unstable probe responses. After each, the next
-    // probe should fire at `last_response + SETTLE`, not amplified.
+    // Three consecutive Undischarged !terminal probe responses. After
+    // each, the next probe should fire at `last_response + SETTLE`, not
+    // amplified.
     let mut response_at = t_event + SETTLE;
+    let unread: std::sync::Arc<std::path::Path> =
+        std::sync::Arc::from(std::path::Path::new("src/opaque"));
     for cycle in 0u32..3 {
         // Drain settle timer → Verifying.
         let probe_correlation = loop {
@@ -258,8 +220,10 @@ fn sustained_unstable_response_storm_paces_at_settle() {
             }
         };
 
-        // Reply with a fresh snapshot whose hash differs from `current`.
-        // We construct a snapshot with a unique inode so the hash diverges.
+        // Reply with an Undischarged !terminal response. This folds to
+        // `QuiescenceVerdict::Undischarged { terminal: false }`, which
+        // routes via `undischarged_drives_batching` — the surviving
+        // retry path that schedules the next attempt at `now + settle`.
         let mut entries = BTreeMap::<CompactString, ChildEntry>::new();
         entries.insert(
             CompactString::new("file"),
@@ -270,7 +234,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
                 FsIdentity::synthetic(u64::from(cycle) + 1, 0),
             )),
         );
-        let unstable_snap = Arc::new(DirSnapshot::new(
+        let degraded_snap = Arc::new(DirSnapshot::new(
             DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
             0,
             entries,
@@ -280,8 +244,10 @@ fn sustained_unstable_response_storm_paces_at_settle() {
                 owner: ProbeOwner::Profile(pid),
                 correlation: probe_correlation,
                 outcome: ProbeOutcome::SubtreeProven {
-                    snapshot: unstable_snap,
-                    authority: ProofAuthority::Authoritative,
+                    snapshot: degraded_snap,
+                    authority: ProofAuthority::Undischarged {
+                        first_unread: std::sync::Arc::clone(&unread),
+                    },
                 },
             }),
             response_at,
@@ -290,7 +256,7 @@ fn sustained_unstable_response_storm_paces_at_settle() {
         let probe_due = response_at + SETTLE;
         assert!(
             e.next_deadline().is_some_and(|d| d <= probe_due),
-            "after unstable response cycle {cycle}, next deadline must be at most \
+            "after undischarged response cycle {cycle}, next deadline must be at most \
              last_response + settle (no exponential amplification)",
         );
 

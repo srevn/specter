@@ -241,7 +241,7 @@ const fn state_label_str(s: WireStateLabel) -> &'static str {
         WireStateLabel::Draining => "draining",
         WireStateLabel::Awaiting => "awaiting",
         WireStateLabel::Rebasing => "rebasing",
-        WireStateLabel::RebaseSettling => "rebase_settling",
+        WireStateLabel::Settling => "settling",
     }
 }
 

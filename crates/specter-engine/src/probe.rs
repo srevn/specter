@@ -79,11 +79,13 @@ use specter_core::{
 ///
 /// `Verifying` carries `(intent, forced)` because those drive the
 /// per-intent fan-out and are not recoverable from the state variant
-/// alone. `Enumerating` carries the proxy `target` because the
-/// enumeration wire is path-only — the slot's tag is the sole
-/// authority for the dispatch key. `Rebasing` and `Descent` need no
-/// payload — the variant (and, for descent, the owner the handler
-/// already holds) is the whole routing decision.
+/// alone. `Rebasing` carries `forced` so the post-fire dispatch threads
+/// the bit symmetrically with its pre-fire twin — read off
+/// [`specter_core::PostFireBurst::forced`] at gate time, captured with
+/// the slot disarm. `Enumerating` carries the proxy `target` because
+/// the enumeration wire is path-only — the slot's tag is the sole
+/// authority for the dispatch key. `Descent` needs no payload — the
+/// owner the handler already holds is the whole routing decision.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum ProbeRoute {
     /// Pending-path descent (Profile `Pending` or Promoter
@@ -93,12 +95,12 @@ pub(crate) enum ProbeRoute {
     /// Profile pre-fire stability probe. `intent` / `forced` are read
     /// off the `PreFireBurst` for the per-intent dispatch fan-out.
     Verifying { intent: BurstIntent, forced: bool },
-    /// Profile post-fire rebase probe. The outcome routes through the
-    /// shared `certify_probe_response` certifier (kind-check + N=2
-    /// quiescence fold over the post-command tree) and then
-    /// `dispatch_rebase_*`; no payload — the variant is the whole
-    /// routing decision.
-    Rebasing,
+    /// Profile post-fire rebase probe. `forced` is read off
+    /// [`specter_core::PostFireBurst::forced`] — the post-fire mirror
+    /// of [`Self::Verifying`]'s `forced` — so the post-fire dispatch
+    /// has the same fold input the pre-fire dispatch does without
+    /// re-reading state past the gate.
+    Rebasing { forced: bool },
     /// Promoter proxy enumeration (`Active`). `target` is the proxy the
     /// probe enumerates, read from the enumeration slot's tag — the
     /// wire is path-only, so it is the canonical dispatch key across
@@ -235,10 +237,10 @@ impl Engine {
                         PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
                     },
                     ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-                        PostFirePhase::Rebasing(_) => Some(ProbeRoute::Rebasing),
-                        PostFirePhase::Awaiting { .. } | PostFirePhase::RebaseSettling { .. } => {
-                            None
-                        }
+                        PostFirePhase::Rebasing(_) => Some(ProbeRoute::Rebasing {
+                            forced: post.forced,
+                        }),
+                        PostFirePhase::Awaiting { .. } | PostFirePhase::Settling { .. } => None,
                     },
                     ProfileState::Idle => None,
                 }?;
@@ -502,8 +504,8 @@ impl Engine {
                 // `intent` / kind-dispatch — independently of the
                 // correlation just read. A `Some` correlation *implies*
                 // a probe-bearing carrier (Batching / Draining /
-                // Awaiting / RebaseSettling / Idle hold no slot), so
-                // those arms are structurally dead when the read-back
+                // Awaiting / Settling / Idle hold no slot), so those
+                // arms are structurally dead when the read-back
                 // succeeded; they fold to `None` exactly as
                 // `probe_gate`'s twin arms do.
                 let correlation = p.state().probe_correlation()?;
@@ -519,7 +521,7 @@ impl Engine {
                     },
                     ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
                         PostFirePhase::Rebasing(_) => Carrier::Rebase,
-                        PostFirePhase::Awaiting { .. } | PostFirePhase::RebaseSettling { .. } => {
+                        PostFirePhase::Awaiting { .. } | PostFirePhase::Settling { .. } => {
                             return None;
                         }
                     },

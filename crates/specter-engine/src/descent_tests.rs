@@ -139,8 +139,8 @@ fn descent_one_level_advances_on_created_entry() {
     );
 
     // Anchor materialized: descent state cleared; the Seed burst
-    // started Batching-first — no probe in this step (it emits one
-    // settle window later via transition_to_verifying).
+    // is cold-arm Verifying-first — a probe is emitted at burst
+    // construction (the same step as materialization).
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
     assert!(
         matches!(
@@ -150,10 +150,10 @@ fn descent_one_level_advances_on_created_entry() {
         "materialization starts the Seed burst (Active, not Idle)",
     );
     assert!(
-        !out.probe_ops()
+        out.probe_ops()
             .iter()
             .any(|op| matches!(op, ProbeOp::Probe { .. })),
-        "Batching-first Seed: no probe emitted at materialization",
+        "cold-arm Seed: probe emitted at burst construction (materialization)",
     );
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -405,8 +405,7 @@ fn descent_materialization_caches_profile_kind() {
     );
 
     let corr = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
-    // Inject as a regular File. The bug class Session 1 closed had
-    // `Profile.kind` left implicit; this test pins the cache so a
+    // Inject as a regular File. This pins the `Profile.kind` cache so a
     // File-anchored materialisation can never re-introduce the
     // descendant-observation dispatch path by an unprobed-anchor
     // accident.

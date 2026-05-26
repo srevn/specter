@@ -7,7 +7,7 @@
 //! any non-FsEvent). This test mirrors that exact rule, then feeds the
 //! FULL list and the RULE-COALESCED list into two engines built
 //! identically, drives both through one real Standard burst lifecycle
-//! (settle → pre-fire N=2), and asserts they reach the same
+//! (settle → pre-fire verify), and asserts they reach the same
 //! observable outcome: same probe target (the LCA of the accumulated
 //! dirty set — the quantity that would diverge if a distinct
 //! `(resource, event)` were wrongly dropped, an F1-key regression, or
@@ -146,7 +146,7 @@ fn seeded() -> (
 
 /// Step every input at one shared `now` (one tick), force the
 /// Batching settle, capture the emitted probe's target, then run the
-/// pre-fire N=2 to a terminal `Idle`. Returns the observable outcome:
+/// pre-fire verify to a terminal `Idle`. Returns the observable outcome:
 /// `(probe target, terminal state discriminant, settled baseline
 /// hash)`.
 fn drive(inputs: &[Input]) -> (Option<PathBuf>, ProfileStateDiscriminant, Option<u128>) {

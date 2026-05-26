@@ -1302,12 +1302,12 @@ pub(crate) enum WireBurstHelper {
     StartSeedBurst,
     StartStandardBurst,
     EventDrivesBatching,
-    UnstableResponseDrivesBatching,
+    UndischargedDrivesBatching,
     TransitionToVerifying,
     TransitionToDraining,
     TransitionToAwaiting,
     TransitionToRebasing,
-    RebaseUnstableLoopsSettling,
+    TransitionToSettling,
     AbsorbEventIntoFireTail,
     RestartBurstFromFireTailResidual,
 }
@@ -1318,12 +1318,12 @@ impl From<BurstHelper> for WireBurstHelper {
             BurstHelper::StartSeedBurst => Self::StartSeedBurst,
             BurstHelper::StartStandardBurst => Self::StartStandardBurst,
             BurstHelper::EventDrivesBatching => Self::EventDrivesBatching,
-            BurstHelper::UnstableResponseDrivesBatching => Self::UnstableResponseDrivesBatching,
+            BurstHelper::UndischargedDrivesBatching => Self::UndischargedDrivesBatching,
             BurstHelper::TransitionToVerifying => Self::TransitionToVerifying,
             BurstHelper::TransitionToDraining => Self::TransitionToDraining,
             BurstHelper::TransitionToAwaiting => Self::TransitionToAwaiting,
             BurstHelper::TransitionToRebasing => Self::TransitionToRebasing,
-            BurstHelper::RebaseUnstableLoopsSettling => Self::RebaseUnstableLoopsSettling,
+            BurstHelper::TransitionToSettling => Self::TransitionToSettling,
             BurstHelper::AbsorbEventIntoFireTail => Self::AbsorbEventIntoFireTail,
             BurstHelper::RestartBurstFromFireTailResidual => Self::RestartBurstFromFireTailResidual,
         }
@@ -1364,7 +1364,7 @@ pub(crate) enum WireStateLabel {
     Draining,
     Awaiting,
     Rebasing,
-    RebaseSettling,
+    Settling,
 }
 
 impl From<StateLabel> for WireStateLabel {
@@ -1377,7 +1377,7 @@ impl From<StateLabel> for WireStateLabel {
             StateLabel::Draining => Self::Draining,
             StateLabel::Awaiting => Self::Awaiting,
             StateLabel::Rebasing => Self::Rebasing,
-            StateLabel::RebaseSettling => Self::RebaseSettling,
+            StateLabel::Settling => Self::Settling,
         }
     }
 }

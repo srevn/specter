@@ -14,12 +14,12 @@ use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
     AnchorClaim, BurstFinish, ClassSet, DedupKey, Diagnostic, DirMeta, DirSnapshot, EntryKind,
     FsEvent, FsIdentity, Input, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, WatchOp,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    anchor_dir, attach, attach_returning, complete_effect_to_rebasing, drain_due, pre_place_dir,
-    seed_settle_to_verifying, seed_to_idle, verify_n2,
+    anchor_dir, attach, attach_returning, complete_effect_to_settling, drain_due,
+    post_fire_settle_id, pre_place_dir, seed_settle_to_verifying, seed_to_idle, verify_n2,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -778,9 +778,9 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
     // Seed Vanished: anchor was found at attach but disappeared before
-    // the (settle-deferred) probe could read. Drive the first
-    // Seed probe out, then answer Vanished — terminal on the first
-    // response (no N=2 needed: the failure helper runs immediately).
+    // the (settle-deferred) probe could read. Drive the first Seed
+    // probe out, then answer Vanished — terminal on the first
+    // response (the failure helper runs immediately).
     let (corr, at) = seed_settle_to_verifying(&mut e, pid, t0);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -944,10 +944,8 @@ fn seed_failed_releases_anchor_claim() {
 
 /// Set up a Profile + a covered Dir child so the anchor cannot reap
 /// when the Profile detaches (the child's existence keeps the slot
-/// alive). Returns (root, child, sid, pid). The Seed burst is
-/// driven to a pinned `Idle` via the N=2 quiescence proof
-/// ([`seed_to_idle`]) — the attach `StepOutput` is no longer
-/// needed (the probe fires on settle expiry, not at attach).
+/// alive). Returns (root, child, sid, pid). The Seed burst is driven
+/// to a pinned `Idle` via the quiescence proof ([`seed_to_idle`]).
 fn setup_with_surviving_child(
     e: &mut Engine,
 ) -> (ResourceId, ResourceId, specter_core::SubId, ProfileId) {
@@ -1502,17 +1500,12 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
 
-    // N=2 quiescence — same snapshot twice. The prime sample
-    // (prior == None ⇒ Unstable) re-arms the settle timer; the
-    // hash-equal confirm sample is the Stable verdict. No covered
-    // descendant is in an Active Standard burst, so emit_effects fires
-    // one Effect for the SubtreeRoot Sub → transition_to_awaiting.
+    // The single Authoritative verify response folds to `Stable`. No
+    // covered descendant is in an Active Standard burst, so
+    // emit_effects fires one Effect for the SubtreeRoot Sub →
+    // transition_to_awaiting.
     let subdir_snap = dir_snap(&[("subdir", EntryKind::Dir, 99)]);
     let n2 = verify_n2(&mut e, pid, &subdir_snap, t2);
-    assert!(
-        n2.primed.effects().is_empty(),
-        "prime sample (prior == None ⇒ Unstable) must not fire",
-    );
     let effect = n2
         .confirmed
         .effects()
@@ -1530,8 +1523,23 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         ),
     ));
 
-    // EffectComplete::Ok → transition_to_rebasing.
-    let (_rebase_out, rebase_corr) = complete_effect_to_rebasing(&mut e, sid, effect.key(), t2);
+    // EffectComplete::Ok lands the burst in Settling. Drive
+    // PostFireSettle expiry by id to advance to Rebasing where the
+    // rebase probe is in flight, then capture the correlation for the
+    // Vanished response below.
+    let _ = complete_effect_to_settling(&mut e, sid, effect.key(), t2);
+    let settle_id = post_fire_settle_id(&e, pid);
+    let _ = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::PostFireSettle,
+            id: settle_id,
+        },
+        t2 + SETTLE,
+    );
+    let rebase_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("rebase probe in flight after PostFireSettle drove Settling → Rebasing");
 
     // Pre-condition: descendant claim still intact going into Rebasing.
     assert!(
@@ -1546,7 +1554,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
             correlation: rebase_corr,
             outcome: ProbeOutcome::Vanished,
         }),
-        t2,
+        t2 + SETTLE,
     );
 
     assert!(matches!(
