@@ -20,8 +20,8 @@
 //!
 //! # Filter semantics
 //!
-//! `--filter` is OR across variants — `--filter SubFired --filter
-//! SubDetached` admits either one. Empty filter (the default) admits
+//! `--filter` is OR across variants — `--filter sub_fired --filter
+//! sub_detached` admits either one. Empty filter (the default) admits
 //! every variant. Filter validation lives in the handler, not in
 //! clap's `value_parser`, because the vocabulary is owned by the
 //! wire crate ([`KNOWN_WIRE_VARIANTS`]) and `specter-config` should
@@ -204,16 +204,16 @@ mod tests {
     /// Filter matching the variant's tag admits the event.
     #[test]
     fn should_emit_matching_filter_admits_the_variant() {
-        let filter = vec!["SubFired".to_string()];
+        let filter = vec!["sub_fired".to_string()];
         assert!(should_emit(&sub_fired(), &filter));
     }
 
     /// Filter naming a different variant rejects this one.
-    /// Mirrors the operator's `--filter SubDetached` against an
+    /// Mirrors the operator's `--filter sub_detached` against an
     /// incoming `SubFired` line.
     #[test]
     fn should_emit_non_matching_filter_rejects() {
-        let filter = vec!["SubDetached".to_string()];
+        let filter = vec!["sub_detached".to_string()];
         assert!(!should_emit(&sub_fired(), &filter));
     }
 
@@ -222,7 +222,7 @@ mod tests {
     /// as AND.
     #[test]
     fn should_emit_or_across_multiple_filters() {
-        let filter = vec!["SubFired".to_string(), "SubDetached".to_string()];
+        let filter = vec!["sub_fired".to_string(), "sub_detached".to_string()];
         assert!(should_emit(&sub_fired(), &filter));
         assert!(!should_emit(&missed(), &filter));
     }
@@ -243,9 +243,9 @@ mod tests {
     #[test]
     fn validate_filter_accepts_known_tags() {
         assert!(validate_filter(&[]).is_ok());
-        assert!(validate_filter(&["SubFired".to_string()]).is_ok());
+        assert!(validate_filter(&["sub_fired".to_string()]).is_ok());
         assert!(
-            validate_filter(&["SubFired".to_string(), "_missed".to_string()]).is_ok(),
+            validate_filter(&["sub_fired".to_string(), "_missed".to_string()]).is_ok(),
             "the underscore-prefixed back-pressure marker is in the vocabulary",
         );
     }

@@ -600,7 +600,7 @@ mod tests {
             },
         );
         assert!(
-            s.starts_with("1970-01-01T00:00:00Z  SubFired"),
+            s.starts_with("1970-01-01T00:00:00Z  sub_fired"),
             "leading timestamp + tag: {s:?}",
         );
         assert!(s.contains("  sub=11"), "sub field present: {s:?}");
@@ -852,123 +852,125 @@ mod tests {
         let global_scope = json!({ "scope": "global" });
         let pressure = json!({ "kind": "pressure", "errno": 24 });
         match tag {
-            "StaleProbeResponse" => {
+            "stale_probe_response" => {
                 json!({"diag": tag, "at": at, "owner": profile_owner, "correlation": 1})
             }
-            "StaleTimer" => json!({"diag": tag, "at": at, "id": 1}),
-            "EffectCompleteOutsideAwaiting" => {
+            "stale_timer" => json!({"diag": tag, "at": at, "id": 1}),
+            "effect_complete_outside_awaiting" => {
                 json!({"diag": tag, "at": at, "sub": id, "profile": id})
             }
-            "EffectCompleteForUnknownSub" | "DetachUnknownSub" => {
+            "effect_complete_for_unknown_sub" | "detach_unknown_sub" => {
                 json!({"diag": tag, "at": at, "sub": id})
             }
-            "ConfigDiffUnknownSub"
-            | "ConfigDiffUnknownPromoter"
-            | "ConfigDiffRebindFallbackAttach" => {
+            "config_diff_unknown_sub"
+            | "config_diff_unknown_promoter"
+            | "config_diff_rebind_fallback_attach" => {
                 json!({"diag": tag, "at": at, "name": "x"})
             }
-            "ProbeVanished" => {
+            "probe_vanished" => {
                 json!({"diag": tag, "at": at, "profile": id, "intent": "standard"})
             }
-            "ProbeFailed" => {
+            "probe_failed" => {
                 json!({"diag": tag, "at": at, "profile": id, "intent": "standard", "errno": 0})
             }
-            "EventClassDropped" => {
+            "event_class_dropped" => {
                 json!({"diag": tag, "at": at, "resource": id, "event": "modified", "profile": id})
             }
-            "EventOnUnwatchedResource" | "EventNoConsumer" | "AttachResourceStale" => {
+            "event_on_unwatched_resource" | "event_no_consumer" | "attach_resource_stale" => {
                 json!({"diag": tag, "at": at, "resource": id})
             }
-            "WatchOpRejected" => {
+            "watch_op_rejected" => {
                 json!({"diag": tag, "at": at, "resource": id, "failure": pressure})
             }
-            "PendingPathProbeVanished" => {
+            "pending_path_probe_vanished" => {
                 json!({"diag": tag, "at": at, "profile": id, "prefix": id})
             }
-            "PendingPathProbeFailed" => {
+            "pending_path_probe_failed" => {
                 json!({"diag": tag, "at": at, "profile": id, "prefix": id, "errno": 0})
             }
-            "ReapPendingCancelled"
-            | "PerFileDriftDroppedOnRecovery"
-            | "PerFileFireSkippedOnFreshSeed" => json!({"diag": tag, "at": at, "profile": id}),
-            "ProfileReaped" => {
+            "reap_pending_cancelled"
+            | "per_file_drift_dropped_on_recovery"
+            | "per_file_fire_skipped_on_fresh_seed" => {
+                json!({"diag": tag, "at": at, "profile": id})
+            }
+            "profile_reaped" => {
                 json!({"diag": tag, "at": at, "profile": id, "via": "immediate"})
             }
-            "ProfileClaimPurged" => json!({
+            "profile_claim_purged" => json!({
                 "diag": tag, "at": at, "profile": id, "claim": "anchor",
                 "resource": id, "failure": pressure,
             }),
-            "PromoterClaimPurged" => json!({
+            "promoter_claim_purged" => json!({
                 "diag": tag, "at": at, "promoter": id, "claim": "active_proxy",
                 "resource": id, "failure": pressure,
             }),
-            "AttachPathInvalid" => {
+            "attach_path_invalid" => {
                 json!({"diag": tag, "at": at, "path": "/x", "hint": "h"})
             }
-            "AnchorKindMismatch" => json!({
+            "anchor_kind_mismatch" => json!({
                 "diag": tag, "at": at, "profile": id,
                 "prior_kind": "dir", "response_kind": "file",
             }),
-            "SpliceCrossedUncovered" => json!({
+            "splice_crossed_uncovered" => json!({
                 "diag": tag, "at": at, "profile": id, "target": id,
                 "cause": "target_outside_anchor_subtree",
             }),
-            "EventAbsorbedByFireTail" => json!({
+            "event_absorbed_by_fire_tail" => json!({
                 "diag": tag, "at": at, "profile": id, "resource": id,
                 "event": "modified",
             }),
-            "AwaitGateDeadlineForceRebasing" | "AwaitGateDeadlineReap" => {
+            "await_gate_deadline_force_rebasing" | "await_gate_deadline_reap" => {
                 json!({"diag": tag, "at": at, "profile": id, "outstanding": 1})
             }
-            "QuiescenceCeilingUnreadable" | "RebaseCeilingUnreadable" => json!({
+            "quiescence_ceiling_unreadable" | "rebase_ceiling_unreadable" => json!({
                 "diag": tag, "at": at, "profile": id,
                 "first_unread": "/x", "intent": "standard",
             }),
-            "RebaseCeilingStillChanging" => {
+            "rebase_ceiling_still_changing" => {
                 json!({"diag": tag, "at": at, "profile": id, "intent": "standard"})
             }
-            "SensorOverflow" => json!({"diag": tag, "at": at, "scope": global_scope}),
-            "PromoterReseededForOverflow" | "PromoterReaped" => {
+            "sensor_overflow" => json!({"diag": tag, "at": at, "scope": global_scope}),
+            "promoter_reseeded_for_overflow" | "promoter_reaped" => {
                 json!({"diag": tag, "at": at, "promoter": id})
             }
-            "SubAttached" => json!({
+            "sub_attached" => json!({
                 "diag": tag, "at": at, "sub": id, "name": "x", "source_promoter": null,
             }),
-            "SubFired" => {
+            "sub_fired" => {
                 json!({"diag": tag, "at": at, "sub": id, "profile": id, "count": 1})
             }
-            "SubDetached" => json!({
+            "sub_detached" => json!({
                 "diag": tag, "at": at, "sub": id, "profile": id, "reason": "ipc_disabled",
             }),
-            "SubRebound" | "RebindUnknownSub" => json!({"diag": tag, "at": at, "sub": id}),
-            "PromoterAttached" => {
+            "sub_rebound" | "rebind_unknown_sub" => json!({"diag": tag, "at": at, "sub": id}),
+            "promoter_attached" => {
                 json!({"diag": tag, "at": at, "promoter": id, "name": "p"})
             }
-            "PromoterDescentVanished" => {
+            "promoter_descent_vanished" => {
                 json!({"diag": tag, "at": at, "promoter": id, "prefix": id})
             }
-            "PromoterDescentFailed" => json!({
+            "promoter_descent_failed" => json!({
                 "diag": tag, "at": at, "promoter": id, "prefix": id, "errno": 0,
             }),
-            "PromotionKindObserved" => json!({
+            "promotion_kind_observed" => json!({
                 "diag": tag, "at": at, "promoter": id, "path": "/x", "kind": "dir",
             }),
-            "PromoterFanoutThreshold" => {
+            "promoter_fanout_threshold" => {
                 json!({"diag": tag, "at": at, "promoter": id, "count": 0})
             }
-            "PromoterProxyStaleEvent" => {
+            "promoter_proxy_stale_event" => {
                 json!({"diag": tag, "at": at, "promoter": id, "resource": id})
             }
-            "PromoterEnumerationVanished" => {
+            "promoter_enumeration_vanished" => {
                 json!({"diag": tag, "at": at, "promoter": id, "proxy": id})
             }
-            "PromoterEnumerationFailed" => json!({
+            "promoter_enumeration_failed" => json!({
                 "diag": tag, "at": at, "promoter": id, "proxy": id, "errno": 0,
             }),
-            "DynamicSubReaped" => json!({
+            "dynamic_sub_reaped" => json!({
                 "diag": tag, "at": at, "promoter": id, "sub": id, "path": "/x",
             }),
-            "InvalidBurstTransition" => json!({
+            "invalid_burst_transition" => json!({
                 "diag": tag, "at": at, "profile": id,
                 "helper": "transition_to_verifying", "observed": "idle",
             }),

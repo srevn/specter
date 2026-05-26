@@ -919,7 +919,7 @@ fn tail_unknown_filter_exits_two() {
 
 // ---------- tail sees a SubFired arrive end-to-end ------------------
 
-/// `tail --filter SubFired` over an attached watch + an operator
+/// `tail --filter sub_fired` over an attached watch + an operator
 /// file touch streams one matching line to stdout. Proves the
 /// streaming surface end-to-end: engine emits Diagnostic ⇒ broker
 /// fans out ⇒ per-conn thread writes wire JSON ⇒ tail client reads
@@ -945,14 +945,14 @@ fn tail_streams_sub_fired_after_touch() {
     // dispatches into thin air. A short sleep covers the
     // spawn → write Subscribe → ack round trip; the wait_for_line
     // deadline is the structural backstop if subscribe slips.
-    let (mut tail, rx) = spawn_client_stream(&sb, "tail", &["--filter", "SubFired", "-o", "json"]);
+    let (mut tail, rx) = spawn_client_stream(&sb, "tail", &["--filter", "sub_fired", "-o", "json"]);
     thread::sleep(Duration::from_millis(400));
 
     touch_unique(&anchor, "tail2");
 
     let line = wait_for_line(
         &rx,
-        |l| l.contains(r#""diag":"SubFired""#),
+        |l| l.contains(r#""diag":"sub_fired""#),
         Duration::from_secs(8),
     );
     assert!(
@@ -984,13 +984,13 @@ fn tail_json_output_round_trips_via_serde() {
     assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE));
     assert!(wait_for_log(&sb.log, |s| s.contains("sub attached"), STARTUP_DEADLINE).is_some());
 
-    let (mut tail, rx) = spawn_client_stream(&sb, "tail", &["--filter", "SubFired", "-o", "json"]);
+    let (mut tail, rx) = spawn_client_stream(&sb, "tail", &["--filter", "sub_fired", "-o", "json"]);
     thread::sleep(Duration::from_millis(400));
     touch_unique(&anchor, "tail3");
 
     let line = wait_for_line(
         &rx,
-        |l| l.contains(r#""diag":"SubFired""#),
+        |l| l.contains(r#""diag":"sub_fired""#),
         Duration::from_secs(8),
     )
     .expect("tail observed a SubFired line");
@@ -999,7 +999,7 @@ fn tail_json_output_round_trips_via_serde() {
     // the bin's pub(crate) WireDiagnostic shape.
     let v: serde_json::Value =
         serde_json::from_str(line.trim_end()).expect("streamed line must be valid JSON");
-    assert_eq!(v.get("diag").and_then(|x| x.as_str()), Some("SubFired"));
+    assert_eq!(v.get("diag").and_then(|x| x.as_str()), Some("sub_fired"));
     assert!(
         v.get("sub").and_then(serde_json::Value::as_u64).is_some(),
         "SubFired line carries a numeric sub id: {line}",
@@ -1112,7 +1112,7 @@ fn subscribe_ack_precedes_first_diagnostic_on_wire() {
         serde_json::from_str(second.trim_end()).expect("second line is valid JSON");
     assert_eq!(
         second_v.get("diag").and_then(serde_json::Value::as_str),
-        Some("SubFired"),
+        Some("sub_fired"),
         "second wire line must be SubFired (proves the subscriber \
          was registered ahead of the burst's emission — the \
          observable shadow of the B3 fence); got {second}",
@@ -1434,7 +1434,7 @@ fn disable_suppresses_fires_enable_restores_them() {
     // Subscribe once for the full cycle. A filter scoped to SubFired
     // means the test only observes the behavioural witness — Detach /
     // Reap / Rebound noise stays off the stream.
-    let (mut tail, rx) = spawn_client_stream(&sb, "tail", &["--filter", "SubFired", "-o", "json"]);
+    let (mut tail, rx) = spawn_client_stream(&sb, "tail", &["--filter", "sub_fired", "-o", "json"]);
     thread::sleep(Duration::from_millis(400));
 
     // Disable. `one_shot` returns once the daemon's IPC drain has
@@ -1464,7 +1464,7 @@ fn disable_suppresses_fires_enable_restores_them() {
     assert!(
         wait_for_line(
             &rx,
-            |l| l.contains(r#""diag":"SubFired""#),
+            |l| l.contains(r#""diag":"sub_fired""#),
             Duration::from_secs(1),
         )
         .is_none(),
@@ -1494,7 +1494,7 @@ fn disable_suppresses_fires_enable_restores_them() {
     assert!(
         wait_for_line(
             &rx,
-            |l| l.contains(r#""diag":"SubFired""#),
+            |l| l.contains(r#""diag":"sub_fired""#),
             Duration::from_secs(8),
         )
         .is_some(),
@@ -1539,9 +1539,9 @@ fn disable_streams_sub_detached_before_profile_reaped() {
         "tail",
         &[
             "--filter",
-            "SubDetached",
+            "sub_detached",
             "--filter",
-            "ProfileReaped",
+            "profile_reaped",
             "-o",
             "json",
         ],
@@ -1566,7 +1566,7 @@ fn disable_streams_sub_detached_before_profile_reaped() {
         serde_json::from_str(lines[1].trim_end()).expect("second line is valid JSON");
     assert_eq!(
         first.get("diag").and_then(serde_json::Value::as_str),
-        Some("SubDetached"),
+        Some("sub_detached"),
         "first emission is SubDetached: {lines:?}",
     );
     assert_eq!(
@@ -1576,7 +1576,7 @@ fn disable_streams_sub_detached_before_profile_reaped() {
     );
     assert_eq!(
         second.get("diag").and_then(serde_json::Value::as_str),
-        Some("ProfileReaped"),
+        Some("profile_reaped"),
         "second emission is ProfileReaped: {lines:?}",
     );
 

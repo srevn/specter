@@ -239,12 +239,22 @@ impl std::fmt::Display for WirePath {
 /// Internally tagged on `diag`; every variant's `at` field
 /// serializes immediately after the tag.
 ///
+/// Tag vocabulary is snake_case (`#[serde(rename_all = "snake_case")]`)
+/// so a single operator-visible vocabulary covers `tail --filter`,
+/// the streamed JSON's `diag` field, and every other `Wire*` enum
+/// in this module (they all carry the same serde rename). The
+/// only exception is [`Self::Missed`], which keeps an explicit
+/// `#[serde(rename = "_missed")]` override — the underscore prefix
+/// is the collision-protection token reserved for the fan-out
+/// back-pressure marker, never a Rust identifier and so unreachable
+/// from a future `specter_core::Diagnostic` variant.
+///
 /// Two-way derive (server serializes for fan-out, client
 /// deserializes for tail/wait) — see the module rustdoc's
 /// `Deserialize policy` section for the structural invariants the
 /// paired edit must preserve.
 #[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(tag = "diag")]
+#[serde(tag = "diag", rename_all = "snake_case")]
 pub(crate) enum WireDiagnostic {
     StaleProbeResponse {
         at: WireTime,
@@ -512,7 +522,9 @@ pub(crate) enum WireDiagnostic {
     /// how many were skipped before the next reachable line. The
     /// underscore-prefix protects against collision with any future
     /// core variant named `Missed`; `#[serde(rename = "_missed")]`
-    /// overrides the PascalCase default.
+    /// overrides the enum's `rename_all = "snake_case"` default (which
+    /// would otherwise emit the bare `missed` token a core variant
+    /// could legitimately occupy).
     #[serde(rename = "_missed")]
     Missed {
         at: WireTime,
@@ -890,9 +902,9 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
 
 impl WireDiagnostic {
     /// Wire tag for this variant — the same `"diag"` field value the
-    /// JSON form carries. Mirrors the serde tag exactly: PascalCase
+    /// JSON form carries. Mirrors the serde tag exactly: snake_case
     /// by default (so [`Self::StaleProbeResponse`] →
-    /// `"StaleProbeResponse"`) or the explicit `#[serde(rename =
+    /// `"stale_probe_response"`) or the explicit `#[serde(rename =
     /// "...")]` override for [`Self::Missed`] → `"_missed"`.
     ///
     /// Exhaustive `match` — a new variant without a paired arm fails
@@ -905,56 +917,56 @@ impl WireDiagnostic {
     /// variant tag as a column without re-walking the JSON.
     pub(crate) const fn variant_name(&self) -> &'static str {
         match self {
-            Self::StaleProbeResponse { .. } => "StaleProbeResponse",
-            Self::StaleTimer { .. } => "StaleTimer",
-            Self::EffectCompleteOutsideAwaiting { .. } => "EffectCompleteOutsideAwaiting",
-            Self::EffectCompleteForUnknownSub { .. } => "EffectCompleteForUnknownSub",
-            Self::DetachUnknownSub { .. } => "DetachUnknownSub",
-            Self::ConfigDiffUnknownSub { .. } => "ConfigDiffUnknownSub",
-            Self::ConfigDiffUnknownPromoter { .. } => "ConfigDiffUnknownPromoter",
-            Self::ConfigDiffRebindFallbackAttach { .. } => "ConfigDiffRebindFallbackAttach",
-            Self::ProbeVanished { .. } => "ProbeVanished",
-            Self::ProbeFailed { .. } => "ProbeFailed",
-            Self::EventClassDropped { .. } => "EventClassDropped",
-            Self::EventOnUnwatchedResource { .. } => "EventOnUnwatchedResource",
-            Self::EventNoConsumer { .. } => "EventNoConsumer",
-            Self::WatchOpRejected { .. } => "WatchOpRejected",
-            Self::PendingPathProbeVanished { .. } => "PendingPathProbeVanished",
-            Self::PendingPathProbeFailed { .. } => "PendingPathProbeFailed",
-            Self::ReapPendingCancelled { .. } => "ReapPendingCancelled",
-            Self::ProfileReaped { .. } => "ProfileReaped",
-            Self::ProfileClaimPurged { .. } => "ProfileClaimPurged",
-            Self::PromoterClaimPurged { .. } => "PromoterClaimPurged",
-            Self::AttachPathInvalid { .. } => "AttachPathInvalid",
-            Self::AttachResourceStale { .. } => "AttachResourceStale",
-            Self::AnchorKindMismatch { .. } => "AnchorKindMismatch",
-            Self::SpliceCrossedUncovered { .. } => "SpliceCrossedUncovered",
-            Self::EventAbsorbedByFireTail { .. } => "EventAbsorbedByFireTail",
-            Self::AwaitGateDeadlineForceRebasing { .. } => "AwaitGateDeadlineForceRebasing",
-            Self::AwaitGateDeadlineReap { .. } => "AwaitGateDeadlineReap",
-            Self::QuiescenceCeilingUnreadable { .. } => "QuiescenceCeilingUnreadable",
-            Self::RebaseCeilingStillChanging { .. } => "RebaseCeilingStillChanging",
-            Self::RebaseCeilingUnreadable { .. } => "RebaseCeilingUnreadable",
-            Self::SensorOverflow { .. } => "SensorOverflow",
-            Self::PromoterReseededForOverflow { .. } => "PromoterReseededForOverflow",
-            Self::PerFileDriftDroppedOnRecovery { .. } => "PerFileDriftDroppedOnRecovery",
-            Self::PerFileFireSkippedOnFreshSeed { .. } => "PerFileFireSkippedOnFreshSeed",
-            Self::SubAttached { .. } => "SubAttached",
-            Self::SubFired { .. } => "SubFired",
-            Self::SubDetached { .. } => "SubDetached",
-            Self::SubRebound { .. } => "SubRebound",
-            Self::RebindUnknownSub { .. } => "RebindUnknownSub",
-            Self::PromoterAttached { .. } => "PromoterAttached",
-            Self::PromoterReaped { .. } => "PromoterReaped",
-            Self::PromoterDescentVanished { .. } => "PromoterDescentVanished",
-            Self::PromoterDescentFailed { .. } => "PromoterDescentFailed",
-            Self::PromotionKindObserved { .. } => "PromotionKindObserved",
-            Self::PromoterFanoutThreshold { .. } => "PromoterFanoutThreshold",
-            Self::PromoterProxyStaleEvent { .. } => "PromoterProxyStaleEvent",
-            Self::PromoterEnumerationVanished { .. } => "PromoterEnumerationVanished",
-            Self::PromoterEnumerationFailed { .. } => "PromoterEnumerationFailed",
-            Self::DynamicSubReaped { .. } => "DynamicSubReaped",
-            Self::InvalidBurstTransition { .. } => "InvalidBurstTransition",
+            Self::StaleProbeResponse { .. } => "stale_probe_response",
+            Self::StaleTimer { .. } => "stale_timer",
+            Self::EffectCompleteOutsideAwaiting { .. } => "effect_complete_outside_awaiting",
+            Self::EffectCompleteForUnknownSub { .. } => "effect_complete_for_unknown_sub",
+            Self::DetachUnknownSub { .. } => "detach_unknown_sub",
+            Self::ConfigDiffUnknownSub { .. } => "config_diff_unknown_sub",
+            Self::ConfigDiffUnknownPromoter { .. } => "config_diff_unknown_promoter",
+            Self::ConfigDiffRebindFallbackAttach { .. } => "config_diff_rebind_fallback_attach",
+            Self::ProbeVanished { .. } => "probe_vanished",
+            Self::ProbeFailed { .. } => "probe_failed",
+            Self::EventClassDropped { .. } => "event_class_dropped",
+            Self::EventOnUnwatchedResource { .. } => "event_on_unwatched_resource",
+            Self::EventNoConsumer { .. } => "event_no_consumer",
+            Self::WatchOpRejected { .. } => "watch_op_rejected",
+            Self::PendingPathProbeVanished { .. } => "pending_path_probe_vanished",
+            Self::PendingPathProbeFailed { .. } => "pending_path_probe_failed",
+            Self::ReapPendingCancelled { .. } => "reap_pending_cancelled",
+            Self::ProfileReaped { .. } => "profile_reaped",
+            Self::ProfileClaimPurged { .. } => "profile_claim_purged",
+            Self::PromoterClaimPurged { .. } => "promoter_claim_purged",
+            Self::AttachPathInvalid { .. } => "attach_path_invalid",
+            Self::AttachResourceStale { .. } => "attach_resource_stale",
+            Self::AnchorKindMismatch { .. } => "anchor_kind_mismatch",
+            Self::SpliceCrossedUncovered { .. } => "splice_crossed_uncovered",
+            Self::EventAbsorbedByFireTail { .. } => "event_absorbed_by_fire_tail",
+            Self::AwaitGateDeadlineForceRebasing { .. } => "await_gate_deadline_force_rebasing",
+            Self::AwaitGateDeadlineReap { .. } => "await_gate_deadline_reap",
+            Self::QuiescenceCeilingUnreadable { .. } => "quiescence_ceiling_unreadable",
+            Self::RebaseCeilingStillChanging { .. } => "rebase_ceiling_still_changing",
+            Self::RebaseCeilingUnreadable { .. } => "rebase_ceiling_unreadable",
+            Self::SensorOverflow { .. } => "sensor_overflow",
+            Self::PromoterReseededForOverflow { .. } => "promoter_reseeded_for_overflow",
+            Self::PerFileDriftDroppedOnRecovery { .. } => "per_file_drift_dropped_on_recovery",
+            Self::PerFileFireSkippedOnFreshSeed { .. } => "per_file_fire_skipped_on_fresh_seed",
+            Self::SubAttached { .. } => "sub_attached",
+            Self::SubFired { .. } => "sub_fired",
+            Self::SubDetached { .. } => "sub_detached",
+            Self::SubRebound { .. } => "sub_rebound",
+            Self::RebindUnknownSub { .. } => "rebind_unknown_sub",
+            Self::PromoterAttached { .. } => "promoter_attached",
+            Self::PromoterReaped { .. } => "promoter_reaped",
+            Self::PromoterDescentVanished { .. } => "promoter_descent_vanished",
+            Self::PromoterDescentFailed { .. } => "promoter_descent_failed",
+            Self::PromotionKindObserved { .. } => "promotion_kind_observed",
+            Self::PromoterFanoutThreshold { .. } => "promoter_fanout_threshold",
+            Self::PromoterProxyStaleEvent { .. } => "promoter_proxy_stale_event",
+            Self::PromoterEnumerationVanished { .. } => "promoter_enumeration_vanished",
+            Self::PromoterEnumerationFailed { .. } => "promoter_enumeration_failed",
+            Self::DynamicSubReaped { .. } => "dynamic_sub_reaped",
+            Self::InvalidBurstTransition { .. } => "invalid_burst_transition",
             Self::Missed { .. } => "_missed",
         }
     }
@@ -986,56 +998,56 @@ impl InfallibleSerialize for WireDiagnostic {}
 /// reading the "Known filters: ..." list see the same order the
 /// source declares them in.
 pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
-    "StaleProbeResponse",
-    "StaleTimer",
-    "EffectCompleteOutsideAwaiting",
-    "EffectCompleteForUnknownSub",
-    "DetachUnknownSub",
-    "ConfigDiffUnknownSub",
-    "ConfigDiffUnknownPromoter",
-    "ConfigDiffRebindFallbackAttach",
-    "ProbeVanished",
-    "ProbeFailed",
-    "EventClassDropped",
-    "EventOnUnwatchedResource",
-    "EventNoConsumer",
-    "WatchOpRejected",
-    "PendingPathProbeVanished",
-    "PendingPathProbeFailed",
-    "ReapPendingCancelled",
-    "ProfileReaped",
-    "ProfileClaimPurged",
-    "PromoterClaimPurged",
-    "AttachPathInvalid",
-    "AttachResourceStale",
-    "AnchorKindMismatch",
-    "SpliceCrossedUncovered",
-    "EventAbsorbedByFireTail",
-    "AwaitGateDeadlineForceRebasing",
-    "AwaitGateDeadlineReap",
-    "QuiescenceCeilingUnreadable",
-    "RebaseCeilingStillChanging",
-    "RebaseCeilingUnreadable",
-    "SensorOverflow",
-    "PromoterReseededForOverflow",
-    "PerFileDriftDroppedOnRecovery",
-    "PerFileFireSkippedOnFreshSeed",
-    "SubAttached",
-    "SubFired",
-    "SubDetached",
-    "SubRebound",
-    "RebindUnknownSub",
-    "PromoterAttached",
-    "PromoterReaped",
-    "PromoterDescentVanished",
-    "PromoterDescentFailed",
-    "PromotionKindObserved",
-    "PromoterFanoutThreshold",
-    "PromoterProxyStaleEvent",
-    "PromoterEnumerationVanished",
-    "PromoterEnumerationFailed",
-    "DynamicSubReaped",
-    "InvalidBurstTransition",
+    "stale_probe_response",
+    "stale_timer",
+    "effect_complete_outside_awaiting",
+    "effect_complete_for_unknown_sub",
+    "detach_unknown_sub",
+    "config_diff_unknown_sub",
+    "config_diff_unknown_promoter",
+    "config_diff_rebind_fallback_attach",
+    "probe_vanished",
+    "probe_failed",
+    "event_class_dropped",
+    "event_on_unwatched_resource",
+    "event_no_consumer",
+    "watch_op_rejected",
+    "pending_path_probe_vanished",
+    "pending_path_probe_failed",
+    "reap_pending_cancelled",
+    "profile_reaped",
+    "profile_claim_purged",
+    "promoter_claim_purged",
+    "attach_path_invalid",
+    "attach_resource_stale",
+    "anchor_kind_mismatch",
+    "splice_crossed_uncovered",
+    "event_absorbed_by_fire_tail",
+    "await_gate_deadline_force_rebasing",
+    "await_gate_deadline_reap",
+    "quiescence_ceiling_unreadable",
+    "rebase_ceiling_still_changing",
+    "rebase_ceiling_unreadable",
+    "sensor_overflow",
+    "promoter_reseeded_for_overflow",
+    "per_file_drift_dropped_on_recovery",
+    "per_file_fire_skipped_on_fresh_seed",
+    "sub_attached",
+    "sub_fired",
+    "sub_detached",
+    "sub_rebound",
+    "rebind_unknown_sub",
+    "promoter_attached",
+    "promoter_reaped",
+    "promoter_descent_vanished",
+    "promoter_descent_failed",
+    "promotion_kind_observed",
+    "promoter_fanout_threshold",
+    "promoter_proxy_stale_event",
+    "promoter_enumeration_vanished",
+    "promoter_enumeration_failed",
+    "dynamic_sub_reaped",
+    "invalid_burst_transition",
     "_missed",
 ];
 

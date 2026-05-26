@@ -2920,7 +2920,7 @@ fn subscribe_ack_precedes_diag_on_wire() {
             .expect("diag line parses as JSON");
     assert_eq!(
         diag_v.get("diag").and_then(|v| v.as_str()),
-        Some("SubAttached"),
+        Some("sub_attached"),
         "second wire line is the diag; got {diag_v:?}",
     );
 

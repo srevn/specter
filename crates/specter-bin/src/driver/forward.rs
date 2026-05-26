@@ -170,8 +170,24 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// **Empty-slice short-circuit.** Most ticks emit zero
     /// diagnostics; the early return keeps the [`SystemTime::now`]
     /// syscall and the `WireTime` projection off the common path.
+    ///
+    /// **Subscriber-empty short-circuit.** When no operator is
+    /// subscribed ([`crate::driver::Hub::has_any_subscriber`] →
+    /// `false`), only [`log_diagnostic`] runs per diag — the per-
+    /// emission [`SystemTime::now`] / [`WireTime::from`] /
+    /// [`diag_sub_id`] / `dispatch_to_subscribers` work is skipped
+    /// entirely. For a `StepOutput` carrying N diags on a quiet
+    /// daemon this collapses to N tracing emits plus one conn-map
+    /// walk, rather than N times the same walk inside the dispatch
+    /// path's defensive inner gate.
     fn forward_diagnostics(&mut self, diagnostics: &[Diagnostic]) {
         if diagnostics.is_empty() {
+            return;
+        }
+        if !self.ipc.has_any_subscriber() {
+            for diag in diagnostics {
+                log_diagnostic(diag);
+            }
             return;
         }
         let wall_now = SystemTime::now();

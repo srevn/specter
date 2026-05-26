@@ -364,6 +364,16 @@ impl Hub {
     /// translate into one interest rearm per ready conn rather than
     /// N (one per `dispatch_to_subscribers` call) — the
     /// re-registration syscall amortizes across the whole tick.
+    ///
+    /// **Subscriber-empty short-circuit is defensive.** The hot path
+    /// already gates fan-out at the StepOutput-scoped caller
+    /// ([`crate::driver::EngineDriver::forward_diagnostics`] reads
+    /// [`Self::has_any_subscriber`] once per emission and skips the
+    /// per-diag `WireTime` / `diag_sub_id` work entirely). The inner
+    /// check below catches a future caller that bypasses the outer
+    /// gate; the cost is one `O(MAX_IPC_CONNS)` discriminator walk
+    /// before bailing, well below the `WireDiagnostic::from` +
+    /// `encode_line` build it stands in front of.
     pub(in crate::driver) fn dispatch_to_subscribers(
         &mut self,
         diag: &Diagnostic,
@@ -371,17 +381,7 @@ impl Hub {
         wire_at: &WireTime,
         diag_sub: Option<SubId>,
     ) {
-        // Subscriber-empty short-circuit: an operator-quiet daemon
-        // (no `tail` / `wait` session live) skips both the
-        // `WireDiagnostic::from` walk and the `encode_line` alloc.
-        // `MAX_IPC_CONNS = 8` bounds the walk above; reading one
-        // enum-discriminator per conn is cheaper than the
-        // build-then-discard pair below.
-        if self
-            .conns
-            .values()
-            .all(|c| !matches!(c.role, ConnRole::Sub { .. }))
-        {
+        if !self.has_any_subscriber() {
             return;
         }
         let wire = WireDiagnostic::from((diag, wire_at));
@@ -393,6 +393,29 @@ impl Hub {
             // here is serialize-once + iterate.
             let _ = conn.try_dispatch_diag(&line, diag_sub, at);
         }
+    }
+
+    /// `true` iff at least one conn in the map is in
+    /// [`super::conns::ConnRole::Sub`] role — i.e., at least one
+    /// operator `tail` / `wait` session is live and would receive
+    /// fan-out lines from [`Self::dispatch_to_subscribers`].
+    ///
+    /// Composed by
+    /// [`crate::driver::EngineDriver::forward_diagnostics`] once per
+    /// `StepOutput` so the no-subscriber common path skips the
+    /// per-emission [`SystemTime::now`] / [`WireTime::from`] /
+    /// [`crate::driver::forward::diag_sub_id`] work entirely.
+    /// The walk is bounded above by [`MAX_IPC_CONNS`] enum-discriminator
+    /// reads — well below the syscall + humantime allocation the
+    /// outer gate would otherwise pay per emission.
+    ///
+    /// [`Self::dispatch_to_subscribers`] retains the same predicate
+    /// as a defensive inner short-circuit; the accessor keeps the
+    /// rule single-source so the two surfaces cannot drift.
+    pub(in crate::driver) fn has_any_subscriber(&self) -> bool {
+        self.conns
+            .values()
+            .any(|c| matches!(c.role, ConnRole::Sub { .. }))
     }
 
     /// Borrow a per-conn state mutably by [`Token`]. Returns `None`
