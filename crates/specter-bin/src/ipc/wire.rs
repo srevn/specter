@@ -407,6 +407,16 @@ pub(crate) enum WireDiagnostic {
         profile: WireId,
         intent: WireBurstIntent,
     },
+    QuiescenceCeilingForcedDespiteChange {
+        at: WireTime,
+        profile: WireId,
+        intent: WireBurstIntent,
+    },
+    RebaseCeilingForcedDespiteChange {
+        at: WireTime,
+        profile: WireId,
+        intent: WireBurstIntent,
+    },
     RebaseCeilingUnreadable {
         at: WireTime,
         profile: WireId,
@@ -739,6 +749,20 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                     intent: WireBurstIntent::from(*intent),
                 }
             }
+            Diagnostic::QuiescenceCeilingForcedDespiteChange { profile, intent } => {
+                Self::QuiescenceCeilingForcedDespiteChange {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    intent: WireBurstIntent::from(*intent),
+                }
+            }
+            Diagnostic::RebaseCeilingForcedDespiteChange { profile, intent } => {
+                Self::RebaseCeilingForcedDespiteChange {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    intent: WireBurstIntent::from(*intent),
+                }
+            }
             Diagnostic::RebaseCeilingUnreadable {
                 profile,
                 first_unread,
@@ -946,6 +970,10 @@ impl WireDiagnostic {
             Self::AwaitGateDeadlineReap { .. } => "await_gate_deadline_reap",
             Self::QuiescenceCeilingUnreadable { .. } => "quiescence_ceiling_unreadable",
             Self::RebaseCeilingStillChanging { .. } => "rebase_ceiling_still_changing",
+            Self::QuiescenceCeilingForcedDespiteChange { .. } => {
+                "quiescence_ceiling_forced_despite_change"
+            }
+            Self::RebaseCeilingForcedDespiteChange { .. } => "rebase_ceiling_forced_despite_change",
             Self::RebaseCeilingUnreadable { .. } => "rebase_ceiling_unreadable",
             Self::SensorOverflow { .. } => "sensor_overflow",
             Self::PromoterReseededForOverflow { .. } => "promoter_reseeded_for_overflow",
@@ -1027,6 +1055,8 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "await_gate_deadline_reap",
     "quiescence_ceiling_unreadable",
     "rebase_ceiling_still_changing",
+    "quiescence_ceiling_forced_despite_change",
+    "rebase_ceiling_forced_despite_change",
     "rebase_ceiling_unreadable",
     "sensor_overflow",
     "promoter_reseeded_for_overflow",
@@ -1302,7 +1332,7 @@ pub(crate) enum WireBurstHelper {
     StartSeedBurst,
     StartStandardBurst,
     EventDrivesBatching,
-    UndischargedDrivesBatching,
+    RetryDrivesBatching,
     TransitionToVerifying,
     TransitionToDraining,
     TransitionToAwaiting,
@@ -1318,7 +1348,7 @@ impl From<BurstHelper> for WireBurstHelper {
             BurstHelper::StartSeedBurst => Self::StartSeedBurst,
             BurstHelper::StartStandardBurst => Self::StartStandardBurst,
             BurstHelper::EventDrivesBatching => Self::EventDrivesBatching,
-            BurstHelper::UndischargedDrivesBatching => Self::UndischargedDrivesBatching,
+            BurstHelper::RetryDrivesBatching => Self::RetryDrivesBatching,
             BurstHelper::TransitionToVerifying => Self::TransitionToVerifying,
             BurstHelper::TransitionToDraining => Self::TransitionToDraining,
             BurstHelper::TransitionToAwaiting => Self::TransitionToAwaiting,
@@ -1750,6 +1780,16 @@ mod tests {
                 at: at(),
                 profile: WireId(121),
                 intent: WireBurstIntent::Standard,
+            },
+            WireDiagnostic::QuiescenceCeilingForcedDespiteChange {
+                at: at(),
+                profile: WireId(123),
+                intent: WireBurstIntent::Standard,
+            },
+            WireDiagnostic::RebaseCeilingForcedDespiteChange {
+                at: at(),
+                profile: WireId(124),
+                intent: WireBurstIntent::Seed,
             },
             WireDiagnostic::RebaseCeilingUnreadable {
                 at: at(),

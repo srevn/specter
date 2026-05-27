@@ -29,7 +29,7 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    anchor_dir, attach_returning, last_probe_path, seed_to_idle, verify_n2,
+    anchor_dir, attach_returning, last_probe_path, seed_to_idle, verify,
 };
 use std::collections::BTreeSet;
 use std::path::PathBuf;
@@ -179,7 +179,7 @@ fn drive(inputs: &[Input]) -> (Option<PathBuf>, ProfileStateDiscriminant, Option
     // The probe is in flight (≥1 recency input ⇒ a burst started).
     // Settle-spaced hash-equal samples ⇒ Stable; the Sub already
     // fired during seed ⇒ B1 dedup ⇒ finish to Idle, baseline intact.
-    let _n2 = verify_n2(&mut e, pid, &snap, at);
+    let _n2 = verify(&mut e, pid, &snap, at);
 
     let p = e.profiles().get(pid).expect("profile alive");
     (probe_target, p.state().discriminant(), p.settled_hash())

@@ -87,7 +87,9 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::AwaitGateDeadlineForceRebasing { at, .. }
         | WireDiagnostic::AwaitGateDeadlineReap { at, .. }
         | WireDiagnostic::QuiescenceCeilingUnreadable { at, .. }
+        | WireDiagnostic::QuiescenceCeilingForcedDespiteChange { at, .. }
         | WireDiagnostic::RebaseCeilingStillChanging { at, .. }
+        | WireDiagnostic::RebaseCeilingForcedDespiteChange { at, .. }
         | WireDiagnostic::RebaseCeilingUnreadable { at, .. }
         | WireDiagnostic::SensorOverflow { at, .. }
         | WireDiagnostic::PromoterReseededForOverflow { at, .. }
@@ -330,6 +332,12 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         }
         WireDiagnostic::RebaseCeilingStillChanging {
             profile, intent, ..
+        }
+        | WireDiagnostic::QuiescenceCeilingForcedDespiteChange {
+            profile, intent, ..
+        }
+        | WireDiagnostic::RebaseCeilingForcedDespiteChange {
+            profile, intent, ..
         } => {
             let _ = write!(
                 out,
@@ -551,7 +559,7 @@ const fn burst_helper_str(h: WireBurstHelper) -> &'static str {
         WireBurstHelper::StartSeedBurst => "start_seed_burst",
         WireBurstHelper::StartStandardBurst => "start_standard_burst",
         WireBurstHelper::EventDrivesBatching => "event_drives_batching",
-        WireBurstHelper::UndischargedDrivesBatching => "undischarged_drives_batching",
+        WireBurstHelper::RetryDrivesBatching => "retry_drives_batching",
         WireBurstHelper::TransitionToVerifying => "transition_to_verifying",
         WireBurstHelper::TransitionToDraining => "transition_to_draining",
         WireBurstHelper::TransitionToAwaiting => "transition_to_awaiting",
@@ -926,7 +934,9 @@ mod tests {
                 "diag": tag, "at": at, "profile": id,
                 "first_unread": "/x", "intent": "standard",
             }),
-            "rebase_ceiling_still_changing" => {
+            "rebase_ceiling_still_changing"
+            | "quiescence_ceiling_forced_despite_change"
+            | "rebase_ceiling_forced_despite_change" => {
                 json!({"diag": tag, "at": at, "profile": id, "intent": "standard"})
             }
             "sensor_overflow" => json!({"diag": tag, "at": at, "scope": global_scope}),

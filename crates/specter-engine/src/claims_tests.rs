@@ -62,11 +62,13 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
 /// pinned `Idle`, committing `snap` as `current` + `baseline`.
 ///
 /// The cold-arm Seed burst pins on the first `Authoritative` sample:
-/// `quiescence_verdict(Authoritative, !forced)` folds to `Authoritative
-/// { forced: false }`, dispatch reaches `SilentPin` (no fired Subs, no
-/// drift) and finishes to Idle. The cold-arm Verifying-first contract
-/// puts the probe in flight at burst construction, so this helper
-/// answers it directly — no settle expiry step.
+/// a cold-Seed `SilentPin` consequence does not owe quiescence proof, so
+/// the witness is [`QuiescenceWitness::EventsReliable`] and the fold
+/// folds to `Stable(StableReason::Natural)`; dispatch reaches `SilentPin`
+/// (no fired Subs, no drift) and finishes to Idle. The cold-arm
+/// Verifying-first contract puts the probe in flight at burst
+/// construction, so this helper answers it directly — no settle expiry
+/// step.
 fn drive_fresh_seed_to_idle(e: &mut Engine, pid: ProfileId, snap: Arc<DirSnapshot>, t0: Instant) {
     let corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))

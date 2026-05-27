@@ -210,13 +210,12 @@ fn common_prefix<'a>(a: &'a Path, b: &Path) -> &'a Path {
 /// -path *basis* doesn't.
 ///
 /// Quiescence is folded at the dispatch by
-/// [`quiescence_verdict`] over `(authority, forced)` — a pure
-/// projection of `ProofAuthority` (C1, the walker certificate) and
-/// `forced` (C2, the event-quiet witness). The burst carries no
-/// per-sample state for the
-/// fold: the engine's two observation channels determine the verdict at
-/// the floor, and the N=2-era prior-sample carrier the verdict used to
-/// fold against is gone.
+/// [`quiescence_verdict`] — a pure projection of `ProofAuthority` (the
+/// walker certificate) and the burst's `forced` flag (the bounded
+/// ceiling-bypass). Any per-burst inputs the fold consumes home on
+/// this struct, so they survive the in-place phase swaps of the
+/// pre-fire lifetime; struct-local fields can't leak across the typed
+/// move to [`PostFireBurst`] at the fire boundary.
 ///
 /// `probe_target` is the resource id of the latest emitted probe.
 /// Initialised to the Profile's anchor at burst start; overwritten by
@@ -322,7 +321,7 @@ pub struct PreFireBurst {
     ///
     /// **Updaters.**
     /// - `event_drives_batching` on every event (`Some(now)`).
-    /// - `undischarged_drives_batching` **pins to `Some(now)`**
+    /// - `retry_drives_batching` **pins to `Some(now)`**
     ///   — the verify just responded, and pinning the timestamp removes
     ///   the `Instant` monotonicity dependency from the reschedule
     ///   correctness argument.
@@ -330,6 +329,36 @@ pub struct PreFireBurst {
     ///   path) and `transition_to_draining` — phase swaps without
     ///   semantic resets.
     pub last_event_time: Option<Instant>,
+    /// Pre-fire N=2 sample carrier — the source of
+    /// [`QuiescenceWitness::HashChannel`]'s `prior` field at the
+    /// verdict floor. `None` on first sample (or when the channel is
+    /// not engaged); `Some(hash)` after the first Authoritative
+    /// response advances it.
+    ///
+    /// **Conditional engagement.** Read only when the burst owes
+    /// quiescence proof (Standard, triggered Seed, post-recovery Seed)
+    /// AND [`Profile::events_witness_quiescence`] is `false` — the
+    /// Profile's `events_union` doesn't cover `CONTENT`, so settle-
+    /// window silence cannot witness in-place writes. For events-
+    /// reliable Profiles or Cold Seeds, the field is born `None` and
+    /// never advanced; the fold consumes
+    /// [`QuiescenceWitness::EventsReliable`] instead.
+    ///
+    /// **Single writer.** [`Profile::advance_certified_sample`] — the
+    /// cat-(b) cascade. Called from the verdict choke on every
+    /// `ProofAuthority::Authoritative` response, regardless of the
+    /// verdict outcome (Stable or Unstable). An Undischarged
+    /// observation must not advance the carrier (the prior would then
+    /// reflect an unread region); the caller gates on authority.
+    ///
+    /// **Preserved across pre-fire phase swaps.**
+    /// `transition_to_{verifying,draining}`, `retry_drives_batching`,
+    /// and `event_drives_batching` mutate only their own fields, so
+    /// the carrier rides through untouched. **Dropped by omission** at
+    /// [`Self::into_post_fire`] (the typed fire move): the post-fire
+    /// side opens a fresh [`PostFireBurst::last_certified_hash`], a
+    /// separate sample sequence over the post-command tree.
+    pub last_certified_hash: Option<u128>,
 }
 
 /// Pre-fire phase discriminator.
@@ -424,13 +453,15 @@ pub enum PreFirePhase {
 /// a fresh query, not a per-origin refcount, so a Seed origin restarts
 /// just as a Standard one does.
 ///
-/// **Single construction seam.** Every `PostFireBurst` is born fresh —
-/// `rebase_ceiling: None`, `forced: false` — through [`Self::new`];
-/// [`PreFireBurst::into_post_fire`] (the typed fire move) is its only
-/// production caller. The post-command tree is a *different tree* than
-/// the one the pre-fire burst observed, so the rebase loop's verdict
-/// is computed fresh by [`quiescence_verdict`] over each post-fire
-/// probe response — no prior sample carries across the fire.
+/// **Single construction seam.** Every `PostFireBurst` is born fresh
+/// — `rebase_ceiling: None`, `forced: false`, `last_certified_hash:
+/// None` — through [`Self::new`]; [`PreFireBurst::into_post_fire`]
+/// (the typed fire move) is its only production caller. The
+/// post-command tree is a *different tree* than the one the pre-fire
+/// burst observed, so neither the pre-fire N=2 sample carrier
+/// ([`PreFireBurst::last_certified_hash`]) nor any other pre-fire
+/// fold input carries across the fire: the rebase loop opens its own
+/// independent sample sequence over the post-command tree.
 #[derive(Debug)]
 pub struct PostFireBurst {
     pub intent: BurstIntent,
@@ -530,6 +561,40 @@ pub struct PostFireBurst {
     /// `rg '\.rebase_ceiling =' --type rust crates/` — expect exactly
     /// two production hits, both in `engine/burst.rs`.
     pub rebase_ceiling: Option<TimerId>,
+    /// Post-fire N=2 sample carrier — the mirror of
+    /// [`PreFireBurst::last_certified_hash`] for the rebase loop's
+    /// `WholeSubtree` samples. `None` on first sample (or when the
+    /// channel is not engaged); `Some(hash)` after the first
+    /// Authoritative rebase response advances it.
+    ///
+    /// **Conditional engagement.** Read only when
+    /// [`Profile::events_witness_quiescence`] is `false` — a rebase
+    /// commits a new baseline and can never commit to a mid-write
+    /// state, so the post-fire loop always owes quiescence proof; the
+    /// `events_witness_quiescence` predicate is the *only* gate. For
+    /// events-reliable Profiles, the field is born `None` and never
+    /// advanced; the fold consumes
+    /// [`QuiescenceWitness::EventsReliable`] instead.
+    ///
+    /// **Single writer.** [`Profile::advance_certified_sample`] — the
+    /// same cat-(b) cascade that advances the pre-fire carrier; the
+    /// cascade dispatches to whichever burst variant is live.
+    ///
+    /// **Born fresh** at [`Self::new`] (`None`, an invariant-bearing
+    /// default the constructor takes no parameter for) — the
+    /// post-command tree is a *different tree* than the pre-fire
+    /// burst observed, so no pre-fire sample carries across. **Dropped
+    /// by omission** at [`Self::into_pre_fire_residual`] (the
+    /// post-fire → pre-fire restart): the restarted pre-fire burst
+    /// opens its own fresh `last_certified_hash`, a fresh sample
+    /// sequence over the now post-rebase tree.
+    ///
+    /// **Preserved across post-fire phase swaps.**
+    /// `transition_to_{settling,rebasing}`, `arm_rebase_loop_ceiling`,
+    /// `force_pending_post_fire`, and `absorb_event_into_fire_tail`
+    /// mutate only their own fields, so the carrier rides through
+    /// untouched.
+    pub last_certified_hash: Option<u128>,
 }
 
 /// Post-fire phase discriminator — the structural mirror of
@@ -610,27 +675,87 @@ pub enum AwaitVerdict {
     NotAwaiting,
 }
 
+/// The quiescence-proof channel that applies to one certified probe
+/// response.
+///
+/// Parallel to [`ProofAuthority`] (which proves *accuracy* of the
+/// snapshot): the witness encodes *which* of the two safety channels
+/// discharges quiescence at the verdict floor.
+///
+/// - [`Self::EventsReliable`] — the Profile's `events_union` covers
+///   in-place writes (see [`Profile::events_witness_quiescence`]) OR
+///   the burst's consequence does not require quiescence (cold-Seed
+///   `SilentPin`). Settle-window silence is the witness; the hash
+///   channel is bypassed structurally (no carrier read, no comparison).
+/// - [`Self::HashChannel`] — events-incomplete fire-bearing burst.
+///   Quiescence requires two consecutive Authoritative samples to agree
+///   on `leaf_hash` / `dir_hash`. `prior` is the burst-resident carrier
+///   read (`None` on first sample); `response` is the current
+///   observation's hash. Equality `Some(prior) == response` is the
+///   stability witness; disagreement (including `prior = None`) routes
+///   the verdict to [`QuiescenceVerdict::Unstable`].
+///
+/// Constructed at the verdict choke (`certify_probe_response`); consumed
+/// by [`quiescence_verdict`]. The two paths are explicit at the call
+/// site — `Option<HashChannel>`-like alternatives would elide the
+/// meaning behind anonymous wrapping.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum QuiescenceWitness {
+    /// Settle-window silence is sufficient — no hash channel engaged.
+    EventsReliable,
+    /// Hash-equality channel: `Stable` iff `prior == Some(response)`.
+    HashChannel { prior: Option<u128>, response: u128 },
+}
+
+/// The fire-path arm of [`QuiescenceVerdict::Stable`] — natural fire
+/// vs. bounded-ceiling fallback.
+///
+/// Pulled out as a sub-enum (not two `bool`s on `Stable`) so the
+/// impossible state `(forced=false, hash_channel_disagreed=true)` is
+/// unrepresentable at the type level — that combination produces
+/// [`QuiescenceVerdict::Unstable`] at the fold, never a `Stable`.
+///
+/// - [`Self::Natural`] — settle-window silence held (the
+///   [`QuiescenceWitness::EventsReliable`] path) OR the hash channel
+///   agreed on its current sample (`prior == Some(response)`).
+///   No ceiling diagnostic owed.
+/// - [`Self::Forced`] — `BurstDeadline` / `RebaseCeiling` fallback
+///   fired. Fire / rebase anyway against the freshest observation.
+///   The dispatch selects a diagnostic by `hash_channel_disagreed`:
+///   `true` ⇒ the strong-signal `*CeilingForcedDespiteChange` (the
+///   tree was visibly still moving — the hash channel observed a
+///   prior/response disagreement before the ceiling expired);
+///   `false` ⇒ post-fire emits the natural-ceiling
+///   [`crate::Diagnostic::RebaseCeilingStillChanging`]; pre-fire stays
+///   silent because `forced` propagates onto `Effect.forced` already.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum StableReason {
+    /// Settle witness held — natural fire/pin/rebase path. No ceiling
+    /// diagnostic owed.
+    Natural,
+    /// Bounded `max_settle` / `RebaseCeiling` fallback. Fire / rebase
+    /// against the freshest observation;
+    /// `hash_channel_disagreed` selects the diagnostic at the dispatch.
+    Forced { hash_channel_disagreed: bool },
+}
+
 /// Verdict of one certified probe response — the pure projection of
-/// the engine's two-axis dispatch decision `(ProofAuthority × forced)`
-/// onto the verdict floor.
+/// the engine's three-axis dispatch decision
+/// `(ProofAuthority × forced × QuiescenceWitness)` onto the verdict
+/// floor.
 ///
-/// Two variants, not three: the old N=2-era `Stable / Unstable` split
-/// flattened `(authority = Authoritative, forced)` onto one axis.
-/// Lifting `forced` onto the [`Self::Authoritative`] payload keeps the
-/// projection un-flattened — the unrepresentable `(Unstable, !forced)`
-/// arm the old shape needed an `unreachable!` for ceases to exist at
-/// the type level.
-///
-/// - [`Self::Authoritative`] — the walker certified every obligation
-///   chain. `forced` distinguishes:
-///   - `false` ⇒ the response arrived on an event-quiet path (settle
-///     expiry or Draining-sweep reconfirm). Quiescence holds by the
-///     event channel; the burst may fire (Standard) or pin
-///     (Seed-baseline) cleanly.
-///   - `true` ⇒ the `BurstDeadline` / `RebaseCeiling` fallback
-///     fired. Fire / rebase anyway against the freshest observation;
-///     a deadline diagnostic is owed downstream.
-/// - [`Self::Undischarged`] — the walker refused on some chain
+/// - [`Self::Stable`] — walker certified AND quiescence proven.
+///   The inner [`StableReason`] distinguishes natural fire from the
+///   bounded-ceiling fallback (and, on the latter, carries the
+///   diagnostic-selection bit).
+/// - [`Self::Unstable`] — walker certified, hash channel disagreed
+///   (`prior != Some(response)`). Reachable only when the channel is
+///   active (events-incomplete fire-bearing burst); for
+///   events-reliable Profiles and cold-Seed bursts the shape is
+///   unrepresentable. Pre-fire: re-Batch via
+///   [`crate::Engine::retry_drives_batching`]; post-fire:
+///   re-Settle via [`crate::Engine::transition_to_settling`].
+/// - [`Self::Undischarged`] — walker refused on some chain
 ///   (`first_unread`). `terminal`:
 ///   - `false` ⇒ the carrier may re-try (Batching / Settling).
 ///   - `true` ⇒ the bounded ceiling already fired; abandon, no
@@ -641,10 +766,18 @@ pub enum AwaitVerdict {
 /// `Undischarged` carries an `Arc<Path>`.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum QuiescenceVerdict {
-    /// Walker certified every obligation chain. `forced` distinguishes
-    /// natural fire (event-quiet witness held) from `max_settle` ceiling-
-    /// fallback (fire-anyway with diagnostic).
-    Authoritative { forced: bool },
+    /// Walker certified + quiescence proven. Fire / pin / rebase
+    /// against the freshest observation; the inner [`StableReason`]
+    /// captures the proof path (natural vs. bounded-ceiling fallback)
+    /// and the diagnostic-selection bit on the latter.
+    Stable(StableReason),
+    /// Walker certified; hash channel disagreed at this sample.
+    /// Pre-fire: re-arm the settle window for another sample; post-
+    /// fire: settle-space the next rebase read. Only reachable when
+    /// the hash channel was active (events-incomplete fire-bearing
+    /// burst); the bounded `BurstDeadline` / `RebaseCeiling` eventually
+    /// surfaces a terminal if disagreement persists.
+    Unstable,
     /// Walker refused on some chain. `terminal: false` ⇒ retry;
     /// `terminal: true` ⇒ ceiling-bound no-fire diagnostic + finish.
     Undischarged {
@@ -653,32 +786,64 @@ pub enum QuiescenceVerdict {
     },
 }
 
-/// Fold a `(ProofAuthority, forced)` pair into a [`QuiescenceVerdict`].
-/// Total, pure, side-effect-free — the verdict floor under the
-/// post-refactor fold contract.
+/// Fold the verdict-floor inputs into a [`QuiescenceVerdict`].
+/// Total, pure, side-effect-free — three axes
+/// (`authority × forced × witness`) projected to three variants.
 ///
-/// **No prior sample.** The `(authority, forced)` pair fully determines
-/// the verdict at the floor: the event-quiet witness (`!forced`)
-/// discharges the quiescence contract that the old N=2 sample-spacing
-/// carrier proved. The two arms project onto:
-///
-/// - [`ProofAuthority::Authoritative`] ⇒
-///   [`QuiescenceVerdict::Authoritative`] carrying `forced` verbatim.
-///   The dispatch site reads the bit to choose between the natural-fire
-///   path (`!forced`) and the bounded-fallback path (`forced`).
 /// - [`ProofAuthority::Undischarged`] ⇒
 ///   [`QuiescenceVerdict::Undischarged`] carrying `first_unread`
-///   verbatim and `terminal = forced`. `forced` projects to two
-///   different consequence axes inside the dispatch (fire-anyway
-///   vs. abandon-with-diagnostic), but the source is one engine-side
-///   flag — set by `BurstDeadline` / `RebaseCeiling` expiry.
+///   verbatim and `terminal = forced`. The witness is irrelevant on
+///   this arm: an unread chain blocks the fire regardless of any
+///   hash-channel observation, and the carrier was not advanced
+///   anyway (the cat-(b) edge is Authoritative-only).
+/// - [`ProofAuthority::Authoritative`] + `forced` ⇒
+///   [`QuiescenceVerdict::Stable`] with
+///   [`StableReason::Forced`]. `hash_channel_disagreed` is `true`
+///   iff the channel was active AND
+///   `prior` is `Some(p)` with `p != response` (the strong
+///   "tree was visibly still moving" signal). `EventsReliable` and
+///   first-sample [`QuiescenceWitness::HashChannel`] (`prior = None`)
+///   both fold to `false` — there is no observed disagreement, only
+///   the absence of confirmation.
+/// - [`ProofAuthority::Authoritative`] + `!forced` ⇒
+///   [`QuiescenceVerdict::Stable`] ([`StableReason::Natural`]) iff
+///   the witness proves quiescence ([`QuiescenceWitness::EventsReliable`]
+///   OR `HashChannel { prior: Some(p), response }` with
+///   `p == response`). Otherwise (`HashChannel` with `prior = None`
+///   OR `prior != Some(response)`) ⇒
+///   [`QuiescenceVerdict::Unstable`].
 #[must_use]
-pub fn quiescence_verdict(authority: ProofAuthority, forced: bool) -> QuiescenceVerdict {
+pub fn quiescence_verdict(
+    authority: ProofAuthority,
+    forced: bool,
+    witness: QuiescenceWitness,
+) -> QuiescenceVerdict {
     match authority {
-        ProofAuthority::Authoritative => QuiescenceVerdict::Authoritative { forced },
         ProofAuthority::Undischarged { first_unread } => QuiescenceVerdict::Undischarged {
             first_unread,
             terminal: forced,
+        },
+        ProofAuthority::Authoritative if forced => {
+            // Ceiling bypass: fire / rebase against freshest observation.
+            // `hash_channel_disagreed` reads the witness: `true` only on
+            // an active channel that observed `prior != response` (with
+            // `prior = Some(_)` — a first-sample `None` is absence of
+            // confirmation, not observation of disagreement).
+            let hash_channel_disagreed = matches!(
+                witness,
+                QuiescenceWitness::HashChannel { prior: Some(p), response } if p != response,
+            );
+            QuiescenceVerdict::Stable(StableReason::Forced {
+                hash_channel_disagreed,
+            })
+        }
+        ProofAuthority::Authoritative => match witness {
+            QuiescenceWitness::EventsReliable => QuiescenceVerdict::Stable(StableReason::Natural),
+            QuiescenceWitness::HashChannel {
+                prior: Some(p),
+                response,
+            } if p == response => QuiescenceVerdict::Stable(StableReason::Natural),
+            QuiescenceWitness::HashChannel { .. } => QuiescenceVerdict::Unstable,
         },
     }
 }
@@ -718,6 +883,36 @@ impl PreFireBurst {
         }
     }
 
+    /// Advance the pre-fire N=2 sample carrier — the sole in-life
+    /// mutator of [`Self::last_certified_hash`]. Records `hash` as
+    /// the current Authoritative sample and returns the prior value
+    /// (`None` on first sample). The returned prior threads through
+    /// the cat-(b) cascade to the verdict choke as the
+    /// [`QuiescenceWitness::HashChannel`] `prior` input.
+    ///
+    /// **Authoritative-only contract.** Callers gate on
+    /// [`crate::probe::ProofAuthority`] before reaching this writer
+    /// — an Undischarged observation must not advance the carrier
+    /// (its hash would not reflect a faithful read of every
+    /// obligation chain). The gate sits at the caller (the verdict
+    /// choke in `certify_probe_response`), not on this writer; the
+    /// writer is a total function on the burst, mirroring
+    /// [`PostFireBurst::note_effect_completion`]'s
+    /// no-public-setter-floor discipline.
+    ///
+    /// **No phase gate.** The carrier's lifetime is the burst's
+    /// lifetime (preserved across every pre-fire phase swap), so the
+    /// writer takes `&mut PreFireBurst` and writes unconditionally.
+    /// `Verifying` is the only structurally reachable phase at the
+    /// verdict choke (a response-bearing transition); the cat-(b)
+    /// edge does not re-enforce that, by design.
+    #[must_use]
+    pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
+        let prior = self.last_certified_hash;
+        self.last_certified_hash = Some(hash);
+        prior
+    }
+
     /// Typed move from pre-fire to post-fire — the fire transition.
     ///
     /// Drops, by leaving them out of the [`PostFireBurst::new`]
@@ -737,12 +932,15 @@ impl PreFireBurst {
     ///   Post-fire opens its own `last_event_time = None`; the absorb
     ///   tail reckons from its own first absorbed event, not the fire
     ///   instant.
+    /// - `last_certified_hash` — the pre-fire N=2 sample carrier.
+    ///   Post-fire opens its own [`PostFireBurst::last_certified_hash`]
+    ///   `= None` for an independent rebase-loop sample sequence over
+    ///   the post-command tree (a different tree than the one the
+    ///   pre-fire carrier sampled, so cross-carrying a hash would be
+    ///   a category error).
     ///
     /// `intent` is preserved (read by `dispatch_rebase_*` for the
-    /// diagnostic). Quiescence is no longer carrier-resident — the
-    /// post-fire rebase folds each response through
-    /// [`quiescence_verdict`] over `(authority, post.forced)`, so the
-    /// move drops nothing for the proof.
+    /// diagnostic).
     ///
     /// Sole production caller: `transition_to_awaiting` in `burst.rs`.
     #[must_use]
@@ -770,10 +968,14 @@ impl PostFireBurst {
     /// - [`TimerKind::PostFireSettle`] — lives on
     ///   [`PostFirePhase::Settling`]'s `settle_timer` field; `None`
     ///   in `Awaiting` / `Rebasing` (no settle window in flight).
-    /// - [`TimerKind::RebaseCeiling`] — lives on the `rebase_ceiling`
-    ///   lifecycle, `Some` only while `Armed`; `NotStarted` (the loop
-    ///   has not begun) and `Reached` (the terminal already latched)
-    ///   both yield `None`, so the just-expired ceiling id lazy-drops.
+    /// - [`TimerKind::RebaseCeiling`] — lives directly on the
+    ///   `rebase_ceiling: Option<TimerId>` field. `Some(t)` iff the
+    ///   ceiling timer is live in the heap; `None` covers both the
+    ///   pre-arm state (no `Settling` entry yet) and the post-fire
+    ///   latched state (timer consumed by `pop_expired`, terminal bit
+    ///   on [`Self::forced`]). The just-expired ceiling id lazy-drops
+    ///   either way — `timer_token` is `&self`, it does not observe
+    ///   the consume.
     /// - [`TimerKind::Settle`] / [`TimerKind::BurstDeadline`] —
     ///   type-impossible here (the fields were dropped at
     ///   [`PreFireBurst::into_post_fire`]); the arm returns `None`
@@ -798,16 +1000,19 @@ impl PostFireBurst {
     ///
     /// Born fresh, always: `rebase_ceiling` is `None` (no ceiling
     /// timer armed yet), `forced` is `false` (the latch carrying the
-    /// ceiling terminal has not fired), and `last_event_time` is
-    /// `None` (the absorb tail reckons from its own first absorbed
-    /// event, not from the fire instant). Those invariant-bearing
-    /// fields take no parameter precisely because *no* construction
-    /// path may seed them — the only mutations are the cat-a
-    /// engine helpers (`arm_rebase_loop_ceiling`,
+    /// ceiling terminal has not fired), `last_event_time` is `None`
+    /// (the absorb tail reckons from its own first absorbed event,
+    /// not from the fire instant), and `last_certified_hash` is
+    /// `None` (the post-fire N=2 sample carrier opens fresh — no
+    /// pre-fire sample carries across the fire). Those
+    /// invariant-bearing fields take no parameter precisely because
+    /// *no* construction path may seed them — the only mutations are
+    /// the cat-a engine helpers (`arm_rebase_loop_ceiling`,
     /// `force_pending_post_fire`, `transition_to_settling`,
     /// `absorb_event_into_fire_tail` — each documented at its
-    /// production writer), the no-bypass discipline applied to
-    /// construction.
+    /// production writer) plus the cat-(b) carrier writer
+    /// ([`Profile::advance_certified_sample`]), the no-bypass
+    /// discipline applied to construction.
     ///
     /// Sole production caller: [`PreFireBurst::into_post_fire`] (the
     /// typed fire move).
@@ -824,6 +1029,7 @@ impl PostFireBurst {
             last_event_time: None,
             forced: false,
             rebase_ceiling: None,
+            last_certified_hash: None,
         }
     }
 
@@ -858,6 +1064,20 @@ impl PostFireBurst {
                 AwaitVerdict::NotAwaiting
             }
         }
+    }
+
+    /// Advance the post-fire N=2 sample carrier — the structural
+    /// mirror of [`PreFireBurst::advance_certified_sample`] for the
+    /// rebase loop's sample sequence. Same `Authoritative`-only
+    /// caller contract; same no-phase-gate writer shape; same
+    /// no-public-setter-floor discipline shared with
+    /// [`Self::note_effect_completion`]. Sole in-life mutator of
+    /// [`Self::last_certified_hash`].
+    #[must_use]
+    pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
+        let prior = self.last_certified_hash;
+        self.last_certified_hash = Some(hash);
+        prior
     }
 
     /// Typed move from post-fire back to a fresh pre-fire `Batching`
@@ -897,10 +1117,13 @@ impl PostFireBurst {
     /// never losing the residual. `probe_target` is the anchor
     /// placeholder, overwritten by the next `transition_to_verifying`
     /// exactly as in a fresh `start_standard_burst`. The post-fire
-    /// `forced` ceiling latch and `rebase_ceiling` timer lifecycle are
-    /// dropped by omission — they are post-fire-only, and the restarted
-    /// pre-fire burst opens its own fresh `burst_deadline`, exactly as
-    /// a fresh `start_standard_burst`.
+    /// `forced` ceiling latch, `rebase_ceiling` timer lifecycle, and
+    /// `last_certified_hash` N=2 sample carrier are dropped by
+    /// omission — all three are post-fire-only and tied to the now-
+    /// discarded post-fire sample sequence; the restarted pre-fire
+    /// burst opens its own fresh `burst_deadline` and fresh
+    /// `last_certified_hash: None`, exactly as a fresh
+    /// `start_standard_burst`.
     ///
     /// Sole production caller: `restart_burst_from_fire_tail_residual`
     /// in `burst.rs`.
@@ -926,6 +1149,7 @@ impl PostFireBurst {
             dirty: residual,
             probe_target: anchor,
             last_event_time: Some(now),
+            last_certified_hash: None,
         }
     }
 }
@@ -966,6 +1190,21 @@ impl ActiveBurst {
         match self {
             Self::PostFire(post) => post.note_effect_completion(),
             Self::PreFire(_) => AwaitVerdict::NotAwaiting,
+        }
+    }
+
+    /// Delegate to whichever burst variant is live — both pre-fire
+    /// and post-fire own a `last_certified_hash` carrier (a separate
+    /// sample sequence each, across the fire boundary). Wildcard-
+    /// free dispatch, same layered shape as [`Self::timer_token`] and
+    /// [`Self::note_effect_completion`], distinguished only by the
+    /// fact that **both** variants advance (no `NotAwaiting`-style
+    /// fold on this delegate: the carrier exists on both sides).
+    #[must_use]
+    pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
+        match self {
+            Self::PreFire(pre) => pre.advance_certified_sample(hash),
+            Self::PostFire(post) => post.advance_certified_sample(hash),
         }
     }
 }
@@ -1301,6 +1540,18 @@ impl ProfileState {
         match self {
             Self::Active(burst, _) => burst.note_effect_completion(),
             Self::Idle | Self::Pending(_) => AwaitVerdict::NotAwaiting,
+        }
+    }
+
+    /// Delegate to the active burst's `last_certified_hash` carrier;
+    /// `Idle` / `Pending` own none and fold to `None` (the "no
+    /// carrier exists to advance" shape). Same layered, wildcard-
+    /// free delegation as [`Self::note_effect_completion`].
+    #[must_use]
+    pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
+        match self {
+            Self::Active(burst, _) => burst.advance_certified_sample(hash),
+            Self::Idle | Self::Pending(_) => None,
         }
     }
 
@@ -2666,6 +2917,31 @@ impl Profile {
         self.cfg.has_per_file_fds
     }
 
+    /// True iff settle-window silence is a sufficient quiescence
+    /// witness — the Profile's `events_union` covers every change class
+    /// that affects `leaf_hash`. Currently reduces to a single bit:
+    /// `events.contains(CONTENT)`.
+    ///
+    /// `CONTENT` events are the only class that signal ongoing change.
+    /// In-place `write(2)` calls fire `NOTE_WRITE` on per-file FDs
+    /// (CONTENT class); without CONTENT subscription, either no per-file
+    /// FD is wired (`has_per_file_fds == false`) or the per-Profile
+    /// class filter drops the event. Either way, writes are invisible
+    /// to the Profile, and settle expiry witnesses kernel-silence
+    /// without tree-quiescence. `STRUCTURE` (create/delete/rename) and
+    /// `METADATA` (chmod/touch) changes are point events that cannot
+    /// span a settle window invisibly.
+    ///
+    /// `false` for a Profile whose `events_union` doesn't carry CONTENT
+    /// signals that fire-bearing bursts require the hash-equality
+    /// witness across two consecutive Authoritative samples — the
+    /// safety net for events-incomplete masks. Invariant for the
+    /// Profile's lifetime (folds into `config_hash` via [`Self::events`]).
+    #[must_use]
+    pub const fn events_witness_quiescence(&self) -> bool {
+        self.events().contains(ClassSet::CONTENT)
+    }
+
     /// The substitution-side projection of `ScanConfig.exclude` (source
     /// strings, builder-canonical order). Returned by reference so the
     /// effect emitter `Arc::clone`s it rather than rebuilding.
@@ -2952,6 +3228,24 @@ impl Profile {
     #[must_use]
     pub fn note_effect_completion(&mut self) -> AwaitVerdict {
         self.state.note_effect_completion()
+    }
+
+    /// The single in-life mutator of the pre-fire and post-fire
+    /// `last_certified_hash` carriers — cat-(b) cascade entry, pure
+    /// delegation through the state machine. The dispatch in
+    /// [`ActiveBurst::advance_certified_sample`] routes to whichever
+    /// burst variant is live; non-Active states fold to `None`.
+    ///
+    /// **Authoritative-only contract** sits at the caller (the
+    /// verdict choke in `certify_probe_response`): only call after
+    /// extracting a `ProofAuthority::Authoritative` response hash.
+    /// The returned prior is the [`QuiescenceWitness::HashChannel`]
+    /// `prior` input. Callable regardless of the verdict outcome
+    /// (Stable or Unstable) — the carrier tracks the last
+    /// walker-certified sample, not the last fire-eligible one.
+    #[must_use]
+    pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
+        self.state.advance_certified_sample(hash)
     }
 
     /// Take the live `current` snapshot, leaving the arm's `current`
@@ -3345,6 +3639,65 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE, None);
         assert!(!p.has_per_file_fds());
+    }
+
+    /// [`Profile::events_witness_quiescence`] is true iff CONTENT is in
+    /// the mask. STRUCTURE / METADATA without CONTENT do not catch
+    /// in-place writes, so settle-window silence is not a quiescence
+    /// witness on those masks. The predicate is the (per-Profile) gate
+    /// on whether the verdict floor's settle-natural fire path is
+    /// sound; events-incomplete Profiles need the hash-equality channel.
+    #[test]
+    fn events_witness_quiescence_tracks_content_bit() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+
+        let empty = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::EMPTY, None);
+        assert!(
+            !empty.events_witness_quiescence(),
+            "an empty events mask catches nothing — silence proves nothing",
+        );
+
+        let structure = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE, None);
+        assert!(
+            !structure.events_witness_quiescence(),
+            "STRUCTURE alone misses in-place CONTENT writes (the scp regression)",
+        );
+
+        let metadata = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA, None);
+        assert!(
+            !metadata.events_witness_quiescence(),
+            "METADATA alone drops CONTENT at the per-Profile class filter",
+        );
+
+        let content = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
+        assert!(
+            content.events_witness_quiescence(),
+            "CONTENT subscribes to in-place writes — settle-silence proves quiescence",
+        );
+
+        let structure_and_content = mk_profile(
+            r,
+            cfg(),
+            MAX_SETTLE,
+            SETTLE,
+            ClassSet::STRUCTURE | ClassSet::CONTENT,
+            None,
+        );
+        assert!(structure_and_content.events_witness_quiescence());
+
+        let structure_and_metadata = mk_profile(
+            r,
+            cfg(),
+            MAX_SETTLE,
+            SETTLE,
+            ClassSet::STRUCTURE | ClassSet::METADATA,
+            None,
+        );
+        assert!(
+            !structure_and_metadata.events_witness_quiescence(),
+            "the predicate is one-bit: CONTENT alone unlocks settle-natural fire",
+        );
     }
 
     #[test]
@@ -3794,8 +4147,8 @@ mod tests {
 
     use super::{
         ActiveBurst, AwaitVerdict, BurstFinish, BurstIntent, DirtyProvenance, PostFireBurst,
-        PostFirePhase, PreFireBurst, PreFirePhase, QuiescenceVerdict, TimerKind,
-        quiescence_verdict,
+        PostFirePhase, PreFireBurst, PreFirePhase, QuiescenceVerdict, QuiescenceWitness,
+        StableReason, TimerKind, quiescence_verdict,
     };
     use crate::ids::{ProbeCorrelation, TimerId};
     use crate::op::ProofAuthority;
@@ -3906,6 +4259,7 @@ mod tests {
             dirty: DirtyProvenance::new(),
             probe_target: anchor,
             last_event_time: None,
+            last_certified_hash: None,
         }
     }
 
@@ -3918,6 +4272,7 @@ mod tests {
             dirty: DirtyProvenance::new(),
             probe_target: anchor,
             last_event_time: None,
+            last_certified_hash: None,
         }
     }
 
@@ -4049,36 +4404,101 @@ mod tests {
         }
     }
 
-    /// The post-refactor verdict-fold floor [`quiescence_verdict`] folds
-    /// `(authority, forced)` into the 2D `QuiescenceVerdict` shape —
-    /// total, side-effect-free, four cases. The `forced` bit projects
-    /// onto two different consequence axes inside the dispatch (the
-    /// `Authoritative` arm's fire-anyway vs. natural-fire split, and
-    /// the `Undischarged` arm's abandon-with-diagnostic vs. retry
-    /// split), but the floor's job is one bit-faithful projection.
+    /// The verdict-fold floor [`quiescence_verdict`] projects three
+    /// axes — `(authority × forced × witness)` — onto three variants
+    /// (`Stable(Natural | Forced)`, `Unstable`, `Undischarged`).
+    /// Total, pure, side-effect-free.
+    ///
+    /// Cases covered (all reachable shapes; the `Authoritative + !forced
+    /// + HashChannel(prior≠response)` row produces `Unstable`, ruling out
+    /// the would-be `Stable(Natural)` mistake):
+    ///
+    /// - Authoritative × !forced × EventsReliable → Stable(Natural)
+    /// - Authoritative × !forced × HashChannel(prior=None) → Unstable
+    /// - Authoritative × !forced × HashChannel(p==r) → Stable(Natural)
+    /// - Authoritative × !forced × HashChannel(p≠r) → Unstable
+    /// - Authoritative ×  forced × EventsReliable → Stable(Forced{disagreed=false})
+    /// - Authoritative ×  forced × HashChannel(prior=None) → Stable(Forced{disagreed=false})
+    /// - Authoritative ×  forced × HashChannel(p==r) → Stable(Forced{disagreed=false})
+    /// - Authoritative ×  forced × HashChannel(p≠r) → Stable(Forced{disagreed=true})
+    /// - Undischarged × !forced × * → Undischarged{terminal=false}
+    /// - Undischarged ×  forced × * → Undischarged{terminal=true}
     #[test]
-    fn quiescence_verdict_folds_authority_forced_pair() {
+    fn quiescence_verdict_folds_three_axes() {
         let unread: std::sync::Arc<std::path::Path> =
             std::sync::Arc::from(std::path::Path::new("first/unread"));
         let undischarged = || ProofAuthority::Undischarged {
             first_unread: std::sync::Arc::clone(&unread),
         };
+        let er = QuiescenceWitness::EventsReliable;
+        let first = QuiescenceWitness::HashChannel {
+            prior: None,
+            response: 1,
+        };
+        let eq = QuiescenceWitness::HashChannel {
+            prior: Some(7),
+            response: 7,
+        };
+        let neq = QuiescenceWitness::HashChannel {
+            prior: Some(7),
+            response: 8,
+        };
 
+        // Authoritative + !forced — witness selects Stable vs Unstable.
         assert_eq!(
-            quiescence_verdict(ProofAuthority::Authoritative, false),
-            QuiescenceVerdict::Authoritative { forced: false },
+            quiescence_verdict(ProofAuthority::Authoritative, false, er),
+            QuiescenceVerdict::Stable(StableReason::Natural),
         );
         assert_eq!(
-            quiescence_verdict(ProofAuthority::Authoritative, true),
-            QuiescenceVerdict::Authoritative { forced: true },
+            quiescence_verdict(ProofAuthority::Authoritative, false, first),
+            QuiescenceVerdict::Unstable,
+            "first-sample hash channel (prior=None) ⇒ Unstable, not Natural",
         );
-        let v = quiescence_verdict(undischarged(), false);
+        assert_eq!(
+            quiescence_verdict(ProofAuthority::Authoritative, false, eq),
+            QuiescenceVerdict::Stable(StableReason::Natural),
+        );
+        assert_eq!(
+            quiescence_verdict(ProofAuthority::Authoritative, false, neq),
+            QuiescenceVerdict::Unstable,
+        );
+
+        // Authoritative + forced — ceiling bypass. Disagreement bit
+        // reads the witness: `true` only on Some(p) != response.
+        assert_eq!(
+            quiescence_verdict(ProofAuthority::Authoritative, true, er),
+            QuiescenceVerdict::Stable(StableReason::Forced {
+                hash_channel_disagreed: false,
+            }),
+        );
+        assert_eq!(
+            quiescence_verdict(ProofAuthority::Authoritative, true, first),
+            QuiescenceVerdict::Stable(StableReason::Forced {
+                hash_channel_disagreed: false,
+            }),
+            "first-sample channel on forced fold ⇒ absence of confirmation, not observed disagreement",
+        );
+        assert_eq!(
+            quiescence_verdict(ProofAuthority::Authoritative, true, eq),
+            QuiescenceVerdict::Stable(StableReason::Forced {
+                hash_channel_disagreed: false,
+            }),
+        );
+        assert_eq!(
+            quiescence_verdict(ProofAuthority::Authoritative, true, neq),
+            QuiescenceVerdict::Stable(StableReason::Forced {
+                hash_channel_disagreed: true,
+            }),
+        );
+
+        // Undischarged — witness ignored; terminal mirrors forced.
+        let v = quiescence_verdict(undischarged(), false, er);
         assert!(
             matches!(&v, QuiescenceVerdict::Undischarged { first_unread, terminal: false }
                 if first_unread.as_ref() == std::path::Path::new("first/unread")),
             "Undischarged + !forced carries first_unread verbatim and projects terminal=false; got {v:?}",
         );
-        let v = quiescence_verdict(undischarged(), true);
+        let v = quiescence_verdict(undischarged(), true, neq);
         assert!(
             matches!(&v, QuiescenceVerdict::Undischarged { first_unread, terminal: true }
                 if first_unread.as_ref() == std::path::Path::new("first/unread")),
@@ -4451,8 +4871,10 @@ mod tests {
     /// a fresh `Batching` Standard burst with the engine-minted timers
     /// and the anchor placeholder, carries the captured paths over
     /// whole (so the restarted burst's first verify obligates over
-    /// them), and opens a fresh quiescence sequence (`certified` resets
-    /// to a fresh [`CertifiedPrior`]).
+    /// them), and opens a fresh quiescence sequence — the restarted
+    /// burst is constructed by [`PostFireBurst::into_pre_fire_residual`]
+    /// from scratch, so any sample-sequence bookkeeping on the prior
+    /// pre-fire burst does not survive the move.
     #[test]
     fn into_pre_fire_residual_seeds_a_fresh_batching_burst() {
         let mut tree = Tree::new();
@@ -4537,6 +4959,59 @@ mod tests {
         let anchor = tree.ensure_root("anchor", ResourceRole::User);
         let _ = rebasing_post(BurstIntent::Standard, DirtyProvenance::new())
             .into_pre_fire_residual(tid(1), tid(2), anchor, std::time::Instant::now());
+    }
+
+    /// The pre-fire N=2 sample carrier drops by omission at the fire
+    /// boundary: `PreFireBurst::into_post_fire` constructs a fresh
+    /// `PostFireBurst::new` whose `last_certified_hash` is `None`,
+    /// regardless of any prior pre-fire sample sequence. Pinning this
+    /// structurally guards a future refactor that might accidentally
+    /// thread the pre-fire carrier across the boundary — the post-fire
+    /// rebase loop samples a different tree (post-command, not pre-),
+    /// so cross-carrying a hash would be a category error.
+    #[test]
+    fn pre_fire_carrier_drops_at_into_post_fire() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut pre = batching_burst(tid(7), tid(99), r);
+        let prior = pre.advance_certified_sample(0xCAFE_F00D_u128);
+        assert_eq!(prior, None, "first sample on a fresh burst returns None");
+        assert_eq!(pre.last_certified_hash, Some(0xCAFE_F00D_u128));
+
+        let post = pre.into_post_fire(1, tid(55));
+        assert_eq!(
+            post.last_certified_hash, None,
+            "the typed fire move drops the pre-fire carrier by omission — \
+             the post-fire rebase loop opens its own fresh sample sequence",
+        );
+    }
+
+    /// The post-fire N=2 sample carrier drops by omission at the
+    /// fire-tail restart: `PostFireBurst::into_pre_fire_residual`
+    /// constructs a fresh `PreFireBurst` whose `last_certified_hash` is
+    /// `None`, regardless of any prior post-fire sample sequence. The
+    /// restarted Standard burst samples a third tree (post-rebase,
+    /// re-debounced) and opens its own fresh quiescence sequence.
+    #[test]
+    fn post_fire_carrier_drops_at_into_pre_fire_residual() {
+        let mut tree = Tree::new();
+        let anchor = tree.ensure_root("anchor", ResourceRole::User);
+        let c1 = tree
+            .ensure_child(anchor, "c1", ResourceRole::User)
+            .expect("live");
+        let residual = dirty_prov(&[(c1, "/w/c1")]);
+
+        let mut post = rebasing_post(BurstIntent::Standard, residual);
+        let prior = post.advance_certified_sample(0xDEAD_BEEF_u128);
+        assert_eq!(prior, None, "first sample on a fresh burst returns None");
+        assert_eq!(post.last_certified_hash, Some(0xDEAD_BEEF_u128));
+
+        let pre = post.into_pre_fire_residual(tid(1), tid(2), anchor, std::time::Instant::now());
+        assert_eq!(
+            pre.last_certified_hash, None,
+            "the typed fire-tail restart drops the post-fire carrier by omission — \
+             the restarted pre-fire burst opens its own fresh sample sequence",
+        );
     }
 
     #[test]

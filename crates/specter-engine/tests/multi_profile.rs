@@ -19,8 +19,8 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, post_fire_settle_id, rebase_post_fire_to_idle,
-    reconfirm_probed, seed_to_idle, verify_n2,
+    DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, post_fire_settle_id,
+    rebase_post_fire_to_idle, reconfirm_probed, seed_to_idle, verify,
 };
 use std::time::{Duration, Instant};
 
@@ -116,9 +116,11 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     // dedup on the restarted burst).
     let child_snap = dir_snap(&[("bar", EntryKind::File, 9)]);
 
-    // Parent: recursive @ /src, NO_EVENTS. It covers /src/foo, so a
-    // child mid-Standard-burst gates it; it bursts only from the
-    // explicit FsEvent at its own anchor below.
+    // Parent: recursive @ /src, NO_EVENTS — must NOT receive descendant
+    // events (the test's later residual-absorb step drives only the child).
+    // events_witness_quiescence == false on this mask, so the parent's
+    // Standard verify owes the N=2 hash-equality channel: two consecutive
+    // Authoritative samples must agree. Driven inline below.
     let out_p = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
             "parent".into(),
@@ -200,10 +202,13 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         )
     };
 
-    // Parent verifies first and stabilises while the child is still
-    // mid-Standard-burst → `Draining` (gated by the covered child). One
-    // `Authoritative` sample folds to a fire decision; the gate diverts
-    // it to Draining because `has_active_standard_descendant` is true.
+    // Parent verifies and stabilises while the child is still
+    // mid-Standard-burst → `Draining` (gated by the covered child). The
+    // parent is on a NO_EVENTS mask, so its Standard verify owes the N=2
+    // hash channel: first sample → Unstable (re-Batching, prior=None);
+    // second sample (settle-spaced, same hash) → Stable; the gate then
+    // diverts it to Draining because `has_active_standard_descendant`
+    // is true.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -212,10 +217,15 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
             .in_active_standard_burst(),
         "child gates the parent before the parent stabilises",
     );
-    let n2_p = verify_n2(&mut e, pid_parent, &dir_snap(&[]), t2);
-    let parent_parked_at = n2_p.confirm_at;
+    let v_p_first = verify(&mut e, pid_parent, &dir_snap(&[]), t2);
+    // First sample re-batches; expire the freshly-armed settle timer
+    // to advance back to Verifying for the second sample.
+    let parent_parked_at = v_p_first.at + SETTLE * 2;
+    drain_due(&mut e, parent_parked_at);
+    let v_p = verify(&mut e, pid_parent, &dir_snap(&[]), parent_parked_at);
+    let parent_parked_at = v_p.at;
     assert!(
-        !reconfirm_probed(&n2_p.confirmed, pid_parent),
+        !reconfirm_probed(&v_p.out, pid_parent),
         "Draining-divert emits no reconfirm probe (parent went Verifying → Draining)",
     );
     assert!(
@@ -234,16 +244,16 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
             .in_active_standard_burst(),
         "child still gates the parent before it stabilises",
     );
-    let n2_c = verify_n2(&mut e, pid_child, &child_snap, parent_parked_at);
-    let child_parked_at = n2_c.confirm_at;
-    let child_effect = n2_c
-        .confirmed
+    let v_c = verify(&mut e, pid_child, &child_snap, parent_parked_at);
+    let child_parked_at = v_c.at;
+    let child_effect = v_c
+        .out
         .effects()
         .first()
         .cloned()
         .expect("child fired one Effect at the stable verdict");
     assert!(
-        !reconfirm_probed(&n2_c.confirmed, pid_parent) && parent_is_draining(&e),
+        !reconfirm_probed(&v_c.out, pid_parent) && parent_is_draining(&e),
         "parent does not reconfirm at the child's stable verdict",
     );
 
@@ -446,6 +456,8 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
 
     // Parent @ /src (recursive) — covers /src/mid/foo, no Profile at
     // /src/mid yet, so the child's covering chain is child → parent.
+    // DEFAULT_EVENTS so the parent's single Authoritative verify folds to
+    // Stable (the gated-Draining path the test pins).
     let out_p = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
             "parent".into(),
@@ -455,7 +467,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
             SETTLE,
             empty_program(),
             EffectScope::SubtreeRoot,
-            NO_EVENTS,
+            DEFAULT_EVENTS,
             false,
         )),
         now,
@@ -475,7 +487,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
             SETTLE,
             empty_program(),
             EffectScope::SubtreeRoot,
-            NO_EVENTS,
+            DEFAULT_EVENTS,
             false,
         )),
         now,
@@ -520,8 +532,8 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
             .in_active_standard_burst(),
         "child gates the parent before the parent stabilises",
     );
-    let n2_parent = verify_n2(&mut e, pid_parent, &dir_snap(&[]), t2);
-    let parent_parked_at = n2_parent.confirm_at;
+    let v_parent = verify(&mut e, pid_parent, &dir_snap(&[]), t2);
+    let parent_parked_at = v_parent.at;
     assert!(
         matches!(
             e.profiles().get(pid_parent).unwrap().state(),
@@ -586,9 +598,9 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
             .in_active_standard_burst(),
         "child still gates the Draining parent before it stabilises",
     );
-    let n2_child = verify_n2(&mut e, pid_child, &dir_snap(&[]), parent_parked_at);
-    let child_parked_at = n2_child.confirm_at;
-    let stable_out = n2_child.confirmed;
+    let v_child = verify(&mut e, pid_child, &dir_snap(&[]), parent_parked_at);
+    let child_parked_at = v_child.at;
+    let stable_out = v_child.out;
     let child_effect = stable_out
         .effects()
         .first()
@@ -684,6 +696,9 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         .build();
     let unbounded = ScanConfig::builder().recursive(true).build();
 
+    // A: events-reliable (DEFAULT_EVENTS) so its single Authoritative
+    // verify folds to Stable directly. max_depth=1 keeps A off P's
+    // covering set anyway, so the descendant `foo` event never reaches A.
     let out_a = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
             "a".into(),
@@ -693,7 +708,7 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
             SETTLE,
             empty_program(),
             EffectScope::SubtreeRoot,
-            NO_EVENTS,
+            DEFAULT_EVENTS,
             false,
         )),
         now,
@@ -729,7 +744,9 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     // later immediate-reap detach requires.
     let b_seed_done = seed_to_idle(&mut e, pid_b, &dir_snap(&[]), a_seed_done);
 
-    // P @ /src/mid/foo (recursive).
+    // P @ /src/mid/foo (recursive). DEFAULT_EVENTS so its single
+    // Authoritative verify fires directly and the post-fire rebase loop
+    // closes in one sample (events-reliable witness).
     let out_pp = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
             "p".into(),
@@ -739,7 +756,7 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
             SETTLE,
             empty_program(),
             EffectScope::SubtreeRoot,
-            NO_EVENTS,
+            DEFAULT_EVENTS,
             false,
         )),
         now,
@@ -778,9 +795,10 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     drain_due(&mut e, t2);
 
     // A stabilises while P gates it through the chain P → B → A →
-    // A enters Draining. A's single Authoritative verify response
-    // folds to `Stable` directly; P still being mid-burst routes A
-    // through `transition_to_draining` instead of firing.
+    // A enters Draining. A's single Authoritative verify response folds
+    // to `Stable` directly (DEFAULT_EVENTS makes A events-reliable); P
+    // still being mid-burst routes A through `transition_to_draining`
+    // instead of firing.
     assert!(
         e.profiles()
             .get(pid_p)
@@ -789,8 +807,8 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
             .in_active_standard_burst(),
         "P gates A (via the intermediate B) before A stabilises",
     );
-    let n2_a = verify_n2(&mut e, pid_a, &dir_snap(&[]), t2);
-    let a_parked_at = n2_a.confirm_at;
+    let v_a = verify(&mut e, pid_a, &dir_snap(&[]), t2);
+    let a_parked_at = v_a.at;
     assert!(
         matches!(
             e.profiles().get(pid_a).unwrap().state(),
@@ -835,9 +853,9 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
             .in_active_standard_burst(),
         "P still gates the Draining A before it stabilises",
     );
-    let n2_p = verify_n2(&mut e, pid_p, &dir_snap(&[]), a_parked_at);
-    let p_parked_at = n2_p.confirm_at;
-    let p_stable = n2_p.confirmed;
+    let v_p = verify(&mut e, pid_p, &dir_snap(&[]), a_parked_at);
+    let p_parked_at = v_p.at;
+    let p_stable = v_p.out;
     let p_effect = p_stable
         .effects()
         .first()
@@ -1136,9 +1154,11 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     drain_due(&mut e, t2);
 
     // Parent stabilises while the child still gates it → Draining.
-    // The parent's single Authoritative verify response folds to
-    // `Stable` directly; the child still being mid-burst routes the
-    // parent through `transition_to_draining` instead of firing.
+    // The parent is on a NO_EVENTS mask, so its Standard verify owes
+    // the N=2 hash channel: first sample → Unstable (prior=None,
+    // re-batches); second sample (settle-spaced, same hash) → Stable;
+    // the child still being mid-burst routes the parent through
+    // `transition_to_draining` instead of firing.
     assert!(
         e.profiles()
             .get(pid_child)
@@ -1147,8 +1167,11 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
             .in_active_standard_burst(),
         "child gates the parent before the parent stabilises",
     );
-    let n2 = verify_n2(&mut e, pid_parent, &dir_snap(&[]), t2);
-    let parked_at = n2.confirm_at;
+    let v_first = verify(&mut e, pid_parent, &dir_snap(&[]), t2);
+    let parked_at = v_first.at + SETTLE * 2;
+    drain_due(&mut e, parked_at);
+    let v = verify(&mut e, pid_parent, &dir_snap(&[]), parked_at);
+    let parked_at = v.at;
     assert!(
         matches!(
             e.profiles().get(pid_parent).unwrap().state(),

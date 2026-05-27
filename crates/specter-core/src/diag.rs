@@ -46,10 +46,10 @@ pub enum BurstHelper {
     StartStandardBurst,
     /// `Engine::event_drives_batching` — pre-fire FsEvent absorb.
     EventDrivesBatching,
-    /// `Engine::undischarged_drives_batching` — Undischarged
+    /// `Engine::retry_drives_batching` — Undischarged
     /// verify response (transient non-observation, ceiling not yet
     /// fired) re-arms Batching for the next sample.
-    UndischargedDrivesBatching,
+    RetryDrivesBatching,
     /// `Engine::transition_to_verifying` — Batching/Draining → Verifying.
     TransitionToVerifying,
     /// `Engine::transition_to_draining` — Verifying → Draining.
@@ -71,7 +71,7 @@ pub enum BurstHelper {
     /// `Rebasing → Settling` undischarged loop-back
     /// (`dispatch_rebase_ok::Undischarged + !terminal`); the post-fire
     /// mirror of pre-fire's `event_drives_batching` /
-    /// `undischarged_drives_batching` pair on the Settling side.
+    /// `retry_drives_batching` pair on the Settling side.
     TransitionToSettling,
     /// `Engine::absorb_event_into_fire_tail` — post-fire FsEvent absorb.
     AbsorbEventIntoFireTail,
@@ -510,23 +510,78 @@ pub enum Diagnostic {
         first_unread: Arc<Path>,
         intent: BurstIntent,
     },
-    /// The post-fire rebase loop reached its ceiling while the
-    /// post-command tree was still moving: two settle-spaced
-    /// `WholeSubtree` reads kept disagreeing until the bounded
-    /// rebase-ceiling elapsed. The engine pins the freshest observation
-    /// as the new baseline anyway (a bounded terminal, not a wedge) and
-    /// finishes the burst — it cannot loop forever waiting for a
-    /// command whose output never settles.
+    /// The post-fire rebase loop reached its ceiling and the engine
+    /// pinned the freshest observation as the new baseline anyway,
+    /// without the hash channel observing concrete disagreement at the
+    /// last sample. Two reachable shapes fold to this terminal:
+    /// settle-spaced reads agreed at the last sample (the ceiling
+    /// simply ran out before two consecutive equal reads accumulated),
+    /// or the rebase loop ran on a Profile whose `events_union` covers
+    /// in-place writes ([`crate::Profile::events_witness_quiescence`])
+    /// so the hash channel was inactive.
     ///
     /// Deliberately **loud**, unlike the pre-fire forced deadline-fire
-    /// (which is silent): a fired command whose tree never quiesces is a
-    /// distinct operator story (a runaway/streaming command, or a
+    /// (which is silent): a fired command whose tree never quiesces is
+    /// a distinct operator story (a runaway/streaming command, or a
     /// `settle` shorter than the command's own write cadence) worth a
     /// log line, where a pre-fire forced fire is the expected
     /// max-settle fallback. `intent` distinguishes a Standard post-fire
-    /// rebase from a Seed-drift one, exactly as on [`Self::ProbeVanished`]
-    /// / [`Self::ProbeFailed`].
+    /// rebase from a Seed-drift one, exactly as on
+    /// [`Self::ProbeVanished`] / [`Self::ProbeFailed`].
+    ///
+    /// Sibling to [`Self::RebaseCeilingForcedDespiteChange`]: the two
+    /// terminals split the post-fire forced-ceiling arm by whether the
+    /// hash channel observed a concrete disagreement
+    /// (`*ForcedDespiteChange`) or not (this variant). The two are
+    /// mutually exclusive — one diagnostic per forced rebase, picked
+    /// by available evidence.
     RebaseCeilingStillChanging {
+        profile: ProfileId,
+        intent: BurstIntent,
+    },
+    /// The pre-fire `BurstDeadline` ceiling fired AND the hash channel
+    /// observed concrete disagreement (`prior != response`) at the last
+    /// sample: the tree was visibly still moving when the deadline
+    /// expired. The engine fires/pins against the freshest observation
+    /// anyway (a bounded terminal, not a wedge), exactly as on the quiet
+    /// forced path — the distinction is operator-visible only.
+    ///
+    /// The pre-fire counterpart of
+    /// [`Self::RebaseCeilingForcedDespiteChange`]. Unlike post-fire's
+    /// loud baseline, pre-fire's quiet forced-ceiling path is silent
+    /// (`forced` already propagates onto `Effect.forced`, visible
+    /// downstream), so only the strong-signal arm earns a diagnostic.
+    ///
+    /// Reachable only when the per-Profile hash channel was active —
+    /// the burst was fire-bearing AND
+    /// [`crate::Profile::events_witness_quiescence`] was `false`
+    /// (events-incomplete mask). For events-reliable Profiles and
+    /// cold-Seed bursts the channel is bypassed and this variant is
+    /// unreachable by the fold (`hash_channel_disagreed` is always
+    /// `false`).
+    QuiescenceCeilingForcedDespiteChange {
+        profile: ProfileId,
+        intent: BurstIntent,
+    },
+    /// The post-fire `RebaseCeiling` fired AND the hash channel
+    /// observed concrete disagreement (`prior != response`) at the
+    /// last `WholeSubtree` sample: the post-command tree was visibly
+    /// still moving when the rebase loop expired. The engine pins the
+    /// freshest observation as the new baseline anyway (a bounded
+    /// terminal, not a wedge) and finishes the burst.
+    ///
+    /// The strong-signal sibling of
+    /// [`Self::RebaseCeilingStillChanging`]: that variant emits when
+    /// the ceiling expires without observed disagreement (the hash
+    /// channel agreed at the last sample, or was inactive); this
+    /// variant emits when the channel was active AND disagreed. The
+    /// two are mutually exclusive — one diagnostic per forced rebase,
+    /// picked by available evidence.
+    ///
+    /// Reachable only when the per-Profile hash channel was active
+    /// (events-incomplete + fire-bearing — see
+    /// [`crate::Profile::events_witness_quiescence`]).
+    RebaseCeilingForcedDespiteChange {
         profile: ProfileId,
         intent: BurstIntent,
     },

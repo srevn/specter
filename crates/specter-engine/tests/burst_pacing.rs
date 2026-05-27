@@ -1,8 +1,9 @@
 //! Regression suite for the settle-timer pacing contract.
 //!
 //! These cases capture the failure mode that motivated splitting
-//! `transition_to_settling` into `event_drives_batching` and
-//! `unstable_response_drives_batching`: a dense storm of `FsEvent`s used
+//! the pre-fire re-Batch into `event_drives_batching` (driven by an
+//! `FsEvent`) and `retry_drives_batching` (driven by an Unstable or
+//! Undischarged verify response): a dense storm of `FsEvent`s used
 //! to inflate the settle backoff curve, eventually pegging the timer at
 //! `burst_deadline` and forcing the Effect to fire `forced = true`. The
 //! current contract is "every event re-arms `now + settle`," so the
@@ -98,7 +99,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         }
     };
 
-    // The verify response folds to `Authoritative { forced: false }`
+    // The verify response folds to `Stable(StableReason::Natural)`
     // on the first sample — single dispatch fires the Effect.
     let resp_t = probe_emit + Duration::from_millis(1);
     let stable_out = e.step(
@@ -147,7 +148,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
 fn sustained_undischarged_response_storm_paces_at_settle() {
     // Verify the second leg of the conflation fix: the
     // `Undischarged + !terminal` retry path routes via
-    // `undischarged_drives_batching`, which schedules the next attempt
+    // `retry_drives_batching`, which schedules the next attempt
     // at `now + settle`, not at the exponential-backoff curve. We
     // reproduce a sustained-undischarged burst: every probe response
     // refuses the obligation; no events arrive in between. Each cycle's
@@ -222,7 +223,7 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
 
         // Reply with an Undischarged !terminal response. This folds to
         // `QuiescenceVerdict::Undischarged { terminal: false }`, which
-        // routes via `undischarged_drives_batching` — the surviving
+        // routes via `retry_drives_batching` — the surviving
         // retry path that schedules the next attempt at `now + settle`.
         let mut entries = BTreeMap::<CompactString, ChildEntry>::new();
         entries.insert(

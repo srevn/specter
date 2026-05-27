@@ -21,7 +21,7 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    first_probe_correlation, seed_settle_to_verifying, seed_to_idle, seed_to_idle_with,
+    assert_seed_verifying, first_probe_correlation, seed_to_idle, seed_to_idle_with,
 };
 use std::time::{Duration, Instant};
 
@@ -135,7 +135,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     // to Vanished. discard_anchor_state clears P.kind, P.current,
     // P.baseline, P.anchor_claim. Vanished terminates the Seed on its
     // first response.
-    let (p_corr, p_at) = seed_settle_to_verifying(&mut e, pid_p, t_p);
+    let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_p),
@@ -265,7 +265,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
 
     // Expire P's first settle window → first Seed probe; drive it to
     // Vanished (terminates the Seed on its first response).
-    let (p_corr, p_at) = seed_settle_to_verifying(&mut e, pid_p, t_p);
+    let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_p),
@@ -374,7 +374,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     // Expire P's first settle window → first Seed probe; drive it to
     // Failed. dispatch_seed_failed clears P.kind and terminates the
     // Seed on its first response.
-    let (p_corr, p_at) = seed_settle_to_verifying(&mut e, pid_p, t_p);
+    let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_p),

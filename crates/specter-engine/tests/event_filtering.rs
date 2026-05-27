@@ -18,8 +18,8 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    anchor_dir, attach, attach_returning, complete_effect_to_settling, drain_due,
-    post_fire_settle_id, pre_place_dir, seed_settle_to_verifying, seed_to_idle, verify_n2,
+    anchor_dir, assert_seed_verifying, attach, attach_returning, complete_effect_to_settling,
+    drain_due, post_fire_settle_id, pre_place_dir, seed_to_idle, verify,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -75,7 +75,7 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
     // certified hash) so it does not pin, but `apply_snapshot` still
     // grafts: with has_per_file_fds=true the File child gets a Watch op
     // on this very (first) response.
-    let (corr, at) = seed_settle_to_verifying(&mut e, pid, t0);
+    let (corr, at) = assert_seed_verifying(&mut e, pid, t0);
     let snap = dir_snap(&[("file.txt", EntryKind::File, 1)]);
     let seed_out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -128,7 +128,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
     );
 
     // The first Seed probe fires one settle window after attach.
-    let (corr, at) = seed_settle_to_verifying(&mut e, pid, t0);
+    let (corr, at) = assert_seed_verifying(&mut e, pid, t0);
     let snap = dir_snap(&[("file.txt", EntryKind::File, 1)]);
     let seed_out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -781,7 +781,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
     // the (settle-deferred) probe could read. Drive the first Seed
     // probe out, then answer Vanished — terminal on the first
     // response (the failure helper runs immediately).
-    let (corr, at) = seed_settle_to_verifying(&mut e, pid, t0);
+    let (corr, at) = assert_seed_verifying(&mut e, pid, t0);
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -842,7 +842,7 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
 
     // Step 2: Seed Vanished (the probe fires one settle window
     // after attach; Vanished is terminal on the first response).
-    let (corr, at) = seed_settle_to_verifying(&mut e, pid, t0);
+    let (corr, at) = assert_seed_verifying(&mut e, pid, t0);
     e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -914,7 +914,7 @@ fn seed_failed_releases_anchor_claim() {
 
     // The Seed probe fires one settle window after attach.
     // Failed is terminal on the first response.
-    let (corr, at) = seed_settle_to_verifying(&mut e, pid, t0);
+    let (corr, at) = assert_seed_verifying(&mut e, pid, t0);
     let _out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -1505,9 +1505,9 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     // emit_effects fires one Effect for the SubtreeRoot Sub →
     // transition_to_awaiting.
     let subdir_snap = dir_snap(&[("subdir", EntryKind::Dir, 99)]);
-    let n2 = verify_n2(&mut e, pid, &subdir_snap, t2);
-    let effect = n2
-        .confirmed
+    let v = verify(&mut e, pid, &subdir_snap, t2);
+    let effect = v
+        .out
         .effects()
         .first()
         .cloned()

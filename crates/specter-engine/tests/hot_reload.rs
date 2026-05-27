@@ -10,7 +10,9 @@ use specter_core::{
     SubRegistryDiff, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
-use specter_engine::testkit::{MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, seed_to_idle, verify_n2};
+use specter_engine::testkit::{
+    DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, seed_to_idle, verify,
+};
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -151,7 +153,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
             SETTLE,
             empty_program(),
             EffectScope::SubtreeRoot,
-            NO_EVENTS,
+            DEFAULT_EVENTS,
             false,
         )),
         now,
@@ -195,8 +197,8 @@ fn config_diff_mid_burst_remove_defers_reap() {
 
     // The single Authoritative verify response folds to `Stable`;
     // reap-pending suppresses the Effect and finishes by reaping.
-    let n2 = verify_n2(&mut e, pid, &dir_snap(&[]), t2);
-    let out = n2.confirmed;
+    let v = verify(&mut e, pid, &dir_snap(&[]), t2);
+    let out = v.out;
     assert!(out.effects().is_empty(), "reap_pending suppresses Effect");
     assert!(
         e.profiles().get(pid).is_none(),

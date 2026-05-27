@@ -42,7 +42,7 @@
 //! - `start_seed_burst` / `start_standard_burst` — Idle →
 //!   `Active(PreFire(_))`.
 //! - `event_drives_batching` (FsEvent during pre-fire) /
-//!   `undischarged_drives_batching` (Undischarged retry) /
+//!   `retry_drives_batching` (Undischarged retry) /
 //!   `transition_to_verifying` (settle-timer expiry, burst-deadline,
 //!   Draining → Verifying reconfirm) /
 //!   `transition_to_draining` — pre-fire phase swaps (mutate
@@ -422,6 +422,7 @@ impl Engine {
                     // same anchor on the triggered path's settle expiry.
                     probe_target: resource,
                     last_event_time,
+                    last_certified_hash: None,
                 }),
                 // Fresh burst — directive starts at `ReturnToIdle`. Flips
                 // to `Reap` only on mid-burst `mark_active_for_reap`.
@@ -506,6 +507,7 @@ impl Engine {
                     // events update this in `event_drives_batching` without
                     // re-inserting a fresh heap entry.
                     last_event_time: Some(now),
+                    last_certified_hash: None,
                 }),
                 // Fresh burst — directive starts at `ReturnToIdle`. Flips
                 // to `Reap` only on mid-burst `mark_active_for_reap`.
@@ -522,9 +524,10 @@ impl Engine {
     /// fresh settle timer
     /// **only when re-entering Batching from Verifying or Draining**,
     /// and writes `phase = Batching { settle_timer }`. `intent`,
-    /// `forced`, `burst_deadline`, and `certified` (the preserved prior
-    /// certified sample — a net-zero change across an event is still a
-    /// valid N=2 quiescence pair) are preserved.
+    /// `forced`, `burst_deadline`, and `last_certified_hash` (the carrier
+    /// preserves the prior sample — a net-zero change across an event is
+    /// still a valid hash-channel pair for the next Verifying response,
+    /// active iff `!events_witness_quiescence`) are preserved.
     ///
     /// Why this is one of two batching mutators rather than a single
     /// helper with a flag: the caller has static knowledge that the
@@ -660,13 +663,13 @@ impl Engine {
     /// settle` (true by construction of the scheduled deadline) and
     /// transitions cleanly — independent of any clock skew between
     /// this call and the prior `last_event_time`.
-    pub(crate) fn undischarged_drives_batching(
+    pub(crate) fn retry_drives_batching(
         &mut self,
         profile_id: ProfileId,
         now: Instant,
         out: &mut StepOutput,
     ) {
-        if !self.require_active_pre_fire(profile_id, BurstHelper::UndischargedDrivesBatching, out) {
+        if !self.require_active_pre_fire(profile_id, BurstHelper::RetryDrivesBatching, out) {
             return;
         }
         let Some(settle) = self.profiles.get(profile_id).map(|p| p.settle) else {
@@ -694,7 +697,7 @@ impl Engine {
     /// the resulting `TimerId` here. The phase *class* is unchanged —
     /// only the timer correlation moves.
     ///
-    /// **Not `undischarged_drives_batching` minus the pin.** That
+    /// **Not `retry_drives_batching` minus the pin.** That
     /// helper re-enters Batching from `Verifying` and pins
     /// `last_event_time = now` (the verify just responded). This path
     /// is *already* `Batching` and must **not** touch
@@ -1092,10 +1095,12 @@ impl Engine {
     /// Once raised, the next probe emission bypasses the walker's
     /// coarse-mtime skip (`forced` projects to the walker's
     /// obligation), the in-flight response folds through
-    /// [`specter_core::quiescence_verdict`] over `(authority,
-    /// forced=true)`, and `dispatch_rebase_ok` reads `Authoritative {
-    /// forced: true }` (commit + diagnose) or `Undischarged { terminal:
-    /// true }` (abandon + diagnose) off the verdict.
+    /// [`specter_core::quiescence_verdict`] with `forced = true`, and
+    /// `dispatch_rebase_ok` reads
+    /// `Stable(StableReason::Forced { hash_channel_disagreed })`
+    /// (commit + diagnose if the channel disagreed; commit silent
+    /// otherwise) or `Undischarged { terminal: true }` (abandon +
+    /// diagnose) off the verdict.
     ///
     /// **Lockstep with `rebase_ceiling`.** Sets `forced = true` AND
     /// drops the timer reference `rebase_ceiling = None` in one move
@@ -1239,7 +1244,7 @@ impl Engine {
 
     /// `Awaiting | Rebasing → Settling`. The post-fire settle-debounce
     /// entry — the symmetric mirror of pre-fire's `event_drives_batching`
-    /// / `undischarged_drives_batching` pair on the Settling side
+    /// / `retry_drives_batching` pair on the Settling side
     /// (post-fire collapses the two pre-fire callers' work to one
     /// helper, since there is no Cancel-vs-no-Cancel split: the prior
     /// phase carries no probe slot in either arm).
@@ -1259,7 +1264,7 @@ impl Engine {
     ///    here. `last_event_time = Some(now)` is the response instant
     ///    — the next Settling window reckons from the unfavorable
     ///    response, the same conservative anchor pre-fire's
-    ///    `undischarged_drives_batching` applies on `last_event_time =
+    ///    `retry_drives_batching` applies on `last_event_time =
     ///    Some(now)` after a verify response.
     ///
     /// Both arms write `phase = Settling { settle_timer }`, pin
@@ -1277,7 +1282,7 @@ impl Engine {
     /// `debug_assert!` pins the accepted prior-phase set.
     ///
     /// **`last_event_time` pinned to `Some(now)`.** Same rationale as
-    /// pre-fire's `undischarged_drives_batching` pin: removes the
+    /// pre-fire's `retry_drives_batching` pin: removes the
     /// `Instant` monotonicity dependency from
     /// [`Engine::handle_post_fire_settle_expired`]'s reschedule check.
     /// The freshly-scheduled `settle_timer` fires at `now + settle`,
@@ -1389,10 +1394,11 @@ impl Engine {
     /// ancestor that a mid-burst topology move took off that chain. The
     /// exit is then bounded-latency (it waits for the gating
     /// descendant's own guaranteed, deadline-bounded finish), never a
-    /// permanent strand. The reconfirm verify's verdict is the carrier
-    /// N=2 comparison (`CertifiedPrior::advance` against the preserved
-    /// `certified` prior), independent of the splice-mutated
-    /// `Profile.current`. Same-step ordering means the `StepOutput`
+    /// permanent strand. The reconfirm verify's verdict folds through
+    /// [`specter_core::quiescence_verdict`] against the fresh response,
+    /// independent of the splice-mutated `Profile.current` — the verdict
+    /// floor reads `(ProofAuthority, forced)`, not the per-Profile
+    /// current snapshot. Same-step ordering means the `StepOutput`
     /// reflects the cascade: child's burst end → parent reconfirm Probe
     /// in one `step` call.
     ///
@@ -2084,13 +2090,13 @@ mod tests {
         e.start_standard_burst(pid, resource, &rp, now, &mut out);
         e.transition_to_verifying(pid, &mut out);
         let mut out = StepOutput::default();
-        // Production reaches `undischarged_drives_batching`
+        // Production reaches `retry_drives_batching`
         // only from `on_profile_probe_response`, which has already
         // disarmed the Verifying slot via `take_owner_probe`. Mirror
         // that consume.
         let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
 
-        e.undischarged_drives_batching(pid, now, &mut out);
+        e.retry_drives_batching(pid, now, &mut out);
 
         assert!(out.probe_ops().is_empty());
         let phase = match e.profiles.get(pid).unwrap().state() {
@@ -2521,6 +2527,7 @@ mod tests {
             dirty,
             probe_target: ResourceId::default(),
             last_event_time: None,
+            last_certified_hash: None,
         }
     }
 

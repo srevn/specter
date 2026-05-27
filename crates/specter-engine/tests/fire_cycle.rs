@@ -28,8 +28,8 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    anchor_dir, complete_effect_to_settling, first_probe_correlation, pid_of,
-    rebase_post_fire_to_idle, seed_to_idle,
+    anchor_dir, attach_structure_only, complete_effect_to_settling, drain_due,
+    first_probe_correlation, pid_of, rebase_post_fire_to_idle, seed_to_idle,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -37,7 +37,10 @@ use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
-const NO_EVENTS: ClassSet = ClassSet::EMPTY;
+/// Production-realistic `EffectScope::SubtreeRoot` events mask — CONTENT
+/// in the mask sets `events_witness_quiescence == true`, so a single
+/// Authoritative sample closes the verdict floor's hash-equality channel.
+const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 
 /// Single-file directory snapshot with an explicit `size`, so a
 /// post-rebase read can carry a different leaf hash for the same
@@ -68,6 +71,10 @@ fn sized_file_snap(
 }
 
 /// Subtree-root attach request returning a recursive Sub with `/bin/true`.
+/// Uses [`DEFAULT_EVENTS`] so a single Authoritative sample closes the
+/// verdict floor's hash-equality channel — the canonical shape every test
+/// in this file relies on. Tests that need a different mask construct
+/// their own request inline.
 fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
     SubAttachRequest::for_anchor(
         name.into(),
@@ -77,7 +84,7 @@ fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
         SETTLE,
         empty_program(),
         EffectScope::SubtreeRoot,
-        NO_EVENTS,
+        DEFAULT_EVENTS,
         false,
     )
 }
@@ -1562,5 +1569,94 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
         perfile2, 1,
         "Burst 2: PerFile Effect RE-FIRES on a real foo.rs change; \
          PerFile is gated by diff membership alone, never fire history",
+    );
+}
+
+/// The user-reported scp regression, reduced to its Standard-burst
+/// shape. A structure-only Profile attached to a Dir; scp creates the
+/// destination file (a `StructureChanged` event at the anchor) then
+/// streams data into it across many settle windows. Pre-Layer-C the
+/// verdict's `Stable(Natural)` folded to `Stable` on the first
+/// sample regardless of mask, firing seconds into a multi-minute
+/// transfer (kernel-silent without tree-quiescent — no per-file FDs
+/// wired, no `CONTENT` subscription to catch `NOTE_WRITE`).
+///
+/// Layer-C: the hash channel is active (events-incomplete + fire-bearing
+/// burst), so the carrier holds the fire until two consecutive samples
+/// observe equal `dir_hash`. Two settle-spaced still-moving samples
+/// (`size = 10` → `size = 4096`) fold to `Unstable`; the third sample
+/// (file stabilised) closes `Stable` and the burst fires exactly once.
+#[test]
+fn scp_into_structure_only_does_not_fire_during_growing_file() {
+    let mut e = Engine::new();
+    let r = anchor_dir(&mut e, "dest");
+    let now = Instant::now();
+    let (_sid, pid) = attach_structure_only(&mut e, r, now);
+
+    // Cold-Seed bypass: an empty-dir baseline pins on one Authoritative
+    // sample (no events, no fires ⇒ `burst_owes_quiescence_proof` is
+    // false ⇒ `EventsReliable` witness even on a structure-only mask).
+    let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
+
+    // Open the Standard burst — the `scp` create at the anchor.
+    let burst_start = seed_done + Duration::from_millis(1);
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::StructureChanged,
+        },
+        burst_start,
+    );
+
+    // Two settle-spaced still-moving samples (file growing in place).
+    // The carrier observes two distinct hashes; both fold to Unstable.
+    // **No fire** — the regression-guarded contract.
+    let s1 = sized_file_snap("scp.bin", EntryKind::File, 21, 10);
+    let s2 = sized_file_snap("scp.bin", EntryKind::File, 21, 4096);
+    assert_ne!(
+        s1.dir_hash(),
+        s2.dir_hash(),
+        "the growing-leaf samples must hash distinctly so the carrier observes disagreement",
+    );
+    let mut at = burst_start;
+    for sample in [&s1, &s2] {
+        at += SETTLE * 2;
+        drain_due(&mut e, at);
+        let corr = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Verifying probe in flight after settle expiry");
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation: corr,
+                outcome: proven(Arc::clone(sample)),
+            }),
+            at,
+        );
+        assert!(
+            out.effects().is_empty(),
+            "Layer-C hash channel holds the fire — a still-moving sample must NOT fire",
+        );
+    }
+
+    // Third sample: the file is now stable. carrier prior == response
+    // ⇒ Stable ⇒ fire.
+    at += SETTLE * 2;
+    drain_due(&mut e, at);
+    let corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight for the stabilised sample");
+    let stable_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: corr,
+            outcome: proven(Arc::clone(&s2)),
+        }),
+        at,
+    );
+    assert_eq!(
+        stable_out.effects().len(),
+        1,
+        "the third sample (carrier prior == response) fires exactly one Effect",
     );
 }

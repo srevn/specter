@@ -57,13 +57,14 @@ pub fn dir_snap(children: &[(&str, EntryKind, u64)]) -> Arc<DirSnapshot> {
     ))
 }
 
-/// A synthetic file `LeafEntry` for [`anchor_ok`] / File-anchored N=2
-/// proofs.
+/// A synthetic file `LeafEntry` for [`anchor_ok`] / File-anchored
+/// quiescence proofs.
 ///
 /// The leaf analogue of [`dir_snap`]'s per-child construction
 /// (`size = 0`, `mtime = UNIX_EPOCH`, `device = 0`; only `kind` and
-/// `inode` identify it). Two equal-arg calls hash equal, so an N=2
-/// anchor proof's prime and confirm samples are stable by construction.
+/// `inode` identify it). Two equal-arg calls hash equal, so paired
+/// samples through the verdict floor's hash channel agree by
+/// construction.
 #[must_use]
 pub fn file_leaf(kind: EntryKind, inode: u64) -> LeafEntry {
     LeafEntry::synthetic(kind, 0, UNIX_EPOCH, FsIdentity::synthetic(inode, 0))
@@ -118,8 +119,9 @@ pub const fn enumerated(snapshot: Arc<DirSnapshot>) -> ProbeOutcome {
 /// An `AnchorOk` outcome — a File/Symlink anchor's `lstat` result.
 ///
 /// Completes the success-outcome trio with [`proven`] (`SubtreeProven`)
-/// and [`enumerated`] (`DirEnumerated`); pair with [`file_leaf`] for an
-/// N=2 anchor proof.
+/// and [`enumerated`] (`DirEnumerated`); pair with [`file_leaf`] for a
+/// File-anchored quiescence sample (hash-channel pair when the carrier
+/// is engaged).
 #[must_use]
 pub const fn anchor_ok(leaf: LeafEntry) -> ProbeOutcome {
     ProbeOutcome::AnchorOk(leaf)

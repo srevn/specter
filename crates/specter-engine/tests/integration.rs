@@ -20,8 +20,8 @@ use specter_core::{
     Tree, WatchOp,
 };
 use specter_engine::testkit::{
-    anchor_dir, attach_promoter, attach_returning, complete_effect_to_settling,
-    first_probe_correlation, pre_place_dir, rebase_post_fire_to_idle, seed_settle_to_verifying,
+    anchor_dir, assert_seed_verifying, attach_promoter, attach_returning,
+    complete_effect_to_settling, first_probe_correlation, pre_place_dir, rebase_post_fire_to_idle,
     seed_to_idle,
 };
 use specter_engine::{Engine, covers};
@@ -31,6 +31,12 @@ use std::time::{Duration, Instant};
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
+/// Production-realistic `EffectScope::SubtreeRoot` events mask — CONTENT
+/// in the mask sets `events_witness_quiescence == true`, so a single
+/// Authoritative sample closes the verdict floor's hash-equality
+/// obligation. Tests that drive the N=2 hash channel directly opt into
+/// `NO_EVENTS` (or a CONTENT-free mask) inline.
+const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 
 fn cfg_recursive() -> ScanConfig {
     ScanConfig::builder().recursive(true).build()
@@ -166,7 +172,7 @@ fn golden_path_full_lifecycle() {
         "build",
         SubAttachAnchor::Resource(r),
         cfg_recursive(),
-        NO_EVENTS,
+        DEFAULT_EVENTS,
         MAX_SETTLE,
         t0,
     );
@@ -247,7 +253,7 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
         "build",
         SubAttachAnchor::Resource(r),
         cfg_recursive(),
-        NO_EVENTS,
+        DEFAULT_EVENTS,
         MAX_SETTLE,
         t0,
     );
@@ -359,7 +365,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         first_probe_correlation(&out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
     );
-    let (correlation, _) = seed_settle_to_verifying(&mut e, pid, t0);
+    let (correlation, _) = assert_seed_verifying(&mut e, pid, t0);
 
     let resp_out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -402,7 +408,7 @@ fn pending_event_race_late_probe_response_discarded() {
         first_probe_correlation(&attach_out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
     );
-    let (stale_correlation, _) = seed_settle_to_verifying(&mut e, pid, t0);
+    let (stale_correlation, _) = assert_seed_verifying(&mut e, pid, t0);
 
     // Inject FsEvent while the first Seed probe is in flight
     // (Verifying). `event_drives_batching` Cancels + disarms that
@@ -470,7 +476,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
         first_probe_correlation(&attach_out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
     );
-    let (correlation, _) = seed_settle_to_verifying(&mut e, pid, t0);
+    let (correlation, _) = assert_seed_verifying(&mut e, pid, t0);
 
     let snap = dir_snap(&[("foo.rs", EntryKind::File, 1), ("bar", EntryKind::Dir, 2)]);
     let resp_out = e.step(
@@ -578,7 +584,7 @@ fn step_output_is_sorted() {
         first_probe_correlation(&attach_out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
     );
-    let (correlation, _) = seed_settle_to_verifying(&mut e, pid, t0);
+    let (correlation, _) = assert_seed_verifying(&mut e, pid, t0);
     let leaves: Vec<(String, EntryKind, u64)> = (0..5)
         .map(|i| (format!("dir-{i}"), EntryKind::Dir, 100 + i))
         .collect();
@@ -641,8 +647,8 @@ fn cancel_all_in_flight_probes_returns_sealed_output() {
 
     // Expire each Profile's own Batching settle so both reach Verifying
     // with a Seed probe in flight.
-    let _ = seed_settle_to_verifying(&mut e, pid1, t0);
-    let _ = seed_settle_to_verifying(&mut e, pid2, t0);
+    let _ = assert_seed_verifying(&mut e, pid1, t0);
+    let _ = assert_seed_verifying(&mut e, pid2, t0);
 
     let out = e.cancel_all_in_flight_probes();
 

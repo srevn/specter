@@ -13,24 +13,30 @@
 //! restart over a static tree must not re-fire); a recovery Seed
 //! drift-fires.
 
+use compact_str::CompactString;
 use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
-    ActiveBurst, BurstFinish, BurstIntent, ClassSet, DedupKey, DirSnapshot, EntryKind, FsEvent,
-    Input, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileId, ProfileState, ProofAuthority, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, StepOutput, SubAttachAnchor, SubId, TimerKind,
+    ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DedupKey, DirMeta, DirSnapshot,
+    EntryKind, FsEvent, FsIdentity, Input, LeafEntry, PreFireBurst, PreFirePhase, ProbeCorrelation,
+    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ProofAuthority,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubId,
+    TimerKind,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    anchor_dir, attach_returning, batching_settle_id, complete_effect_to_settling,
-    first_probe_correlation, rebase_post_fire_to_idle,
+    anchor_dir, attach_returning, attach_structure_only, batching_settle_id,
+    complete_effect_to_settling, first_probe_correlation, rebase_post_fire_to_idle, seed_to_idle,
 };
+use std::collections::BTreeMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, UNIX_EPOCH};
 
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
-const NO_EVENTS: ClassSet = ClassSet::EMPTY;
+/// Production-realistic `EffectScope::SubtreeRoot` events mask — CONTENT in
+/// the mask sets `events_witness_quiescence == true`, so a single
+/// Authoritative sample closes the verdict floor's hash-equality channel.
+const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 
 /// `pid`'s pre-fire `burst_deadline` (`BurstDeadline`) timer id, or
 /// panic with the actual state. Used to fire the max-settle ceiling
@@ -40,6 +46,30 @@ fn burst_deadline_id(e: &Engine, pid: ProfileId) -> specter_core::TimerId {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.burst_deadline,
         other => panic!("expected {pid:?} in Active(PreFire(_)), got {other:?}"),
     }
+}
+
+/// Single-file directory snapshot with an explicit `size` so two
+/// snapshots over the same name + inode hash distinctly when the leaf
+/// grows in place — the canonical scp / in-place-write shape the N=2
+/// hash channel exists to catch. `dir_snap` bakes `size = 0` and offers
+/// no override, so this distinct sized fixture stays file-local; the
+/// growing-leaf test is the sole consumer here.
+fn dir_snap_sized_file(name: &str, inode: u64, size: u64) -> Arc<DirSnapshot> {
+    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
+    map.insert(
+        CompactString::new(name),
+        ChildEntry::Leaf(LeafEntry::synthetic(
+            EntryKind::File,
+            size,
+            UNIX_EPOCH,
+            FsIdentity::synthetic(inode, 0),
+        )),
+    );
+    Arc::new(DirSnapshot::new(
+        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
+        0,
+        map,
+    ))
 }
 
 /// Deliver one Seed probe response for `pid`: if the burst is in
@@ -157,6 +187,47 @@ fn drive_standard_fire_once(
     );
 }
 
+/// The cold-Seed bypass — Layer-B's cold-attach latency win preserved
+/// on the worst-case mask. A `STRUCTURE`-only Profile fails
+/// `events_witness_quiescence`, so any *fire-bearing* burst on it owes
+/// the hash channel. But a cold Seed (no events, never fired) does NOT
+/// owe a quiescence proof — `burst_owes_quiescence_proof` projects to
+/// `false` on `(BurstIntent::Seed, dirty.is_empty(), !any_fired)`, and
+/// `certify_probe_response` skips the hash channel entirely (witness =
+/// `EventsReliable`). The single Authoritative response folds to
+/// `Stable(Natural)` and the burst finishes in one sample, exactly as on
+/// an events-reliable Profile.
+///
+/// Pins the regression guard for the cold-attach latency win: a
+/// structure-only Profile must not accidentally engage the hash channel
+/// for cold-Seed quiet (no extra settle window, no carrier loop).
+/// [`seed_to_idle`] asserts internally that one Authoritative sample
+/// pins to Idle.
+#[test]
+fn cold_seed_on_structure_only_pins_in_one_sample_without_loop() {
+    let mut e = Engine::new();
+    let r = anchor_dir(&mut e, "src");
+    let now = Instant::now();
+    let (_sid, pid) = attach_structure_only(&mut e, r, now);
+    assert!(
+        !e.profiles().get(pid).unwrap().events_witness_quiescence(),
+        "fixture sanity: structure-only Profile fails events_witness_quiescence \
+         (so the hash channel would engage for fire-bearing bursts)",
+    );
+
+    let snap = dir_snap(&[]);
+    let done = seed_to_idle(&mut e, pid, &snap, now);
+    assert_eq!(
+        done,
+        now + SETTLE,
+        "cold-Seed bypass: one Authoritative sample (no retry loop)",
+    );
+    assert!(
+        e.profiles().get(pid).unwrap().baseline_is_some(),
+        "cold-Seed bypass establishes the baseline on the first sample",
+    );
+}
+
 #[test]
 fn fresh_seed_with_activity_fires_exactly_one_effect() {
     let snap = dir_snap(&[("a.rs", EntryKind::File, 11)]);
@@ -168,7 +239,7 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
         "test",
         SubAttachAnchor::Resource(r),
         ScanConfig::builder().recursive(true).build(),
-        NO_EVENTS,
+        DEFAULT_EVENTS,
         MAX_SETTLE,
         now,
     );
@@ -254,6 +325,94 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
     drive_standard_fire_once(&mut e, pid, sid, r, &snap_changed, t1 + SETTLE * 4);
 }
 
+/// Growing-leaf scp variant of the fresh-with-activity contract on an
+/// events-incomplete (`STRUCTURE`-only) Profile: the same fresh-Seed
+/// witnessed-activity path, except in-place writes between samples make
+/// the first two reads hash distinctly. The verdict floor's hash channel
+/// holds the fire until the leaf stabilises, then fires exactly one
+/// Effect — the user-reported scp regression scenario, reduced to its
+/// Seed-with-activity shape.
+///
+/// `attach_structure_only` gives a `STRUCTURE`-only mask: in-place
+/// `CONTENT` writes are invisible (no per-file FDs wired, and the
+/// per-Profile class filter drops descendant CONTENT events even if
+/// they arrived), so settle-window silence is **not** a quiescence
+/// witness — the burst owes the hash-equality channel for fire-bearing
+/// consequences. Anchor events bypass the class filter, so a single
+/// anchor `FsEvent::Modified` Cancels the cold-arm verify slot and
+/// re-enters Batching with `dirty` non-empty — a triggered (not cold)
+/// Seed whose `burst_owes_quiescence_proof` is `true`.
+///
+/// The three settle-spaced samples: read1=S1 (prior None ⇒ Unstable,
+/// carrier := hash(S1)), read2=S2 ≠ S1 (prior hash(S1) ⇒ Unstable,
+/// carrier := hash(S2)), read3=S2 (prior hash(S2) ⇒ Stable ⇒ fire).
+#[test]
+fn fresh_seed_with_activity_growing_leaf_fires_one() {
+    let mut e = Engine::new();
+    let r = anchor_dir(&mut e, "src");
+    let now = Instant::now();
+    let (sid, pid) = attach_structure_only(&mut e, r, now);
+
+    // Anchor event during the cold-arm Verifying phase: bypasses the
+    // class filter, Cancels the cold-arm verify slot, re-enters Batching
+    // with `dirty` non-empty (triggered Seed — owes a quiescence proof).
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::Modified,
+        },
+        now + Duration::from_millis(1),
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state(),
+            ProfileState::Active(
+                ActiveBurst::PreFire(PreFireBurst {
+                    phase: PreFirePhase::Batching { .. },
+                    intent: BurstIntent::Seed,
+                    ..
+                }),
+                _
+            )
+        ),
+        "anchor event during cold-arm Verifying re-enters PreFire(Batching) as a triggered Seed",
+    );
+
+    let s1 = dir_snap_sized_file("big.bin", 21, 10);
+    let s2 = dir_snap_sized_file("big.bin", 21, 4096);
+    assert_ne!(
+        s1.dir_hash(),
+        s2.dir_hash(),
+        "the growing-leaf samples must hash distinctly so the carrier observes disagreement",
+    );
+
+    // Two re-batch samples (still-moving — no fire); the third is the
+    // stable verdict. Each iteration advances time by SETTLE: the prior
+    // step's `retry_drives_batching` armed a fresh `Settle` deadline at
+    // `prior + SETTLE`, so the next `seed_cycle` expires it cleanly.
+    let mut at = now + Duration::from_millis(1);
+    for read in [&s1, &s2] {
+        at += SETTLE;
+        let out = seed_cycle(&mut e, pid, read, at);
+        assert!(
+            out.effects().is_empty(),
+            "no fire before the carrier observes two consecutive equal samples (still moving)",
+        );
+    }
+    at += SETTLE;
+    let stable_out = seed_cycle(&mut e, pid, &s2, at);
+
+    assert_eq!(
+        stable_out.effects().len(),
+        1,
+        "the third sample (carrier prior == response) fires exactly one Effect at the stable verdict",
+    );
+    assert!(
+        matches!(stable_out.effects()[0].key(), DedupKey::Subtree { sub, .. } if sub == sid),
+        "the single Effect is the SubtreeRoot Sub's Subtree effect",
+    );
+}
+
 /// Drive a fresh Seed to the
 /// `Undischarged + forced` ceiling terminal so the Profile ends Idle
 /// `Undischarged + forced` ceiling terminal so the Profile ends Idle
@@ -276,7 +435,7 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
         "ceil",
         SubAttachAnchor::Resource(r),
         ScanConfig::builder().recursive(true).build(),
-        NO_EVENTS,
+        DEFAULT_EVENTS,
         MAX_SETTLE,
         now,
     );
@@ -398,24 +557,24 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     let parent_snap = dir_snap(&[("foo", EntryKind::Dir, 7)]);
     let child_snap = dir_snap(&[]);
 
-    // Parent: recursive @ /src, NO_EVENTS. Covers /src/foo.
+    // Parent: recursive @ /src, DEFAULT_EVENTS. Covers /src/foo.
     let (sid_p, pid_parent, _) = attach_returning(
         &mut e,
         "parent",
         SubAttachAnchor::Resource(src),
         ScanConfig::builder().recursive(true).build(),
-        NO_EVENTS,
+        DEFAULT_EVENTS,
         MAX_SETTLE,
         now,
     );
 
-    // Child: recursive @ /src/foo, NO_EVENTS.
+    // Child: recursive @ /src/foo, DEFAULT_EVENTS.
     let (sid_c, pid_child, _) = attach_returning(
         &mut e,
         "child",
         SubAttachAnchor::Resource(foo),
         ScanConfig::builder().recursive(true).build(),
-        NO_EVENTS,
+        DEFAULT_EVENTS,
         MAX_SETTLE,
         now,
     );
@@ -556,7 +715,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
 
         // ── Drive the child's Standard burst to a genuine Idle. ──
         //
-        // The child Sub (recursive @ /src/foo, NO_EVENTS) had its Seed
+        // The child Sub (recursive @ /src/foo, DEFAULT_EVENTS) had its Seed
         // pinned **silently** over an empty tree (a no-activity Seed
         // never fires ⇒ `has_fired == false`). B1
         // `SuppressDedup` requires `!forced && nothing_changed &&
@@ -573,11 +732,11 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         // Timing rule (`on_settle_expired`): a step that expires a
         // re-armed Batching settle timer must use an instant `≥
         // last_event_time + SETTLE`, else the handler reschedules
-        // (stays Batching, no probe). `unstable_response_drives_batching`
-        // pins `last_event_time = <response step instant>`. The child
-        // prime response is stepped at `p2` exactly (no `+1ms`), so the
-        // child re-batches with `last_event_time = p2` and a fresh
-        // settle deadline at `p2 + SETTLE`; the child confirm settle is
+        // (stays Batching, no probe). `retry_drives_batching` pins
+        // `last_event_time = <response step instant>`. The child first
+        // response is stepped at `p2` exactly (no `+1ms`), so the child
+        // re-batches with `last_event_time = p2` and a fresh settle
+        // deadline at `p2 + SETTLE`; the child's next-sample settle is
         // then expired at exactly `p2 + SETTLE` (== `last_event_time +
         // SETTLE`), which satisfies `now − last ≥ settle`.
 

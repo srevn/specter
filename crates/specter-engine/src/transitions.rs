@@ -16,10 +16,10 @@
 //! like every other carrier.
 //! The Verifying choke and the post-fire Rebase arm share one
 //! certifier, `certify_probe_response`: lower the outcome, verify kind
-//! agreement, and fold the single quiescence verdict
-//! ([`specter_core::CertifiedPrior::advance`]). `dispatch_burst_outcome`
-//! then fans the certified result out per [`specter_core::BurstIntent`];
-//! the Rebase arm maps it to the rebase-loop consequence.
+//! agreement, and fold the single quiescence verdict via
+//! [`specter_core::quiescence_verdict`]. `dispatch_burst_outcome` then
+//! fans the certified result out per [`specter_core::BurstIntent`]; the
+//! Rebase arm maps it to the rebase-loop consequence.
 
 use crate::Engine;
 use crate::engine::is_timer_referenced;
@@ -35,9 +35,9 @@ use specter_core::{
     EffectCommon, EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent,
     PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse,
     ProbeSlot, Profile, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState,
-    ProofAuthority, QuiescenceVerdict, ReapTrigger, Resource, ResourceId, ResourceKind, StepOutput,
-    SubAttachRequest, SubId, TimerId, TimerKind, TreeSnapshot, WatchFailure, WatchRegistryDiff,
-    quiescence_verdict,
+    ProofAuthority, QuiescenceVerdict, QuiescenceWitness, ReapTrigger, Resource, ResourceId,
+    ResourceKind, StableReason, StepOutput, SubAttachRequest, SubId, TimerId, TimerKind,
+    TreeSnapshot, WatchFailure, WatchRegistryDiff, quiescence_verdict,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -598,17 +598,39 @@ impl Engine {
     /// [`specter_core::Profile::install_file_current`] commit.
     ///
     /// **Verdict fold.** [`specter_core::quiescence_verdict`] is the
-    /// floor — a pure, total `(ProofAuthority, forced) → QuiescenceVerdict`
-    /// projection. The fold needs no prior sample: the engine's two
-    /// observation channels (walker authority C1, event-quiet witness C2
-    /// — the `forced` bit) fully determine the verdict at the floor.
-    /// `forced` arrives from the caller (read off the burst by
-    /// [`Engine::probe_gate`], packed onto the [`crate::probe::ProbeRoute`]'s
-    /// `Verifying { forced }` / `Rebasing { forced }` payload, threaded
-    /// here); both carriers — pre-fire `PreFireBurst.forced` and
-    /// post-fire `PostFireBurst.forced` — pass through this one site
-    /// symmetrically. The callers diverge only on the *consequence*
-    /// (per-intent fire/pin vs. the rebase-loop table).
+    /// floor — a pure, total
+    /// `(ProofAuthority, forced, QuiescenceWitness) → QuiescenceVerdict`
+    /// projection over three axes:
+    ///
+    /// - **Authority (C1).** `Authoritative` ⇒ walker certified every
+    ///   obligation chain; `Undischarged` ⇒ refused. Set by the walker,
+    ///   threaded as-is.
+    /// - **Forced.** Set by the caller (read off the burst by
+    ///   [`Engine::probe_gate`], packed onto
+    ///   [`crate::probe::ProbeRoute`]'s `Verifying { forced }` /
+    ///   `Rebasing { forced }` payload, threaded here); both carriers —
+    ///   pre-fire `PreFireBurst.forced` and post-fire
+    ///   `PostFireBurst.forced` — pass through this one site
+    ///   symmetrically. `forced` distinguishes natural fire from the
+    ///   bounded `BurstDeadline` / `RebaseCeiling` fallback.
+    /// - **Witness (C2 vs. C3).** [`QuiescenceWitness::EventsReliable`]
+    ///   when settle-window silence proves quiescence — the Profile's
+    ///   `events_union` covers in-place writes
+    ///   ([`specter_core::Profile::events_witness_quiescence`]) OR the
+    ///   burst's consequence does not require proof (cold-Seed
+    ///   `SilentPin`, see [`Self::burst_owes_quiescence_proof`]).
+    ///   [`QuiescenceWitness::HashChannel`] otherwise: this site
+    ///   advances the per-burst `last_certified_hash` carrier through
+    ///   the cat-(b) cascade
+    ///   ([`specter_core::Profile::advance_certified_sample`]) and
+    ///   reads its prior as the channel's input. The advance is gated
+    ///   on `Authoritative ∧ needs_hash_channel` — an `Undischarged`
+    ///   observation must not advance (the prior would then reflect an
+    ///   unread region), and the `EventsReliable` path skips the
+    ///   carrier entirely (dead write avoided on the cold-attach win).
+    ///
+    /// The callers diverge only on the *consequence* (per-intent
+    /// fire/pin vs. the rebase-loop table).
     fn certify_probe_response(
         &mut self,
         profile_id: ProfileId,
@@ -651,9 +673,99 @@ impl Engine {
             return CertifiedResponse::Regressed;
         }
 
+        // Witness selection — sole pre-fold side computation. The hash
+        // channel engages iff the burst owes a proof AND the events
+        // stream is insufficient. Read both predicates under disjoint
+        // borrows: `burst_owes_quiescence_proof` reads `profiles + subs`;
+        // `events_witness_quiescence` reads a single Profile bit
+        // (invariant across the burst). Defaulting absent Profile to
+        // `events_witness_quiescence = true` short-circuits the channel
+        // — the dispatch arms guard on a present Profile anyway.
+        let response_hash = snap.hash();
+        let needs_hash_channel = self.burst_owes_quiescence_proof(profile_id)
+            && !self
+                .profiles
+                .get(profile_id)
+                .is_some_and(Profile::events_witness_quiescence);
+
+        // Cat-(b) carrier advance: the cascade
+        // (`Profile::advance_certified_sample` →
+        // `ActiveBurst::advance_certified_sample` →
+        // `PreFireBurst::advance_certified_sample` /
+        // `PostFireBurst::advance_certified_sample`) routes to whichever
+        // burst is live. Gated on `Authoritative ∧ needs_hash_channel`:
+        // an Undischarged observation never advances (its hash reflects
+        // an unread region), and the EventsReliable path skips the
+        // write entirely.
+        let prior = if needs_hash_channel && matches!(authority, ProofAuthority::Authoritative) {
+            self.profiles
+                .get_mut(profile_id)
+                .and_then(|p| p.advance_certified_sample(response_hash))
+        } else {
+            None
+        };
+        let witness = if needs_hash_channel {
+            QuiescenceWitness::HashChannel {
+                prior,
+                response: response_hash,
+            }
+        } else {
+            QuiescenceWitness::EventsReliable
+        };
+
         CertifiedResponse::Proceed {
             snapshot: snap,
-            verdict: quiescence_verdict(authority, forced),
+            verdict: quiescence_verdict(authority, forced, witness),
+        }
+    }
+
+    /// Whether the burst's consequence at the verdict floor requires a
+    /// tree-quiescence proof (Contract B — "fire when the tree
+    /// settles") rather than mere baseline establishment (Contract A —
+    /// the cold-Seed `SilentPin` path, which records a reference
+    /// freely).
+    ///
+    /// Returns `false` only for the cold-Seed quiet case: a `Seed`-
+    /// intent `PreFire` burst with `dirty.is_empty()` AND no prior
+    /// fires on the Profile. Every other reachable shape — Standard
+    /// (any), Seed with witnessed activity, recovery Seed (`any_fired`),
+    /// any `PostFire` (Rebase) — owes a quiescence proof.
+    ///
+    /// **Composed.** Reads `Profile.state()` (intent + `dirty.is_empty()`)
+    /// and `SubRegistry::any_fired`. The predicate spans two stores so
+    /// it lives on `Engine`, not as a `Profile` method.
+    ///
+    /// **Conservative for recovery Seed.** `any_fired = true` Seed
+    /// bursts with `dirty.is_empty()` are marked proof-owing even
+    /// though [`Self::classify_consequence`] may post-`apply_snapshot`
+    /// resolve them to `SilentPin` (no drift). The drift discriminant
+    /// is computed only after the verdict commits a snapshot, so the
+    /// floor must commit conservatively. Cost: one extra settle window
+    /// before pinning if drift was absent on a structure-only
+    /// recovery Seed; no fire missed.
+    ///
+    /// **Structurally-unreachable defaults to `true`.** A missing
+    /// Profile or non-`Active` state at the verdict floor should not
+    /// occur (the floor is reached only on a response-bearing
+    /// `Active(Verifying | Rebasing)` transition); the safe default
+    /// preserves the proof requirement rather than silently bypassing.
+    fn burst_owes_quiescence_proof(&self, profile_id: ProfileId) -> bool {
+        let Some(profile) = self.profiles.get(profile_id) else {
+            return true;
+        };
+        match profile.state() {
+            ProfileState::Active(ActiveBurst::PostFire(_), _) => true,
+            ProfileState::Active(ActiveBurst::PreFire(pre), _) => match pre.intent {
+                BurstIntent::Standard => true,
+                BurstIntent::Seed => {
+                    // Cold Seed (no activity, never fired) ⇒
+                    // `SilentPin` (Contract A); any other Seed ⇒
+                    // fire-bearing (`FreshSeedFire` / `RecoveryFire`)
+                    // ⇒ Contract B.
+                    !pre.dirty.is_empty() || self.subs.any_fired(profile_id)
+                }
+            },
+            ProfileState::Idle | ProfileState::Pending(_) => true,
         }
     }
 
@@ -2256,19 +2368,35 @@ impl Engine {
     /// (Seed | Standard, Ok) — map the quiescence `verdict` to its
     /// consequence. One router for both intents: `intent` only selects
     /// the [`Consequence`] split in [`Engine::classify_consequence`]
-    /// and threads onto the [`Diagnostic::QuiescenceCeilingUnreadable`]
-    /// payload — there is no forked path.
+    /// and threads onto the
+    /// [`Diagnostic::QuiescenceCeilingUnreadable`] /
+    /// [`Diagnostic::QuiescenceCeilingForcedDespiteChange`] payloads —
+    /// there is no forked path.
     ///
-    /// - [`QuiescenceVerdict::Authoritative`] — the fireable verdict.
-    ///   [`Engine::fire_or_seal`] commits, classifies, then either
-    ///   gated-fires or silently seals the witness. `forced = false` is
-    ///   the natural-fire case (event-quiet witness held); `forced =
-    ///   true` is the bounded `max_settle` fallback over a still-moving
-    ///   tree, fired through the Draining gate by the `forced`
-    ///   disjunct in [`Engine::gated_fire`]. `forced` propagates onto
-    ///   [`specter_core::Effect::forced`] via
-    ///   [`crate::effect::EmitMode::Standard`]; no diagnostic is owed
-    ///   on this arm (the bit is operator-visible on the emitted Effect).
+    /// - [`QuiescenceVerdict::Stable`]([`StableReason::Natural`]) — the
+    ///   natural fire path. [`Engine::fire_or_seal`] commits,
+    ///   classifies, then either gated-fires or silently seals the
+    ///   witness. No diagnostic owed (the witness held).
+    /// - [`QuiescenceVerdict::Stable`]([`StableReason::Forced`]) — the
+    ///   bounded `BurstDeadline` fallback fired. `fire_or_seal` runs
+    ///   the same fire path with `forced = true`, which propagates
+    ///   onto [`specter_core::Effect::forced`] via
+    ///   [`crate::effect::EmitMode::Standard`] and crosses the
+    ///   Draining gate via the `forced` disjunct in
+    ///   [`Engine::gated_fire`]. On `hash_channel_disagreed = true`
+    ///   (strong signal — the hash channel observed
+    ///   `prior != response` before the ceiling expired) the dispatch
+    ///   emits [`Diagnostic::QuiescenceCeilingForcedDespiteChange`];
+    ///   the quiet `false` case stays silent (the `forced` bit is
+    ///   already operator-visible on the emitted Effect).
+    /// - [`QuiescenceVerdict::Unstable`] — walker certified but the
+    ///   hash channel disagreed at this sample. Re-arm the settle
+    ///   window via [`Engine::retry_drives_batching`] for another
+    ///   sample. Only reachable for events-incomplete + fire-bearing
+    ///   bursts (`needs_hash_channel == true` at the verdict choke);
+    ///   for events-reliable Profiles and cold-Seed bursts the shape
+    ///   is unrepresentable. The bounded `BurstDeadline` eventually
+    ///   surfaces a `Forced` terminal if disagreement persists.
     /// - [`QuiescenceVerdict::Undischarged`] with `terminal = true` —
     ///   the bounded ceiling already fired and the probe could not
     ///   discharge its obligation. Surface `first_unread` via
@@ -2278,9 +2406,9 @@ impl Engine {
     /// - [`QuiescenceVerdict::Undischarged`] with `terminal = false` —
     ///   transient non-observation (`EACCES`, a chmod-000 chain). Loop
     ///   back through a fresh settle window via
-    ///   [`Engine::undischarged_drives_batching`]; never
-    ///   commit, never re-emit a diagnostic per round (the eventual
-    ///   ceiling terminal surfaces the wedge).
+    ///   [`Engine::retry_drives_batching`]; never commit, never
+    ///   re-emit a diagnostic per round (the eventual ceiling terminal
+    ///   surfaces the wedge).
     fn dispatch_quiescence_ok(
         &mut self,
         profile_id: ProfileId,
@@ -2299,12 +2427,44 @@ impl Engine {
         };
 
         match verdict {
-            QuiescenceVerdict::Authoritative { forced } => {
-                // Single fire path. `fire_or_seal` branches on `forced`
-                // internally (for the dedup-suppress override and the
-                // Effect.forced propagation); the Draining gate uses
-                // the same bit to fire-anyway on a still-moving tree.
-                self.fire_or_seal(profile_id, snapshot, target, forced, intent, now, out);
+            QuiescenceVerdict::Stable(StableReason::Natural) => {
+                // Natural fire path. `forced = false` propagates onto
+                // `Effect.forced`; the Draining gate is consulted via
+                // `gated_fire` (no `forced` short-circuit).
+                self.fire_or_seal(profile_id, snapshot, target, false, intent, now, out);
+            }
+            QuiescenceVerdict::Stable(StableReason::Forced {
+                hash_channel_disagreed,
+            }) => {
+                // Bounded-ceiling fire path. The strong-signal
+                // diagnostic emits only when the hash channel observed
+                // a concrete prior/response disagreement before the
+                // deadline expired; the quiet ceiling fire stays
+                // silent (the `forced` bit is operator-visible on the
+                // emitted Effect itself). The fire path is the same
+                // either way — `forced = true` triggers the
+                // Draining-gate bypass in `gated_fire`.
+                if hash_channel_disagreed {
+                    out.diagnostics
+                        .push(Diagnostic::QuiescenceCeilingForcedDespiteChange {
+                            profile: profile_id,
+                            intent,
+                        });
+                }
+                self.fire_or_seal(profile_id, snapshot, target, true, intent, now, out);
+            }
+            QuiescenceVerdict::Unstable => {
+                // Walker certified but the hash channel disagreed
+                // (`prior != Some(response)`) at this sample — the
+                // tree is moving under the verify window. Re-arm the
+                // settle gate for another sample; never commit (the
+                // disagreement means the prior carrier value is the
+                // last walker-certified sample, not a quiescent one).
+                // Reachable only on events-incomplete fire-bearing
+                // bursts; the bounded `BurstDeadline` ceiling
+                // eventually surfaces a `Forced` terminal if
+                // disagreement persists.
+                self.retry_drives_batching(profile_id, now, out);
             }
             QuiescenceVerdict::Undischarged {
                 first_unread,
@@ -2331,7 +2491,7 @@ impl Engine {
                 // next attempt. No commit (an unread region must not
                 // poison `current`); the eventual `BurstDeadline`
                 // ceiling surfaces the operator-visible terminal.
-                self.undischarged_drives_batching(profile_id, now, out);
+                self.retry_drives_batching(profile_id, now, out);
             }
         }
     }
@@ -2593,20 +2753,42 @@ impl Engine {
         self.finish_burst_to_idle(profile_id, out);
     }
 
-    /// (Rebase, Ok). The carrier folded its own N=2 quiescence verdict
-    /// over the *post-command* tree at the shared certifier; this
-    /// routine maps the post-fire `verdict` to a consequence. The
-    /// Rebasing probe always targets the anchor (set by
+    /// (Rebase, Ok). The shared certifier folded the quiescence
+    /// verdict over the *post-command* tree (events-reliable witness
+    /// silence for CONTENT-subscribed Profiles, the
+    /// `last_certified_hash` N=2 channel otherwise); this routine maps
+    /// the post-fire `verdict` to a consequence. The Rebasing probe
+    /// always targets the anchor (set by
     /// [`Engine::transition_to_rebasing`]).
     ///
-    /// - [`QuiescenceVerdict::Authoritative`] with `forced = false` —
-    ///   genuinely quiescent post-command tree. `apply_snapshot` +
+    /// - [`QuiescenceVerdict::Stable`]([`StableReason::Natural`]) —
+    ///   genuinely quiescent post-command tree (settle silence held,
+    ///   or the hash channel agreed). `apply_snapshot` +
     ///   `rebase_baseline` (`baseline := current`), then restart from
     ///   the fire-tail residual or finish to Idle.
-    /// - [`QuiescenceVerdict::Authoritative`] with `forced = true` —
+    /// - [`QuiescenceVerdict::Stable`]([`StableReason::Forced`]) —
     ///   the bounded `RebaseCeiling` fired but the walker still
-    ///   certified. Pin the freshest observation anyway with
-    ///   [`Diagnostic::RebaseCeilingStillChanging`], then finish.
+    ///   certified. Pin the freshest observation anyway (a bounded
+    ///   terminal, not a wedge) and finish. Diagnostic selection is
+    ///   mutually exclusive — exactly one diagnostic per forced
+    ///   rebase, picked by available evidence:
+    ///   - `hash_channel_disagreed = true` ⇒
+    ///     [`Diagnostic::RebaseCeilingForcedDespiteChange`] (the
+    ///     strong signal: the hash channel observed
+    ///     `prior != response` before the ceiling expired).
+    ///   - `hash_channel_disagreed = false` ⇒
+    ///     [`Diagnostic::RebaseCeilingStillChanging`] (the
+    ///     natural-ceiling story: channel agreed at the last sample,
+    ///     or the channel was inactive on an events-reliable
+    ///     Profile).
+    /// - [`QuiescenceVerdict::Unstable`] — walker certified but the
+    ///   hash channel disagreed (`prior != Some(response)`) at this
+    ///   sample. Never commit (the channel's disagreement means the
+    ///   carrier prior is the last walker-certified sample, not a
+    ///   quiescent one); settle-space the next sample via
+    ///   [`Engine::transition_to_settling`]. The bounded
+    ///   `RebaseCeiling` eventually surfaces a `Forced` terminal if
+    ///   disagreement persists.
     /// - [`QuiescenceVerdict::Undischarged`] with `terminal = false` —
     ///   transient non-observation. Never commit (an unread region
     ///   must not poison `current`); loop back through the settle
@@ -2616,23 +2798,24 @@ impl Engine {
     ///   blind: surface [`Diagnostic::RebaseCeilingUnreadable`] and
     ///   finish without committing.
     ///
-    /// **Post-rebase residual.** On the natural `Authoritative` terminal
-    /// a [`BurstFinish::ReturnToIdle`] burst with a non-empty fire-tail
+    /// **Post-rebase residual.** On the natural Stable terminal a
+    /// [`BurstFinish::ReturnToIdle`] burst with a non-empty fire-tail
     /// residual restarts a fresh debounced burst over the rebased
     /// baseline (`restart_burst_from_fire_tail_residual`) so a
-    /// final-window change is not lost — origin-agnostic (a Seed-origin
-    /// drift → fire → rebase restarts too: the reconfirm is a fresh
-    /// query, not a per-origin refcount, so `into_pre_fire_residual`
-    /// rejoins it to the Standard debounce lifecycle). An empty residual
-    /// or a zombie `Reap` burst finishes to Idle. The ceiling terminals
-    /// never restart (the loop is bounded, not raced).
+    /// final-window change is not lost — origin-agnostic (a
+    /// Seed-origin drift → fire → rebase restarts too: the reconfirm
+    /// is a fresh query, not a per-origin refcount, so
+    /// `into_pre_fire_residual` rejoins it to the Standard debounce
+    /// lifecycle). An empty residual or a zombie `Reap` burst
+    /// finishes to Idle. The ceiling and Unstable terminals never
+    /// restart (the loop is bounded by the rebase ceiling, not raced).
     ///
-    /// **Why the verdict applies.** Kind agreement and the verdict fold
-    /// are owned upstream by the shared certifier
+    /// **Why the verdict applies.** Kind agreement and the verdict
+    /// fold are owned upstream by the shared certifier
     /// ([`Engine::certify_probe_response`]). The verdict is a pure
-    /// projection of `(ProofAuthority, forced)` — independent of
-    /// `current` / `baseline`, so acting on it is sound even though the
-    /// fire just mutated those snapshots.
+    /// projection of `(ProofAuthority, forced, QuiescenceWitness)` —
+    /// independent of `current` / `baseline`, so acting on it is
+    /// sound even though the fire just mutated those snapshots.
     fn dispatch_rebase_ok(
         &mut self,
         profile_id: ProfileId,
@@ -2650,7 +2833,7 @@ impl Engine {
         };
 
         match verdict {
-            QuiescenceVerdict::Authoritative { forced: false } => {
+            QuiescenceVerdict::Stable(StableReason::Natural) => {
                 self.apply_snapshot(profile_id, target, snapshot, out);
                 if let Some(p) = self.profiles.get_mut(profile_id) {
                     p.rebase_baseline();
@@ -2677,23 +2860,46 @@ impl Engine {
                 }
             }
 
-            QuiescenceVerdict::Authoritative { forced: true } => {
+            QuiescenceVerdict::Stable(StableReason::Forced {
+                hash_channel_disagreed,
+            }) => {
                 // Bounded terminal: the `RebaseCeiling` already fired
-                // but the walker certified anyway (the post-command
-                // tree was still changing under the loop, but this
-                // sample read clean). Pin the freshest observation —
-                // a deliberate, loud terminal, not a wedge.
+                // but the walker certified anyway. Pin the freshest
+                // observation — a deliberate, loud terminal, not a
+                // wedge — and emit exactly one diagnostic, picked by
+                // whether the hash channel observed concrete
+                // disagreement before the ceiling expired.
                 self.apply_snapshot(profile_id, target, snapshot, out);
                 if let Some(p) = self.profiles.get_mut(profile_id) {
                     p.rebase_baseline();
                 }
                 let intent = self.rebase_burst_intent(profile_id);
-                out.diagnostics
-                    .push(Diagnostic::RebaseCeilingStillChanging {
+                let diag = if hash_channel_disagreed {
+                    Diagnostic::RebaseCeilingForcedDespiteChange {
                         profile: profile_id,
                         intent,
-                    });
+                    }
+                } else {
+                    Diagnostic::RebaseCeilingStillChanging {
+                        profile: profile_id,
+                        intent,
+                    }
+                };
+                out.diagnostics.push(diag);
                 self.finish_burst_to_idle(profile_id, out);
+            }
+
+            QuiescenceVerdict::Unstable => {
+                // Walker certified but the hash channel disagreed
+                // (`prior != Some(response)`) at this sample — the
+                // post-command tree is moving under the rebase loop.
+                // Never commit (the prior is the last walker-certified
+                // sample, not a quiescent one); settle-space the next
+                // sample via Rebasing → Settling. Reachable only on
+                // events-incomplete + fire-bearing bursts; the bounded
+                // `RebaseCeiling` eventually surfaces a `Forced`
+                // terminal if disagreement persists.
+                self.transition_to_settling(profile_id, now, out);
             }
 
             QuiescenceVerdict::Undischarged {
@@ -3012,7 +3218,7 @@ impl Engine {
         // Mirror `handle_burst_deadline`: drive the final sample now iff
         // no probe is in flight (`Settling` — the `Batching` analogue).
         // In `Rebasing` the in-flight response applies the terminal
-        // via `dispatch_rebase_ok`'s `Authoritative { forced: true }` /
+        // via `dispatch_rebase_ok`'s `Stable(StableReason::Forced)` /
         // `Undischarged { terminal: true }` arms.
         let needs_rebase = self
             .profiles
@@ -3677,11 +3883,12 @@ fn fire_decision(
 ///
 /// The certifier performs the operation common to the Verifying choke
 /// and the post-fire Rebase arm — lower the outcome, verify kind
-/// agreement, fold the carrier's N=2 quiescence verdict — and yields
-/// this 4-variant result. The callers own the consequence: Verifying
-/// fans `Proceed` out per [`BurstIntent`]; Rebase maps the verdict to
-/// the rebase-loop table. One verdict-construction site at the floor,
-/// two routes preserved.
+/// agreement, fold the quiescence verdict (events-reliable witness for
+/// CONTENT-subscribed bursts, or the `last_certified_hash` channel
+/// otherwise) — and yields this 4-variant result. The callers own the
+/// consequence: Verifying fans `Proceed` out per [`BurstIntent`]; Rebase
+/// maps the verdict to the rebase-loop table. One verdict-construction
+/// site at the floor, two routes preserved.
 ///
 /// - `Proceed`: lowered, kind-agreed, verdict folded — the caller acts
 ///   on `(snapshot, verdict)`.

@@ -15,11 +15,11 @@ use crate::Engine;
 use specter_core::testkit::{enumerated, proven};
 use specter_core::{
     ActiveBurst, ClassSet, DedupKey, DirSnapshot, EffectCompletion, EffectOutcome, EffectScope,
-    FS_ROOT_SEGMENT, Input, PatternSpec, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase,
-    ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileIdentity,
-    ProfileState, PromoterAttachRequest, PromoterId, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, TimerId, TimerKind,
-    WatchFailure,
+    FS_ROOT_SEGMENT, FsEvent, Input, PatternSpec, PostFireBurst, PostFirePhase, PreFireBurst,
+    PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
+    ProfileIdentity, ProfileState, PromoterAttachRequest, PromoterId, ResourceId, ResourceKind,
+    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, TimerId,
+    TimerKind, WatchFailure,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -31,7 +31,18 @@ pub const SETTLE: Duration = Duration::from_millis(100);
 /// Force-fire ceiling every fixture uses.
 pub const MAX_SETTLE: Duration = Duration::from_secs(6);
 /// The empty event mask (a Profile that bursts only from its own anchor).
+///
+/// Events-incomplete — `events_witness_quiescence == false`, so fire-bearing
+/// bursts owe the verdict floor's N=2 hash-equality channel. Tests that
+/// drive a single Authoritative sample to Stable must opt into a CONTENT-
+/// containing mask (e.g. [`DEFAULT_EVENTS`]) instead.
 pub const NO_EVENTS: ClassSet = ClassSet::EMPTY;
+/// Production-realistic `EffectScope::SubtreeRoot` events mask.
+///
+/// CONTENT in the mask sets `events_witness_quiescence == true`, so a
+/// single Authoritative sample closes the verdict floor's hash-equality
+/// obligation (witness = `EventsReliable`).
+pub const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 
 /// Blanket-drain every timer due at `at`, stepping each.
 ///
@@ -197,20 +208,133 @@ pub fn attach_seeded(
     (sid, pid, done)
 }
 
-/// Read `pid`'s cold-arm `Active(PreFire(Verifying))` slot.
+/// Attach a subtree-root Sub with `events: STRUCTURE`, returning
+/// `(SubId, ProfileId)`.
+///
+/// The resulting Profile fails [`specter_core::Profile::events_witness_quiescence`]:
+/// settle-window silence is **not** a sufficient quiescence witness on a
+/// `STRUCTURE`-only mask, since in-place writes fire `CONTENT` events
+/// that this mask drops at the per-Profile class filter. Fire-bearing
+/// bursts on this Profile owe the verdict floor's hash-equality channel.
+///
+/// Fixture defaults: `MAX_SETTLE`, recursive [`ScanConfig`], name
+/// `"build"`. A test needing a non-recursive scan or a different
+/// `max_settle` reaches for [`attach`] directly. The helper exists
+/// because the `STRUCTURE`-only mask is the canonical regression
+/// scenario (the `scp` user-reported bug) — every Layer-C inventory
+/// test starts here.
+#[must_use]
+pub fn attach_structure_only(
+    e: &mut Engine,
+    anchor: ResourceId,
+    now: Instant,
+) -> (SubId, ProfileId) {
+    let (sid, pid) = attach(
+        e,
+        "build",
+        SubAttachAnchor::Resource(anchor),
+        ScanConfig::builder().recursive(true).build(),
+        ClassSet::STRUCTURE,
+        MAX_SETTLE,
+        now,
+    );
+    debug_assert!(
+        !e.profiles()
+            .get(pid)
+            .expect("attach_structure_only just attached")
+            .events_witness_quiescence(),
+        "attach_structure_only must produce an events-incomplete Profile",
+    );
+    (sid, pid)
+}
+
+/// Drive a Standard burst from `start_event` through the verdict floor's
+/// retry loop to a fire.
+///
+/// Opens the burst with an [`FsEvent::StructureChanged`] on `start_event`
+/// at `now` — the canonical opening event for the events-incomplete
+/// `STRUCTURE`-only target the helper is named after; it also opens a
+/// burst on any wider mask that contains `STRUCTURE` (the anchor's
+/// class-filter bypass is sufficient for narrower masks the helper
+/// might be reused against). Then runs one `Batching → settle expiry →
+/// Verifying → response` cycle per element of `responses`, returning
+/// the first cycle's [`StepOutput`] that carries effects.
+///
+/// Each cycle advances time by `SETTLE * 2` — well past the freshly-armed
+/// settle timer's `last_event_time + SETTLE` expiry without bumping into
+/// the burst-deadline ceiling at `now + MAX_SETTLE`.
+///
+/// Under the Pass-1 verdict floor (`Authoritative ⇒ fire`),
+/// `responses.len() == 1` is the canonical shape: the first sample's
+/// Authoritative fold fires unconditionally. Under the post-Layer-C
+/// verdict floor for an events-incomplete fire-bearing burst, two
+/// consecutive samples must agree on the response hash for `Stable`,
+/// so the canonical shape is the three-sample slow-writer pattern
+/// `[s1, s2, s2]` — `read1`, then `read2 ≠ read1` re-loops, then
+/// `read3 = read2` fires. The helper is invariant on which side of the
+/// refactor it runs against: the loop reads only the StepOutput's
+/// effects, and both verdict shapes converge through it.
+///
+/// Panics if `responses` is empty or the loop exhausts the slice
+/// without firing — the test author chose the sample sequence, so a
+/// non-fire is a test setup bug.
+#[must_use]
+pub fn drive_standard_n2_until_stable(
+    e: &mut Engine,
+    pid: ProfileId,
+    start_event: ResourceId,
+    responses: &[Arc<DirSnapshot>],
+    now: Instant,
+) -> StepOutput {
+    assert!(
+        !responses.is_empty(),
+        "drive_standard_n2_until_stable needs at least one verify-sample snapshot",
+    );
+
+    let _ = e.step(
+        Input::FsEvent {
+            resource: start_event,
+            event: FsEvent::StructureChanged,
+        },
+        now,
+    );
+
+    let mut at = now;
+    for snap in responses {
+        at += SETTLE * 2;
+        drain_due(e, at);
+        let corr = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("Verifying probe in flight after settle expiry");
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation: corr,
+                outcome: proven(Arc::clone(snap)),
+            }),
+            at,
+        );
+        if !out.effects().is_empty() {
+            return out;
+        }
+    }
+    panic!(
+        "drive_standard_n2_until_stable: {} sample(s) exhausted without firing",
+        responses.len()
+    );
+}
+
+/// Assert `pid` is in cold-arm `Active(PreFire(Verifying))` and read
+/// its in-flight probe correlation.
 ///
 /// Post-`start_seed_burst(None)` shape under the cold-arm Verifying-
-/// first contract: the in-flight correlation is on the Verifying slot,
-/// fetched via `pending_probe_for`. Returns the in-flight probe
-/// correlation and `at` unchanged — under the cold-arm shape there is
-/// no settle expiry to advance through; the probe is already in flight
-/// at attach.
-///
-/// Retained as `seed_settle_to_verifying` for call-site parity with the
-/// prior Batching-first helper; the body is now a state projection
-/// rather than a timer driver.
+/// first contract: the probe is in flight at burst construction (no
+/// Batching settle to drain on the way in), so the helper is a state
+/// projection — it asserts the phase and returns the correlation
+/// plus `at` unchanged so call sites stay symmetric with helpers that
+/// do advance time.
 #[must_use]
-pub fn seed_settle_to_verifying(
+pub fn assert_seed_verifying(
     e: &mut Engine,
     pid: ProfileId,
     at: Instant,
@@ -234,9 +358,10 @@ pub fn seed_settle_to_verifying(
 /// `make_outcome()`.
 ///
 /// The cold-arm Seed burst pins on the first `Authoritative` response:
-/// `quiescence_verdict(Authoritative, !forced)` folds to
-/// `Authoritative { forced: false }`, dispatch reaches `SilentPin` (a
-/// fresh Seed with no activity), and the burst finishes to Idle. The
+/// a `SilentPin` consequence does not owe quiescence proof, so the
+/// witness is [`QuiescenceWitness::EventsReliable`] and the fold reaches
+/// `Stable(StableReason::Natural)`; dispatch then commits the `SilentPin`
+/// (a fresh Seed with no activity) and the burst finishes to Idle. The
 /// cold-arm Verifying-first contract puts the probe in flight at burst
 /// construction — no Batching settle to drain on the way in.
 ///
@@ -287,65 +412,67 @@ pub fn seed_to_idle(
     seed_to_idle_with(e, pid, || proven(Arc::clone(snap)), start)
 }
 
-/// The pre-fire Standard verify response for `pid`.
+/// The pre-fire verify dispatch outcome for `pid`: the response
+/// [`StepOutput`] and the [`Instant`] the response stepped at.
 ///
-/// A Standard burst's first `Authoritative` probe response fires (or
-/// routes to Draining via the gate) directly — there is no prime/confirm
-/// pair. `primed` is retained as an empty placeholder
-/// `StepOutput::default()` so legacy assertions like
-/// `n2.primed.effects().is_empty()` (a fresh placeholder has no
-/// effects) and `!reconfirm_probed(&n2.primed, _)` (an empty
-/// placeholder probes nothing) stay vacuously true. The single
-/// dispatch response lives on [`Self::confirmed`]; [`Self::confirm_at`]
-/// is its step instant.
+/// Single-sample shape: under the verdict floor's
+/// `EventsReliable` witness one Authoritative response folds to
+/// `Stable`, so this struct carries exactly one [`StepOutput`]. Tests
+/// driving an events-incomplete N=2 retry loop chain two
+/// [`verify`] calls (first sample → re-Batch; second sample → Stable)
+/// or reach for [`drive_standard_n2_until_stable`] when the
+/// intermediate state is uninteresting.
 #[derive(Debug)]
-pub struct N2 {
-    pub primed: StepOutput,
-    pub confirmed: StepOutput,
-    pub confirm_at: Instant,
+pub struct Verify {
+    pub out: StepOutput,
+    pub at: Instant,
 }
 
-/// The pre-fire Standard verify dispatch for `pid`, answering the
-/// single in-flight probe with `make_outcome()`.
+/// The pre-fire verify dispatch for `pid`, answering the single
+/// in-flight probe with `make_outcome()`.
 ///
-/// The verify response folds through `quiescence_verdict(Authoritative,
-/// !forced)` to `QuiescenceVerdict::Authoritative { forced: false }` —
-/// single sample, single dispatch. The helper returns the response
-/// step output as [`N2::confirmed`] and an empty placeholder on
-/// [`N2::primed`] (kept for legacy callers that assert
-/// `primed.effects().is_empty()` and `!reconfirm_probed(&primed, …)` —
-/// both vacuously true on a fresh `StepOutput::default()`).
+/// `pid` is already in `Active(PreFire(Verifying))` (the caller has
+/// drained the settle timer driving `Batching → Verifying`). The probe
+/// response steps at `start + SETTLE` — one settle window past `start`
+/// to give later operations a clean instant — well within the burst's
+/// `MAX_SETTLE` ceiling.
+///
+/// The response folds through
+/// [`specter_core::quiescence_verdict`]. For an events-reliable Profile
+/// or a non-fire-bearing burst (cold Seed → `SilentPin`) the
+/// single Authoritative sample reaches `Stable` and the dispatch fires
+/// or pins inline. For an events-incomplete fire-bearing burst the
+/// first sample (carrier `prior = None`) folds to `Unstable` and the
+/// helper returns the re-Batch step; the caller drains the freshly-
+/// armed settle timer and calls [`verify`] again for the second
+/// sample.
 #[must_use]
-pub fn verify_n2_with(
+pub fn verify_with(
     e: &mut Engine,
     pid: ProfileId,
     make_outcome: impl Fn() -> ProbeOutcome,
     start: Instant,
-) -> N2 {
+) -> Verify {
     let corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("Verifying probe in flight at verify_n2_with entry");
-    let confirm_at = start + SETTLE * 2;
-    let confirmed = e.step(
+        .expect("Verifying probe in flight at verify_with entry");
+    let at = start + SETTLE;
+    let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: make_outcome(),
         }),
-        confirm_at,
+        at,
     );
-    N2 {
-        primed: StepOutput::default(),
-        confirmed,
-        confirm_at,
-    }
+    Verify { out, at }
 }
 
-/// [`verify_n2_with`] answering the sample with `proven(snap)` — the
-/// Subtree common case for the pre-fire Standard verify dispatch.
+/// [`verify_with`] answering the sample with `proven(snap)` — the
+/// `Subtree` common case for the pre-fire verify dispatch.
 #[must_use]
-pub fn verify_n2(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, start: Instant) -> N2 {
-    verify_n2_with(e, pid, || proven(Arc::clone(snap)), start)
+pub fn verify(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, start: Instant) -> Verify {
+    verify_with(e, pid, || proven(Arc::clone(snap)), start)
 }
 
 /// The clean post-fire rebase to Idle for `pid`.
@@ -355,8 +482,9 @@ pub fn verify_n2(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, start:
 /// `on_effect_complete::LastReached`). Drives `PostFireSettle` expiry
 /// by id (`Settling → Rebasing` via `handle_post_fire_settle_expired`),
 /// then answers the in-flight rebase probe with `proven(snap)`. The
-/// response folds through `quiescence_verdict(Authoritative, !forced)`
-/// → commit + finish (or restart on a non-empty residual).
+/// response folds through `quiescence_verdict` to
+/// `Stable(StableReason::Natural)` → commit + finish (or restart on a
+/// non-empty residual).
 ///
 /// Returns every step output (`settle`, `finish`) and the finish
 /// instant so the caller can assert co-Profile state between each.
@@ -412,7 +540,7 @@ pub fn rebase_post_fire_to_idle(
 /// Returns the full `StepOutput`: the caller reads the next descent
 /// correlation, asserts the terminal Seed/proxy shape, or asserts
 /// no-progress. Descent runs outside the Burst lifecycle, so this is a
-/// primitive beside [`seed_settle_to_verifying`], composing neither.
+/// primitive beside [`assert_seed_verifying`], composing neither.
 #[must_use]
 pub fn descent_advance(
     e: &mut Engine,
