@@ -275,6 +275,17 @@ impl ClassSet {
     /// (atomic creates/renames; chmod/touch) and never bridge a gap.
     /// Adding STREAM / SPARSE_GROW / XATTR to the witness vocabulary is
     /// a one-line decision here.
+    ///
+    /// **Kernel-event-vocabulary assumption.** The criterion assumes
+    /// the kernel surfaces every in-place write as a CONTENT-class
+    /// event at the write boundary (`NOTE_WRITE` / `NOTE_EXTEND` on
+    /// kqueue, `IN_MODIFY` / `IN_CLOSE_WRITE` on inotify).
+    /// `mmap`-driven writes via dirty-page flushes, async-I/O
+    /// completions, and `splice(2)` zero-copy paths may not satisfy
+    /// this on every supported platform. Workloads with such writers
+    /// should subscribe to a mask that does *not* cover
+    /// [`Self::IN_PLACE_WRITES`] (e.g. `STRUCTURE` only), forcing the
+    /// hash-channel safety net.
     pub const IN_PLACE_WRITES: Self = Self::CONTENT;
 
     /// True iff every bit in `other` is set in `self` AND `other` is
@@ -295,6 +306,21 @@ impl ClassSet {
     #[must_use]
     pub const fn intersects(self, other: Self) -> bool {
         (self.0 & other.0) != 0
+    }
+
+    /// True iff this mask subscribes to every change class that can
+    /// affect `leaf_hash` invisibly over a settle window — the
+    /// criterion the verdict floor reads (via
+    /// [`crate::Profile::events_witness_quiescence`]) to choose
+    /// between [`crate::QuiescenceWitness::EventsReliable`] and the
+    /// Layer-C hash channel.
+    ///
+    /// Defined as `self.contains(Self::IN_PLACE_WRITES)`. Class
+    /// additions to the witness vocabulary are a one-line decision at
+    /// [`Self::IN_PLACE_WRITES`]'s docstring.
+    #[must_use]
+    pub const fn witnesses_quiescence(self) -> bool {
+        self.contains(Self::IN_PLACE_WRITES)
     }
 
     /// Canonical bit representation — folded into `config_hash`.

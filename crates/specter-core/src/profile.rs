@@ -2984,30 +2984,25 @@ impl Profile {
     }
 
     /// True iff settle-window silence is a sufficient quiescence
-    /// witness — the Profile's `events_union` covers every change class
-    /// that affects `leaf_hash`. Reduces to a single semantic mask:
-    /// <code>events.contains([ClassSet::IN_PLACE_WRITES])</code>.
+    /// witness for this Profile — the mask covers
+    /// [`ClassSet::IN_PLACE_WRITES`]. The criterion (which classes
+    /// count, why, and the kernel-event-vocabulary assumption) lives
+    /// at that constant; this method is the Profile-level projection
+    /// via [`Self::events`] / [`ClassSet::witnesses_quiescence`].
     ///
-    /// [`ClassSet::IN_PLACE_WRITES`] names *what we are asking of the
-    /// mask* — that subscription suffices to catch in-place writes —
-    /// rather than naming the bit (currently `CONTENT`). In-place
-    /// `write(2)` calls fire `NOTE_WRITE` on per-file FDs (CONTENT
-    /// class); without that subscription, either no per-file FD is
-    /// wired (`has_per_file_fds == false`) or the per-Profile class
-    /// filter drops the event. Either way, writes are invisible to the
-    /// Profile, and settle expiry witnesses kernel-silence without
-    /// tree-quiescence. `STRUCTURE` (create/delete/rename) and
-    /// `METADATA` (chmod/touch) changes are point events that cannot
-    /// span a settle window invisibly.
+    /// `false` signals that fire-bearing bursts require the
+    /// hash-equality witness across two consecutive Authoritative
+    /// samples — the Layer-C safety net for events-incomplete masks.
+    /// Invariant for the Profile's lifetime (folds into `config_hash`
+    /// via [`Self::events`]).
     ///
-    /// `false` for a Profile whose `events_union` doesn't carry the
-    /// mask signals that fire-bearing bursts require the hash-equality
-    /// witness across two consecutive Authoritative samples — the
-    /// safety net for events-incomplete masks. Invariant for the
-    /// Profile's lifetime (folds into `config_hash` via [`Self::events`]).
+    /// See also `Engine::burst_owes_quiescence_proof` — the orthogonal
+    /// predicate selecting *which* bursts owe a proof. The two compose
+    /// at the witness-selection join inside
+    /// `Engine::certify_probe_response`.
     #[must_use]
     pub const fn events_witness_quiescence(&self) -> bool {
-        self.events().contains(ClassSet::IN_PLACE_WRITES)
+        self.events().witnesses_quiescence()
     }
 
     /// The substitution-side projection of `ScanConfig.exclude` (source
