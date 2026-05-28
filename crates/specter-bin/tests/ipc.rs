@@ -214,7 +214,6 @@ struct StatusResponseSnap {
 /// daemon-side type's `pub(crate)` visibility.
 #[derive(Debug, Deserialize)]
 struct LastReloadSnap {
-    #[allow(dead_code)]
     last_reload_at: String,
     last_reload_via: ReloadTriggerSnap,
 }
@@ -242,7 +241,6 @@ enum ResponseSnap {
     Show(ShowResponseSnap),
     Err {
         code: String,
-        #[allow(dead_code)]
         error: String,
     },
     #[serde(other)]
@@ -469,8 +467,9 @@ fn malformed_request_returns_err() {
     let line = one_shot(&sb.socket, "not json").expect("send malformed");
     let resp: ResponseSnap = serde_json::from_str(line.trim_end()).expect("parse response");
     match resp {
-        ResponseSnap::Err { code, .. } => {
+        ResponseSnap::Err { code, error } => {
             assert_eq!(code, "malformed", "code matches ERR_MALFORMED");
+            assert!(!error.is_empty(), "Err carries a non-empty error message");
         }
         other => panic!("expected Err, got {other:?}"),
     }
@@ -495,8 +494,9 @@ fn unknown_op_returns_err() {
     let line = one_shot(&sb.socket, r#"{"op":"frobnicate"}"#).expect("send unknown op");
     let resp: ResponseSnap = serde_json::from_str(line.trim_end()).expect("parse response");
     match resp {
-        ResponseSnap::Err { code, .. } => {
+        ResponseSnap::Err { code, error } => {
             assert_eq!(code, "malformed", "unknown op surfaces as malformed");
+            assert!(!error.is_empty(), "Err carries a non-empty error message");
         }
         other => panic!("expected Err, got {other:?}"),
     }
@@ -552,6 +552,10 @@ fn reload_via_ipc_increments_counters() {
         lr.last_reload_via,
         ReloadTriggerSnap::Ipc,
         "IPC reload attributes the trigger to `ipc`",
+    );
+    assert!(
+        !lr.last_reload_at.is_empty(),
+        "successful reload stamps a non-empty RFC 3339 wall-clock token",
     );
 
     // Confirm the log carries the reload-pipeline line — the
@@ -1642,8 +1646,9 @@ fn disable_unknown_dynamic_shape_name_returns_unknown_sub() {
         .expect("disable request");
     let resp: ResponseSnap = serde_json::from_str(reply.trim_end()).expect("parse response");
     match resp {
-        ResponseSnap::Err { code, .. } => {
+        ResponseSnap::Err { code, error } => {
             assert_eq!(code, "unknown_sub", "typo reports structural truth");
+            assert!(!error.is_empty(), "Err carries a non-empty error message");
         }
         other => panic!("expected Err, got {other:?}"),
     }
@@ -1709,7 +1714,10 @@ enabled   = false
     let reply = one_shot(&sb.socket, r#"{"op":"enable","name":"foo"}"#).expect("enable 1");
     let resp: ResponseSnap = serde_json::from_str(reply.trim_end()).expect("parse enable 1");
     match resp {
-        ResponseSnap::Err { code, .. } => assert_eq!(code, "toml_disabled"),
+        ResponseSnap::Err { code, error } => {
+            assert_eq!(code, "toml_disabled");
+            assert!(!error.is_empty(), "Err carries a non-empty error message");
+        }
         other => panic!("expected Err(toml_disabled), got {other:?}"),
     }
 
@@ -1718,7 +1726,10 @@ enabled   = false
     let reply = one_shot(&sb.socket, r#"{"op":"enable","name":"foo"}"#).expect("enable 2");
     let resp: ResponseSnap = serde_json::from_str(reply.trim_end()).expect("parse enable 2");
     match resp {
-        ResponseSnap::Err { code, .. } => assert_eq!(code, "not_disabled"),
+        ResponseSnap::Err { code, error } => {
+            assert_eq!(code, "not_disabled");
+            assert!(!error.is_empty(), "Err carries a non-empty error message");
+        }
         other => panic!("expected Err(not_disabled), got {other:?}"),
     }
 
@@ -1767,7 +1778,10 @@ fn reload_prune_drops_disabled_runtime_when_name_leaves_toml() {
     // override is gone, not merely hidden from the projection).
     let reply = one_shot(&sb.socket, r#"{"op":"enable","name":"foo"}"#).expect("enable");
     match serde_json::from_str::<ResponseSnap>(reply.trim_end()).expect("parse") {
-        ResponseSnap::Err { code, .. } => assert_eq!(code, "not_disabled"),
+        ResponseSnap::Err { code, error } => {
+            assert_eq!(code, "not_disabled");
+            assert!(!error.is_empty(), "Err carries a non-empty error message");
+        }
         other => panic!("expected Err(not_disabled), got {other:?}"),
     }
 

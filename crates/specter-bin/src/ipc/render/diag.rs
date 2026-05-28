@@ -122,7 +122,8 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
 ///
 /// Field order mirrors the variant's declaration order so the human
 /// form and the JSON form present fields in the same sequence.
-#[allow(clippy::too_many_lines)] // one arm per variant — fewer would mean a less specific format
+///
+/// One arm per variant — fewer would mean a less specific format.
 fn write_fields(out: &mut String, d: &WireDiagnostic) {
     match d {
         WireDiagnostic::StaleProbeResponse {

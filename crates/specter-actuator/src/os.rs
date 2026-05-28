@@ -368,24 +368,16 @@ fn build_pair(child: Child) -> (u32, OsChildWaiter, OsChildSignaler) {
 fn create_cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     #[cfg(target_os = "linux")]
     {
-        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io_from_nix)
+        nix::unistd::pipe2(nix::fcntl::OFlag::O_CLOEXEC).map_err(io::Error::from)
     }
     #[cfg(not(target_os = "linux"))]
     {
         use nix::fcntl::{FcntlArg, FdFlag, fcntl};
-        let (read_fd, write_fd) = nix::unistd::pipe().map_err(io_from_nix)?;
-        fcntl(&read_fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io_from_nix)?;
-        fcntl(&write_fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io_from_nix)?;
+        let (read_fd, write_fd) = nix::unistd::pipe().map_err(io::Error::from)?;
+        fcntl(&read_fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io::Error::from)?;
+        fcntl(&write_fd, FcntlArg::F_SETFD(FdFlag::FD_CLOEXEC)).map_err(io::Error::from)?;
         Ok((read_fd, write_fd))
     }
-}
-
-/// Convert a [`nix::Error`] (which is `nix::errno::Errno`) into an
-/// [`io::Error`] that the actuator's syscall-shaped error plumbing
-/// understands.
-#[allow(clippy::cast_possible_wrap)]
-fn io_from_nix(e: nix::errno::Errno) -> io::Error {
-    io::Error::from_raw_os_error(e as i32)
 }
 
 /// Best-effort rollback for [`OsSpawner::spawn_pipe`]: SIGKILL +
@@ -487,33 +479,41 @@ impl ChildSignaler for OsChildSignaler {
     }
 }
 
-#[allow(clippy::cast_possible_wrap)]
+/// `std::process::Child::id()` returns a `u32` to surface the kernel's
+/// unsigned PID-slot encoding faithfully; POSIX `pid_t` and
+/// `nix::unistd::Pid` are signed 32-bit. The conversion is total in
+/// practice — Linux's `pid_max` defaults to 4 M (configurable to a
+/// kernel-side cap below `i32::MAX`); macOS caps lower still — so a
+/// `pid > i32::MAX` would indicate kernel state corruption rather than
+/// a representable value. `try_from(...).expect(...)` makes that
+/// invariant a load-bearing assertion instead of a silent wrap.
+fn pid_from_u32(pid: u32) -> nix::unistd::Pid {
+    nix::unistd::Pid::from_raw(i32::try_from(pid).expect("kernel pid_max is well below i32::MAX"))
+}
+
 fn signal_pid(pid: u32, sig: nix::sys::signal::Signal) -> io::Result<()> {
     use nix::errno::Errno;
-    use nix::unistd::Pid;
-    let pid = Pid::from_raw(pid as i32);
+    let pid = pid_from_u32(pid);
     match nix::sys::signal::kill(pid, sig) {
         Ok(()) => Ok(()),
         Err(Errno::ESRCH) => Ok(()), // already gone
-        Err(e) => Err(io::Error::from_raw_os_error(e as i32)),
+        Err(e) => Err(io::Error::from(e)),
     }
 }
 
 /// Block until `pid` is reaped via `waitpid(2)`. `EINTR` is retried;
 /// `ECHILD` is collapsed to `Ok(())` so the recovery path is idempotent
 /// against any earlier external reap.
-#[allow(clippy::cast_possible_wrap)]
 fn reap_pid(pid: u32) -> io::Result<()> {
     use nix::errno::Errno;
     use nix::sys::wait::waitpid;
-    use nix::unistd::Pid;
-    let pid = Pid::from_raw(pid as i32);
+    let pid = pid_from_u32(pid);
     loop {
         match waitpid(Some(pid), None) {
             Ok(_) => return Ok(()),
             Err(Errno::EINTR) => {}              // retry
             Err(Errno::ECHILD) => return Ok(()), // already reaped
-            Err(e) => return Err(io::Error::from_raw_os_error(e as i32)),
+            Err(e) => return Err(io::Error::from(e)),
         }
     }
 }

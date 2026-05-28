@@ -1584,7 +1584,7 @@ impl ActuatorState {
     /// `expect` for the same reason as `spawn_exec_with_permit`:
     /// the controller is single-threaded and the caller has just
     /// installed `slot.running`.
-    #[allow(clippy::too_many_arguments, clippy::needless_pass_by_value)]
+    #[allow(clippy::needless_pass_by_value)]
     fn spawn_wait_thread_after_install(
         &mut self,
         key: &DedupKey,

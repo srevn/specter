@@ -82,10 +82,10 @@ pub enum ProofObligation {
 /// Boxing the heavy `Subtree` variant was considered and rejected: every
 /// non-Descent burst produces one, at most one Probe is in flight per
 /// burst, and `Arc<DirSnapshot>` baselines are already the dominant
-/// payload (the variant width is amortised regardless of how the
-/// enclosing `ProbeOp` is stored).
-/// `#[allow(clippy::large_enum_variant)]`
-/// mirrors the same allowance on `ProbeOp`.
+/// payload. The enclosing `ProbeOp` lives in a
+/// `StepOutput::probe_ops` `BTreeMap` node — heap-allocated on insert
+/// regardless of variant width — so the variant width never rides an
+/// inline slot.
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProbeRequest {
@@ -448,12 +448,11 @@ impl ProbeOp {
 /// Profile has already left `Awaiting` by then).
 ///
 /// **Memory.** `Submit(Effect)` is the dominant variant width; the
-/// channel slot size is dictated by it. `Cancel { profile }` pays
-/// only the discriminant on top of an 8-byte `ProfileId`. The
-/// `large_enum_variant` allowance below mirrors [`ProbeOp`]'s —
-/// boxing `Submit` would add a heap allocation per emitted Effect
-/// for no gain (bursts emit Effects in batches; cancel is sparse —
-/// gate-deadline only).
+/// engine→actuator FIFO channel slot size is dictated by it.
+/// `Cancel { profile }` pays only the discriminant on top of an 8-byte
+/// `ProfileId`. Boxing `Submit` would add a heap allocation per emitted
+/// Effect for no gain — bursts emit Effects in batches; `Cancel` is
+/// sparse (gate-deadline only).
 #[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum EffectOp {
