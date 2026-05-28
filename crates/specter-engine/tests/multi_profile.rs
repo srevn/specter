@@ -205,7 +205,7 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     // Parent verifies and stabilises while the child is still
     // mid-Standard-burst → `Draining` (gated by the covered child). The
     // parent is on a NO_EVENTS mask, so its Standard verify owes the N=2
-    // hash channel: first sample → Unstable (re-Batching, prior=None);
+    // hash channel: first sample → Retry (re-Batching, prior=None);
     // second sample (settle-spaced, same hash) → Stable; the gate then
     // diverts it to Draining because `has_active_standard_descendant`
     // is true.
@@ -1155,7 +1155,7 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
 
     // Parent stabilises while the child still gates it → Draining.
     // The parent is on a NO_EVENTS mask, so its Standard verify owes
-    // the N=2 hash channel: first sample → Unstable (prior=None,
+    // the N=2 hash channel: first sample → Retry (prior=None,
     // re-batches); second sample (settle-spaced, same hash) → Stable;
     // the child still being mid-burst routes the parent through
     // `transition_to_draining` instead of firing.

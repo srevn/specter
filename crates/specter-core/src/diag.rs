@@ -46,9 +46,10 @@ pub enum BurstHelper {
     StartStandardBurst,
     /// `Engine::event_drives_batching` — pre-fire FsEvent absorb.
     EventDrivesBatching,
-    /// `Engine::retry_drives_batching` — Undischarged
-    /// verify response (transient non-observation, ceiling not yet
-    /// fired) re-arms Batching for the next sample.
+    /// `Engine::retry_drives_batching` — a
+    /// [`crate::QuiescenceVerdict::Retry`] verify response (channel
+    /// disagreement or transient non-observation with the ceiling not
+    /// yet fired) re-arms Batching for the next sample.
     RetryDrivesBatching,
     /// `Engine::transition_to_verifying` — Batching/Draining → Verifying.
     TransitionToVerifying,
@@ -68,10 +69,10 @@ pub enum BurstHelper {
     /// `Engine::transition_to_settling` — post-fire settle-debounce
     /// entry. Reached from the natural `Awaiting → Settling` advance
     /// (`on_effect_complete::LastReached + ReturnToIdle`) and the
-    /// `Rebasing → Settling` undischarged loop-back
-    /// (`dispatch_rebase_ok::Undischarged + !terminal`); the post-fire
-    /// mirror of pre-fire's `event_drives_batching` /
-    /// `retry_drives_batching` pair on the Settling side.
+    /// `Rebasing → Settling` retry loop-back
+    /// (`dispatch_rebase_ok::Retry`); the post-fire mirror of
+    /// pre-fire's `event_drives_batching` / `retry_drives_batching`
+    /// pair on the Settling side.
     TransitionToSettling,
     /// `Engine::absorb_event_into_fire_tail` — post-fire FsEvent absorb.
     AbsorbEventIntoFireTail,

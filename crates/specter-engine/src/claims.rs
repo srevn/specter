@@ -270,16 +270,18 @@ impl Engine {
     ///   [`specter_core::Profile::settled_hash`]). `dispatch_rebase_ok`
     ///   and the Seed-Ok recovery pin only (the `EmitMode::SeedDrift`
     ///   seal in `fire_and_settle`, or the silent `SilentPin` arm of
-    ///   `fire_or_seal`, reached from the `Stable` / `Unstable + forced`
-    ///   Seed verdicts) call
+    ///   `fire_or_seal`, reached from the
+    ///   [`specter_core::QuiescenceVerdict::Stable`] Seed verdicts —
+    ///   both `Natural` and `Forced`) call
     ///   [`specter_core::Profile::rebase_baseline`], which consumes it
-    ///   (the `Witness → Snapshot` move); the Seed `Unstable + !forced`
-    ///   and `Undischarged` arms graft (or skip) without rebasing, so
-    ///   the witness outlives an unbounded re-batch loop and is consumed
-    ///   only at the eventual pin. A live baseline and a survival
-    ///   witness are mutually exclusive *by construction* in the anchor
-    ///   sum — the old `baseline.is_some() ⇒ …is_none()` rule is a type
-    ///   property now, not a step-boundary invariant.
+    ///   (the `Witness → Snapshot` move); the Seed
+    ///   [`specter_core::QuiescenceVerdict::Retry`] arm grafts (or
+    ///   skips) without rebasing, so the witness outlives an unbounded
+    ///   re-batch loop and is consumed only at the eventual pin. A live
+    ///   baseline and a survival witness are mutually exclusive *by
+    ///   construction* in the anchor sum — the old
+    ///   `baseline.is_some() ⇒ …is_none()` rule is a type property
+    ///   now, not a step-boundary invariant.
     ///
     /// **Pre-condition.** The owner's probe slot must already be
     /// disarmed. Callers either took the response-dispatch path (which

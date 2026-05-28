@@ -868,7 +868,7 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
     // `seed_owes_first_fire` is false and `seed_drift_observed` is
     // false (never-fired) ⇒ `classify_consequence` yields the silent
     // `SilentPin` ⇒ finish_to_idle directly, no Awaiting tail.
-    // Probe 1 (Unstable, prior None) re-batches into
+    // Probe 1 (Retry, prior None) re-batches into
     // PreFire(Batching); probe 2 (Stable, hash-equal) pins straight
     // to Idle. The witnessed-activity case
     // (a fresh Seed that *did* see events fires one Effect and *does*
@@ -1584,7 +1584,7 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
 /// Layer-C: the hash channel is active (events-incomplete + fire-bearing
 /// burst), so the carrier holds the fire until two consecutive samples
 /// observe equal `dir_hash`. Two settle-spaced still-moving samples
-/// (`size = 10` → `size = 4096`) fold to `Unstable`; the third sample
+/// (`size = 10` → `size = 4096`) fold to `Retry`; the third sample
 /// (file stabilised) closes `Stable` and the burst fires exactly once.
 #[test]
 fn scp_into_structure_only_does_not_fire_during_growing_file() {
@@ -1609,7 +1609,7 @@ fn scp_into_structure_only_does_not_fire_during_growing_file() {
     );
 
     // Two settle-spaced still-moving samples (file growing in place).
-    // The carrier observes two distinct hashes; both fold to Unstable.
+    // The carrier observes two distinct hashes; both fold to Retry.
     // **No fire** — the regression-guarded contract.
     let s1 = sized_file_snap("scp.bin", EntryKind::File, 21, 10);
     let s2 = sized_file_snap("scp.bin", EntryKind::File, 21, 4096);

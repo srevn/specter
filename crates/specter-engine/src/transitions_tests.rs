@@ -280,7 +280,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
     // Drive the first Seed verify with a Dir-shaped response. The
     // kind-classification fallback in `dispatch_burst_outcome` caches
     // the anchor kind from the response shape on the *first* response,
-    // before the first-sample `Unstable` verdict re-batches.
+    // before the first-sample `Retry` verdict re-batches.
     let correlation = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("Seed verify probe in flight after settle expiry");
@@ -2296,7 +2296,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
     // First-probe response with one File and one Dir descendant.
     // Only the Dir gets a Watch op; the File materializes without an FD
     // contribution. The graft (and thus the descendant Watch ops) runs
-    // on the first response even though its verdict is Unstable.
+    // on the first response even though its verdict is Retry.
     let snap = dir_tree_snap(vec![
         ("a.rs", EntryKind::File, 1),
         ("subdir", EntryKind::Dir, 2),
@@ -5120,22 +5120,24 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// An `Undischarged { terminal: false }` rebase response loops back
-/// through `transition_to_settling` (no commit), the next
-/// `PostFireSettle` expiry re-enters `Rebasing` with a fresh probe,
-/// and a follow-up `Authoritative` response commits and finishes — the
-/// only surviving post-fire loop. Pairs with
-/// `rebase_undischarged_not_reached_does_not_poison_current` (which
-/// pins the first loop-back); this test pins the COMPLETE retry path:
-/// loop entry → settle expiry → re-Rebasing → Authoritative commit.
+/// A `Retry` rebase response loops back through `transition_to_settling`
+/// (no commit), the next `PostFireSettle` expiry re-enters `Rebasing`
+/// with a fresh probe, and a follow-up `Authoritative` response commits
+/// and finishes — the only surviving post-fire loop. Pairs with
+/// `rebase_retry_does_not_poison_current` (which pins the first
+/// loop-back); this test pins the COMPLETE retry path: loop entry →
+/// settle expiry → re-Rebasing → Authoritative commit. The `Retry`
+/// verdict has two origins — channel disagreement and walker refusal
+/// with `terminal: false` — that share this dispatcher arm; the test
+/// exercises the walker-refusal origin.
 #[test]
-fn post_fire_undischarged_retries_via_settling() {
+fn post_fire_retry_loops_via_settling() {
     let (mut e, pid, sid, root, now) = engine_with_attached_sub();
     let rebase_corr = drive_to_rebasing(&mut e, pid, sid, root, now);
     let baseline_before = baseline_hash(&e, pid);
 
-    // First Rebasing response: Undischarged + !terminal → Settling.
-    // No commit; the baseline must not move.
+    // First Rebasing response: Undischarged + !terminal authority folds
+    // to Retry → Settling. No commit; the baseline must not move.
     let unread: std::sync::Arc<std::path::Path> =
         std::sync::Arc::from(std::path::Path::new("anchor/opaque"));
     let degraded = dir_tree_snap(vec![("ghost", EntryKind::File, 9)]);
@@ -5156,14 +5158,14 @@ fn post_fire_undischarged_retries_via_settling() {
     let retry_settle_id = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
             PostFirePhase::Settling { settle_timer } => *settle_timer,
-            other => panic!("Undischarged !terminal must loop into Settling; got {other:?}"),
+            other => panic!("Retry must loop into Settling; got {other:?}"),
         },
         other => panic!("expected Active(PostFire(Settling)); got {other:?}"),
     };
     assert_eq!(
         baseline_hash(&e, pid),
         baseline_before,
-        "Undischarged !terminal must not commit — baseline stays put",
+        "Retry must not commit — baseline stays put",
     );
 
     // PostFireSettle expiry past the settle window: Settling → Rebasing
@@ -5397,18 +5399,22 @@ fn rebase_authoritative_commits_baseline_and_finishes() {
     );
 }
 
-/// `Undischarged`, ceiling not reached: an unread region must never
-/// poison `current` — **no** `apply_snapshot` — and the carrier prior
-/// is withheld. The loop settle-spaces for another sample.
+/// A `Retry` rebase response — produced by the walker refusing on some
+/// chain with `terminal: false`, or by the hash channel disagreeing at
+/// this sample — loops back through `transition_to_settling`: an unread
+/// region must never poison `current` — **no** `apply_snapshot` — and
+/// the carrier prior is withheld. The loop settle-spaces for another
+/// sample. The test exercises the walker-refusal origin; the channel
+/// disagreement origin folds identically.
 #[test]
-fn rebase_undischarged_not_reached_does_not_poison_current() {
+fn rebase_retry_does_not_poison_current() {
     let (mut e, pid, sid, root, now) = engine_with_attached_sub();
     let rebase_corr = drive_to_rebasing(&mut e, pid, sid, root, now);
     let baseline_before = baseline_hash(&e, pid);
     let current_before = current_hash(&e, pid);
 
     // An unread response: the walker could not discharge its
-    // obligation at `first_unread`.
+    // obligation at `first_unread`. Fold: Undischarged + !forced ⇒ Retry.
     let unread: std::sync::Arc<std::path::Path> =
         std::sync::Arc::from(std::path::Path::new("anchor/opaque"));
     let degraded = dir_tree_snap(vec![("ghost", EntryKind::File, 9)]);
@@ -5429,7 +5435,7 @@ fn rebase_undischarged_not_reached_does_not_poison_current() {
     match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => assert!(
             matches!(post.phase, PostFirePhase::Settling { .. }),
-            "Undischarged + !reached loops back through Settling; got {:?}",
+            "Retry loops back through Settling; got {:?}",
             post.phase,
         ),
         other => panic!("expected Active(PostFire(Settling)); got {other:?}"),
@@ -5437,12 +5443,12 @@ fn rebase_undischarged_not_reached_does_not_poison_current() {
     assert_eq!(
         current_hash(&e, pid),
         current_before,
-        "Undischarged + !reached must NOT apply_snapshot — an unread region cannot poison current",
+        "Retry must NOT apply_snapshot — an unread region cannot poison current",
     );
     assert_eq!(
         baseline_hash(&e, pid),
         baseline_before,
-        "Undischarged + !reached never rebases the baseline",
+        "Retry never rebases the baseline",
     );
 }
 
@@ -5503,11 +5509,13 @@ fn rebase_authoritative_at_ceiling_pins_freshest_and_diagnoses() {
     );
 }
 
-/// `Undischarged`, ceiling **reached**: refuse to rebase blind. No
-/// commit, no rebase — the prior baseline stays in place — plus the
-/// loud `RebaseCeilingUnreadable` carrying `first_unread`.
+/// An `Abandon { first_unread }` rebase response — Undischarged
+/// authority with the ceiling **reached** (forced=true) — refuses to
+/// rebase blind. No commit, no rebase — the prior baseline stays in
+/// place — plus the loud `RebaseCeilingUnreadable` carrying
+/// `first_unread`.
 #[test]
-fn rebase_undischarged_at_ceiling_refuses_blind_rebase_and_diagnoses() {
+fn rebase_abandon_refuses_blind_rebase_and_diagnoses() {
     let (mut e, pid, sid, root, now) = engine_with_attached_sub();
     let rebase_corr = drive_to_rebasing(&mut e, pid, sid, root, now);
     let baseline_before = baseline_hash(&e, pid);
@@ -5540,12 +5548,12 @@ fn rebase_undischarged_at_ceiling_refuses_blind_rebase_and_diagnoses() {
 
     assert!(
         matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
-        "Undischarged + Reached is a terminal — the burst finishes",
+        "Abandon is a terminal — the burst finishes",
     );
     assert_eq!(
         baseline_hash(&e, pid),
         baseline_before,
-        "Undischarged + Reached never rebases blind — the prior baseline stays in place",
+        "Abandon never rebases blind — the prior baseline stays in place",
     );
     assert!(
         out.diagnostics.iter().any(|d| matches!(
@@ -5555,7 +5563,7 @@ fn rebase_undischarged_at_ceiling_refuses_blind_rebase_and_diagnoses() {
                     && first_unread.as_ref() == std::path::Path::new("anchor/opaque")
                     && *intent == BurstIntent::Standard,
         )),
-        "Undischarged + Reached emits RebaseCeilingUnreadable carrying first_unread; got {:?}",
+        "Abandon emits RebaseCeilingUnreadable carrying first_unread; got {:?}",
         out.diagnostics,
     );
 }
@@ -5630,10 +5638,10 @@ fn rebase_ceiling_in_settling_drives_rebasing_with_forced() {
     let (mut e, pid, sid, root, now) = engine_with_attached_sub();
     let rebase_corr = drive_to_rebasing(&mut e, pid, sid, root, now);
 
-    // Loop back through Settling via an Undischarged !terminal response
-    // (the only surviving post-fire loop). The `Stable(Natural)`
-    // arm finishes immediately; we need the burst still alive in
-    // Settling to fire the ceiling there.
+    // Loop back through Settling via a Retry response — produced by
+    // an Undischarged !forced authority (the only surviving post-fire
+    // loop). The `Stable(Natural)` arm finishes immediately; we need
+    // the burst still alive in Settling to fire the ceiling there.
     let unread: std::sync::Arc<std::path::Path> =
         std::sync::Arc::from(std::path::Path::new("anchor/opaque"));
     e.step(
@@ -5660,7 +5668,7 @@ fn rebase_ceiling_in_settling_drives_rebasing_with_forced() {
                 _,
             ),
         ),
-        "Undischarged !terminal loops the post-fire burst back through Settling",
+        "Retry loops the post-fire burst back through Settling",
     );
 
     // Now fire the RebaseCeiling in Settling.
@@ -5732,7 +5740,7 @@ fn rebase_ceiling_in_settling_drives_rebasing_with_forced() {
 /// would let two back-to-back `WholeSubtree` reads catch the same
 /// transient byte-state and manufacture a premature `Stable`. The loop
 /// instead settle-separates consecutive samples through `Settling`: a
-/// mid-loop change makes sample N+1 differ from sample N ⇒ `Unstable` ⇒
+/// mid-loop change makes sample N+1 differ from sample N ⇒ `Retry` ⇒
 /// keep looping; only two settle-spaced *equal* samples close `Stable`.
 ///
 /// Pins, on a `STRUCTURE`-only Profile (the hash channel is active for
@@ -5806,7 +5814,7 @@ fn rebase_loop_spacing_defeats_a_premature_stable_on_a_slow_writer() {
         .expect("rebase probe in flight after PostFireSettle drove Settling → Rebasing");
 
     // Sample 1: the writer's state at this instant (carrier prior None ⇒
-    // Unstable). Records carrier := hash(A); the response routes through
+    // Retry). Records carrier := hash(A); the response routes through
     // `transition_to_settling` (no commit).
     let a = dir_tree_snap(vec![("draft", EntryKind::File, 1)]);
     let t_s1 = after_fire + SETTLE * 2;
@@ -5848,7 +5856,7 @@ fn rebase_loop_spacing_defeats_a_premature_stable_on_a_slow_writer() {
         .expect("PostFireSettle re-arms Rebasing #2");
 
     // Sample 2, settle-spaced: the slow writer advanced, so this read
-    // differs (B ≠ A). carrier prior hash(A) ≠ hash(B) ⇒ Unstable —
+    // differs (B ≠ A). carrier prior hash(A) ≠ hash(B) ⇒ Retry —
     // NOT a premature Stable just because it is the "second" sample.
     let b = dir_tree_snap(vec![
         ("draft", EntryKind::File, 1),
@@ -5930,7 +5938,7 @@ fn rebase_loop_spacing_defeats_a_premature_stable_on_a_slow_writer() {
 /// already operator-visible on `Effect.forced`.
 ///
 /// Drives a structure-only Profile through Sample 1 (carrier prior =
-/// None → Unstable, carrier := hash(A)), then expires the
+/// None → Retry, carrier := hash(A)), then expires the
 /// `BurstDeadline` mid-Batching to set `forced = true` and drive a
 /// fresh Verifying probe; Sample 2 (hash(B) ≠ hash(A)) folds to
 /// `Stable(Forced { hash_channel_disagreed: true })` ⇒ the strong-signal
@@ -5957,7 +5965,7 @@ fn pre_fire_forced_ceiling_with_hash_disagreement_emits_strong_signal_diagnostic
     );
 
     // Sample 1: Settle expires → Verifying probe → response (snap A).
-    // Carrier prior=None ⇒ Unstable ⇒ `retry_drives_batching` re-arms
+    // Carrier prior=None ⇒ Retry ⇒ `retry_drives_batching` re-arms
     // Batching with carrier := hash(A).
     let a = dir_tree_snap(vec![("draft", EntryKind::File, 1)]);
     let s1_at = burst_start + SETTLE * 2;
@@ -5978,7 +5986,7 @@ fn pre_fire_forced_ceiling_with_hash_disagreement_emits_strong_signal_diagnostic
     );
     assert!(
         s1_out.effects().is_empty(),
-        "Sample 1: carrier prior=None ⇒ Unstable ⇒ no fire (re-Batching)",
+        "Sample 1: carrier prior=None ⇒ Retry ⇒ no fire (re-Batching)",
     );
 
     // Fire the BurstDeadline mid-Batching: `force_pending` sets
@@ -6053,7 +6061,7 @@ fn pre_fire_forced_ceiling_with_hash_disagreement_emits_strong_signal_diagnostic
 /// one diagnostic per forced rebase, picked by available evidence.
 ///
 /// Drives a structure-only Profile through the post-fire loop: Sample 1
-/// in Rebasing (carrier := hash(A) ⇒ Unstable ⇒ Settling); RebaseCeiling
+/// in Rebasing (carrier := hash(A) ⇒ Retry ⇒ Settling); RebaseCeiling
 /// expires mid-Settling (`force_pending_post_fire` sets `forced=true`,
 /// `handle_rebase_ceiling` drives Rebasing); Sample 2 (hash(B) ≠
 /// hash(A)) folds to `Stable(Forced{disagreed=true})` ⇒ the strong-
@@ -6110,7 +6118,7 @@ fn post_fire_forced_ceiling_with_hash_disagreement_emits_strong_signal_diagnosti
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("rebase probe in flight after PostFireSettle drove Settling → Rebasing");
 
-    // Sample 1 in Rebasing: snap A ⇒ carrier prior=None ⇒ Unstable ⇒
+    // Sample 1 in Rebasing: snap A ⇒ carrier prior=None ⇒ Retry ⇒
     // transition_to_settling (carrier := hash(A)).
     let a = dir_tree_snap(vec![("draft", EntryKind::File, 1)]);
     let t_s1 = after_fire + SETTLE * 2;
@@ -6131,7 +6139,7 @@ fn post_fire_forced_ceiling_with_hash_disagreement_emits_strong_signal_diagnosti
             Diagnostic::RebaseCeilingForcedDespiteChange { .. }
                 | Diagnostic::RebaseCeilingStillChanging { .. }
         )),
-        "Sample 1 (Unstable + ceiling not yet reached) emits no rebase ceiling diagnostic; \
+        "Sample 1 (Retry + ceiling not yet reached) emits no rebase ceiling diagnostic; \
          got {:?}",
         s1_out.diagnostics,
     );
@@ -6356,6 +6364,207 @@ fn dispatch_rebase_ok_consumes_survival_witness() {
         "rebase consumed the survival witness: the settled reference now \
          tracks the new baseline, not the stale pre-loss witness",
     );
+}
+
+/// `dispatch_quiescence_ok` contract — pre-fire `Stable(Forced)` arm.
+/// The pre-fire forced ceiling fires through the Draining gate
+/// regardless of the disagreement bit; the bit selects only the
+/// diagnostic:
+/// - `hash_channel_disagreed = true` ⇒ exactly one
+///   [`Diagnostic::QuiescenceCeilingForcedDespiteChange`].
+/// - `hash_channel_disagreed = false` ⇒ zero diagnostics from this
+///   arm (the `forced` bit is already operator-visible on the
+///   emitted Effect; pre-fire's quiet ceiling stays silent).
+///
+/// Pins audit Test Gap #3 for the pre-fire forced dispatch.
+#[test]
+fn dispatch_quiescence_ok_stable_forced_emits_diagnostic_only_when_disagreed() {
+    for (disagreed, label) in [(false, "quiet forced"), (true, "loud forced")] {
+        let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+        let _ = e.cancel_all_in_flight_probes();
+
+        let state = active_pre_fire_burst(
+            &mut e,
+            pid,
+            PreFirePhase::Verifying(ProbeSlot::empty()),
+            BurstIntent::Standard,
+            anchor,
+            now,
+        );
+        if let Some(p) = e.profiles.get_mut(pid) {
+            p.transition_state(state);
+        }
+
+        let snap = dir_tree_snap(vec![("a", EntryKind::File, 1)]);
+        let mut out = StepOutput::default();
+        e.dispatch_quiescence_ok(
+            pid,
+            TreeSnapshot::Dir(snap),
+            QuiescenceVerdict::Stable(StableReason::Forced {
+                hash_channel_disagreed: disagreed,
+            }),
+            BurstIntent::Standard,
+            now,
+            &mut out,
+        );
+
+        let ceiling_count = out
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, Diagnostic::QuiescenceCeilingForcedDespiteChange { .. },))
+            .count();
+        assert_eq!(
+            ceiling_count,
+            usize::from(disagreed),
+            "{label}: QuiescenceCeilingForcedDespiteChange emits iff \
+             hash_channel_disagreed; got diagnostics {:?}",
+            out.diagnostics,
+        );
+        assert!(
+            !out.diagnostics
+                .iter()
+                .any(|d| matches!(d, Diagnostic::QuiescenceCeilingUnreadable { .. },)),
+            "{label}: Stable(Forced) never emits QuiescenceCeilingUnreadable; \
+             got {:?}",
+            out.diagnostics,
+        );
+    }
+}
+
+/// `dispatch_quiescence_ok` contract — pre-fire `Abandon` arm. The
+/// bounded ceiling already fired and the walker still refused on
+/// `first_unread`; the dispatch must emit exactly one
+/// [`Diagnostic::QuiescenceCeilingUnreadable`] carrying the unread
+/// path, finish the burst to Idle, and **not** commit (an unread
+/// region must never become the dedup / Seed baseline).
+#[test]
+fn dispatch_quiescence_ok_abandon_emits_unreadable_and_finishes() {
+    let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+    let _ = e.cancel_all_in_flight_probes();
+
+    let state = active_pre_fire_burst(
+        &mut e,
+        pid,
+        PreFirePhase::Verifying(ProbeSlot::empty()),
+        BurstIntent::Standard,
+        anchor,
+        now,
+    );
+    if let Some(p) = e.profiles.get_mut(pid) {
+        p.transition_state(state);
+    }
+
+    let unread: Arc<std::path::Path> = Arc::from(std::path::Path::new("anchor/sealed"));
+    let snap = dir_tree_snap(vec![]);
+    let mut out = StepOutput::default();
+    e.dispatch_quiescence_ok(
+        pid,
+        TreeSnapshot::Dir(snap),
+        QuiescenceVerdict::Abandon {
+            first_unread: Arc::clone(&unread),
+        },
+        BurstIntent::Standard,
+        now,
+        &mut out,
+    );
+
+    let unreadable: Vec<_> = out
+        .diagnostics
+        .iter()
+        .filter_map(|d| match d {
+            Diagnostic::QuiescenceCeilingUnreadable { first_unread, .. } => Some(first_unread),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        unreadable.len(),
+        1,
+        "Abandon emits exactly one QuiescenceCeilingUnreadable; got {:?}",
+        out.diagnostics,
+    );
+    assert_eq!(
+        unreadable[0].as_ref(),
+        unread.as_ref(),
+        "Abandon's diagnostic carries the verdict's first_unread verbatim",
+    );
+    assert!(
+        matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
+        "Abandon finishes the burst to Idle",
+    );
+}
+
+/// `dispatch_rebase_ok` contract — post-fire `Stable(Forced)` arm.
+/// The post-fire forced ceiling always commits (graft +
+/// `rebase_baseline`) AND emits exactly one ceiling diagnostic; the
+/// disagreement bit selects which:
+/// - `hash_channel_disagreed = true` ⇒
+///   [`Diagnostic::RebaseCeilingForcedDespiteChange`].
+/// - `hash_channel_disagreed = false` ⇒
+///   [`Diagnostic::RebaseCeilingStillChanging`].
+///
+/// The two are mutually exclusive — never both, never neither.
+#[test]
+fn dispatch_rebase_ok_stable_forced_emits_exactly_one_ceiling_diagnostic() {
+    for (disagreed, expected_loud) in [(false, false), (true, true)] {
+        let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+        let _ = e.cancel_all_in_flight_probes();
+
+        let baseline = dir_tree_snap(vec![("seed", EntryKind::File, 1)]);
+        let current = dir_tree_snap(vec![("seed", EntryKind::File, 2)]);
+        enter_active_mode(&mut e, pid, baseline, current);
+        let state = active_post_fire_burst(
+            &mut e,
+            pid,
+            PostFirePhase::Rebasing(ProbeSlot::empty()),
+            BurstIntent::Standard,
+            anchor,
+            now,
+        );
+        if let Some(p) = e.profiles.get_mut(pid) {
+            p.transition_state(state);
+        }
+
+        let snap = dir_tree_snap(vec![("seed", EntryKind::File, 7)]);
+        let snap_hash = snap.dir_hash();
+        let mut out = StepOutput::default();
+        e.dispatch_rebase_ok(
+            pid,
+            TreeSnapshot::Dir(snap),
+            QuiescenceVerdict::Stable(StableReason::Forced {
+                hash_channel_disagreed: disagreed,
+            }),
+            now,
+            &mut out,
+        );
+
+        let loud = out
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, Diagnostic::RebaseCeilingForcedDespiteChange { .. }))
+            .count();
+        let quiet = out
+            .diagnostics
+            .iter()
+            .filter(|d| matches!(d, Diagnostic::RebaseCeilingStillChanging { .. }))
+            .count();
+        assert_eq!(
+            (loud, quiet),
+            (usize::from(expected_loud), usize::from(!expected_loud)),
+            "disagreed={disagreed}: exactly one ceiling diagnostic, picked by \
+             the disagreement bit; got {:?}",
+            out.diagnostics,
+        );
+        assert_eq!(
+            baseline_hash(&e, pid),
+            Some(snap_hash),
+            "Stable(Forced) commits + rebases the baseline (the prelude \
+             absorbs into the outer Stable(_) arm)",
+        );
+        assert!(
+            matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
+            "Stable(Forced) finishes the burst to Idle",
+        );
+    }
 }
 
 #[test]

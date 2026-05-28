@@ -468,7 +468,7 @@ fn snapshot_dir(
 /// or a dirent / non-UTF-8 / `strip_prefix` / per-child `lstat`
 /// (non-NotFound) fault dropped an entry. Two faults stay `Complete`
 /// because they are *observed-absent*, not blindness, and self-correct
-/// (empty/short snapshot hash-differs → `Unstable` → converge):
+/// (empty/short snapshot hash-differs → `Retry` → converge):
 /// `read_dir` `NotFound` (raced-empty dir) and a per-child `lstat`
 /// `NotFound` (a child unlinked between `read_dir` and the `lstat` — a
 /// raced delete during `rm -rf` / `rsync --delete` / log-rotate).
@@ -489,7 +489,7 @@ fn enumerate_dir(
     let read_dir = match std::fs::read_dir(path) {
         Ok(rd) => rd,
         // Observed-absent, self-correcting: a raced-empty dir's empty
-        // snapshot hash-differs from a non-empty prior ⇒ Unstable ⇒
+        // snapshot hash-differs from a non-empty prior ⇒ Retry ⇒
         // converge. Degrading it would be a liveness regression.
         Err(e) if e.kind() == io::ErrorKind::NotFound => {
             return (entries, Completeness::Complete);

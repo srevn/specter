@@ -42,7 +42,7 @@
 //! - `start_seed_burst` / `start_standard_burst` — Idle →
 //!   `Active(PreFire(_))`.
 //! - `event_drives_batching` (FsEvent during pre-fire) /
-//!   `retry_drives_batching` (Undischarged retry) /
+//!   `retry_drives_batching` (`QuiescenceVerdict::Retry`) /
 //!   `transition_to_verifying` (settle-timer expiry, burst-deadline,
 //!   Draining → Verifying reconfirm) /
 //!   `transition_to_draining` — pre-fire phase swaps (mutate
@@ -183,7 +183,7 @@ impl Engine {
     /// `handle_gate_deadline`'s non-zombie arm),
     /// `transition_to_settling` (entered from `Awaiting` via
     /// `on_effect_complete::LastReached`, or from `Rebasing` via
-    /// `dispatch_rebase_ok::Undischarged + !terminal`),
+    /// `dispatch_rebase_ok::Retry`),
     /// `transition_to_rebasing` (entered from `Settling` via
     /// `handle_post_fire_settle_expired` / `handle_rebase_ceiling`'s
     /// drive-now arm, or from `Awaiting` via `handle_gate_deadline`'s
@@ -626,13 +626,15 @@ impl Engine {
     }
 
     /// Sole caller: [`Engine::dispatch_quiescence_ok`]'s
-    /// `QuiescenceVerdict::Undischarged { terminal: false }` arm — a
-    /// verify just responded with a transient non-observation
-    /// (`EACCES`, a chmod-000 chain) and the burst-deadline ceiling has
-    /// not yet fired, so the engine retries through a fresh settle
-    /// window. The verify slot was already disarmed at the top of
-    /// `on_profile_probe_response`; no Cancel needed. Arms a fresh
-    /// settle timer and writes `phase = Batching { settle_timer }`.
+    /// [`specter_core::QuiescenceVerdict::Retry`] arm — a verify just
+    /// responded non-terminally (either the hash channel observed
+    /// `prior != Some(response)`, or the walker refused on some chain
+    /// with a transient non-observation — `EACCES`, a chmod-000 chain)
+    /// and the burst-deadline ceiling has not yet fired, so the engine
+    /// retries through a fresh settle window. The verify slot was
+    /// already disarmed at the top of `on_profile_probe_response`; no
+    /// Cancel needed. Arms a fresh settle timer and writes
+    /// `phase = Batching { settle_timer }`.
     ///
     /// **`dirty` preserved; no re-commit.** The next verify re-targets
     /// and re-obligates per the carrier's own rule — a Standard burst
@@ -647,12 +649,13 @@ impl Engine {
     /// this helper) until the `BurstDeadline` surfaces the terminal.
     ///
     /// **Reachability.** This helper runs *only* on the
-    /// `Undischarged + !terminal` dispatch arm; an `FsEvent` arriving
-    /// during the verify routes through `event_drives_batching`, which
-    /// Cancels and disarms the verify slot first. The `forced`
-    /// (terminal) case in either dispatcher bypasses this helper —
-    /// the burst-deadline ceiling surfaces the operator-visible
-    /// terminal via `QuiescenceCeilingUnreadable` instead.
+    /// [`specter_core::QuiescenceVerdict::Retry`] dispatch arm; an
+    /// `FsEvent` arriving during the verify routes through
+    /// `event_drives_batching`, which Cancels and disarms the verify
+    /// slot first. The `forced` (terminal) cases in the dispatcher
+    /// bypass this helper — `Stable(Forced)` fires through, and
+    /// `Abandon` surfaces the operator-visible
+    /// `QuiescenceCeilingUnreadable` and finishes.
     ///
     /// **`last_event_time` pinned to `Some(now)`.** The verify just
     /// responded, so `now` is the timestamp of the latest observation
@@ -1099,8 +1102,8 @@ impl Engine {
     /// `dispatch_rebase_ok` reads
     /// `Stable(StableReason::Forced { hash_channel_disagreed })`
     /// (commit + diagnose if the channel disagreed; commit silent
-    /// otherwise) or `Undischarged { terminal: true }` (abandon +
-    /// diagnose) off the verdict.
+    /// otherwise) or [`specter_core::QuiescenceVerdict::Abandon`]
+    /// (abandon + diagnose) off the verdict.
     ///
     /// **Lockstep with `rebase_ceiling`.** Sets `forced = true` AND
     /// drops the timer reference `rebase_ceiling = None` in one move
@@ -1258,12 +1261,12 @@ impl Engine {
     ///    arm the loop's ceiling at its start; `last_event_time =
     ///    Some(now)` is the EffectComplete instant — the Settling
     ///    window reckons from there.
-    /// 2. `Rebasing → Settling` — `dispatch_rebase_ok::Undischarged +
-    ///    !terminal` (the only surviving post-fire loop-back arm).
-    ///    The ceiling was armed at the loop's start (1); no re-arm
-    ///    here. `last_event_time = Some(now)` is the response instant
-    ///    — the next Settling window reckons from the unfavorable
-    ///    response, the same conservative anchor pre-fire's
+    /// 2. `Rebasing → Settling` — `dispatch_rebase_ok::Retry` (the
+    ///    only surviving post-fire loop-back arm). The ceiling was
+    ///    armed at the loop's start (1); no re-arm here.
+    ///    `last_event_time = Some(now)` is the response instant — the
+    ///    next Settling window reckons from the unfavorable response,
+    ///    the same conservative anchor pre-fire's
     ///    `retry_drives_batching` applies on `last_event_time =
     ///    Some(now)` after a verify response.
     ///

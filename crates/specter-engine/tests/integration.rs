@@ -470,7 +470,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
     // The Seed is Batching-first: descendants are watched via
     // the *first* Seed probe, which materializes only after the initial
     // settle expiry — not at attach. The first sample's verdict is
-    // Unstable (no prior), but `apply_snapshot` still runs the
+    // `Retry` (no prior), but `apply_snapshot` still runs the
     // reconcile / Watch side effects on that first response.
     assert!(
         first_probe_correlation(&attach_out).is_some(),

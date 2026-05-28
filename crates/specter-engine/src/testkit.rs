@@ -442,10 +442,10 @@ pub struct Verify {
 /// or a non-fire-bearing burst (cold Seed → `SilentPin`) the
 /// single Authoritative sample reaches `Stable` and the dispatch fires
 /// or pins inline. For an events-incomplete fire-bearing burst the
-/// first sample (carrier `prior = None`) folds to `Unstable` and the
-/// helper returns the re-Batch step; the caller drains the freshly-
-/// armed settle timer and calls [`verify`] again for the second
-/// sample.
+/// first sample (carrier `prior = None`) folds to
+/// [`specter_core::QuiescenceVerdict::Retry`] and the helper returns
+/// the re-Batch step; the caller drains the freshly-armed settle timer
+/// and calls [`verify`] again for the second sample.
 #[must_use]
 pub fn verify_with(
     e: &mut Engine,
@@ -489,8 +489,8 @@ pub fn verify(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, start: In
 /// Returns every step output (`settle`, `finish`) and the finish
 /// instant so the caller can assert co-Profile state between each.
 /// **Carve-out:** a test that injects a custom absorb in the final
-/// window or exercises the Undischarged loop-back composes the finer
-/// primitives inline.
+/// window or exercises the [`specter_core::QuiescenceVerdict::Retry`]
+/// loop-back composes the finer primitives inline.
 #[derive(Debug)]
 pub struct RebasePostFire {
     pub settle: StepOutput,

@@ -80,7 +80,7 @@ fn dir_snap_sized_file(name: &str, inode: u64, size: u64) -> Arc<DirSnapshot> {
 fn seed_cycle(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Instant) -> StepOutput {
     // Cold-arm Verifying-first: the first Seed sample is delivered
     // directly to the construct-armed slot — no Batching to expire.
-    // A Batching re-entry (e.g. after an Undischarged !terminal retry)
+    // A Batching re-entry (e.g. after a `QuiescenceVerdict::Retry`)
     // needs the settle-timer expiry to advance back to Verifying.
     if !matches!(
         e.profiles().get(pid).unwrap().state(),
@@ -138,7 +138,7 @@ fn drive_standard_fire_once(
     );
     // The verify response against the seed baseline fires directly on
     // its first Authoritative sample. The drain loop is defensive in
-    // case the first response routes through an Undischarged retry.
+    // case the first response routes through a `QuiescenceVerdict::Retry`.
     let mut t = t0;
     let mut stable_out: Option<StepOutput> = None;
     for _ in 0..8 {
@@ -343,8 +343,8 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
 /// re-enters Batching with `dirty` non-empty — a triggered (not cold)
 /// Seed whose `burst_owes_quiescence_proof` is `true`.
 ///
-/// The three settle-spaced samples: read1=S1 (prior None ⇒ Unstable,
-/// carrier := hash(S1)), read2=S2 ≠ S1 (prior hash(S1) ⇒ Unstable,
+/// The three settle-spaced samples: read1=S1 (prior None ⇒ Retry,
+/// carrier := hash(S1)), read2=S2 ≠ S1 (prior hash(S1) ⇒ Retry,
 /// carrier := hash(S2)), read3=S2 (prior hash(S2) ⇒ Stable ⇒ fire).
 #[test]
 fn fresh_seed_with_activity_growing_leaf_fires_one() {
@@ -413,18 +413,18 @@ fn fresh_seed_with_activity_growing_leaf_fires_one() {
     );
 }
 
-/// Drive a fresh Seed to the
-/// `Undischarged + forced` ceiling terminal so the Profile ends Idle
-/// `Undischarged + forced` ceiling terminal so the Profile ends Idle
-/// with NO baseline (no FsEvents, expire the BurstDeadline so
-/// `forced=true`, answer the verify with an `Undischarged` authority —
-/// `undischarged_consequence` + `forced` ⇒ `finish_burst_to_idle`
-/// WITHOUT `apply_snapshot` / `rebase_baseline`). Then inject a *single*
-/// `FsEvent` (Idle + `!baseline_is_some()` ⇒ `start_seed_burst`) and
-/// drive a clean Seed proof to `Stable`. Asserts exactly one Effect —
-/// this pins the constructor-symmetry contract specifically: a fresh
-/// Seed re-opened by a single event after a forced-ceiling terminal
-/// still carries its witnessed activity into the fire path.
+/// Drive a fresh Seed to the `QuiescenceVerdict::Abandon` ceiling
+/// terminal so the Profile ends Idle with NO baseline (no FsEvents,
+/// expire the BurstDeadline so `forced=true`, answer the verify with a
+/// `ProofAuthority::Undischarged` authority — the fold projects this
+/// to `QuiescenceVerdict::Abandon { first_unread }`, and the dispatch
+/// runs `finish_burst_to_idle` WITHOUT `apply_snapshot` /
+/// `rebase_baseline`). Then inject a *single* `FsEvent` (Idle +
+/// `!baseline_is_some()` ⇒ `start_seed_burst`) and drive a clean Seed
+/// proof to `Stable`. Asserts exactly one Effect — this pins the
+/// constructor-symmetry contract specifically: a fresh Seed re-opened
+/// by a single event after a forced-ceiling terminal still carries
+/// its witnessed activity into the fire path.
 #[test]
 fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
     let mut e = Engine::new();
@@ -458,9 +458,9 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
     let corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("forced Seed verify probe still in flight");
-    // Undischarged authority: a non-observation lies on the obligation
-    // chain. `undischarged_consequence` + forced ⇒ ceiling terminal:
-    // finish to Idle, NO apply_snapshot, NO rebase_baseline.
+    // `ProofAuthority::Undischarged` + forced ⇒ the fold projects to
+    // `QuiescenceVerdict::Abandon` (the ceiling terminal): finish to
+    // Idle, NO apply_snapshot, NO rebase_baseline.
     let unread: Arc<std::path::Path> = Arc::from(std::path::Path::new("/src/unreadable"));
     let ceil_out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -481,7 +481,7 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
     );
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
-        "Undischarged + forced is a terminal — the burst finishes to Idle",
+        "Abandon (Undischarged + forced) is a terminal — the burst finishes to Idle",
     );
     assert!(
         !e.profiles().get(pid).unwrap().baseline_is_some(),
@@ -856,9 +856,9 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         );
 
         // Defensive: if the reconfirm did not fire on its first
-        // Authoritative response (e.g. a transient re-Draining or an
-        // Undischarged retry), drive successive settle windows until
-        // an Effect is emitted. The `pop_expired` drain advances `t`
+        // Authoritative response (e.g. a transient re-Draining or a
+        // `QuiescenceVerdict::Retry`), drive successive settle windows
+        // until an Effect is emitted. The `pop_expired` drain advances `t`
         // by `SETTLE * 4` per iteration, always well past
         // `last_event_time + SETTLE`, so each re-armed settle expiry
         // transitions to Verifying rather than rescheduling.

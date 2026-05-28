@@ -2,8 +2,9 @@
 //!
 //! These cases capture the failure mode that motivated splitting
 //! the pre-fire re-Batch into `event_drives_batching` (driven by an
-//! `FsEvent`) and `retry_drives_batching` (driven by an Unstable or
-//! Undischarged verify response): a dense storm of `FsEvent`s used
+//! `FsEvent`) and `retry_drives_batching` (driven by a
+//! `QuiescenceVerdict::Retry` verify response): a dense storm of
+//! `FsEvent`s used
 //! to inflate the settle backoff curve, eventually pegging the timer at
 //! `burst_deadline` and forcing the Effect to fire `forced = true`. The
 //! current contract is "every event re-arms `now + settle`," so the
@@ -147,7 +148,8 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
 #[test]
 fn sustained_undischarged_response_storm_paces_at_settle() {
     // Verify the second leg of the conflation fix: the
-    // `Undischarged + !terminal` retry path routes via
+    // `QuiescenceVerdict::Retry` path (here driven by walker-refused
+    // `Undischarged !terminal` authority responses) routes via
     // `retry_drives_batching`, which schedules the next attempt
     // at `now + settle`, not at the exponential-backoff curve. We
     // reproduce a sustained-undischarged burst: every probe response
@@ -198,7 +200,8 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
         t_event,
     );
 
-    // Three consecutive Undischarged !terminal probe responses. After
+    // Three consecutive `ProofAuthority::Undischarged` !terminal probe
+    // responses (each folding to `QuiescenceVerdict::Retry`). After
     // each, the next probe should fire at `last_response + SETTLE`, not
     // amplified.
     let mut response_at = t_event + SETTLE;
@@ -221,10 +224,10 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
             }
         };
 
-        // Reply with an Undischarged !terminal response. This folds to
-        // `QuiescenceVerdict::Undischarged { terminal: false }`, which
-        // routes via `retry_drives_batching` — the surviving
-        // retry path that schedules the next attempt at `now + settle`.
+        // Reply with an Undischarged !terminal authority. This folds to
+        // `QuiescenceVerdict::Retry`, which routes via
+        // `retry_drives_batching` — the surviving retry path that
+        // schedules the next attempt at `now + settle`.
         let mut entries = BTreeMap::<CompactString, ChildEntry>::new();
         entries.insert(
             CompactString::new("file"),

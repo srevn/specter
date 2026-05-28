@@ -347,7 +347,8 @@ pub struct PreFireBurst {
     /// **Single writer.** [`Profile::advance_certified_sample`] — the
     /// cat-(b) cascade. Called from the verdict choke on every
     /// `ProofAuthority::Authoritative` response, regardless of the
-    /// verdict outcome (Stable or Unstable). An Undischarged
+    /// verdict outcome ([`QuiescenceVerdict::Stable`] or
+    /// [`QuiescenceVerdict::Retry`]). A `ProofAuthority::Undischarged`
     /// observation must not advance the carrier (the prior would then
     /// reflect an unread region); the caller gates on authority.
     ///
@@ -616,10 +617,10 @@ pub struct PostFireBurst {
 /// `Rebasing` carries a [`ProbeSlot`]: the post-fire baseline-capture
 /// probe's liveness *and* identity live on the phase, so a rebase in
 /// flight without its correlation is unconstructable. The rebase
-/// response folds through [`quiescence_verdict`]; an `Authoritative`
-/// verdict rebases `baseline := current` and finishes (or restarts on
-/// a non-empty residual), an `Undischarged + !terminal` verdict loops
-/// back through `Settling`.
+/// response folds through [`quiescence_verdict`]; a
+/// [`QuiescenceVerdict::Stable`] verdict rebases `baseline := current`
+/// and finishes (or restarts on a non-empty residual), a
+/// [`QuiescenceVerdict::Retry`] verdict loops back through `Settling`.
 ///
 /// `Settling { settle_timer }`: settle-debounce wait for the
 /// post-command kernel-event tail to quiet — the post-fire mirror of
@@ -693,7 +694,7 @@ pub enum AwaitVerdict {
 ///   read (`None` on first sample); `response` is the current
 ///   observation's hash. Equality `Some(prior) == response` is the
 ///   stability witness; disagreement (including `prior = None`) routes
-///   the verdict to [`QuiescenceVerdict::Unstable`].
+///   the verdict to [`QuiescenceVerdict::Retry`].
 ///
 /// Constructed at the verdict choke (`certify_probe_response`); consumed
 /// by [`quiescence_verdict`]. The two paths are explicit at the call
@@ -713,7 +714,7 @@ pub enum QuiescenceWitness {
 /// Pulled out as a sub-enum (not two `bool`s on `Stable`) so the
 /// impossible state `(forced=false, hash_channel_disagreed=true)` is
 /// unrepresentable at the type level — that combination produces
-/// [`QuiescenceVerdict::Unstable`] at the fold, never a `Stable`.
+/// [`QuiescenceVerdict::Retry`] at the fold, never a `Stable`.
 ///
 /// - [`Self::Natural`] — settle-window silence held (the
 ///   [`QuiescenceWitness::EventsReliable`] path) OR the hash channel
@@ -748,22 +749,38 @@ pub enum StableReason {
 ///   The inner [`StableReason`] distinguishes natural fire from the
 ///   bounded-ceiling fallback (and, on the latter, carries the
 ///   diagnostic-selection bit).
-/// - [`Self::Unstable`] — walker certified, hash channel disagreed
-///   (`prior != Some(response)`). Reachable only when the channel is
-///   active (events-incomplete fire-bearing burst); for
-///   events-reliable Profiles and cold-Seed bursts the shape is
-///   unrepresentable. Pre-fire: re-Batch via
-///   [`crate::Engine::retry_drives_batching`]; post-fire:
-///   re-Settle via [`crate::Engine::transition_to_settling`].
-/// - [`Self::Undischarged`] — walker refused on some chain
-///   (`first_unread`). `terminal`:
-///   - `false` ⇒ the carrier may re-try (Batching / Settling).
-///   - `true` ⇒ the bounded ceiling already fired; abandon, no
-///     commit, diagnose `*CeilingUnreadable`.
+/// - [`Self::Retry`] — non-firing, non-terminal: either the walker
+///   certified but the hash channel observed `prior != Some(response)`
+///   at this sample (events-incomplete fire-bearing burst), or the
+///   walker refused on some chain (transient non-observation —
+///   `EACCES`, a chmod-000 chain) and the bounded ceiling has not yet
+///   fired. Both origins route the same way at both dispatch sites
+///   (pre-fire re-Batch via [`crate::Engine::retry_drives_batching`],
+///   post-fire re-Settle via [`crate::Engine::transition_to_settling`]);
+///   neither commits. Carries no payload: the transient `first_unread`
+///   is consumed only on the [`Self::Abandon`] terminal, and the
+///   channel-disagreement provenance persists through the burst's
+///   `last_certified_hash` carrier for the eventual forced-ceiling
+///   read. The bounded `BurstDeadline` / `RebaseCeiling` eventually
+///   surfaces a [`StableReason::Forced`] (channel-disagreement path)
+///   or [`Self::Abandon`] (walker-refused path) terminal.
+/// - [`Self::Abandon`] — bounded terminal: the ceiling already fired
+///   and the walker still refused on some chain (`first_unread`). No
+///   commit; the dispatch diagnoses `*CeilingUnreadable` and finishes
+///   the burst.
 ///
 /// Constructed solely by [`quiescence_verdict`]; the dispatch site
 /// consumes the variants and never re-constructs. Not `Copy` —
-/// `Undischarged` carries an `Arc<Path>`.
+/// `Abandon` carries an `Arc<Path>`.
+///
+/// **Over-discrimination axiom.** Every variant must have a dispatch
+/// consumer that distinguishes it from every other variant. A field
+/// with no consumer is over-discrimination — collapse to the
+/// next-coarser variant. Today: the prior `Unstable` collapsed into
+/// `Retry`; the prior transient `Undischarged`'s `first_unread`
+/// dropped at the fold (the dispatch never read it). Auditable in one
+/// grep: every variant tag must appear in a dispatch arm whose body
+/// diverges from at least one sibling.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum QuiescenceVerdict {
     /// Walker certified + quiescence proven. Fire / pin / rebase
@@ -771,31 +788,35 @@ pub enum QuiescenceVerdict {
     /// captures the proof path (natural vs. bounded-ceiling fallback)
     /// and the diagnostic-selection bit on the latter.
     Stable(StableReason),
-    /// Walker certified; hash channel disagreed at this sample.
-    /// Pre-fire: re-arm the settle window for another sample; post-
-    /// fire: settle-space the next rebase read. Only reachable when
-    /// the hash channel was active (events-incomplete fire-bearing
-    /// burst); the bounded `BurstDeadline` / `RebaseCeiling` eventually
-    /// surfaces a terminal if disagreement persists.
-    Unstable,
-    /// Walker refused on some chain. `terminal: false` ⇒ retry;
-    /// `terminal: true` ⇒ ceiling-bound no-fire diagnostic + finish.
-    Undischarged {
-        first_unread: Arc<Path>,
-        terminal: bool,
-    },
+    /// Non-firing, non-terminal — loop back through the settle
+    /// window for another sample. Subsumes two structurally-distinct
+    /// origins (hash-channel disagreement; transient walker refusal)
+    /// that share the same routing at both dispatch sites. Carries no
+    /// payload (see the type-level docs for the consumption argument).
+    Retry,
+    /// Bounded terminal: the ceiling already fired and the walker
+    /// still refused on `first_unread`. The dispatch surfaces the
+    /// unread path via `*CeilingUnreadable` and finishes the burst
+    /// without committing — an unread region must never become the
+    /// dedup / Seed baseline.
+    Abandon { first_unread: Arc<Path> },
 }
 
 /// Fold the verdict-floor inputs into a [`QuiescenceVerdict`].
 /// Total, pure, side-effect-free — three axes
 /// (`authority × forced × witness`) projected to three variants.
 ///
-/// - [`ProofAuthority::Undischarged`] ⇒
-///   [`QuiescenceVerdict::Undischarged`] carrying `first_unread`
-///   verbatim and `terminal = forced`. The witness is irrelevant on
-///   this arm: an unread chain blocks the fire regardless of any
-///   hash-channel observation, and the carrier was not advanced
-///   anyway (the cat-(b) edge is Authoritative-only).
+/// - [`ProofAuthority::Undischarged`] + `forced` ⇒
+///   [`QuiescenceVerdict::Abandon`] carrying `first_unread` verbatim.
+///   The witness is irrelevant on this arm: an unread chain blocks
+///   the fire regardless of any hash-channel observation, and the
+///   carrier was not advanced anyway (the cat-(b) edge is
+///   Authoritative-only).
+/// - [`ProofAuthority::Undischarged`] + `!forced` ⇒
+///   [`QuiescenceVerdict::Retry`]. `first_unread` is dropped at the
+///   fold (one `Arc::drop` instead of clone-then-drop downstream):
+///   the transient arm at both dispatch sites has no consumer for it
+///   today, and the carrier was not advanced.
 /// - [`ProofAuthority::Authoritative`] + `forced` ⇒
 ///   [`QuiescenceVerdict::Stable`] with
 ///   [`StableReason::Forced`]. `hash_channel_disagreed` is `true`
@@ -811,7 +832,11 @@ pub enum QuiescenceVerdict {
 ///   OR `HashChannel { prior: Some(p), response }` with
 ///   `p == response`). Otherwise (`HashChannel` with `prior = None`
 ///   OR `prior != Some(response)`) ⇒
-///   [`QuiescenceVerdict::Unstable`].
+///   [`QuiescenceVerdict::Retry`] — the channel-disagreement
+///   provenance persists through the burst's `last_certified_hash`
+///   carrier; the eventual forced-ceiling read reconstructs the
+///   strong-signal `*CeilingForcedDespiteChange` if disagreement
+///   persists, so no operator-visible signal is lost.
 #[must_use]
 pub fn quiescence_verdict(
     authority: ProofAuthority,
@@ -819,10 +844,17 @@ pub fn quiescence_verdict(
     witness: QuiescenceWitness,
 ) -> QuiescenceVerdict {
     match authority {
-        ProofAuthority::Undischarged { first_unread } => QuiescenceVerdict::Undischarged {
-            first_unread,
-            terminal: forced,
-        },
+        ProofAuthority::Undischarged { first_unread } if forced => {
+            QuiescenceVerdict::Abandon { first_unread }
+        }
+        ProofAuthority::Undischarged { .. } => {
+            // `first_unread` dropped at the fold — the transient arm
+            // at both dispatch sites has no consumer for it, and the
+            // carrier was not advanced (the cat-(b) edge is
+            // Authoritative-only). One `Arc::drop` instead of
+            // clone-then-drop downstream.
+            QuiescenceVerdict::Retry
+        }
         ProofAuthority::Authoritative if forced => {
             // Ceiling bypass: fire / rebase against freshest observation.
             // `hash_channel_disagreed` reads the witness: `true` only on
@@ -843,7 +875,7 @@ pub fn quiescence_verdict(
                 prior: Some(p),
                 response,
             } if p == response => QuiescenceVerdict::Stable(StableReason::Natural),
-            QuiescenceWitness::HashChannel { .. } => QuiescenceVerdict::Unstable,
+            QuiescenceWitness::HashChannel { .. } => QuiescenceVerdict::Retry,
         },
     }
 }
@@ -2600,16 +2632,17 @@ impl Profile {
     ///
     /// Called only at a **terminal pin**, after a successful graft where
     /// `current.is_some()` holds:
-    /// - `dispatch_rebase_ok` on `Stable` (two settle-spaced equal
-    ///   post-command samples) or `Unstable + ceiling Reached` (the
-    ///   bounded rebase-loop terminal — pin the freshest observation).
+    /// - `dispatch_rebase_ok` on [`QuiescenceVerdict::Stable`] — both
+    ///   `StableReason::Natural` (two settle-spaced equal post-command
+    ///   samples) and `StableReason::Forced` (the bounded rebase-loop
+    ///   terminal — pin the freshest observation against the ceiling).
     /// - the Seed-Ok recovery pin — the `EmitMode::SeedDrift` seal in
     ///   the engine's `fire_and_settle`, and the silent `SilentPin`
-    ///   pin — reached from the `Stable` / `Unstable + forced` Seed
-    ///   verdicts.
+    ///   pin — reached from the [`QuiescenceVerdict::Stable`] Seed
+    ///   verdicts (both `Natural` and `Forced`).
     ///
-    /// The rebase-loop `Unstable`/`Undischarged` arms (not yet at the
-    /// ceiling) and the Seed `Unstable + !forced` / `Undischarged` arms
+    /// The rebase-loop [`QuiescenceVerdict::Retry`] arm (not yet at
+    /// the ceiling) and the Seed [`QuiescenceVerdict::Retry`] arm
     /// graft (or skip) but **do not** rebase: the witness-survival
     /// contract — the survival witness must outlive an unbounded
     /// re-batch / rebase loop and be consumed only at the eventual
@@ -3243,8 +3276,9 @@ impl Profile {
     /// extracting a `ProofAuthority::Authoritative` response hash.
     /// The returned prior is the [`QuiescenceWitness::HashChannel`]
     /// `prior` input. Callable regardless of the verdict outcome
-    /// (Stable or Unstable) — the carrier tracks the last
-    /// walker-certified sample, not the last fire-eligible one.
+    /// ([`QuiescenceVerdict::Stable`] or [`QuiescenceVerdict::Retry`])
+    /// — the carrier tracks the last walker-certified sample, not the
+    /// last fire-eligible one.
     #[must_use]
     pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
         self.state.advance_certified_sample(hash)
@@ -4444,23 +4478,28 @@ mod tests {
 
     /// The verdict-fold floor [`quiescence_verdict`] projects three
     /// axes — `(authority × forced × witness)` — onto three variants
-    /// (`Stable(Natural | Forced)`, `Unstable`, `Undischarged`).
-    /// Total, pure, side-effect-free.
+    /// (`Stable(Natural | Forced)`, `Retry`, `Abandon`). Total, pure,
+    /// side-effect-free.
     ///
-    /// Cases covered (all reachable shapes; the `Authoritative + !forced
-    /// + HashChannel(prior≠response)` row produces `Unstable`, ruling out
-    /// the would-be `Stable(Natural)` mistake):
+    /// Cases covered: all reachable shapes; the
+    /// `Authoritative + !forced + HashChannel(prior≠response)` row
+    /// produces `Retry`, ruling out the would-be `Stable(Natural)`
+    /// mistake. The `Undischarged + !forced` arm drops `first_unread`
+    /// at the fold — the transient retry arm at both dispatch sites
+    /// has no consumer for it (consumption-aligned: an unused
+    /// `Arc<Path>` is one `Arc::drop` instead of clone-then-drop
+    /// downstream).
     ///
-    /// - Authoritative × !forced × EventsReliable → Stable(Natural)
-    /// - Authoritative × !forced × HashChannel(prior=None) → Unstable
-    /// - Authoritative × !forced × HashChannel(p==r) → Stable(Natural)
-    /// - Authoritative × !forced × HashChannel(p≠r) → Unstable
-    /// - Authoritative ×  forced × EventsReliable → Stable(Forced{disagreed=false})
+    /// - Authoritative × !forced × EventsReliable          → Stable(Natural)
+    /// - Authoritative × !forced × HashChannel(prior=None) → Retry
+    /// - Authoritative × !forced × HashChannel(p==r)       → Stable(Natural)
+    /// - Authoritative × !forced × HashChannel(p≠r)        → Retry
+    /// - Authoritative ×  forced × EventsReliable          → Stable(Forced{disagreed=false})
     /// - Authoritative ×  forced × HashChannel(prior=None) → Stable(Forced{disagreed=false})
-    /// - Authoritative ×  forced × HashChannel(p==r) → Stable(Forced{disagreed=false})
-    /// - Authoritative ×  forced × HashChannel(p≠r) → Stable(Forced{disagreed=true})
-    /// - Undischarged × !forced × * → Undischarged{terminal=false}
-    /// - Undischarged ×  forced × * → Undischarged{terminal=true}
+    /// - Authoritative ×  forced × HashChannel(p==r)       → Stable(Forced{disagreed=false})
+    /// - Authoritative ×  forced × HashChannel(p≠r)        → Stable(Forced{disagreed=true})
+    /// - Undischarged   × !forced × *                      → Retry           (first_unread dropped at the fold)
+    /// - Undischarged   ×  forced × *                      → Abandon { first_unread }
     #[test]
     fn quiescence_verdict_folds_three_axes() {
         let unread: std::sync::Arc<std::path::Path> =
@@ -4482,15 +4521,15 @@ mod tests {
             response: 8,
         };
 
-        // Authoritative + !forced — witness selects Stable vs Unstable.
+        // Authoritative + !forced — witness selects Stable vs Retry.
         assert_eq!(
             quiescence_verdict(ProofAuthority::Authoritative, false, er),
             QuiescenceVerdict::Stable(StableReason::Natural),
         );
         assert_eq!(
             quiescence_verdict(ProofAuthority::Authoritative, false, first),
-            QuiescenceVerdict::Unstable,
-            "first-sample hash channel (prior=None) ⇒ Unstable, not Natural",
+            QuiescenceVerdict::Retry,
+            "first-sample hash channel (prior=None) ⇒ Retry, not Natural",
         );
         assert_eq!(
             quiescence_verdict(ProofAuthority::Authoritative, false, eq),
@@ -4498,7 +4537,7 @@ mod tests {
         );
         assert_eq!(
             quiescence_verdict(ProofAuthority::Authoritative, false, neq),
-            QuiescenceVerdict::Unstable,
+            QuiescenceVerdict::Retry,
         );
 
         // Authoritative + forced — ceiling bypass. Disagreement bit
@@ -4529,18 +4568,19 @@ mod tests {
             }),
         );
 
-        // Undischarged — witness ignored; terminal mirrors forced.
-        let v = quiescence_verdict(undischarged(), false, er);
-        assert!(
-            matches!(&v, QuiescenceVerdict::Undischarged { first_unread, terminal: false }
-                if first_unread.as_ref() == std::path::Path::new("first/unread")),
-            "Undischarged + !forced carries first_unread verbatim and projects terminal=false; got {v:?}",
+        // Undischarged — witness ignored; forced selects Retry vs Abandon.
+        // !forced drops first_unread at the fold (transient arm — no
+        // consumer); forced carries it verbatim on Abandon.
+        assert_eq!(
+            quiescence_verdict(undischarged(), false, er),
+            QuiescenceVerdict::Retry,
+            "Undischarged + !forced ⇒ Retry (first_unread dropped at the fold)",
         );
         let v = quiescence_verdict(undischarged(), true, neq);
         assert!(
-            matches!(&v, QuiescenceVerdict::Undischarged { first_unread, terminal: true }
+            matches!(&v, QuiescenceVerdict::Abandon { first_unread }
                 if first_unread.as_ref() == std::path::Path::new("first/unread")),
-            "Undischarged + forced carries first_unread verbatim and projects terminal=true; got {v:?}",
+            "Undischarged + forced ⇒ Abandon carrying first_unread verbatim; got {v:?}",
         );
     }
 

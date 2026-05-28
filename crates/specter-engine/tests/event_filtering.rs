@@ -72,7 +72,7 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
     // The Seed probe fires one settle window after attach, not
     // at attach. Drive the first Seed probe with one File child.
     // graft runs against prior=None ⇒ `Diff::all_created` pure-create
-    // path. The first sample is `Unstable` by construction (no prior
+    // path. The first sample is `Retry` by construction (no prior
     // certified hash) so it does not pin, but `apply_snapshot` still
     // grafts: with has_per_file_fds=true the File child gets a Watch op
     // on this very (first) response.
