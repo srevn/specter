@@ -1007,12 +1007,22 @@ impl Engine {
     /// old (just-expired) id is no longer referenced and lazily drops
     /// on a subsequent `pop_expired`. The phase stays Batching.
     ///
-    /// Transition path: `now − last_event_time ≥ settle` (or
-    /// `last_event_time` is `None`, which only occurs as a defensive
-    /// fall-through — Standard bursts seed it at burst start, and
-    /// Seed-burst Batching re-entries via `event_drives_batching`
-    /// populate it before any settle timer is scheduled). Forwards to
+    /// Transition path: `now − last_event_time ≥ settle`. Forwards to
     /// [`Engine::transition_to_verifying`].
+    ///
+    /// **Structurally unreachable: `last_event_time = None` on a
+    /// Batching expiry.** Every constructor that lands a burst in
+    /// `Batching` pins `Some(now)`: `start_standard_burst`'s
+    /// burst-start `FsEvent`; `start_seed_burst`'s triggered arm
+    /// (`Some(trigger)` ⇒ Batching-first with `Some(now)`); the
+    /// `event_drives_batching` re-entry from a Verifying/Draining
+    /// cancel. The cold-Seed arm constructs `Verifying` directly with
+    /// `None` and never schedules a `Settle` timer. The match's `None`
+    /// arm is therefore unreachable in production; it carries
+    /// `debug_assert!(false)` + the safe transition default to surface
+    /// a future writer that opens the unreachable shape, the same
+    /// convention `burst_owes_quiescence_proof` and `pre_fire_target`
+    /// use.
     ///
     /// **Preconditions** (guaranteed by [`is_timer_referenced`]
     /// upstream): `Profile.state == Active(PreFire(_))` and
@@ -1037,26 +1047,31 @@ impl Engine {
             return;
         }
         let settle = p.settle;
-        let last = pre.last_event_time;
 
         // saturating_duration_since handles `now < last` (test mockclock
         // rewind / non-monotonic clocks): returns Duration::ZERO, which
         // satisfies `< settle` and triggers a reschedule. Safe under any
         // clock skew the harness can produce.
-        if let Some(last) = last
-            && now.saturating_duration_since(last) < settle
-        {
-            let new_deadline = last + settle;
-            let new_timer = self
-                .timers
-                .schedule(new_deadline, profile_id, TimerKind::Settle);
-            self.reschedule_batching(profile_id, new_timer);
-            return;
+        match pre.last_event_time {
+            Some(last) if now.saturating_duration_since(last) < settle => {
+                let new_deadline = last + settle;
+                let new_timer = self
+                    .timers
+                    .schedule(new_deadline, profile_id, TimerKind::Settle);
+                self.reschedule_batching(profile_id, new_timer);
+            }
+            Some(_) => self.transition_to_verifying(profile_id, out),
+            None => {
+                debug_assert!(
+                    false,
+                    "on_settle_expired: last_event_time = None on Batching expiry \
+                     for Profile {profile_id:?} — every Batching constructor pins \
+                     Some(now); reaching here means a future writer opened the \
+                     unreachable arm",
+                );
+                self.transition_to_verifying(profile_id, out);
+            }
         }
-
-        // Quiet for ≥ settle (or last_event_time is None — defensive):
-        // proceed with the original Batching → Verifying transition.
-        self.transition_to_verifying(profile_id, out);
     }
 
     /// Dispatch a [`Input::EffectComplete`].
@@ -3217,11 +3232,16 @@ impl Engine {
     /// and lazily drops on a subsequent `pop_expired`. The phase stays
     /// `Settling`.
     ///
-    /// **Transition path**: `now − last_event_time ≥ settle` (or
-    /// `last_event_time` is `None`, a defensive fall-through —
-    /// production `transition_to_settling` pins it to `Some(now)`, so
-    /// this case is structurally unreachable in production). Forwards
+    /// **Transition path**: `now − last_event_time ≥ settle`. Forwards
     /// to [`Engine::transition_to_rebasing`] for the next sample.
+    ///
+    /// **Structurally unreachable: `last_event_time = None` on a
+    /// `Settling` expiry.** Both `Settling` entries
+    /// (`Awaiting → Settling`, `Rebasing → Settling`) flow through
+    /// [`Engine::transition_to_settling`], which pins `Some(now)`. The
+    /// match's `None` arm is therefore unreachable in production; it
+    /// carries `debug_assert!(false)` + the safe transition default
+    /// (the pre-fire mirror at `on_settle_expired`).
     ///
     /// **Preconditions** (guaranteed by [`is_timer_referenced`]
     /// upstream): `Profile.state == Active(PostFire(Settling {
@@ -3244,26 +3264,32 @@ impl Engine {
             return;
         }
         let settle = p.settle;
-        let last = post.last_event_time;
 
         // saturating_duration_since handles `now < last` (test mockclock
         // rewind / non-monotonic clocks): returns Duration::ZERO, which
         // satisfies `< settle` and triggers a reschedule. Safe under any
         // clock skew the harness can produce.
-        if let Some(last) = last
-            && now.saturating_duration_since(last) < settle
-        {
-            let new_deadline = last + settle;
-            let new_timer =
-                self.timers
-                    .schedule(new_deadline, profile_id, TimerKind::PostFireSettle);
-            self.reschedule_settling(profile_id, new_timer);
-            return;
+        match post.last_event_time {
+            Some(last) if now.saturating_duration_since(last) < settle => {
+                let new_deadline = last + settle;
+                let new_timer =
+                    self.timers
+                        .schedule(new_deadline, profile_id, TimerKind::PostFireSettle);
+                self.reschedule_settling(profile_id, new_timer);
+            }
+            Some(_) => self.transition_to_rebasing(profile_id, out),
+            None => {
+                debug_assert!(
+                    false,
+                    "handle_post_fire_settle_expired: last_event_time = None on \
+                     Settling expiry for Profile {profile_id:?} — \
+                     transition_to_settling pins Some(now) at every Settling \
+                     entry; reaching here means a future writer opened the \
+                     unreachable arm",
+                );
+                self.transition_to_rebasing(profile_id, out);
+            }
         }
-
-        // Quiet for ≥ settle (or last_event_time is None — defensive):
-        // proceed with `Settling → Rebasing`.
-        self.transition_to_rebasing(profile_id, out);
     }
 
     /// `RebaseCeiling` row — the rebase loop's bound, the forced-mirror
