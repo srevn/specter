@@ -22,15 +22,15 @@ use specter_core::program::SpawnBody;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, BurstIntent,
-    ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    DirtyProvenance, EffectCompletion, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT,
-    FsEvent, FsIdentity, Input, LeafEntry, OverflowScope, PatternSpec, Placeholder, PostFireBurst,
-    PostFirePhase, PreFireBurst, PreFirePhase, ProbeFailure, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeRequest, ProbeResponse, ProbeSlot, ProfileIdentity, ProfileState, Promoter,
-    PromoterAttachRequest, PromoterRegistryDiff, PromoterState, ProofAuthority, ProofObligation,
-    QuiescenceVerdict, ResourceId, ResourceKind, ResourceRole, ScanConfig, StableReason,
-    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Termination, TimerKind,
-    TreeSnapshot, WatchOp, WatchRegistryDiff,
+    CeilingState, ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta,
+    DirSnapshot, DirtyProvenance, EffectCompletion, EffectOutcome, EffectScope, EntryKind,
+    FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry, OverflowScope, PatternSpec,
+    Placeholder, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeFailure, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProbeSlot, ProfileIdentity,
+    ProfileState, Promoter, PromoterAttachRequest, PromoterRegistryDiff, PromoterState,
+    ProofAuthority, ProofObligation, QuiescenceVerdict, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, StableReason, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
+    Termination, TimerKind, TreeSnapshot, WatchOp, WatchRegistryDiff,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -5273,8 +5273,9 @@ fn gate_deadline_non_zombie_drives_rebase_with_forced_directly() {
     );
 
     // Phase: Awaiting → Rebasing directly (no Settling in between).
-    // Fields: forced == true (latched), rebase_ceiling == None (skipped
-    // — gate-deadline has already waited 4× max_settle).
+    // CeilingState: gate-deadline latches directly from NotStarted to
+    // Reached without arming a timer (the prior `forced = true` +
+    // `rebase_ceiling = None` lockstep, now a single state).
     match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => {
             assert!(
@@ -5282,11 +5283,11 @@ fn gate_deadline_non_zombie_drives_rebase_with_forced_directly() {
                 "gate-deadline transitions Awaiting → Rebasing directly; got {:?}",
                 post.phase,
             );
-            assert!(post.forced, "force_pending_post_fire latched forced = true");
             assert!(
-                post.rebase_ceiling.is_none(),
-                "rebase_ceiling skipped on the gate-deadline path (lockstep \
-                 with forced = true)",
+                matches!(post.ceiling, CeilingState::Reached),
+                "gate-deadline latches CeilingState::Reached directly from \
+                 NotStarted without arming a timer; got {:?}",
+                post.ceiling,
             );
         }
         other => panic!("expected Active(PostFire(Rebasing)); got {other:?}"),
@@ -5602,8 +5603,10 @@ fn rebase_ceiling_in_rebasing_is_set_only_inflight_response_applies_terminal() {
                 post.phase,
             );
             assert!(
-                post.forced,
-                "the ceiling latched: forced raised by force_pending_post_fire",
+                matches!(post.ceiling, CeilingState::Reached),
+                "the ceiling latched: CeilingState::Reached raised by \
+                 force_pending_post_fire; got {:?}",
+                post.ceiling,
             );
         }
         other => panic!("expected Active(PostFire(Rebasing)); got {other:?}"),
@@ -5696,7 +5699,11 @@ fn rebase_ceiling_in_settling_drives_rebasing_with_forced() {
                 "driven immediately back into Rebasing; got {:?}",
                 post.phase,
             );
-            assert!(post.forced, "the ceiling latched: forced=true");
+            assert!(
+                matches!(post.ceiling, CeilingState::Reached),
+                "the ceiling latched: CeilingState::Reached; got {:?}",
+                post.ceiling,
+            );
         }
         other => panic!("expected Active(PostFire(Rebasing)); got {other:?}"),
     }

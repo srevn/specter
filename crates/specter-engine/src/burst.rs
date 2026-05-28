@@ -14,8 +14,9 @@
 //!   edge-method on the field's owner in `specter-core` (the method
 //!   *is* the floor — total fn, no public setter). `note_effect_completion`
 //!   is the surviving member; a phase helper here would only enforce
-//!   it at a distance. The rebase-loop ceiling lifecycle
-//!   (`rebase_ceiling`, `forced`) once lived in cat-b but folded back
+//!   it at a distance. The rebase-loop ceiling lifecycle (formerly
+//!   `rebase_ceiling: Option<TimerId>` + `forced: bool`, now the
+//!   `ceiling: CeilingState` sum) once lived in cat-b but folded back
 //!   into cat-a once `transition_to_settling` opened a true post-fire
 //!   settle-debounce window — the writes are co-located with their
 //!   phase transitions on this side. (The old `apply_dirty_delta`
@@ -54,14 +55,16 @@
 //! - `transition_to_awaiting` — `Active(PreFire(_))` → `Active(PostFire(_))`,
 //!   the sole site that crosses the fire boundary (via
 //!   `PreFireBurst::into_post_fire`).
-//! - `arm_rebase_loop_ceiling` (writes `post.rebase_ceiling = Some(t)`
-//!   at the `Awaiting → Settling` natural entry) /
-//!   `force_pending_post_fire` (writes `post.forced = true; post.rebase_ceiling
-//!   = None;` on ceiling expiry or gate-deadline recovery) — post-fire
-//!   single-field mutators, the symmetric mirror of pre-fire's
-//!   `force_pending`. Each has exactly one production write site, both
-//!   in this module; the grep `\.rebase_ceiling =` lands exactly two
-//!   hits.
+//! - `arm_rebase_loop_ceiling` (writes `post.ceiling =
+//!   CeilingState::Armed(t)` at the `Awaiting → Settling` natural
+//!   entry) / `force_pending_post_fire` (writes `post.ceiling =
+//!   CeilingState::Reached` on ceiling expiry or gate-deadline
+//!   recovery) — post-fire single-field mutators on the
+//!   `CeilingState` sum, the symmetric mirror of pre-fire's
+//!   `force_pending`. Each has exactly one production write site,
+//!   both in this module; the grep `self\.ceiling = ` lands exactly
+//!   the two writers plus the burst-fresh default in
+//!   `PostFireBurst::new`.
 //! - `transition_to_settling` (Awaiting | Rebasing → Settling) /
 //!   `transition_to_rebasing` (Settling → Rebasing or
 //!   gate-deadline-recovery Awaiting → Rebasing) — post-fire phase
@@ -117,8 +120,8 @@
 use crate::Engine;
 use smallvec::SmallVec;
 use specter_core::{
-    ActiveBurst, BurstFinish, BurstHelper, BurstIntent, Diagnostic, DirtyProvenance, FsEvent,
-    PostFirePhase, PreFireBurst, PreFirePhase, ProbeOwner, ProbeSlot, Profile, ProfileId,
+    ActiveBurst, BurstFinish, BurstHelper, BurstIntent, CeilingState, Diagnostic, DirtyProvenance,
+    FsEvent, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOwner, ProbeSlot, Profile, ProfileId,
     ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId, TimerKind, Tree,
     TreeSnapshot,
 };
@@ -1036,13 +1039,13 @@ impl Engine {
     ///
     /// Schedules a [`TimerKind::RebaseCeiling`] timer at `now +
     /// max_settle` and writes
-    /// `PostFireBurst.rebase_ceiling = Some(timer)` (`NotStarted →
-    /// Armed`) inline. The sole writer of `(None, false) → (Some(t),
-    /// false)`; the matching `(Some(t), false) → (None, true)` /
-    /// `(None, false) → (None, true)` writes live on
-    /// [`Self::force_pending_post_fire`]. The grep
-    /// `\.rebase_ceiling =` lands exactly two production hits, here
-    /// and there — both in this module.
+    /// `PostFireBurst.ceiling = CeilingState::Armed(timer)` inline
+    /// — the sole [`CeilingState::NotStarted`] →
+    /// [`CeilingState::Armed`] edge; the [`CeilingState::Armed`] /
+    /// [`CeilingState::NotStarted`] → [`CeilingState::Reached`]
+    /// writes live on [`Self::force_pending_post_fire`]. The grep
+    /// `self\.ceiling = ` lands exactly two production writers plus
+    /// the burst-fresh default in `PostFireBurst::new`.
     ///
     /// **Sole caller.** [`Engine::on_effect_complete`]'s `LastReached
     /// + ReturnToIdle` arm (the natural `Awaiting → Settling` entry,
@@ -1053,21 +1056,21 @@ impl Engine {
     ///
     /// `handle_gate_deadline`'s non-zombie arm does NOT call this
     /// helper — gate-deadline-recovery has already waited 4× max_settle
-    /// and the `forced` bit guarantees the next response commits
-    /// unconditionally, so no loop bound is needed. It calls
-    /// [`Self::force_pending_post_fire`] + [`Self::transition_to_rebasing`]
-    /// directly (skip ceiling + Settling), the symmetric mirror of
-    /// pre-fire's `handle_burst_deadline → force_pending → drive
-    /// Verifying now`.
+    /// and the [`CeilingState::Reached`] latch guarantees the next
+    /// response commits unconditionally, so no loop bound is needed.
+    /// It calls [`Self::force_pending_post_fire`] +
+    /// [`Self::transition_to_rebasing`] directly (skip ceiling +
+    /// Settling), the symmetric mirror of pre-fire's
+    /// `handle_burst_deadline → force_pending → drive Verifying now`.
     ///
     /// **Gate-free by design.** The call site has verified
     /// `Active(PostFire(Awaiting))` before reaching the helper; the
     /// `if let` is the stale-id tolerance, mirroring
     /// [`Self::force_pending`]'s shape on the pre-fire side. The
     /// `debug_assert!` pins the arm-once contract: an
-    /// `Armed`/`Reached` find here is a future caller misroute (the
-    /// sole caller runs once per loop, at the natural entry), not a
-    /// runtime race.
+    /// [`CeilingState::Armed`] / [`CeilingState::Reached`] find here
+    /// is a future caller misroute (the sole caller runs once per
+    /// loop, at the natural entry), not a runtime race.
     pub(crate) fn arm_rebase_loop_ceiling(&mut self, profile_id: ProfileId, now: Instant) {
         let Some(max_settle) = self.profiles.get(profile_id).map(Profile::max_settle) else {
             return;
@@ -1081,22 +1084,23 @@ impl Engine {
             .and_then(Profile::post_fire_burst_mut)
         {
             debug_assert!(
-                post.rebase_ceiling.is_none() && !post.forced,
+                matches!(post.ceiling, CeilingState::NotStarted),
                 "arm_rebase_loop_ceiling: ceiling already armed/reached \
-                 (profile = {profile_id:?})",
+                 (profile = {profile_id:?}, state = {:?})",
+                post.ceiling,
             );
-            post.rebase_ceiling = Some(timer);
+            post.ceiling = CeilingState::Armed(timer);
         }
     }
 
-    /// Latch the rebase-loop terminal — sets `post.forced = true` and
-    /// drops `post.rebase_ceiling = None` in lockstep. The post-fire
-    /// mirror of [`Self::force_pending`] on the pre-fire side; the
-    /// single-source mutator of `PostFireBurst.forced` and the
-    /// `Some(t) → None` / `None → None` writes of `rebase_ceiling`.
+    /// Latch the rebase-loop terminal — writes
+    /// `post.ceiling = CeilingState::Reached`. The post-fire mirror of
+    /// [`Self::force_pending`] on the pre-fire side; the single-source
+    /// [`CeilingState::Armed`] / [`CeilingState::NotStarted`] →
+    /// [`CeilingState::Reached`] writer.
     ///
-    /// Once raised, the next probe emission bypasses the walker's
-    /// coarse-mtime skip (`forced` projects to the walker's
+    /// Once latched, the next probe emission bypasses the walker's
+    /// coarse-mtime skip (the ceiling projects to the walker's
     /// obligation), the in-flight response folds through
     /// [`specter_core::quiescence_verdict`] with `forced = true`, and
     /// `dispatch_rebase_ok` reads
@@ -1105,24 +1109,26 @@ impl Engine {
     /// otherwise) or [`specter_core::QuiescenceVerdict::Abandon`]
     /// (abandon + diagnose) off the verdict.
     ///
-    /// **Lockstep with `rebase_ceiling`.** Sets `forced = true` AND
-    /// drops the timer reference `rebase_ceiling = None` in one move
-    /// — the invariant that `(rebase_ceiling = Some, forced = true)`
-    /// is unreachable (a stale RebaseCeiling-armed-but-forced entry
-    /// would re-fire `handle_rebase_ceiling` and double-latch). The
-    /// drop is safe whether the timer was consumed by `pop_expired`
-    /// (the natural ceiling-expiry path) or was never armed at all
-    /// (the gate-deadline-recovery path, which raises `forced` without
-    /// an in-heap ceiling entry).
+    /// **One write, was two.** The prior two-field shape
+    /// (`forced = true; rebase_ceiling = None`) carried an
+    /// algorithmic invariant — `(rebase_ceiling = Some, forced =
+    /// true)` was unreachable — that the [`CeilingState`] sum makes
+    /// structurally unrepresentable. The single write collapses both
+    /// the natural ceiling-expiry path (the prior timer reference,
+    /// already consumed by `pop_expired`, is dropped at the same
+    /// write) and the gate-deadline-recovery path (no in-heap ceiling
+    /// timer was ever armed — the [`CeilingState::NotStarted`] →
+    /// [`CeilingState::Reached`] direct edge).
     ///
     /// **Field write only — the phase decision stays with the
     /// caller.** [`Engine::handle_rebase_ceiling`] re-reads the phase
     /// after this call to decide whether to drive a Rebasing verify
     /// *now* (Settling — no probe in flight) or wait (Rebasing — a
-    /// probe is already in flight and will dispatch with `forced`
-    /// observed). [`Engine::handle_gate_deadline`]'s non-zombie arm
-    /// always drives `transition_to_rebasing` after this call (the
-    /// Settling path is skipped — we already waited 4× max_settle).
+    /// probe is already in flight and will dispatch with the latched
+    /// ceiling observed). [`Engine::handle_gate_deadline`]'s
+    /// non-zombie arm always drives `transition_to_rebasing` after
+    /// this call (the Settling path is skipped — we already waited 4×
+    /// max_settle).
     ///
     /// **Gate-free by design.** Same rationale as
     /// [`Self::force_pending`]: the callers are reached only through
@@ -1136,8 +1142,7 @@ impl Engine {
             .get_mut(profile_id)
             .and_then(Profile::post_fire_burst_mut)
         {
-            post.forced = true;
-            post.rebase_ceiling = None;
+            post.ceiling = CeilingState::Reached;
         }
     }
 

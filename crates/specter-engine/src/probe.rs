@@ -63,9 +63,9 @@
 use crate::Engine;
 use crate::path::empty_path;
 use specter_core::{
-    ActiveBurst, BurstIntent, NonEmptyChainSet, PostFirePhase, PreFirePhase, ProbeCorrelation,
-    ProbeOp, ProbeOwner, ProbeRequest, Profile, ProfileState, Promoter, PromoterState,
-    ProofObligation, ResourceId, ResourceKind, StepOutput, subtree_at_dir,
+    ActiveBurst, BurstIntent, CeilingState, NonEmptyChainSet, PostFirePhase, PreFirePhase,
+    ProbeCorrelation, ProbeOp, ProbeOwner, ProbeRequest, Profile, ProfileState, Promoter,
+    PromoterState, ProofObligation, ResourceId, ResourceKind, StepOutput, subtree_at_dir,
 };
 
 /// State-derived routing class for a probe response — what the
@@ -238,7 +238,7 @@ impl Engine {
                     },
                     ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
                         PostFirePhase::Rebasing(_) => Some(ProbeRoute::Rebasing {
-                            forced: post.forced,
+                            forced: matches!(post.ceiling, CeilingState::Reached),
                         }),
                         PostFirePhase::Awaiting { .. } | PostFirePhase::Settling { .. } => None,
                     },
@@ -483,10 +483,15 @@ impl Engine {
                 forced: bool,
                 intent: BurstIntent,
             },
-            /// Profile `Rebasing` — target is the anchor, `forced` is
-            /// pre-fire-only (⇒ `false`). Obligation = `WholeSubtree`:
-            /// the command just mutated the tree, so there is no
-            /// trustworthy prior to skip against (exactly as Seed).
+            /// Profile `Rebasing` — target is the anchor; the
+            /// emission ships `forced = false` because the obligation
+            /// is unconditionally `WholeSubtree` (the command just
+            /// mutated the tree, so there is no trustworthy prior to
+            /// mtime-skip against, exactly as Seed). The post-fire
+            /// [`CeilingState::Reached`] latch is the *response-side*
+            /// `forced`, read by `probe_gate` for the
+            /// `ProbeRoute::Rebasing` payload — disjoint from the
+            /// emission knob.
             /// No accumulator drain — the fire-tail residual reset is
             /// owned by `transition_to_rebasing`.
             Rebase,

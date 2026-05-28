@@ -44,12 +44,14 @@ use std::time::{Duration, Instant};
 /// **Post-fire** (`Awaiting | Rebasing | Settling`): the actuator
 /// gate, then the *structural mirror* of the pre-fire loop —
 /// `Settling ⇄ Rebasing` is `Batching ⇄ Verifying`, bounded by
-/// its own `rebase_ceiling` (pre-fire's `burst_deadline` analogue),
-/// over the *post-command* tree. The same fold floor
+/// its own [`CeilingState`] lifecycle (pre-fire's
+/// `(burst_deadline, forced)` analogue, collapsed into a sum), over
+/// the *post-command* tree. The same fold floor
 /// ([`quiescence_verdict`]) computes the post-fire verdict from the
-/// rebase response's `(authority, post.forced)` pair — no prior
-/// sample carries across the fire. The pre-fire fields that encode a
-/// fire decision do not cross the boundary — the typed
+/// rebase response's `(authority, forced)` pair — `forced` projected
+/// from [`CeilingState::Reached`] at the `probe_gate` read — and no
+/// prior sample carries across the fire. The pre-fire fields that
+/// encode a fire decision do not cross the boundary — the typed
 /// [`PreFireBurst::into_post_fire`] move drops them, and the
 /// `BurstDeadline` timer becomes structurally irrelevant
 /// ([`PostFireBurst::timer_token`] folds it to `None` for post-fire
@@ -421,22 +423,22 @@ pub enum PreFirePhase {
 ///
 /// Post-fire runs its own quiescence loop over the *post-command*
 /// tree, so it mirrors the pre-fire shape: a loop bound
-/// (`rebase_ceiling` + `forced`, the post-fire analogue of pre-fire's
-/// `burst_deadline` + `forced`) and a `last_event_time` (mirror of the
-/// pre-fire field of the same name), captured by
+/// ([`CeilingState`], the post-fire analogue of pre-fire's
+/// `burst_deadline` + `forced` pair) and a `last_event_time` (mirror
+/// of the pre-fire field of the same name), captured by
 /// `absorb_event_into_fire_tail` on every absorbed FsEvent. The
 /// pre-fire fields that encode a *fire decision* do not cross the
 /// boundary, dropped by leaving them out of
 /// [`PreFireBurst::into_post_fire`]:
-/// - `forced`: opens fresh on the post-fire side. The pre-fire
-///   `forced` decided the pre-burst fire; the post-fire `forced` is
-///   the rebase-ceiling latch, set by `force_pending_post_fire` when
-///   `RebaseCeiling` expires (or gate-deadline-recovery raises it
-///   without an in-heap ceiling entry). The two are disjoint decisions
-///   over disjoint tree-shapes, so the bit does not carry across.
-/// - No `burst_deadline`: the pre-fire ceiling; `rebase_ceiling` is
-///   the post-fire one. The stale pre-fire timer lazy-drops via
-///   [`PostFireBurst::timer_token`]'s `Settle | BurstDeadline` arm.
+/// - `forced`: the pre-fire `forced` bit decided the pre-burst fire
+///   over the pre-command tree; the post-fire ceiling latch
+///   ([`CeilingState::Reached`]) is a disjoint decision over the
+///   post-command tree. The two decisions don't carry across, and the
+///   post-fire side opens a fresh [`CeilingState::NotStarted`].
+/// - No `burst_deadline`: the pre-fire ceiling; the post-fire one is
+///   carried by [`CeilingState::Armed`]. The stale pre-fire timer
+///   lazy-drops via [`PostFireBurst::timer_token`]'s `Settle |
+///   BurstDeadline` arm.
 /// - No `probe_target`: Rebasing always targets the Profile's anchor.
 ///
 /// The pre-fire `dirty` (the captured-path basis) also does not cross;
@@ -458,7 +460,7 @@ pub enum PreFirePhase {
 /// just as a Standard one does.
 ///
 /// **Single construction seam.** Every `PostFireBurst` is born fresh
-/// — `rebase_ceiling: None`, `forced: false`, `last_certified_hash:
+/// — `ceiling: CeilingState::NotStarted`, `last_certified_hash:
 /// None` — through [`Self::new`]; [`PreFireBurst::into_post_fire`]
 /// (the typed fire move) is its only production caller. The
 /// post-command tree is a *different tree* than the one the pre-fire
@@ -521,50 +523,18 @@ pub struct PostFireBurst {
     /// timestamp to decide reschedule vs transition, mirroring
     /// `on_settle_expired`'s pre-fire fork.
     pub last_event_time: Option<Instant>,
-    /// The rebase-loop ceiling latch — the post-fire mirror of
-    /// [`PreFireBurst::forced`]. Born `false`; raised to `true` by
-    /// the `force_pending_post_fire` engine helper when `RebaseCeiling`
-    /// expires (or gate-deadline-recovery latches `forced` without an
-    /// in-heap ceiling entry). The next probe response folds through
-    /// [`quiescence_verdict`] over `(authority, forced=true)` and
-    /// dispatches as the ceiling terminal.
+    /// The rebase-loop ceiling lifecycle — the post-fire mirror of
+    /// [`PreFireBurst::forced`] + the pre-fire `burst_deadline` pair,
+    /// collapsed into a single sum type. See [`CeilingState`] for the
+    /// three valid states and the algorithmic-edge writers.
     ///
-    /// **Single production writer.** `Engine::force_pending_post_fire`
-    /// (cat-a, `engine/burst.rs`). The lockstep with
-    /// [`Self::rebase_ceiling`] is enforced at the writer.
-    pub forced: bool,
-    /// The rebase-loop ceiling timer lifecycle. `Some(timer)` ⇔
-    /// armed (timer live in the heap), `None` otherwise. Combined
-    /// with [`Self::forced`], three valid pairs:
-    ///
-    /// - `(None,    false)` — NotStarted (the loop has not entered
-    ///   `Settling`; no ceiling timer exists yet).
-    /// - `(Some(t), false)` — Armed (the ceiling timer is live).
-    /// - `(None,    true)`  — Reached (the ceiling fired; the timer
-    ///   was consumed by `pop_expired`; `forced` carries the terminal
-    ///   bit through to the next `Rebasing` response).
-    ///
-    /// `(Some(_), true)` is algorithmically unreachable: the
-    /// `force_pending_post_fire` engine helper drops the timer
-    /// reference in the same step it raises `forced`, so the illegal
-    /// pair never exists.
-    ///
-    /// **Two production writers**, both cat-a in `engine/burst.rs`:
-    /// - `Engine::arm_rebase_loop_ceiling` — `(None, false) →
-    ///   (Some(t), false)`, the arm-once edge at the natural
-    ///   `Awaiting → Settling` entry. Single caller:
-    ///   `on_effect_complete::LastReached + ReturnToIdle`.
-    /// - `Engine::force_pending_post_fire` — `(Some(t), false) →
-    ///   (None, true)` (natural ceiling expiry) or `(None, false) →
-    ///   (None, true)` (gate-deadline-recovery latches `forced`
-    ///   without an in-heap ceiling entry).
-    ///
-    /// The `(Some(_), true)` unreachability is an algorithmic
-    /// invariant on the writer, not a type-system property. The
-    /// single-source falsifiability grep is one line:
-    /// `rg '\.rebase_ceiling =' --type rust crates/` — expect exactly
-    /// two production hits, both in `engine/burst.rs`.
-    pub rebase_ceiling: Option<TimerId>,
+    /// Folded into [`quiescence_verdict`] at the dispatch as
+    /// `forced = matches!(self.ceiling, CeilingState::Reached)`. The
+    /// fold is the only response-path consumer; the
+    /// [`Self::timer_token`] projection for
+    /// [`TimerKind::RebaseCeiling`] reads the [`CeilingState::Armed`]
+    /// payload.
+    pub ceiling: CeilingState,
     /// Post-fire N=2 sample carrier — the mirror of
     /// [`PreFireBurst::last_certified_hash`] for the rebase loop's
     /// `WholeSubtree` samples. `None` on first sample (or when the
@@ -662,6 +632,53 @@ pub enum PostFirePhase {
     /// response here is a late, untracked arrival (folded to the same
     /// routing as `Rebasing`).
     Settling { settle_timer: TimerId },
+}
+
+/// The rebase-loop ceiling lifecycle — three valid states.
+///
+/// The `(Armed + Reached)` pair the prior two-field shape
+/// (`forced: bool` + `rebase_ceiling: Option<TimerId>`) flagged as
+/// algorithmically unreachable is now unrepresentable.
+///
+/// The post-fire analogue of pre-fire's
+/// `(burst_deadline: TimerId, forced: bool)` pair: a single in-life
+/// timer reference held while the ceiling is armed, then a terminal
+/// latch the next probe response folds through
+/// [`quiescence_verdict`] over `(authority, forced = true)`.
+///
+/// **Two writers, one edge each.** Both cat-a in `engine/burst.rs`:
+/// - `Engine::arm_rebase_loop_ceiling` — [`Self::NotStarted`] →
+///   [`Self::Armed`] at the natural `Awaiting → Settling` entry.
+///   Single caller: `on_effect_complete::LastReached + ReturnToIdle`.
+/// - `Engine::force_pending_post_fire` — [`Self::Armed`] →
+///   [`Self::Reached`] (natural ceiling expiry; the prior timer
+///   reference is dropped at the same write) or [`Self::NotStarted`]
+///   → [`Self::Reached`] (gate-deadline-recovery latches the
+///   ceiling without an in-heap timer entry).
+///
+/// The single-source falsifiability grep is one line:
+/// `rg 'self\.ceiling = ' --type rust crates/` — expect exactly the
+/// two writers plus the burst-fresh default in `PostFireBurst::new`.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum CeilingState {
+    /// Pre-`Settling` entry — no ceiling timer exists yet. The
+    /// burst-fresh default at [`PostFireBurst::new`].
+    NotStarted,
+    /// Ceiling timer live in the heap. Reachable only via
+    /// `Engine::arm_rebase_loop_ceiling`'s sole edge, from
+    /// [`Self::NotStarted`]. The payload is the [`TimerId`] the
+    /// `Engine`'s `pop_expired` resolves the heap entry against; the
+    /// post-fire [`PostFireBurst::timer_token`] projection for
+    /// [`TimerKind::RebaseCeiling`] reads it.
+    Armed(TimerId),
+    /// Ceiling fired (`handle_rebase_ceiling`'s
+    /// `force_pending_post_fire` call, from [`Self::Armed`]) OR
+    /// gate-deadline-recovery latched the ceiling without arming a
+    /// timer (`handle_gate_deadline`'s non-zombie arm, from
+    /// [`Self::NotStarted`]). Both routes land here; the next probe
+    /// response folds through [`quiescence_verdict`] over
+    /// `(authority, forced = true)`.
+    Reached,
 }
 
 /// Verdict of one `EffectComplete` against the post-fire counter.
@@ -1003,14 +1020,15 @@ impl PostFireBurst {
     /// - [`TimerKind::PostFireSettle`] — lives on
     ///   [`PostFirePhase::Settling`]'s `settle_timer` field; `None`
     ///   in `Awaiting` / `Rebasing` (no settle window in flight).
-    /// - [`TimerKind::RebaseCeiling`] — lives directly on the
-    ///   `rebase_ceiling: Option<TimerId>` field. `Some(t)` iff the
-    ///   ceiling timer is live in the heap; `None` covers both the
+    /// - [`TimerKind::RebaseCeiling`] — lives on the [`Self::ceiling`]
+    ///   field as the [`CeilingState::Armed`] payload. The other two
+    ///   states ([`CeilingState::NotStarted`] / [`CeilingState::Reached`])
+    ///   hold no live timer and fold to `None` — covering both the
     ///   pre-arm state (no `Settling` entry yet) and the post-fire
-    ///   latched state (timer consumed by `pop_expired`, terminal bit
-    ///   on [`Self::forced`]). The just-expired ceiling id lazy-drops
-    ///   either way — `timer_token` is `&self`, it does not observe
-    ///   the consume.
+    ///   latched state (timer consumed by `pop_expired`, the terminal
+    ///   bit now structurally [`CeilingState::Reached`]). The
+    ///   just-expired ceiling id lazy-drops either way — `timer_token`
+    ///   is `&self`, it does not observe the consume.
     /// - [`TimerKind::Settle`] / [`TimerKind::BurstDeadline`] —
     ///   type-impossible here (the fields were dropped at
     ///   [`PreFireBurst::into_post_fire`]); the arm returns `None`
@@ -1026,27 +1044,29 @@ impl PostFireBurst {
                 PostFirePhase::Settling { settle_timer } => Some(*settle_timer),
                 PostFirePhase::Awaiting { .. } | PostFirePhase::Rebasing(_) => None,
             },
-            TimerKind::RebaseCeiling => self.rebase_ceiling,
+            TimerKind::RebaseCeiling => match self.ceiling {
+                CeilingState::Armed(t) => Some(t),
+                CeilingState::NotStarted | CeilingState::Reached => None,
+            },
             TimerKind::Settle | TimerKind::BurstDeadline => None,
         }
     }
 
     /// Construct a post-fire burst — the single construction seam.
     ///
-    /// Born fresh, always: `rebase_ceiling` is `None` (no ceiling
-    /// timer armed yet), `forced` is `false` (the latch carrying the
-    /// ceiling terminal has not fired), `last_event_time` is `None`
-    /// (the absorb tail reckons from its own first absorbed event,
-    /// not from the fire instant), and `last_certified_hash` is
-    /// `None` (the post-fire N=2 sample carrier opens fresh — no
-    /// pre-fire sample carries across the fire). Those
-    /// invariant-bearing fields take no parameter precisely because
-    /// *no* construction path may seed them — the only mutations are
-    /// the cat-a engine helpers (`arm_rebase_loop_ceiling`,
-    /// `force_pending_post_fire`, `transition_to_settling`,
-    /// `absorb_event_into_fire_tail` — each documented at its
-    /// production writer) plus the cat-(b) carrier writer
-    /// ([`Profile::advance_certified_sample`]), the no-bypass
+    /// Born fresh, always: `ceiling` is [`CeilingState::NotStarted`]
+    /// (no ceiling timer armed yet, no terminal latched),
+    /// `last_event_time` is `None` (the absorb tail reckons from its
+    /// own first absorbed event, not from the fire instant), and
+    /// `last_certified_hash` is `None` (the post-fire N=2 sample
+    /// carrier opens fresh — no pre-fire sample carries across the
+    /// fire). Those invariant-bearing fields take no parameter
+    /// precisely because *no* construction path may seed them — the
+    /// only mutations are the cat-a engine helpers
+    /// (`arm_rebase_loop_ceiling`, `force_pending_post_fire`,
+    /// `transition_to_settling`, `absorb_event_into_fire_tail` — each
+    /// documented at its production writer) plus the cat-(b) carrier
+    /// writer ([`Profile::advance_certified_sample`]), the no-bypass
     /// discipline applied to construction.
     ///
     /// Sole production caller: [`PreFireBurst::into_post_fire`] (the
@@ -1062,8 +1082,7 @@ impl PostFireBurst {
             phase,
             final_window_residual,
             last_event_time: None,
-            forced: false,
-            rebase_ceiling: None,
+            ceiling: CeilingState::NotStarted,
             last_certified_hash: None,
         }
     }

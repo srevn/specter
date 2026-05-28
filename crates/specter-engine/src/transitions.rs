@@ -605,8 +605,9 @@ impl Engine {
     ///   [`Engine::probe_gate`], packed onto
     ///   [`crate::probe::ProbeRoute`]'s `Verifying { forced }` /
     ///   `Rebasing { forced }` payload, threaded here); both carriers —
-    ///   pre-fire `PreFireBurst.forced` and post-fire
-    ///   `PostFireBurst.forced` — pass through this one site
+    ///   pre-fire `PreFireBurst.forced` (a single bit) and post-fire
+    ///   [`specter_core::CeilingState::Reached`] (projected to a bool
+    ///   at the `probe_gate` read) — pass through this one site
     ///   symmetrically. `forced` distinguishes natural fire from the
     ///   bounded `BurstDeadline` / `RebaseCeiling` fallback.
     /// - **Witness (C2 vs. C3).** [`QuiescenceWitness::EventsReliable`]
@@ -3293,12 +3294,13 @@ impl Engine {
     }
 
     /// `RebaseCeiling` row — the rebase loop's bound, the forced-mirror
-    /// of [`Engine::handle_burst_deadline`]. Sets `forced := true` via
-    /// [`Engine::force_pending_post_fire`] (the single-source mutator
-    /// of `post.forced` and lockstep dropper of `post.rebase_ceiling
-    /// = None`), then mirrors `handle_burst_deadline`'s phase routing
-    /// exactly: in `Settling` no probe is in flight (the `Batching`
-    /// analogue), so drive the final sample *now* via
+    /// of [`Engine::handle_burst_deadline`]. Latches
+    /// [`specter_core::CeilingState::Reached`] via
+    /// [`Engine::force_pending_post_fire`] (the single-source
+    /// [`specter_core::CeilingState::Armed`] → `Reached` writer), then
+    /// mirrors `handle_burst_deadline`'s phase routing exactly: in
+    /// `Settling` no probe is in flight (the `Batching` analogue), so
+    /// drive the final sample *now* via
     /// [`Engine::transition_to_rebasing`]; in `Rebasing` a probe is
     /// already in flight (the `Verifying` analogue), so set-only — its
     /// response carries the terminal. `Awaiting` is unreachable (the
@@ -3306,11 +3308,12 @@ impl Engine {
     /// entry) and folds to the no-op default, as does a vanished
     /// Profile.
     fn handle_rebase_ceiling(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        // Single-source latch: `forced = true; rebase_ceiling = None;`
-        // in one lockstep write. `is_timer_referenced` only routes
-        // `RebaseCeiling` here while `Armed`, so the live timer entry
-        // we just popped is dropped from the phase reference in the
-        // same move that raises `forced`.
+        // Single-source latch: `post.ceiling = CeilingState::Reached`,
+        // collapsing the prior two-field `forced = true; rebase_ceiling
+        // = None` lockstep into one write. `is_timer_referenced` only
+        // routes `RebaseCeiling` here while `Armed`, so the live timer
+        // entry we just popped is dropped from the phase reference in
+        // the same move that latches the terminal.
         self.force_pending_post_fire(profile_id);
 
         // Mirror `handle_burst_deadline`: drive the final sample now iff
