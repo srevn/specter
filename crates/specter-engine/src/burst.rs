@@ -1235,8 +1235,11 @@ impl Engine {
         // an obligation source, so clearing here keeps a `Stable`
         // terminal from spuriously restarting on every tree-touching
         // command. Earlier-round absorbs are not lost — the
-        // `WholeSubtree` walk observes them regardless.
-        post.final_window_residual.clear();
+        // `WholeSubtree` walk observes them regardless. The clear is
+        // owned by the post-fire side via the typed edge-method;
+        // cross-crate callers cannot reach `DirtyProvenance::clear`
+        // directly.
+        post.reset_residual();
         post.phase = PostFirePhase::Rebasing(ProbeSlot::armed(correlation, ()));
 
         // The choke reads the correlation back off the `Rebasing` slot,

@@ -125,10 +125,13 @@ impl DirtyProvenance {
         self.0.is_empty()
     }
 
-    /// Drop every recorded event — the per-`Rebasing`-entry fire-tail
-    /// residual reset. Behaviour-preserving swap-in for the prior
-    /// `BTreeSet::clear`.
-    pub fn clear(&mut self) {
+    /// Drop every recorded event. Crate-private — the asymmetric clear
+    /// is the post-fire side's privilege and is owned by the typed
+    /// edge-method [`PostFireBurst::reset_residual`]; the `pub`
+    /// mutator surface on [`Self`] ([`Self::note`], [`Self::is_empty`],
+    /// [`Self::chains`], [`Self::lca_path`]) is symmetric across
+    /// pre-fire and post-fire and stays shared.
+    pub(crate) fn clear(&mut self) {
         self.0.clear();
     }
 
@@ -1063,6 +1066,24 @@ impl PostFireBurst {
             rebase_ceiling: None,
             last_certified_hash: None,
         }
+    }
+
+    /// Reset the fire-tail residual — the typed edge-method on the
+    /// owner for the sole asymmetric clear of
+    /// [`DirtyProvenance::clear`]. Cross-crate callers reach the
+    /// operation only through this method; the underlying `clear` is
+    /// `pub(crate)`, and [`PreFireBurst`] exposes no analogue, so the
+    /// "drop a fire-bearing burst's captured paths" footgun is
+    /// structurally unrepresentable on the pre-fire side.
+    ///
+    /// **Sole caller.** `Engine::transition_to_rebasing` at every
+    /// `Rebasing` entry (the per-entry residual reset documented at
+    /// the caller — under `WholeSubtree` the residual is only the
+    /// final-window restart seed, so clearing per entry keeps a
+    /// `Stable` terminal from spuriously restarting on every
+    /// tree-touching command).
+    pub fn reset_residual(&mut self) {
+        self.final_window_residual.clear();
     }
 
     /// Apply one `EffectComplete`, returning the zero-edge verdict. The
