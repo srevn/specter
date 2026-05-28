@@ -63,9 +63,9 @@
 use crate::Engine;
 use crate::path::empty_path;
 use specter_core::{
-    ActiveBurst, BurstIntent, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOwner,
-    ProbeRequest, Profile, ProfileState, Promoter, PromoterState, ProofObligation, ResourceId,
-    ResourceKind, StepOutput, subtree_at_dir,
+    ActiveBurst, BurstIntent, NonEmptyChainSet, PostFirePhase, PreFirePhase, ProbeCorrelation,
+    ProbeOp, ProbeOwner, ProbeRequest, Profile, ProfileState, Promoter, PromoterState,
+    ProofObligation, ResourceId, ResourceKind, StepOutput, subtree_at_dir,
 };
 
 /// State-derived routing class for a probe response — what the
@@ -447,12 +447,15 @@ impl Engine {
     ///    ⇒ `AnchorFile`, else ⇒ `Subtree` with the Profile's
     ///    `(config, config_hash)`, `baseline_subtree`, and the
     ///    per-carrier [`specter_core::ProofObligation`] (Standard ⇒
-    ///    `Chains` from the persisting `dirty`'s captured paths, or
-    ///    `WholeSubtree` under a `debug_assert` if empty; Seed and
-    ///    Rebase ⇒ `WholeSubtree` — no trustworthy prior — built
-    ///    lazily, never for a File anchor). The kind rule lives here
-    ///    exactly once, so the prior positional constructors' fan-out
-    ///    dissolves into struct literals.
+    ///    `Chains` over the [`specter_core::NonEmptyChainSet`] from the
+    ///    persisting `dirty`'s captured paths, degrading to
+    ///    `WholeSubtree` when the projection is empty — production
+    ///    never reaches that arm but the type wrapper makes a
+    ///    silently-chainless `Chains` unrepresentable; Seed and Rebase
+    ///    ⇒ `WholeSubtree` — no trustworthy prior — built lazily, never
+    ///    for a File anchor). The kind rule lives here exactly once, so
+    ///    the prior positional constructors' fan-out dissolves into
+    ///    struct literals.
     fn probe_emission_request(&self, owner: ProbeOwner) -> Option<ProbeRequest> {
         // `Copy` carrier classification: which carrier, and (for the
         // pre-fire carrier) the target + `forced` + `intent` read off
@@ -592,14 +595,18 @@ impl Engine {
                                 // path is at-or-under `target` by
                                 // construction (`pre_fire_target`
                                 // resolved the captured paths' LCA), so
-                                // no subtree filter is needed. An empty
-                                // `dirty` is a should-never (a Standard
-                                // burst notes its trigger); degrade to
-                                // `WholeSubtree` so the response proves
-                                // the whole subtree rather than
-                                // silently skipping it, with the
-                                // `debug_assert` as the dev/CI tripwire
-                                // for an ingest path that forgot to note.
+                                // no subtree filter is needed.
+                                // `NonEmptyChainSet::new` rejects an
+                                // empty projection — degrade to
+                                // `WholeSubtree` so the walker proves
+                                // the whole subtree rather than silently
+                                // certifying Authoritative against a
+                                // chain-less obligation. Production
+                                // never reaches the `None` arm (a
+                                // Standard burst notes its trigger), but
+                                // the type wrapper makes the silent-skip
+                                // failure mode structurally
+                                // unrepresentable regardless.
                                 Carrier::PreFire {
                                     intent: BurstIntent::Standard,
                                     ..
@@ -614,16 +621,10 @@ impl Engine {
                                              borrow"
                                         )
                                     };
-                                    if pre.dirty.is_empty() {
-                                        debug_assert!(
-                                            false,
-                                            "Standard obligation empty: every ingest site \
-                                             must note(id, path) (profile {pid:?})"
-                                        );
-                                        ProofObligation::WholeSubtree
-                                    } else {
-                                        ProofObligation::Chains(pre.dirty.chains())
-                                    }
+                                    NonEmptyChainSet::new(pre.dirty.chains()).map_or(
+                                        ProofObligation::WholeSubtree,
+                                        ProofObligation::Chains,
+                                    )
                                 }
                                 // Descent emits ProbeRequest::Descent in
                                 // the outer arm and never reaches the

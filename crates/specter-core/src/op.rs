@@ -44,6 +44,81 @@ pub enum ProbeOwner {
     Promoter(PromoterId),
 }
 
+/// Non-empty carrier for the [`ProofObligation::Chains`] chain set.
+///
+/// The wrapper's value *is* the invariant: a `Chains(NonEmptyChainSet)`
+/// always carries at least one chain. Empty input is rejected at
+/// construction ([`Self::new`] returns `None`), with the contract that
+/// the caller MUST degrade to [`ProofObligation::WholeSubtree`] — passing
+/// an empty chain set to the walker would silently certify
+/// [`ProofAuthority::Authoritative`] (the walker's `certify` returns
+/// `Authoritative` when no chain matches a degraded frame, and an empty
+/// chain set matches nothing), defeating the proof obligation.
+///
+/// No public mutators — the wrapper is constructed once at the engine's
+/// probe choke and consumed read-only by the walker. The invariant
+/// composes through `Clone` because [`BTreeSet`]'s non-emptiness is
+/// preserved by clone.
+///
+/// Member order follows `BTreeSet<Arc<Path>>` (lex on the path bytes) so
+/// the walker's first-hit search ([`certify`](#)) is deterministic
+/// across replays.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct NonEmptyChainSet(BTreeSet<Arc<Path>>);
+
+impl NonEmptyChainSet {
+    /// Wrap a [`BTreeSet`] of chain paths, returning `None` when the
+    /// input is empty. The `None` case is the caller's contract: degrade
+    /// to [`ProofObligation::WholeSubtree`].
+    #[must_use]
+    pub fn new(set: BTreeSet<Arc<Path>>) -> Option<Self> {
+        (!set.is_empty()).then_some(Self(set))
+    }
+
+    /// Borrowing iterator over every chain path, in [`BTreeSet`] lex
+    /// order. The wrapper exposes no other iteration shape — the
+    /// walker's `certify` and tests' membership / cardinality assertions
+    /// compose through this projection.
+    pub fn iter(&self) -> impl Iterator<Item = &Arc<Path>> + '_ {
+        self.0.iter()
+    }
+
+    /// Number of chain paths. Always `>= 1` by construction; pair with
+    /// [`Self::is_empty`] to satisfy clippy's `len_without_is_empty`
+    /// lint with a structural proof rather than `#[allow]`.
+    #[must_use]
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Always `false` — the wrapper's load-bearing invariant. `const`
+    /// so the proof is inspectable at compile time; pairs with
+    /// [`Self::len`] to satisfy `len_without_is_empty` without
+    /// `#[allow]`.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        false
+    }
+
+    /// True iff `frame` is at-or-above some chain path. Composes the
+    /// walker's `obligation_at_or_under` predicate: a frame on the
+    /// recursion path that is an ancestor of (or equal to) any chain
+    /// path must not be mtime-skipped, lest the kernel's signal at the
+    /// chain leaf be missed.
+    #[must_use]
+    pub fn any_chain_starts_with(&self, frame: &Path) -> bool {
+        self.0.iter().any(|p| p.starts_with(frame))
+    }
+
+    /// True iff `path` is byte-equal to some chain path. O(log n) via
+    /// `BTreeSet::contains` (lookup keyed by `Path` through
+    /// `Arc<Path>: Borrow<Path>`).
+    #[must_use]
+    pub fn contains(&self, path: &Path) -> bool {
+        self.0.contains(path)
+    }
+}
+
 /// What a [`ProbeRequest::Subtree`] walk must freshly observe for its
 /// response to certify quiescence.
 ///
@@ -55,7 +130,12 @@ pub enum ProbeOwner {
 /// - [`Self::Chains`] — Standard. The dirty root→leaf chains
 ///   (resources whose `FsEvent` drove the burst, projected to paths).
 ///   The walker refuses mtime-skip at any directory at-or-above a chain
-///   path; off-chain siblings stay skip-eligible.
+///   path; off-chain siblings stay skip-eligible. The
+///   [`NonEmptyChainSet`] carrier makes the empty case unrepresentable:
+///   an empty chain set would silently certify
+///   [`ProofAuthority::Authoritative`] (no chain to match a degraded
+///   frame), defeating the proof obligation, so the engine degrades to
+///   [`Self::WholeSubtree`] when the source projection yields nothing.
 /// - [`Self::WholeSubtree`] — Seed / Rebase. No trustworthy prior
 ///   exists, so nothing under the anchor may be skipped: the whole
 ///   subtree is unproven until freshly read. Seed has never observed
@@ -65,11 +145,11 @@ pub enum ProbeOwner {
 ///   skip would re-clone a stale subtree and certify a false quiet).
 ///
 /// `Chains` entries are `Arc::clone`s of the engine's slot paths
-/// (shipped without re-allocating); `BTreeSet` for deterministic replay
-/// order.
+/// (shipped without re-allocating); the underlying `BTreeSet` orders
+/// them deterministically for replay.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ProofObligation {
-    Chains(BTreeSet<Arc<Path>>),
+    Chains(NonEmptyChainSet),
     WholeSubtree,
 }
 
@@ -523,6 +603,31 @@ pub enum EffectOp {
     /// [`crate::DedupKey::profile`] matches and drops queued
     /// `pending` / `plan_continue` work for the same key set.
     Cancel { profile: ProfileId },
+}
+
+#[cfg(test)]
+mod non_empty_chain_set_tests {
+    use super::NonEmptyChainSet;
+    use std::collections::BTreeSet;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// `new` rejects empty input — the wrapper's load-bearing
+    /// invariant. The probe choke relies on this `None` to degrade to
+    /// `WholeSubtree`; flipping `new`'s contract would silently emit a
+    /// chain-less `Chains` obligation and the walker would certify
+    /// Authoritative against a no-op proof. Behavioural integration
+    /// tests cover the downstream effects; this is the focused
+    /// constructor pin.
+    #[test]
+    fn new_rejects_empty_and_wraps_non_empty() {
+        assert!(NonEmptyChainSet::new(BTreeSet::new()).is_none());
+
+        let mut populated: BTreeSet<Arc<Path>> = BTreeSet::new();
+        populated.insert(Arc::from(Path::new("/w/a")));
+        let wrapped = NonEmptyChainSet::new(populated).expect("non-empty wraps");
+        assert_eq!(wrapped.len(), 1);
+    }
 }
 
 #[cfg(test)]

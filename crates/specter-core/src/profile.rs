@@ -4258,6 +4258,34 @@ mod tests {
         assert!(dp.is_empty() && dp.lca_path().is_none());
     }
 
+    #[test]
+    fn dirty_provenance_chains_non_empty_iff_dirty_non_empty() {
+        // Probe-choke post-condition: `chains()` is empty exactly when
+        // `dirty` is empty (and conversely, non-empty when `dirty` is
+        // non-empty). The engine's probe choke wraps the result with
+        // `NonEmptyChainSet::new(...)`; the `None` arm degrades to
+        // `WholeSubtree`. For a Standard burst with a recorded trigger
+        // (`!dirty.is_empty()`), the projection must yield a non-empty
+        // chain set or the engine would silently re-walk the whole
+        // subtree under `WholeSubtree`. Forward-defensive: if a future
+        // change to `chains()` (a filter, a guard) could leave it empty
+        // while `dirty` still carries values, this test catches it
+        // before the probe-choke regression lands.
+        let r = rids(1);
+        let mut dp = DirtyProvenance::new();
+        assert!(dp.chains().is_empty(), "empty dirty ⇒ empty chains");
+
+        dp.note(r[0], Arc::from(Path::new("/w/a")));
+        assert!(!dp.is_empty());
+        assert!(
+            !dp.chains().is_empty(),
+            "non-empty dirty must project to a non-empty chain set",
+        );
+
+        dp.clear();
+        assert!(dp.chains().is_empty(), "cleared dirty ⇒ empty chains");
+    }
+
     fn batching_burst(settle: TimerId, deadline: TimerId, anchor: ResourceId) -> PreFireBurst {
         PreFireBurst {
             burst_deadline: deadline,

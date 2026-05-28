@@ -10,7 +10,6 @@ use specter_core::{
     ProofObligation, ScanConfig,
 };
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
-use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -61,7 +60,7 @@ fn subtree_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -
         scan_config: ScanConfig::builder().recursive(true).build(),
         captured_with: 0,
         baseline_subtree: None,
-        obligation: ProofObligation::Chains(BTreeSet::new()),
+        obligation: ProofObligation::WholeSubtree,
         forced: false,
     }
 }

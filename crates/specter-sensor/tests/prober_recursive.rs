@@ -60,7 +60,7 @@ fn segments(
         scan_config: cfg,
         captured_with: 0,
         baseline_subtree: None,
-        obligation: ProofObligation::Chains(BTreeSet::new()),
+        obligation: ProofObligation::WholeSubtree,
         forced: false,
     });
     let resp = match rx.recv_timeout(Duration::from_secs(2)).expect("response") {

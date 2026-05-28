@@ -138,7 +138,7 @@ struct ProofLedger {
 /// (`WholeSubtree`, where no obligation path exists to name).
 fn certify(obligation: &ProofObligation, l: &ProofLedger) -> ProofAuthority {
     match obligation {
-        ProofObligation::Chains(paths) => paths
+        ProofObligation::Chains(chains) => chains
             .iter()
             .find(|p| l.degraded.iter().any(|f| p.starts_with(f)))
             .map_or(ProofAuthority::Authoritative, |p| {
@@ -237,7 +237,7 @@ impl WalkContext<'_> {
     #[must_use]
     fn obligation_at_or_under(&self, path: &Path) -> bool {
         match self.obligation {
-            ProofObligation::Chains(paths) => paths.iter().any(|p| p.starts_with(path)),
+            ProofObligation::Chains(chains) => chains.any_chain_starts_with(path),
             ProofObligation::WholeSubtree => true,
         }
     }

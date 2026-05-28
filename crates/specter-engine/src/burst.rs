@@ -2858,14 +2858,14 @@ mod tests {
             .expect("Standard probe emitted");
         match req {
             ProbeRequest::Subtree { obligation, .. } => match obligation {
-                ProofObligation::Chains(paths) => {
-                    assert!(paths.contains(&ap), "the trigger path is a chain");
-                    assert!(paths.contains(&bp), "a sibling chain is not filtered");
+                ProofObligation::Chains(chains) => {
+                    assert!(chains.contains(&ap), "the trigger path is a chain");
+                    assert!(chains.contains(&bp), "a sibling chain is not filtered");
                     assert!(
-                        paths.contains(&rp),
+                        chains.contains(&rp),
                         "a captured ancestor path is not filtered out",
                     );
-                    assert_eq!(paths.len(), 3, "exactly the captured paths, no more");
+                    assert_eq!(chains.len(), 3, "exactly the captured paths, no more");
                 }
                 other => panic!("Standard burst obligation must be Chains; got {other:?}"),
             },
@@ -2910,7 +2910,7 @@ mod tests {
                     "sibling component-LCA resolves to the anchor",
                 );
                 match obligation {
-                    ProofObligation::Chains(paths) => assert_eq!(paths.len(), 2),
+                    ProofObligation::Chains(chains) => assert_eq!(chains.len(), 2),
                     other => panic!("Standard burst obligation must be Chains; got {other:?}"),
                 }
             }
