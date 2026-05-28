@@ -230,7 +230,7 @@ impl Engine {
                 let route = match state {
                     ProfileState::Pending(_) => Some(ProbeRoute::Descent),
                     ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
-                        PreFirePhase::Verifying(_) => Some(ProbeRoute::Verifying {
+                        PreFirePhase::Verifying { .. } => Some(ProbeRoute::Verifying {
                             intent: pre.intent,
                             forced: pre.forced,
                         }),
@@ -470,9 +470,10 @@ impl Engine {
             /// proof obligation (a structural query is not a
             /// quiescence observation).
             Descent(ResourceId),
-            /// Profile `Verifying`. `target` = `pre.probe_target`
-            /// (the live id `pre_fire_target` resolved from the
-            /// captured paths' LCA), `forced` = `pre.forced`. `intent`
+            /// Profile `Verifying`. `target` = the variant payload's
+            /// `target` (the live id `pre_fire_target` resolved from
+            /// the captured paths' LCA, immutable for the Verifying
+            /// variant's lifetime), `forced` = `pre.forced`. `intent`
             /// selects the obligation kind: Seed ⇒ `WholeSubtree` (no
             /// trustworthy prior); Standard ⇒ `Chains` from the
             /// *persisting* `dirty`'s captured paths (read immutably in
@@ -520,8 +521,8 @@ impl Engine {
                 let carrier = match p.state() {
                     ProfileState::Pending(d) => Carrier::Descent(d.current_prefix()),
                     ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
-                        PreFirePhase::Verifying(_) => Carrier::PreFire {
-                            target: pre.probe_target,
+                        PreFirePhase::Verifying { target, .. } => Carrier::PreFire {
+                            target: *target,
                             forced: pre.forced,
                             intent: pre.intent,
                         },
@@ -536,11 +537,13 @@ impl Engine {
                     ProfileState::Idle => return None,
                 };
 
-                // The Rebase target is the anchor (`PostFireBurst`
-                // carries no `probe_target`); `forced` is pre-fire-only
-                // so `false`. No mutation here — the Rebase obligation
-                // is `WholeSubtree` (built in the render pass), so this
-                // resolution no longer needs `&mut` to drain anything.
+                // The Rebase target is the anchor (the post-fire side
+                // carries no probe target on its variant — Rebasing's
+                // target is structurally fixed); `forced` is pre-fire
+                // -only so `false`. No mutation here — the Rebase
+                // obligation is `WholeSubtree` (built in the render
+                // pass), so this resolution no longer needs `&mut` to
+                // drain anything.
                 let (target, forced) = match carrier {
                     Carrier::Descent(prefix) => (prefix, false),
                     Carrier::PreFire { target, forced, .. } => (target, forced),

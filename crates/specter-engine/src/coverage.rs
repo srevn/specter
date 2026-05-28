@@ -1149,7 +1149,6 @@ mod tests {
                 intent,
                 forced: false,
                 dirty: DirtyProvenance::new(),
-                probe_target: r,
                 last_event_time: None,
                 last_certified_hash: None,
             }),

@@ -2603,12 +2603,13 @@ impl Engine {
 
     /// The pre-fire snapshot-commit target + Profile-presence guard —
     /// the shared up-front read for [`Engine::dispatch_quiescence_ok`].
-    /// `target` is the latest emitted probe target
-    /// ([`specter_core::PreFireBurst::probe_target`]); the `p.resource`
-    /// fallback on the structurally-unreachable non-PreFire arm matches
-    /// the prior `unwrap_or(anchor)`. `None` only on the
-    /// structurally-unreachable absent-Profile path (the caller arms
-    /// then return).
+    /// `target` is the in-flight probe's target, read off
+    /// [`specter_core::PreFirePhase::Verifying`]'s variant payload (set
+    /// at construction by [`crate::pre_fire_target`] and immutable for
+    /// the variant's lifetime). The `p.resource` fallback on the
+    /// structurally-unreachable non-Verifying arm matches the historical
+    /// `unwrap_or(anchor)`. `None` only on the structurally-unreachable
+    /// absent-Profile path (the caller arms then return).
     ///
     /// Both fall-through arms `debug_assert!(false)` to surface a
     /// dispatch-contract violation in dev/CI and degrade silently in
@@ -2633,14 +2634,24 @@ impl Engine {
             );
             return None;
         };
-        Some(match p.pre_fire_burst() {
-            Some(pre) => pre.probe_target,
-            None => {
+        let Some(pre) = p.pre_fire_burst() else {
+            debug_assert!(
+                false,
+                "pre_fire_target: non-PreFire Profile {profile_id:?} \
+                 reached dispatch_quiescence_ok (probe_gate dispatches \
+                 Verifying only on Active(PreFire))",
+            );
+            return Some(p.resource());
+        };
+        Some(match &pre.phase {
+            PreFirePhase::Verifying { target, .. } => *target,
+            PreFirePhase::Batching { .. } | PreFirePhase::Draining => {
                 debug_assert!(
                     false,
-                    "pre_fire_target: non-PreFire Profile {profile_id:?} \
-                     reached dispatch_quiescence_ok (probe_gate dispatches \
-                     Verifying only on Active(PreFire))",
+                    "pre_fire_target: non-Verifying pre-fire phase on \
+                     Profile {profile_id:?} reached dispatch_quiescence_ok \
+                     (probe_gate dispatches Verifying only on \
+                     PreFirePhase::Verifying)",
                 );
                 p.resource()
             }
@@ -2901,7 +2912,8 @@ impl Engine {
     ) {
         // Rebasing targets the anchor by construction
         // (`transition_to_rebasing` always probes `Profile.resource`;
-        // `PostFireBurst` carries no `probe_target`). Kind agreement and
+        // the post-fire side carries no probe target on its variant —
+        // Rebasing's target is structurally fixed). Kind agreement and
         // the verdict fold are owned upstream by the shared certifier.
         let Some(target) = self.profiles.get(profile_id).map(Profile::resource) else {
             return;

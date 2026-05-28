@@ -103,8 +103,9 @@
 //!   captured paths, a File leaf promoted to its parent Dir, anchor on
 //!   any resolution miss). Post-fire rebases target the anchor
 //!   unconditionally and bypass this helper.
-//!   `transition_to_verifying` resolves the target through it and writes
-//!   it onto `pre.probe_target` for the choke to read back.
+//!   `transition_to_verifying` resolves the target through it and
+//!   constructs [`PreFirePhase::Verifying`] with the target on the
+//!   variant payload for the choke to read back.
 //! - [`Engine::emit_owner_probe`] (in `probe`) — the single
 //!   owner-polymorphic emission choke. Each burst-launch helper is
 //!   `mint → arm (loud) → emit_owner_probe(owner)`; the choke resolves
@@ -389,7 +390,15 @@ impl Engine {
                 );
                 let correlation = self.mint_probe_correlation();
                 (
-                    PreFirePhase::Verifying(ProbeSlot::armed(correlation, ())),
+                    // Cold-Seed cold-walk: the anchor is the probe target
+                    // (every Seed probe targets the anchor — the
+                    // `pre_fire_target` rule reduces to `p.resource()` on
+                    // Seed intent — and the emission choke materialises
+                    // `WholeSubtree` off the same anchor).
+                    PreFirePhase::Verifying {
+                        slot: ProbeSlot::armed(correlation, ()),
+                        target: resource,
+                    },
                     None,
                     DirtyProvenance::new(),
                 )
@@ -414,16 +423,15 @@ impl Engine {
             ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
                     burst_deadline,
+                    // Cold-walk: `phase = Verifying { slot, target: anchor }`
+                    // — built above. Triggered: `phase = Batching { .. }`
+                    // — no probe in flight, no target carried; the next
+                    // `transition_to_verifying` constructs the Verifying
+                    // variant with the freshly computed target.
                     phase,
                     intent: BurstIntent::Seed,
                     forced: false,
                     dirty,
-                    // Initial target = anchor, the value `pre_fire_target`
-                    // returns for every Seed verify (cold path's emission
-                    // choke resolves the same anchor at the wire-render).
-                    // `transition_to_verifying` overwrites it with the
-                    // same anchor on the triggered path's settle expiry.
-                    probe_target: resource,
                     last_event_time,
                     last_certified_hash: None,
                 }),
@@ -476,7 +484,6 @@ impl Engine {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        let resource = p.resource();
         let settle = p.settle;
         let max_settle = p.max_settle();
 
@@ -495,16 +502,15 @@ impl Engine {
             ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
                     burst_deadline,
+                    // Standard bursts are Batching-first; no probe is in
+                    // flight at construction so the variant carries no
+                    // target. `transition_to_verifying` constructs the
+                    // Verifying variant with the freshly computed target
+                    // on settle expiry / force-fire.
                     phase: PreFirePhase::Batching { settle_timer },
                     intent: BurstIntent::Standard,
                     forced: false,
                     dirty,
-                    // Initial target = anchor. `transition_to_verifying`
-                    // overwrites it with the live id at the captured
-                    // paths' component-LCA on settle expiry / force-fire;
-                    // the initial value carries no observable consequence
-                    // (no probe has emitted yet).
-                    probe_target: resource,
                     // The burst-start FsEvent IS the first event; seed the
                     // settle-deadline source of truth with `now`. Subsequent
                     // events update this in `event_drives_batching` without
@@ -588,14 +594,14 @@ impl Engine {
         // own timer slot; Verifying/Draining have none.
         let needs_fresh_timer = matches!(
             pre.phase,
-            PreFirePhase::Verifying(_) | PreFirePhase::Draining
+            PreFirePhase::Verifying { .. } | PreFirePhase::Draining
         );
 
         // Idempotent: disarms the `Verifying` slot and emits Cancel iff
         // a probe was in flight. For Batching / Draining entries no slot
         // is armed and the helper is a no-op. On the Verifying path this
-        // leaves a transient `Verifying(ProbeSlot::empty())` until the
-        // phase is rewritten to `Batching` below — a single-step,
+        // leaves a transient `Verifying { slot: empty, target }` until
+        // the phase is rewritten to `Batching` below — a single-step,
         // unobserved, fully representable window; the consume is the
         // disarm here, not the later phase rewrite.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
@@ -796,18 +802,17 @@ impl Engine {
     /// the original Verifying entry; a slot reaped in between only
     /// changes the live-id resolution (anchor fallback).
     ///
-    /// **Emission.** This helper writes the `Verifying` phase + armed
-    /// slot + `probe_target`, then calls [`Engine::emit_owner_probe`] —
-    /// the single choke that reads the correlation back off the slot,
-    /// materializes the proof obligation off the persisting burst
-    /// (`ProofObligation::Chains` from `dirty`'s captured paths for
-    /// Standard, `WholeSubtree` for Seed — read immutably, **not**
-    /// drained: the burst outlives this probe across re-batching), and
-    /// reads `forced`
-    /// (so the walker bypasses mtime-skip on a force-fire). New events
-    /// arriving during `Verifying` are noted into `dirty`
-    /// (via `event_drives_batching`) and reshape the obligation on the
-    /// next emission.
+    /// **Emission.** This helper writes the `Verifying` variant — armed
+    /// slot and target shipped as one struct-variant payload — then
+    /// calls [`Engine::emit_owner_probe`], the single choke that reads
+    /// the correlation back off the slot, materializes the proof
+    /// obligation off the persisting burst (`ProofObligation::Chains`
+    /// from `dirty`'s captured paths for Standard, `WholeSubtree` for
+    /// Seed — read immutably, **not** drained: the burst outlives this
+    /// probe across re-batching), and reads `forced` (so the walker
+    /// bypasses mtime-skip on a force-fire). New events arriving during
+    /// `Verifying` are noted into `dirty` (via `event_drives_batching`)
+    /// and reshape the obligation on the next emission.
     pub(crate) fn transition_to_verifying(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToVerifying, out) {
             return;
@@ -881,8 +886,15 @@ impl Engine {
                  Active(PreFire) after require_active_pre_fire proved it"
             );
         };
-        pre.phase = PreFirePhase::Verifying(ProbeSlot::armed(correlation, ()));
-        pre.probe_target = target;
+        // One write: the armed slot and its target ship together as a
+        // single variant payload. The variant *is* the moment of probe
+        // construction, so a half-written Verifying — slot armed without
+        // target, or target written without an armed slot — is
+        // unconstructable.
+        pre.phase = PreFirePhase::Verifying {
+            slot: ProbeSlot::armed(correlation, ()),
+            target,
+        };
 
         self.emit_owner_probe(owner, out);
     }
@@ -914,7 +926,7 @@ impl Engine {
             .and_then(Profile::pre_fire_burst_mut)
         {
             debug_assert!(
-                matches!(pre.phase, PreFirePhase::Verifying(_)),
+                matches!(pre.phase, PreFirePhase::Verifying { .. }),
                 "transition_to_draining off a non-Verifying phase (profile = {profile_id:?})",
             );
             pre.phase = PreFirePhase::Draining;
@@ -1172,8 +1184,9 @@ impl Engine {
     /// the loop's previous Rebasing entry emitted was disarmed at
     /// its response's `on_profile_probe_response`, before the loop-
     /// back routed through `transition_to_settling`. `emit_owner_probe`
-    /// resolves the target (the anchor — `PostFireBurst` carries no
-    /// `probe_target`) and reads the correlation back off the slot.
+    /// resolves the target (the anchor — the post-fire side carries no
+    /// probe target on its variant) and reads the correlation back off
+    /// the slot.
     ///
     /// **`baseline_subtree` is shipped but not skip-trusted.** The
     /// probe ships `Profile.current` as `baseline_subtree`, but its
@@ -1667,12 +1680,9 @@ impl Engine {
         // precondition already proved `Active(PostFire)`; the inner
         // `matches!` is the borrow discipline for the typed move below,
         // not a duplicated guard.
-        let Some((resource, settle, max_settle)) = self.profiles.get(profile_id).and_then(|p| {
-            matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _)).then_some((
-                p.resource(),
-                p.settle,
-                p.max_settle(),
-            ))
+        let Some((settle, max_settle)) = self.profiles.get(profile_id).and_then(|p| {
+            matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _))
+                .then_some((p.settle, p.max_settle()))
         }) else {
             return;
         };
@@ -1716,7 +1726,6 @@ impl Engine {
                             ActiveBurst::PreFire(post.into_pre_fire_residual(
                                 burst_deadline,
                                 settle_timer,
-                                resource,
                                 now,
                             )),
                             finish,
@@ -1918,7 +1927,7 @@ mod tests {
             _ => panic!("expected Active"),
         };
         assert_eq!(burst.intent, BurstIntent::Seed);
-        assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
+        assert!(matches!(burst.phase, PreFirePhase::Verifying { .. }));
         assert!(!burst.forced);
         assert!(burst.dirty.is_empty(), "cold-Seed dirty starts empty");
         assert!(
@@ -1971,7 +1980,7 @@ mod tests {
 
         match e.profiles.get(pid).unwrap().state() {
             ProfileState::Active(ActiveBurst::PreFire(b), _) => {
-                assert!(matches!(b.phase, PreFirePhase::Verifying(_)));
+                assert!(matches!(b.phase, PreFirePhase::Verifying { .. }));
             }
             _ => panic!("expected Active(PreFire)"),
         }
@@ -2009,7 +2018,7 @@ mod tests {
         // Identity is on the Verifying slot itself.
         let slot_correlation = match e.profiles.get(pid).unwrap().state() {
             ProfileState::Active(ActiveBurst::PreFire(b), _) => match &b.phase {
-                PreFirePhase::Verifying(slot) => slot.correlation(),
+                PreFirePhase::Verifying { slot, .. } => slot.correlation(),
                 other => panic!("expected Verifying, got {other:?}"),
             },
             other => panic!("expected Active(PreFire), got {other:?}"),
@@ -2253,7 +2262,7 @@ mod tests {
         };
         let rescheduled_timer = match phase {
             PreFirePhase::Batching { settle_timer } => *settle_timer,
-            PreFirePhase::Verifying(_) | PreFirePhase::Draining => {
+            PreFirePhase::Verifying { .. } | PreFirePhase::Draining => {
                 panic!("expected Batching after reschedule, got {phase:?}")
             }
         };
@@ -2294,7 +2303,7 @@ mod tests {
             other => panic!("expected Active(PreFire), got {other:?}"),
         };
         assert!(
-            matches!(final_phase, PreFirePhase::Verifying(_)),
+            matches!(final_phase, PreFirePhase::Verifying { .. }),
             "after quiet ≥ settle, on_settle_expired transitions to Verifying; \
              got {final_phase:?}",
         );
@@ -2532,11 +2541,13 @@ mod tests {
     fn pre_fire_burst_for_test(intent: BurstIntent, dirty: DirtyProvenance) -> PreFireBurst {
         PreFireBurst {
             burst_deadline: TimerId::default(),
-            phase: PreFirePhase::Verifying(ProbeSlot::empty()),
+            phase: PreFirePhase::Verifying {
+                slot: ProbeSlot::empty(),
+                target: ResourceId::default(),
+            },
             intent,
             forced: false,
             dirty,
-            probe_target: ResourceId::default(),
             last_event_time: None,
             last_certified_hash: None,
         }

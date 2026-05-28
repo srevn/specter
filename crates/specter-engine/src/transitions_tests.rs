@@ -198,7 +198,7 @@ fn assert_seed_verifying(e: &Engine) {
         };
         if pre.intent == BurstIntent::Seed {
             assert!(
-                matches!(pre.phase, PreFirePhase::Verifying(_)),
+                matches!(pre.phase, PreFirePhase::Verifying { .. }),
                 "cold-arm Seed: expected Verifying at burst construction, got {:?}",
                 pre.phase,
             );
@@ -2660,7 +2660,7 @@ fn sensor_overflow_global_idle_reseeds_to_active_seed() {
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
     };
     assert_eq!(burst.intent, BurstIntent::Seed);
-    assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
+    assert!(matches!(burst.phase, PreFirePhase::Verifying { .. }));
     assert!(
         burst.dirty.is_empty(),
         "reseed starts a fresh Seed quiescence sequence (cold-arm Verifying-first)",
@@ -2721,7 +2721,7 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
         BurstIntent::Seed,
         "overflow abandoned the Standard burst and re-seeded",
     );
-    assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
+    assert!(matches!(burst.phase, PreFirePhase::Verifying { .. }));
     assert!(
         burst.dirty.is_empty(),
         "seed burst starts with an empty dirty set and a fresh quiescence \
@@ -2760,7 +2760,7 @@ fn sensor_overflow_armed_verifying_reseeds_no_cancel() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         s => panic!("fixture: expected Active(PreFire(Verifying)); got {s:?}"),
     };
-    assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
+    assert!(matches!(burst.phase, PreFirePhase::Verifying { .. }));
     assert!(
         e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
         "fixture: Verifying slot genuinely armed (NOT pre-consumed)",
@@ -2804,7 +2804,7 @@ fn sensor_overflow_armed_verifying_reseeds_no_cancel() {
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
     };
     assert_eq!(burst.intent, BurstIntent::Seed);
-    assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
+    assert!(matches!(burst.phase, PreFirePhase::Verifying { .. }));
     assert!(
         burst.dirty.is_empty(),
         "reseed starts a fresh Seed quiescence sequence",
@@ -2896,7 +2896,7 @@ fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
     };
     assert_eq!(burst.intent, BurstIntent::Seed);
-    assert!(matches!(burst.phase, PreFirePhase::Verifying(_)));
+    assert!(matches!(burst.phase, PreFirePhase::Verifying { .. }));
     assert!(
         burst.dirty.is_empty(),
         "reseed starts a fresh Seed quiescence sequence",
@@ -3422,7 +3422,7 @@ fn config_diff_added_only_attaches_subs() {
             p.state(),
             ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
-                    phase: PreFirePhase::Verifying(_),
+                    phase: PreFirePhase::Verifying { .. },
                     intent: BurstIntent::Seed,
                     ..
                 }),
@@ -6236,7 +6236,6 @@ fn active_pre_fire_burst(
     pid: specter_core::ProfileId,
     phase: PreFirePhase,
     intent: BurstIntent,
-    probe_target: ResourceId,
     now: Instant,
 ) -> ProfileState {
     let burst_deadline = e
@@ -6249,7 +6248,6 @@ fn active_pre_fire_burst(
             intent,
             forced: false,
             dirty: DirtyProvenance::new(),
-            probe_target,
             last_event_time: None,
             last_certified_hash: None,
         }),
@@ -6265,7 +6263,6 @@ fn active_post_fire_burst(
     _pid: specter_core::ProfileId,
     phase: PostFirePhase,
     intent: BurstIntent,
-    _probe_target: ResourceId,
     _now: Instant,
 ) -> ProfileState {
     ProfileState::Active(
@@ -6310,7 +6307,7 @@ fn enter_active_mode(
 
 #[test]
 fn dispatch_rebase_ok_consumes_survival_witness() {
-    let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+    let (mut e, pid, _sid, _anchor, now) = engine_with_attached_sub();
     // Drain the attach-time Seed-Verifying probe before the manual
     // `transition_state` clobber below drops that armed state.
     let _ = e.cancel_all_in_flight_probes();
@@ -6323,7 +6320,6 @@ fn dispatch_rebase_ok_consumes_survival_witness() {
         pid,
         PostFirePhase::Rebasing(ProbeSlot::empty()),
         BurstIntent::Standard,
-        anchor,
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
@@ -6393,9 +6389,11 @@ fn dispatch_quiescence_ok_stable_forced_emits_diagnostic_only_when_disagreed() {
         let state = active_pre_fire_burst(
             &mut e,
             pid,
-            PreFirePhase::Verifying(ProbeSlot::empty()),
+            PreFirePhase::Verifying {
+                slot: ProbeSlot::empty(),
+                target: anchor,
+            },
             BurstIntent::Standard,
-            anchor,
             now,
         );
         if let Some(p) = e.profiles.get_mut(pid) {
@@ -6452,9 +6450,11 @@ fn dispatch_quiescence_ok_abandon_emits_unreadable_and_finishes() {
     let state = active_pre_fire_burst(
         &mut e,
         pid,
-        PreFirePhase::Verifying(ProbeSlot::empty()),
+        PreFirePhase::Verifying {
+            slot: ProbeSlot::empty(),
+            target: anchor,
+        },
         BurstIntent::Standard,
-        anchor,
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
@@ -6513,7 +6513,7 @@ fn dispatch_quiescence_ok_abandon_emits_unreadable_and_finishes() {
 #[test]
 fn dispatch_rebase_ok_stable_forced_emits_exactly_one_ceiling_diagnostic() {
     for (disagreed, expected_loud) in [(false, false), (true, true)] {
-        let (mut e, pid, _sid, anchor, now) = engine_with_attached_sub();
+        let (mut e, pid, _sid, _anchor, now) = engine_with_attached_sub();
         let _ = e.cancel_all_in_flight_probes();
 
         let baseline = dir_tree_snap(vec![("seed", EntryKind::File, 1)]);
@@ -6524,7 +6524,6 @@ fn dispatch_rebase_ok_stable_forced_emits_exactly_one_ceiling_diagnostic() {
             pid,
             PostFirePhase::Rebasing(ProbeSlot::empty()),
             BurstIntent::Standard,
-            anchor,
             now,
         );
         if let Some(p) = e.profiles.get_mut(pid) {
@@ -6590,9 +6589,11 @@ fn seed_recovery_seal_consumes_survival_witness() {
     let state = active_pre_fire_burst(
         &mut e,
         pid,
-        PreFirePhase::Verifying(ProbeSlot::empty()),
+        PreFirePhase::Verifying {
+            slot: ProbeSlot::empty(),
+            target: anchor,
+        },
         BurstIntent::Seed,
-        anchor,
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
@@ -6651,9 +6652,11 @@ fn seed_recovery_fire_consumes_survival_witness_eagerly() {
     let state = active_pre_fire_burst(
         &mut e,
         pid,
-        PreFirePhase::Verifying(ProbeSlot::empty()),
+        PreFirePhase::Verifying {
+            slot: ProbeSlot::empty(),
+            target: anchor,
+        },
         BurstIntent::Seed,
-        anchor,
         now,
     );
     e.subs.mark_fired(sid);
@@ -6761,9 +6764,11 @@ fn per_file_drift_dropped_on_recovery_emits_once_on_real_drift() {
     let state = active_pre_fire_burst(
         &mut e,
         pid,
-        PreFirePhase::Verifying(ProbeSlot::empty()),
+        PreFirePhase::Verifying {
+            slot: ProbeSlot::empty(),
+            target: anchor,
+        },
         BurstIntent::Seed,
-        anchor,
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
@@ -6817,9 +6822,11 @@ fn per_file_drift_dropped_on_recovery_silent_on_byte_identical_recovery() {
     let state = active_pre_fire_burst(
         &mut e,
         pid,
-        PreFirePhase::Verifying(ProbeSlot::empty()),
+        PreFirePhase::Verifying {
+            slot: ProbeSlot::empty(),
+            target: anchor,
+        },
         BurstIntent::Seed,
-        anchor,
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {
@@ -6879,9 +6886,11 @@ fn per_file_drift_dropped_on_recovery_gated_by_per_stable_file_scope() {
     let state = active_pre_fire_burst(
         &mut e,
         pid,
-        PreFirePhase::Verifying(ProbeSlot::empty()),
+        PreFirePhase::Verifying {
+            slot: ProbeSlot::empty(),
+            target: anchor,
+        },
         BurstIntent::Seed,
-        anchor,
         now,
     );
     if let Some(p) = e.profiles.get_mut(pid) {

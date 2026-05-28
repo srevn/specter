@@ -413,7 +413,7 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
             e.profiles().get(pid_parent).unwrap().state(),
             ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
-                    phase: PreFirePhase::Verifying(_),
+                    phase: PreFirePhase::Verifying { .. },
                     ..
                 }),
                 BurstFinish::ReturnToIdle
@@ -644,7 +644,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
             e.profiles().get(pid_parent).unwrap().state(),
             ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
-                    phase: PreFirePhase::Verifying(_),
+                    phase: PreFirePhase::Verifying { .. },
                     ..
                 }),
                 BurstFinish::ReturnToIdle
@@ -894,7 +894,7 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
             e.profiles().get(pid_a).unwrap().state(),
             ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
-                    phase: PreFirePhase::Verifying(_),
+                    phase: PreFirePhase::Verifying { .. },
                     ..
                 }),
                 BurstFinish::ReturnToIdle
@@ -1261,7 +1261,7 @@ fn global_overflow_excludes_draining_ancestor_keeps_reconfirm() {
             e.profiles().get(pid_parent).unwrap().state(),
             ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
-                    phase: PreFirePhase::Verifying(_),
+                    phase: PreFirePhase::Verifying { .. },
                     intent: BurstIntent::Standard,
                     ..
                 }),
@@ -1334,7 +1334,7 @@ fn resource_overflow_excludes_draining_ancestor_keeps_reconfirm() {
             e.profiles().get(pid_parent).unwrap().state(),
             ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
-                    phase: PreFirePhase::Verifying(_),
+                    phase: PreFirePhase::Verifying { .. },
                     intent: BurstIntent::Standard,
                     ..
                 }),
@@ -1410,7 +1410,7 @@ fn overflow_on_draining_reap_ancestor_defers_reap_to_reconfirm() {
             e.profiles().get(pid_parent).unwrap().state(),
             ProfileState::Active(
                 ActiveBurst::PreFire(PreFireBurst {
-                    phase: PreFirePhase::Verifying(_),
+                    phase: PreFirePhase::Verifying { .. },
                     intent: BurstIntent::Standard,
                     ..
                 }),

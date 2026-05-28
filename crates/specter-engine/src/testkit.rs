@@ -341,7 +341,7 @@ pub fn assert_seed_verifying(
 ) -> (ProbeCorrelation, Instant) {
     match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => assert!(
-            matches!(pre.phase, PreFirePhase::Verifying(_)),
+            matches!(pre.phase, PreFirePhase::Verifying { .. }),
             "expected {pid:?} in cold-arm Active(PreFire(Verifying)), got phase {:?}",
             pre.phase,
         ),

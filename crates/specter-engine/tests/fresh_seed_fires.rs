@@ -86,7 +86,7 @@ fn seed_cycle(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Insta
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(
             ActiveBurst::PreFire(PreFireBurst {
-                phase: PreFirePhase::Verifying(_),
+                phase: PreFirePhase::Verifying { .. },
                 ..
             }),
             _,

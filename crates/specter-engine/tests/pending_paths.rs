@@ -100,7 +100,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
             assert_eq!(pre.intent, specter_core::BurstIntent::Seed);
             assert!(
-                matches!(pre.phase, specter_core::PreFirePhase::Verifying(_)),
+                matches!(pre.phase, specter_core::PreFirePhase::Verifying { .. }),
                 "cold-arm Seed opens Verifying-first; got {:?}",
                 pre.phase,
             );

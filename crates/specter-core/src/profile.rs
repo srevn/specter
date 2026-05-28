@@ -29,8 +29,8 @@ use std::time::{Duration, Instant};
 /// [`PreFireBurst`] to [`PostFireBurst`]: the two sides have disjoint
 /// valid mutators, valid timers, valid probe responses, and accumulator
 /// semantics. Encoding the split at the type level means a field that
-/// has no post-fire consumer (e.g. `forced`, `probe_target`,
-/// `last_event_time`) cannot leak across the boundary by construction.
+/// has no post-fire consumer (e.g. `forced`, `last_event_time`) cannot
+/// leak across the boundary by construction.
 ///
 /// **Pre-fire** (`Batching | Verifying | Draining`): event-driven
 /// debounce window, in-flight verify or self-stable / descendants-pending
@@ -199,8 +199,8 @@ fn common_prefix<'a>(a: &'a Path, b: &Path) -> &'a Path {
 /// Pre-fire lifecycle — every phase before the fire transition.
 ///
 /// Fields are split across three roles:
-/// - **Burst-scoped invariants** (`intent`, `forced`, `burst_deadline`,
-///   `probe_target`): survive every pre-fire phase transition.
+/// - **Burst-scoped invariants** (`intent`, `forced`, `burst_deadline`):
+///   survive every pre-fire phase transition.
 /// - **Pre-fire event state** (`dirty`, `last_event_time`): populated
 ///   by `event_drives_batching` on every `FsEvent`, for both intents
 ///   (both burst constructors are Batching-first). `dirty`'s captured
@@ -208,6 +208,10 @@ fn common_prefix<'a>(a: &'a Path, b: &Path) -> &'a Path {
 ///   `transition_to_verifying` for a Standard burst, and live-but-inert
 ///   for a Seed (anchor target + `WholeSubtree`); `last_event_time` is
 ///   the settle deadline's source of truth for both.
+/// - **Phase-resident facts** ([`PreFirePhase::Verifying`]'s `target`):
+///   the probe's resource target lives on the variant's payload, so it
+///   exists exactly when a probe does. No placeholder field carries
+///   across `Batching` / `Draining` where no probe is in flight.
 ///
 /// `dirty` is preserved across the burst's pre-fire lifetime because
 /// the obligation + scope are re-projected from it at every reconfirm
@@ -221,16 +225,6 @@ fn common_prefix<'a>(a: &'a Path, b: &Path) -> &'a Path {
 /// this struct, so they survive the in-place phase swaps of the
 /// pre-fire lifetime; struct-local fields can't leak across the typed
 /// move to [`PostFireBurst`] at the fire boundary.
-///
-/// `probe_target` is the resource id of the latest emitted probe.
-/// Initialised to the Profile's anchor at burst start; overwritten by
-/// `transition_to_verifying` (LCA for Standard, anchor for Seed) and by
-/// `transition_to_rebasing` (anchor unconditionally). Non-Optional —
-/// the anchor is a meaningful pre-probe initial value, and every
-/// reader either knows it's been written or correctly treats it as the
-/// fallback. The prior `Option<ResourceId>` with a `unwrap_or(anchor)`
-/// fallback at every reader was the same semantics with one extra
-/// nullability layer.
 ///
 /// `last_event_time` is the source of truth for the settle deadline:
 /// the settle timer is scheduled once on Batching entry and reschedules
@@ -273,25 +267,6 @@ pub struct PreFireBurst {
     ///   no baseline, so every restart is a fresh Seed). A recovery Seed
     ///   (`any_fired`) ignores this and uses the drift oracle instead.
     pub dirty: DirtyProvenance,
-    /// Latest probe target. Initialised to the Profile's anchor at
-    /// burst start. Overwritten by `transition_to_verifying` to the
-    /// `pre_fire_target` result (File anchor → anchor; Seed → anchor;
-    /// Standard → the live id at the component-LCA of `dirty`'s captured
-    /// paths, a File leaf promoted to its parent Dir, anchor on any
-    /// resolution miss). `transition_to_rebasing` targets the anchor
-    /// unconditionally but does not write this field (the post-fire
-    /// phases live on `PostFireBurst`, which has no `probe_target` —
-    /// Rebasing's target is structurally fixed).
-    ///
-    /// **Draining → Verifying reconfirm.** Recomputed via the same
-    /// `pre_fire_target` rule because `dirty` is preserved across the
-    /// burst's pre-fire lifetime: production code only ever *notes* into
-    /// it, so the captured-path basis is identical at the reconfirm.
-    /// The probe target and obligation derive from the captured paths
-    /// (history), so a slot reaped during Draining cannot collapse
-    /// either — only the live-id *resolution* may fall back to the
-    /// anchor, which is strictly wider and never clips a chain.
-    pub probe_target: ResourceId,
     /// Wall-clock instant of the most recent `FsEvent` that drove this
     /// burst. The **source of truth** for the Batching settle deadline:
     /// the live settle timer's heap entry pins to a fixed deadline
@@ -371,9 +346,10 @@ pub struct PreFireBurst {
 ///
 /// `Batching` carries its own correlation token (`settle_timer: TimerId`)
 /// because timer correlation is per-Burst and has no peer slot to live
-/// on. `Verifying` carries a [`ProbeSlot`]: the pre-fire stability
-/// probe's liveness *and* identity live on the phase, so a verify in
-/// flight without its correlation is unconstructable and I5 ("at most
+/// on. `Verifying` carries a [`ProbeSlot`] and the probe's resource
+/// target: the pre-fire stability probe's liveness, identity, *and*
+/// scope all live on the phase, so a verify in flight without a
+/// correlation or without a target is unconstructable and I5 ("at most
 /// one outstanding probe") is a representability property of the single
 /// slot. `Draining` carries no correlation token of its own: its exit
 /// is driven by a fresh query over the live tree
@@ -385,25 +361,39 @@ pub enum PreFirePhase {
     /// timer; an `FsEvent` reschedules it (`event_drives_batching`),
     /// timer expiry advances to `Verifying` (`transition_to_verifying`).
     Batching { settle_timer: TimerId },
-    /// Pre-fire stability probe. The [`ProbeSlot`] is armed with the
-    /// correlation the response must echo while the probe is in flight;
-    /// it is empty only for the transient post-Cancel window before the
-    /// burst re-arms `Batching` (`event_drives_batching`). Consuming the
-    /// response disarms the slot exactly once — the structural
-    /// consume-once guarantee. Constructing the variant *requires* a
-    /// slot, so a verify phase without a correlation cannot exist:
+    /// Pre-fire stability probe.
+    ///
+    /// `slot` is armed with the correlation the response must echo while
+    /// the probe is in flight; it is empty only for the transient
+    /// post-Cancel window before the burst re-arms `Batching`
+    /// (`event_drives_batching`). Consuming the response disarms the
+    /// slot exactly once — the structural consume-once guarantee.
+    ///
+    /// `target` is the resource id the probe was scoped to, computed at
+    /// construction by `pre_fire_target` and immutable for the variant's
+    /// lifetime. For Standard bursts: the live id at the component-LCA
+    /// of `dirty`'s captured paths (File leaf promoted to its parent
+    /// Dir; anchor on any resolution miss). For Seed bursts (triggered
+    /// or cold-walk): the Profile's anchor. The Verifying response reads
+    /// this for the post-fire snapshot-commit target.
+    ///
+    /// Constructing the variant *requires* both fields, so a verify
+    /// phase without a correlation or without a target cannot exist:
     ///
     /// ```compile_fail
-    /// use specter_core::PreFirePhase;
-    /// // `Verifying` is not unit — a bare tag is not a `PreFirePhase`.
-    /// let _: PreFirePhase = PreFirePhase::Verifying;
+    /// use specter_core::{PreFirePhase, ProbeSlot};
+    /// // Missing `target` — the struct literal is incomplete.
+    /// let _ = PreFirePhase::Verifying { slot: ProbeSlot::empty() };
     /// ```
     ///
     /// ```
-    /// use specter_core::{PreFirePhase, ProbeSlot};
-    /// let _ = PreFirePhase::Verifying(ProbeSlot::empty());
+    /// use specter_core::{PreFirePhase, ProbeSlot, ResourceId};
+    /// let _ = PreFirePhase::Verifying {
+    ///     slot: ProbeSlot::empty(),
+    ///     target: ResourceId::default(),
+    /// };
     /// ```
-    Verifying(ProbeSlot),
+    Verifying { slot: ProbeSlot, target: ResourceId },
     /// Self-stable; descendants pending. The stable snapshot lives on
     /// `Profile.current` — `fire_or_seal` commits `current` to the
     /// stable response immediately before classification, so the
@@ -439,7 +429,8 @@ pub enum PreFirePhase {
 ///   carried by [`CeilingState::Armed`]. The stale pre-fire timer
 ///   lazy-drops via [`PostFireBurst::timer_token`]'s `Settle |
 ///   BurstDeadline` arm.
-/// - No `probe_target`: Rebasing always targets the Profile's anchor.
+/// - No probe target on the post-fire side: Rebasing always targets
+///   the Profile's anchor (the variant carries the `ProbeSlot` only).
 ///
 /// The pre-fire `dirty` (the captured-path basis) also does not cross;
 /// the post-fire `final_window_residual` is a *distinct, freshly-empty*
@@ -926,7 +917,7 @@ impl PreFireBurst {
         match kind {
             TimerKind::Settle => match &self.phase {
                 PreFirePhase::Batching { settle_timer } => Some(*settle_timer),
-                PreFirePhase::Verifying(_) | PreFirePhase::Draining => None,
+                PreFirePhase::Verifying { .. } | PreFirePhase::Draining => None,
             },
             TimerKind::BurstDeadline => Some(self.burst_deadline),
             TimerKind::AwaitGateDeadline | TimerKind::PostFireSettle | TimerKind::RebaseCeiling => {
@@ -976,7 +967,9 @@ impl PreFireBurst {
     ///   fire. The post-fire side opens its own `forced: false`; the
     ///   rebase-loop ceiling latch ([`PostFireBurst::forced`]) is a
     ///   disjoint decision over the post-command tree.
-    /// - `probe_target` — Rebasing always targets the anchor.
+    /// - Pre-fire probe target — homed on
+    ///   [`PreFirePhase::Verifying`]'s payload, so it dies with the
+    ///   pre-fire phase. Rebasing always targets the anchor.
     /// - `dirty` — pre-fire-only event state. Post-fire opens a
     ///   *fresh, empty* `final_window_residual` (the fire-tail
     ///   residual), not the pre-fire captured-path provenance.
@@ -1186,14 +1179,15 @@ impl PostFireBurst {
     /// instant, not the absorbed events' (those timestamps are discarded
     /// at absorb). The restarted burst's settle window therefore carries
     /// a bounded ≤ one-`settle` extra re-fire latency in exchange for
-    /// never losing the residual. `probe_target` is the anchor
-    /// placeholder, overwritten by the next `transition_to_verifying`
-    /// exactly as in a fresh `start_standard_burst`. The post-fire
-    /// `forced` ceiling latch, `rebase_ceiling` timer lifecycle, and
-    /// `last_certified_hash` N=2 sample carrier are dropped by
-    /// omission — all three are post-fire-only and tied to the now-
-    /// discarded post-fire sample sequence; the restarted pre-fire
-    /// burst opens its own fresh `burst_deadline` and fresh
+    /// never losing the residual. The restart lands in `Batching`, so
+    /// no probe is in flight; the next `transition_to_verifying`
+    /// constructs a [`PreFirePhase::Verifying`] with a freshly computed
+    /// target, exactly as in a fresh `start_standard_burst`. The
+    /// post-fire `forced` ceiling latch, `rebase_ceiling` timer
+    /// lifecycle, and `last_certified_hash` N=2 sample carrier are
+    /// dropped by omission — all three are post-fire-only and tied to
+    /// the now-discarded post-fire sample sequence; the restarted
+    /// pre-fire burst opens its own fresh `burst_deadline` and fresh
     /// `last_certified_hash: None`, exactly as a fresh
     /// `start_standard_burst`.
     ///
@@ -1204,7 +1198,6 @@ impl PostFireBurst {
         self,
         burst_deadline: TimerId,
         settle_timer: TimerId,
-        anchor: ResourceId,
         now: Instant,
     ) -> PreFireBurst {
         debug_assert!(
@@ -1219,7 +1212,6 @@ impl PostFireBurst {
             intent: BurstIntent::Standard,
             forced: false,
             dirty: residual,
-            probe_target: anchor,
             last_event_time: Some(now),
             last_certified_hash: None,
         }
@@ -1485,7 +1477,7 @@ impl ProfileState {
             Self::Pending(_) => StateLabel::Pending,
             Self::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
                 PreFirePhase::Batching { .. } => StateLabel::Batching,
-                PreFirePhase::Verifying(_) => StateLabel::Verifying,
+                PreFirePhase::Verifying { .. } => StateLabel::Verifying,
                 PreFirePhase::Draining => StateLabel::Draining,
             },
             Self::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
@@ -1709,7 +1701,7 @@ impl ProfileState {
     pub const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
         match self {
             Self::Active(ActiveBurst::PreFire(burst), _) => match &burst.phase {
-                PreFirePhase::Verifying(slot) => slot.correlation(),
+                PreFirePhase::Verifying { slot, .. } => slot.correlation(),
                 PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
             },
             Self::Active(ActiveBurst::PostFire(burst), _) => match &burst.phase {
@@ -1734,7 +1726,7 @@ impl ProfileState {
     pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
         match self {
             Self::Active(ActiveBurst::PreFire(burst), _) => match &mut burst.phase {
-                PreFirePhase::Verifying(slot) => slot.disarm(),
+                PreFirePhase::Verifying { slot, .. } => slot.disarm(),
                 PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
             },
             Self::Active(ActiveBurst::PostFire(burst), _) => match &mut burst.phase {
@@ -2881,8 +2873,9 @@ impl Profile {
     /// `state == Active(PreFire(_), _)` — the `&self` mirror of
     /// [`Self::pre_fire_burst_mut`]. A read of the state's structural
     /// shape, never a transition; the engine's pre-fire dispatch reads
-    /// (`probe_target`, the Seed first-fire witness `dirty`) route
-    /// through this instead of re-matching `state()` inline.
+    /// (the [`PreFirePhase::Verifying`] target, the Seed first-fire
+    /// witness `dirty`) route through this instead of re-matching
+    /// `state()` inline.
     #[must_use]
     pub const fn pre_fire_burst(&self) -> Option<&PreFireBurst> {
         match &self.state {
@@ -4360,7 +4353,7 @@ mod tests {
         assert!(dp.chains().is_empty(), "cleared dirty ⇒ empty chains");
     }
 
-    fn batching_burst(settle: TimerId, deadline: TimerId, anchor: ResourceId) -> PreFireBurst {
+    fn batching_burst(settle: TimerId, deadline: TimerId) -> PreFireBurst {
         PreFireBurst {
             burst_deadline: deadline,
             phase: PreFirePhase::Batching {
@@ -4369,20 +4362,18 @@ mod tests {
             intent: BurstIntent::Standard,
             forced: false,
             dirty: DirtyProvenance::new(),
-            probe_target: anchor,
             last_event_time: None,
             last_certified_hash: None,
         }
     }
 
-    fn unit_pre(phase: PreFirePhase, deadline: TimerId, anchor: ResourceId) -> PreFireBurst {
+    fn unit_pre(phase: PreFirePhase, deadline: TimerId) -> PreFireBurst {
         PreFireBurst {
             burst_deadline: deadline,
             phase,
             intent: BurstIntent::Standard,
             forced: false,
             dirty: DirtyProvenance::new(),
-            probe_target: anchor,
             last_event_time: None,
             last_certified_hash: None,
         }
@@ -4391,9 +4382,7 @@ mod tests {
     /// Settle on Batching returns the carried token.
     #[test]
     fn timer_token_settle_on_batching_returns_settle_timer() {
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("anchor", ResourceRole::User);
-        let pre = batching_burst(tid(7), tid(99), r);
+        let pre = batching_burst(tid(7), tid(99));
         assert_eq!(pre.timer_token(TimerKind::Settle), Some(tid(7)));
     }
 
@@ -4407,10 +4396,13 @@ mod tests {
             PreFirePhase::Batching {
                 settle_timer: tid(1),
             },
-            PreFirePhase::Verifying(ProbeSlot::empty()),
+            PreFirePhase::Verifying {
+                slot: ProbeSlot::empty(),
+                target: r,
+            },
             PreFirePhase::Draining,
         ] {
-            let pre = unit_pre(phase, tid(42), r);
+            let pre = unit_pre(phase, tid(42));
             assert_eq!(pre.timer_token(TimerKind::BurstDeadline), Some(tid(42)));
         }
     }
@@ -4422,10 +4414,13 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         for phase in [
-            PreFirePhase::Verifying(ProbeSlot::empty()),
+            PreFirePhase::Verifying {
+                slot: ProbeSlot::empty(),
+                target: r,
+            },
             PreFirePhase::Draining,
         ] {
-            let pre = unit_pre(phase, tid(42), r);
+            let pre = unit_pre(phase, tid(42));
             assert!(pre.timer_token(TimerKind::Settle).is_none());
         }
     }
@@ -4433,9 +4428,7 @@ mod tests {
     /// AwaitGateDeadline is type-impossible on pre-fire — returns None.
     #[test]
     fn timer_token_await_gate_is_none_on_prefire() {
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("anchor", ResourceRole::User);
-        let pre = batching_burst(tid(1), tid(2), r);
+        let pre = batching_burst(tid(1), tid(2));
         assert!(pre.timer_token(TimerKind::AwaitGateDeadline).is_none());
     }
 
@@ -4627,9 +4620,7 @@ mod tests {
     /// ActiveBurst delegates to the held inner type.
     #[test]
     fn active_burst_timer_token_dispatches_by_lifecycle() {
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("anchor", ResourceRole::User);
-        let pre = ActiveBurst::PreFire(batching_burst(tid(3), tid(4), r));
+        let pre = ActiveBurst::PreFire(batching_burst(tid(3), tid(4)));
         assert_eq!(pre.timer_token(TimerKind::Settle), Some(tid(3)));
         assert_eq!(pre.timer_token(TimerKind::BurstDeadline), Some(tid(4)));
         assert!(pre.timer_token(TimerKind::AwaitGateDeadline).is_none());
@@ -4685,10 +4676,8 @@ mod tests {
     /// ProfileState::Active delegates to the held ActiveBurst.
     #[test]
     fn profile_state_timer_token_active_delegates_to_burst() {
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("anchor", ResourceRole::User);
         let state = ProfileState::Active(
-            ActiveBurst::PreFire(batching_burst(tid(11), tid(12), r)),
+            ActiveBurst::PreFire(batching_burst(tid(11), tid(12))),
             BurstFinish::ReturnToIdle,
         );
         assert_eq!(state.timer_token(TimerKind::Settle), Some(tid(11)));
@@ -4704,14 +4693,14 @@ mod tests {
 
         // Active PreFire Draining — true.
         let draining = ProfileState::Active(
-            ActiveBurst::PreFire(unit_pre(PreFirePhase::Draining, tid(1), r)),
+            ActiveBurst::PreFire(unit_pre(PreFirePhase::Draining, tid(1))),
             BurstFinish::ReturnToIdle,
         );
         assert!(draining.is_draining());
 
         // BurstFinish doesn't influence the predicate.
         let draining_reap = ProfileState::Active(
-            ActiveBurst::PreFire(unit_pre(PreFirePhase::Draining, tid(1), r)),
+            ActiveBurst::PreFire(unit_pre(PreFirePhase::Draining, tid(1))),
             BurstFinish::Reap,
         );
         assert!(draining_reap.is_draining());
@@ -4726,14 +4715,16 @@ mod tests {
             )),
             ProfileState::Active(
                 ActiveBurst::PreFire(unit_pre(
-                    PreFirePhase::Verifying(ProbeSlot::empty()),
+                    PreFirePhase::Verifying {
+                        slot: ProbeSlot::empty(),
+                        target: r,
+                    },
                     tid(1),
-                    r,
                 )),
                 BurstFinish::ReturnToIdle,
             ),
             ProfileState::Active(
-                ActiveBurst::PreFire(batching_burst(tid(1), tid(2), r)),
+                ActiveBurst::PreFire(batching_burst(tid(1), tid(2))),
                 BurstFinish::ReturnToIdle,
             ),
             ProfileState::Active(
@@ -4786,7 +4777,7 @@ mod tests {
 
         assert!(ProfileState::Idle.descent_state().is_none());
         let active = ProfileState::Active(
-            ActiveBurst::PreFire(batching_burst(tid(1), tid(2), r)),
+            ActiveBurst::PreFire(batching_burst(tid(1), tid(2))),
             BurstFinish::ReturnToIdle,
         );
         assert!(active.descent_state().is_none());
@@ -4860,7 +4851,7 @@ mod tests {
         assert_eq!(ProfileState::Idle.probe_correlation(), None);
         assert_eq!(ProfileState::Idle.take_probe(), None);
         let mut active = ProfileState::Active(
-            ActiveBurst::PreFire(batching_burst(tid(1), tid(2), r)),
+            ActiveBurst::PreFire(batching_burst(tid(1), tid(2))),
             BurstFinish::ReturnToIdle,
         );
         assert_eq!(active.probe_correlation(), None);
@@ -4883,9 +4874,9 @@ mod tests {
         ))
     }
 
-    fn active_prefire(r: ResourceId) -> ProfileState {
+    fn active_prefire() -> ProfileState {
         ProfileState::Active(
-            ActiveBurst::PreFire(batching_burst(tid(1), tid(2), r)),
+            ActiveBurst::PreFire(batching_burst(tid(1), tid(2))),
             BurstFinish::ReturnToIdle,
         )
     }
@@ -4966,7 +4957,7 @@ mod tests {
         assert_eq!(p.note_effect_completion(), AwaitVerdict::NotAwaiting);
         p.transition_state(pending(r));
         assert_eq!(p.note_effect_completion(), AwaitVerdict::NotAwaiting);
-        p.transition_state(active_prefire(r));
+        p.transition_state(active_prefire());
         assert_eq!(p.note_effect_completion(), AwaitVerdict::NotAwaiting);
 
         p.transition_state(ProfileState::Active(
@@ -5009,7 +5000,6 @@ mod tests {
         let pre = rebasing_post(BurstIntent::Standard, residual).into_pre_fire_residual(
             tid(7),
             tid(8),
-            anchor,
             now,
         );
 
@@ -5025,7 +5015,6 @@ mod tests {
             expected_chains(&["/w/c1", "/w/c2"]),
             "the move preserves the residual's captured paths",
         );
-        assert_eq!(pre.probe_target, anchor);
         assert_eq!(pre.last_event_time, Some(now));
     }
 
@@ -5048,7 +5037,6 @@ mod tests {
         let pre = rebasing_post(BurstIntent::Seed, residual).into_pre_fire_residual(
             tid(1),
             tid(2),
-            anchor,
             std::time::Instant::now(),
         );
         assert_eq!(
@@ -5073,10 +5061,8 @@ mod tests {
     #[test]
     #[should_panic(expected = "empty residual")]
     fn into_pre_fire_residual_empty_residual_trips_assert() {
-        let mut tree = Tree::new();
-        let anchor = tree.ensure_root("anchor", ResourceRole::User);
         let _ = rebasing_post(BurstIntent::Standard, DirtyProvenance::new())
-            .into_pre_fire_residual(tid(1), tid(2), anchor, std::time::Instant::now());
+            .into_pre_fire_residual(tid(1), tid(2), std::time::Instant::now());
     }
 
     /// The pre-fire N=2 sample carrier drops by omission at the fire
@@ -5089,9 +5075,7 @@ mod tests {
     /// so cross-carrying a hash would be a category error.
     #[test]
     fn pre_fire_carrier_drops_at_into_post_fire() {
-        let mut tree = Tree::new();
-        let r = tree.ensure_root("anchor", ResourceRole::User);
-        let mut pre = batching_burst(tid(7), tid(99), r);
+        let mut pre = batching_burst(tid(7), tid(99));
         let prior = pre.advance_certified_sample(0xCAFE_F00D_u128);
         assert_eq!(prior, None, "first sample on a fresh burst returns None");
         assert_eq!(pre.last_certified_hash, Some(0xCAFE_F00D_u128));
@@ -5124,7 +5108,7 @@ mod tests {
         assert_eq!(prior, None, "first sample on a fresh burst returns None");
         assert_eq!(post.last_certified_hash, Some(0xDEAD_BEEF_u128));
 
-        let pre = post.into_pre_fire_residual(tid(1), tid(2), anchor, std::time::Instant::now());
+        let pre = post.into_pre_fire_residual(tid(1), tid(2), std::time::Instant::now());
         assert_eq!(
             pre.last_certified_hash, None,
             "the typed fire-tail restart drops the post-fire carrier by omission — \
@@ -5392,7 +5376,7 @@ mod tests {
         p.transition_state(active_postfire());
         assert!(p.pre_fire_burst_mut().is_none(), "PostFire has no pre-fire");
 
-        p.transition_state(active_prefire(r));
+        p.transition_state(active_prefire());
         let pre = p.pre_fire_burst_mut().expect("PreFire carries the payload");
         pre.forced = true;
         assert!(
@@ -5408,7 +5392,7 @@ mod tests {
         let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
 
         assert!(p.post_fire_burst_mut().is_none(), "Idle has no post-fire");
-        p.transition_state(active_prefire(r));
+        p.transition_state(active_prefire());
         assert!(
             p.post_fire_burst_mut().is_none(),
             "PreFire has no post-fire"
@@ -5472,7 +5456,7 @@ mod tests {
         let mut q = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert!(!q.mark_active_for_reap(), "Idle cannot be marked");
         assert!(!q.clear_active_reap(), "Idle has nothing to clear");
-        q.transition_state(active_prefire(r));
+        q.transition_state(active_prefire());
         assert!(q.mark_active_for_reap(), "Active flips to Reap");
         assert!(q.mark_active_for_reap(), "already-Reap is idempotent true");
         assert!(q.clear_active_reap(), "zombie revived");
@@ -5712,7 +5696,7 @@ mod tests {
                         assert_invariants(&p, "transition_state(Pending)");
                     }
                     8 => {
-                        p.transition_state(active_prefire(r));
+                        p.transition_state(active_prefire());
                         assert_invariants(&p, "transition_state(PreFire)");
                     }
                     _ => {
