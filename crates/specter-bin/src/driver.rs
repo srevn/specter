@@ -282,12 +282,14 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// Build the driver from preconstructed pieces.
     ///
     /// The [`Reactor`] is constructed in `App::run` first because it
-    /// mints the [`mio::Waker`] (via [`WakeHandle`]) that the prober +
-    /// actuator wrappers clone before the driver gets built. It also
-    /// hands back the [`mio::Registry::try_clone()`] handle the
-    /// [`Hub`] takes to register its listener — the boot order is
-    /// therefore Reactor → wrappers → Hub → EngineDriver. Passing
-    /// both halves in here keeps the construction order honest.
+    /// anchors the canonical [`mio::Waker`] (via its `waker` field,
+    /// reached through [`Reactor::wake_handle`]) that the prober +
+    /// actuator wrappers clone before the driver gets built. The
+    /// [`Hub`]'s [`mio::Registry::try_clone()`] handle is minted by
+    /// a follow-up [`Reactor::registry_clone`] call — the boot order
+    /// is therefore Reactor → registry_clone → Hub → wake_handle
+    /// clones → wrappers → EngineDriver. Passing both halves in
+    /// here keeps the construction order honest.
     ///
     /// **Argument order matches drop order.** `ipc` precedes `reactor`
     /// in the parameter list as a syntactic mirror of the field order

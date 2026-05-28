@@ -33,7 +33,9 @@ use specter_core::{Input, SendError};
 use std::io;
 use std::sync::Arc;
 
-/// Cloneable handle to the Reactor's single mio Waker.
+/// Cloneable handle to the Reactor's single mio Waker. [`Clone`] is
+/// structurally cheap — [`Arc::clone`] of the underlying
+/// [`mio::Waker`], one atomic refcount bump per call.
 ///
 /// The `pub(crate)` constructor [`WakeHandle::new`] is the only call
 /// site of [`mio::Waker::new`] in the bin — `grep "Waker::new"`
@@ -108,10 +110,10 @@ impl WakeHandle {
 /// `Option::as_ref` branch per send — well below the noise floor
 /// for the cross-thread channel hop.
 ///
-/// Construction requires a [`WakeHandle`], which means routing
-/// through [`crate::driver::Reactor::new`]'s return value. New
-/// wake-bearing sinks drop in as `WakingSink::new(tx, handle.clone())`
-/// — the mio "one Waker per Poll" invariant stays structural.
+/// Construction requires a [`WakeHandle`], obtainable from
+/// [`crate::driver::Reactor::wake_handle`]. New wake-bearing sinks
+/// drop in as `WakingSink::new(tx, reactor.wake_handle())` — the mio
+/// "one Waker per Poll" invariant stays structural.
 pub(crate) struct WakingSink {
     /// Wrapped in [`Option`] so [`Drop`] can [`Option::take`] the
     /// inner [`Sender<Input>`] and drop it BEFORE pulsing the wake
@@ -127,8 +129,8 @@ pub(crate) struct WakingSink {
 impl WakingSink {
     /// Wrap a [`Sender<Input>`] and a [`WakeHandle`] into the
     /// wake-bearing sink. The `waker` argument is typically a
-    /// [`WakeHandle::clone`] of the handle returned from
-    /// [`crate::driver::Reactor::new`].
+    /// [`WakeHandle`] clone minted via
+    /// [`crate::driver::Reactor::wake_handle`].
     pub(crate) const fn new(tx: Sender<Input>, waker: WakeHandle) -> Self {
         Self {
             tx: Some(tx),
@@ -197,17 +199,26 @@ mod tests {
     use specter_core::{Input, ProfileId, TimerId, TimerKind};
     use std::time::{Duration, Instant};
 
-    // Both tests below clone `wake` so the underlying [`mio::Waker`]
-    // outlives the sink drop. Production already does this — the
-    // [`super::super::Reactor`] owns its own [`WakeHandle`] and clones
-    // one per wake-bearing sink. Without that outer clone, the sink's
-    // [`Drop`] runs while holding the sole reference; on Linux that
-    // closes the Waker's eventfd inside the Drop body, and the
-    // pending wake-write is lost — Linux auto-deregisters closed fds
-    // from epoll. macOS's kqueue queues the `EVFILT_USER` trigger
-    // ahead of the filter teardown, so the same setup passes on
-    // macOS even without the clone; the test would pass for the
-    // wrong reason.
+    // Both tests below construct a [`WakeHandle`] directly (no
+    // Reactor) and clone it test-side so the underlying
+    // [`mio::Waker`] outlives the [`WakingSink::Drop`]. The clone is
+    // the test's analogue of the production anchor in
+    // [`super::super::Reactor`]: there the Reactor's `waker` field
+    // holds one Arc reference for the Poll's lifetime; here the
+    // test's `wake` binding holds one Arc reference for the test
+    // function's lifetime. Both encode the same invariant —
+    // [`Arc<mio::Waker>`] refcount ≥ 1 across the [`WakingSink`]'s
+    // drop edge — which mio's contract requires for the post-drop
+    // wake to be observable.
+    //
+    // Without the clone the sink's [`Drop`] runs while holding the
+    // sole reference; on Linux that closes the Waker's eventfd
+    // inside the Drop body and the pending wake-write is lost
+    // (Linux auto-deregisters closed fds from epoll's interest and
+    // ready lists). On macOS the `EVFILT_USER` trigger queues on
+    // the kqueue's own state and survives the filter teardown, so
+    // the same setup passes on macOS even without the clone —
+    // passing for the wrong reason.
 
     /// Constructing a [`WakingSink`] and dropping it closes the
     /// paired [`crossbeam::channel::Receiver`] *and* pulses the

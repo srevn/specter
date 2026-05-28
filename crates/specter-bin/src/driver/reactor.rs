@@ -5,11 +5,13 @@
 //! Constructed once by `App::run`; owned by [`super::EngineDriver`]
 //! for the rest of the daemon's lifetime. Holds the Poll, every static
 //! fd source (watcher, config-watcher, signal pipe), the cross-thread
-//! channel receivers, and the single [`mio::Waker`] the prober +
-//! actuator wake-bearing senders clone. The IPC listener and per-conn
-//! map live on [`super::Hub`], which registers against a
-//! [`Registry::try_clone()`] handle this constructor returns; both
-//! halves share the same underlying selector.
+//! channel receivers, and the canonical [`Arc<mio::Waker>`] (held as
+//! the [`waker`](Self::wake_handle) field) the prober + actuator
+//! wake-bearing senders clone via [`Reactor::wake_handle`]. The IPC
+//! listener and per-conn map live on [`super::Hub`], which registers
+//! against a [`Registry::try_clone()`] handle minted through
+//! [`Reactor::registry_clone`]; both halves share the same underlying
+//! selector.
 //!
 //! # Drop order
 //!
@@ -34,30 +36,63 @@
 //! 4. **`watcher`** drops — closes the kqueue / inotify fd.
 //! 5. **`events`** drops — a plain `Vec<event::Event>`; no resource
 //!    implications.
-//! 6. **`poll`** drops — the underlying selector loses one
+//! 6. **`waker`** drops — releases the Reactor's [`Arc<mio::Waker>`]
+//!    reference. Any external clones still held in [`WakingSink`]s
+//!    contribute the remaining refcount; the underlying
+//!    [`mio::Waker`] closes when the last clone drops. Placed BEFORE
+//!    `poll` in field order so the refcount decrement happens while
+//!    the selector is still alive — matching mio's "Source dies
+//!    before Selector" lifecycle convention.
+//! 7. **`poll`** drops — the underlying selector loses one
 //!    Arc-reference. The [`super::Hub`] has already dropped
 //!    (field order on [`super::EngineDriver`] puts `ipc` before
 //!    `reactor`), so its [`Registry::try_clone()`] handle has
 //!    released its Arc-reference too. The selector closes here as
 //!    the last reference dies.
-//! 7. **`prober_response_rx` / `effect_complete_rx`** drop together
+//! 8. **`prober_response_rx` / `effect_complete_rx`** drop together
 //!    with the surrounding struct — pure crossbeam `Receiver` drops,
 //!    which signal `Disconnected` to the paired senders (the prober
 //!    pool's worker threads, the actuator's controller thread). Those
 //!    threads exit their loops on the next observed `Disconnected`,
 //!    so Reactor drop is the structural shutdown signal for both.
 //!
-//! The [`super::WakeHandle`] returned from [`Reactor::new`] is the
-//! single anchor for external wake-bearing senders. Late `wake()`
-//! calls against a torn-down Poll are silent no-ops (mio's documented
-//! contract).
+//! The Reactor anchors the canonical [`Arc<mio::Waker>`] via its
+//! `waker` field; [`Reactor::wake_handle`] emits clones for external
+//! senders. Late `wake()` calls against a torn-down Poll are silent
+//! no-ops (mio's documented contract).
+//!
+//! # Lifetime anchoring
+//!
+//! Every kernel-fd source registered against this Poll has its
+//! Rust-side ownership structurally bounded below by this Reactor's
+//! lifetime. The watcher, config-watcher, signal pipe, and the Waker
+//! are direct fields; the Hub's listener and per-conn streams are
+//! downstream via the [`EngineDriver`](super::EngineDriver) field
+//! order. No external consumer needs to track an fd's lifetime to
+//! reason about whether the kernel state is still observable — if
+//! the Reactor exists, the kernel state is intact.
+//!
+//! The `waker` field is the structural cap on the "Waker lifetime ≥
+//! Poll lifetime" invariant mio's rustdoc requires
+//! (`mio-1.2.0/src/waker.rs:16-17`). Linux exposes the contract:
+//! `mio::Waker` is an [`OwnedFd`](std::os::fd::OwnedFd) wrapping the
+//! eventfd, and closing it auto-removes the fd from epoll's interest
+//! AND ready lists — a Drop-fired `wake()` against the last Arc clone
+//! would be stranded. macOS satisfies the contract incidentally: the
+//! `NOTE_TRIGGER` event is queued on the kqueue's own state, so the
+//! Waker's selector-clone close does not lose the pending trigger.
+//! The Reactor's anchor closes the platform divergence — no
+//! permutation of external [`WakingSink`] drop orderings can take the
+//! Arc refcount to 0 while `Poll` is alive, so a Drop-fired wake
+//! always reaches the next `poll.poll()` call.
 //!
 //! # Visibility
 //!
 //! Every export is `pub(super)` or `pub(crate)`. The crate-visible
-//! surface is [`Reactor::new`] (called by `App::run`); every other
-//! method is `pub(super)` — only the surrounding `driver` module
-//! reaches them. `tick.rs` drives [`Reactor::poll_and_drain`];
+//! surface is [`Reactor::new`] + [`Reactor::wake_handle`] +
+//! [`Reactor::registry_clone`] (all called by `App::run`); every
+//! other method is `pub(super)` — only the surrounding `driver`
+//! module reaches them. `tick.rs` drives [`Reactor::poll_and_drain`];
 //! `forward.rs` drives [`Reactor::apply_watch_ops`]; the static
 //! token constants are imported by [`super::ipc::hub`] for the
 //! listener registration.
@@ -129,6 +164,19 @@ pub(crate) struct Reactor<W: FsWatcher = DefaultWatcher> {
     /// conns × 2 directions); the kernel coalesces ready edges so the
     /// worst case is bounded.
     events: Events,
+    /// Anchored [`WakeHandle`] — the Reactor IS the canonical owner;
+    /// external wake-bearing sinks receive clones via
+    /// [`Self::wake_handle`]. Carries one live [`Arc<mio::Waker>`]
+    /// reference for the Reactor's lifetime, so no permutation of
+    /// external [`super::WakingSink`] drops can take the refcount to
+    /// 0 while [`Poll`] is alive. See the module rustdoc's "Lifetime
+    /// anchoring" section for the cross-platform rationale.
+    ///
+    /// Field order places `waker` BEFORE `poll`: on Reactor drop the
+    /// Arc-refcount decrement happens while the selector is still
+    /// alive, matching mio's "Source dies before Selector" lifecycle
+    /// convention.
+    waker: WakeHandle,
     /// The mio reactor. Drops last (after the explicit [`Drop`] runs
     /// its deregisters) so registered Sources can finalize their fd
     /// close ahead of the underlying selector's invalidation.
@@ -215,26 +263,8 @@ pub(super) struct DrainedTick {
 }
 
 impl<W: FsWatcher> Reactor<W> {
-    /// Construct the Reactor from already-allocated kernel resources.
-    ///
-    /// Returns a triple — `(Self, WakeHandle, Registry)`:
-    ///
-    /// - [`Self`] is the Reactor itself, owning the Poll + every
-    ///   static Source.
-    /// - [`WakeHandle`] is cloned for every external sender that needs
-    ///   to wake the driver. Sharing one Waker across senders honors
-    ///   mio's "one Waker per Poll" contract — and the [`WakeHandle`]
-    ///   newtype makes that invariant structural: [`WakeHandle::new`]
-    ///   is the sole call site of [`mio::Waker::new`] in the bin, so
-    ///   a second construction site would require a fresh
-    ///   `use mio::Waker` import.
-    /// - [`Registry`] is an owned [`Registry::try_clone()`] handle
-    ///   that [`super::Hub::new`] takes to register the listener
-    ///   and (later) per-conn streams against the same underlying
-    ///   selector. Cloning the registry — rather than threading
-    ///   `&Registry` through every Hub method — keeps the
-    ///   per-call ergonomics clean: Hub's methods carry no
-    ///   registry parameter.
+    /// Construct the Reactor, allocating its [`mio::Poll`] and
+    /// anchoring its [`WakeHandle`].
     ///
     /// `watcher` is any [`FsWatcher`] (production passes
     /// [`DefaultWatcher`]; tests pass `MockFsWatcher`). `config_watcher`
@@ -244,23 +274,31 @@ impl<W: FsWatcher> Reactor<W> {
     /// `prober_response_rx` / `effect_complete_rx` are the consumer
     /// halves of the wake'd channels paired with the
     /// `WakingProberResponseSender` / `WakingEffectCompleteSender`
-    /// adapters (constructed at `App::run` with a clone of the
-    /// [`WakeHandle`] returned from this constructor).
+    /// adapters built at `App::run` time using
+    /// [`Self::wake_handle`] clones.
+    ///
+    /// The constructor mints the [`WakeHandle`] (the sole call site
+    /// of [`WakeHandle::new`] in the bin, which is itself the sole
+    /// call site of [`mio::Waker::new`] — making mio's "one Waker
+    /// per Poll" contract structural by typing) and anchors it as
+    /// the `waker` field. Downstream consumers receive clones via
+    /// [`Self::wake_handle`]; the Hub registers against a
+    /// [`Registry::try_clone()`] obtained through
+    /// [`Self::registry_clone`].
     ///
     /// # Errors
     ///
     /// Propagates [`io::Error`] from `Poll::new`, [`WakeHandle::new`],
-    /// any of the three static `Source` registrations, or
-    /// `Registry::try_clone`. All paths are programmer-error or
-    /// kernel-pressure failures (`EMFILE` on the Waker fd, selector
-    /// cloning OOM) — the caller treats any error as startup-fatal.
+    /// or any of the three static `Source` registrations. All paths
+    /// are programmer-error or kernel-pressure failures (`EMFILE` on
+    /// the Waker fd) — the caller treats any error as startup-fatal.
     pub(crate) fn new(
         watcher: W,
         mut config_watcher: Option<DefaultConfigWatcher>,
         signals: SignalPipe,
         prober_response_rx: Receiver<Input>,
         effect_complete_rx: Receiver<Input>,
-    ) -> io::Result<(Self, WakeHandle, Registry)> {
+    ) -> io::Result<Self> {
         let poll = Poll::new()?;
         let waker = WakeHandle::new(poll.registry(), TOKEN_WAKER)?;
 
@@ -289,25 +327,54 @@ impl<W: FsWatcher> Reactor<W> {
         poll.registry()
             .register(&mut SourceFd(&signal_raw), TOKEN_SIGNAL, Interest::READABLE)?;
 
-        // Mint the registry clone for [`super::Hub`] BEFORE
-        // returning. The clone holds an Arc of the same underlying
-        // selector — registrations against either handle land in the
-        // same kernel-side state.
-        let registry_for_ipc = poll.registry().try_clone()?;
-
-        Ok((
-            Self {
-                signals,
-                config_watcher,
-                watcher,
-                events: Events::with_capacity(64),
-                poll,
-                prober_response_rx,
-                effect_complete_rx,
-            },
+        Ok(Self {
+            signals,
+            config_watcher,
+            watcher,
+            events: Events::with_capacity(64),
             waker,
-            registry_for_ipc,
-        ))
+            poll,
+            prober_response_rx,
+            effect_complete_rx,
+        })
+    }
+
+    /// Mint a clone of the anchored [`WakeHandle`].
+    ///
+    /// Total fn — [`Arc::clone`](std::sync::Arc::clone) is infallible
+    /// and structurally cheap (one atomic refcount bump). Every
+    /// downstream wake-bearing sink calls this to receive a clone
+    /// whose lifetime is bounded BELOW by the Reactor's: the Arc
+    /// refcount has a floor of 1 (the Reactor's own `waker` field)
+    /// for the entire span of the Reactor's existence, so no
+    /// permutation of external clone-drop orderings can take the
+    /// refcount to 0 while [`Poll`] is alive. See the module
+    /// rustdoc's "Lifetime anchoring" section for the cross-platform
+    /// rationale.
+    #[must_use]
+    pub(crate) fn wake_handle(&self) -> WakeHandle {
+        self.waker.clone()
+    }
+
+    /// Mint a [`Registry::try_clone()`] handle for the
+    /// [`super::Hub`].
+    ///
+    /// Fallible — [`Registry::try_clone`] is a syscall that can fail
+    /// under kernel pressure (selector clone OOM). Callers translate
+    /// the error to startup-fatal; this method exists so the call
+    /// site sees the fallibility explicitly rather than hiding it
+    /// behind a tuple-return contract the constructor would carry
+    /// forever.
+    ///
+    /// The returned [`Registry`] handle shares the underlying
+    /// selector with the Reactor's [`Poll`] — registrations against
+    /// either land in the same kernel-side state.
+    ///
+    /// # Errors
+    ///
+    /// Propagates [`io::Error`] from [`Registry::try_clone`].
+    pub(crate) fn registry_clone(&self) -> io::Result<Registry> {
+        self.poll.registry().try_clone()
     }
 
     /// Block on mio's Poll with `timeout`, drain every ready static
@@ -583,7 +650,12 @@ impl<W: FsWatcher> Drop for Reactor<W> {
         let signal_raw = self.signals.as_fd().as_raw_fd();
         let _ = registry.deregister(&mut SourceFd(&signal_raw));
         // Field-order drop (signals → config_watcher → watcher →
-        // events → poll → receivers) runs after this method returns.
+        // events → waker → poll → receivers) runs after this method
+        // returns. The `waker` field's drop releases the Reactor's
+        // [`Arc<mio::Waker>`] reference while the Poll is still alive
+        // — matching mio's "Source dies before Selector" convention
+        // (see the module rustdoc's "Lifetime anchoring" section for
+        // the load-bearing cross-platform rationale).
     }
 }
 
@@ -606,9 +678,9 @@ mod tests {
     use std::time::Instant;
 
     /// `poll_and_drain(Some(ZERO))` returns immediately with no events
-    /// queued. Pins the non-blocking poll path. The Registry clone
-    /// returned alongside the Reactor is dropped here — the test
-    /// doesn't construct a Hub.
+    /// queued. Pins the non-blocking poll path. No wake fires and no
+    /// Hub is constructed, so neither [`Reactor::wake_handle`] nor
+    /// [`Reactor::registry_clone`] is called.
     #[test]
     fn poll_and_drain_zero_timeout_returns_empty() {
         let watcher = MockFsWatcher::new();
@@ -616,7 +688,7 @@ mod tests {
         let (_prober_tx, prober_rx) = unbounded::<Input>();
         let (_effect_tx, effect_rx) = unbounded::<Input>();
 
-        let (mut reactor, _waker, _registry_for_ipc) =
+        let mut reactor =
             Reactor::new(watcher, None, signals, prober_rx, effect_rx).expect("reactor init");
         let drained = reactor
             .poll_and_drain(Some(Duration::ZERO))
@@ -646,8 +718,9 @@ mod tests {
         let (_prober_tx, prober_rx) = unbounded::<Input>();
         let (effect_tx, effect_rx) = unbounded::<Input>();
 
-        let (mut reactor, waker, _registry_for_ipc) =
+        let mut reactor =
             Reactor::new(watcher, None, signals, prober_rx, effect_rx).expect("reactor init");
+        let waker = reactor.wake_handle();
 
         // Drop the only effect-completion sender. The Reactor-side
         // receiver has no other senders connected — the next try_recv
@@ -680,8 +753,9 @@ mod tests {
         let (_prober_tx, prober_rx) = unbounded::<Input>();
         let (effect_tx, effect_rx) = unbounded::<Input>();
 
-        let (mut reactor, waker, _registry_for_ipc) =
+        let mut reactor =
             Reactor::new(watcher, None, signals, prober_rx, effect_rx).expect("reactor init");
+        let waker = reactor.wake_handle();
 
         effect_tx
             .send(Input::TimerExpired {
@@ -717,8 +791,9 @@ mod tests {
         let (prober_tx, prober_rx) = unbounded::<Input>();
         let (_effect_tx, effect_rx) = unbounded::<Input>();
 
-        let (mut reactor, waker, _registry_for_ipc) =
+        let mut reactor =
             Reactor::new(watcher, None, signals, prober_rx, effect_rx).expect("reactor init");
+        let waker = reactor.wake_handle();
 
         // Push an Input into the prober channel — without a wake,
         // the poll wouldn't see it (it polls fd-readiness, not
@@ -755,7 +830,7 @@ mod tests {
         let (_prober_tx, prober_rx) = unbounded::<Input>();
         let (_effect_tx, effect_rx) = unbounded::<Input>();
 
-        let (mut reactor, _waker, _registry_for_ipc) =
+        let mut reactor =
             Reactor::new(watcher, None, signals, prober_rx, effect_rx).expect("reactor init");
 
         let mut slotmap: slotmap::SlotMap<ResourceId, ()> = slotmap::SlotMap::with_key();
@@ -784,7 +859,7 @@ mod tests {
         let (_prober_tx, prober_rx) = unbounded::<Input>();
         let (_effect_tx, effect_rx) = unbounded::<Input>();
 
-        let (mut reactor, _waker, _registry_for_ipc) =
+        let mut reactor =
             Reactor::new(watcher, None, signals, prober_rx, effect_rx).expect("reactor init");
 
         let mut slotmap: slotmap::SlotMap<ResourceId, ()> = slotmap::SlotMap::with_key();

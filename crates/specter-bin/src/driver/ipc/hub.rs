@@ -4,11 +4,11 @@
 //! register / deregister.
 //!
 //! Constructed once by `App::run` from the [`Registry`] clone
-//! [`super::Reactor::new`] returns. Owned by [`super::EngineDriver`]
-//! for the rest of the daemon's lifetime, dropped BEFORE
-//! [`super::Reactor`] so the explicit `Drop` impl below can
-//! deregister listener + every live conn stream against a still-live
-//! Poll selector.
+//! minted via [`super::Reactor::registry_clone`]. Owned by
+//! [`super::EngineDriver`] for the rest of the daemon's lifetime,
+//! dropped BEFORE [`super::Reactor`] so the explicit `Drop` impl
+//! below can deregister listener + every live conn stream against a
+//! still-live Poll selector.
 //!
 //! # Drop order
 //!
@@ -201,8 +201,8 @@ impl Hub {
     /// `listener` is the bound `std::os::unix::net::UnixListener` from
     /// [`crate::ipc::sockpath::bind_socket_atomic`]; we re-wrap it
     /// into mio's flavor after setting non-blocking. `registry` is
-    /// the [`Registry::try_clone()`] handle from
-    /// [`super::Reactor::new`]'s return; it shares the underlying
+    /// the [`Registry::try_clone()`] handle minted via
+    /// [`super::Reactor::registry_clone`]; it shares the underlying
     /// selector with the Reactor's Poll.
     ///
     /// # Errors

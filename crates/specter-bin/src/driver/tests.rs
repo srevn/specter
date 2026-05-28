@@ -2,16 +2,15 @@
 //! over the [`TestRig`] mio-integrated harness.
 //!
 //! Wired by `#[cfg(test)] mod tests;` in `driver.rs`. The rig
-//! constructs a real [`mio::Poll`] via [`Reactor::new`] (which hands
-//! back the `Registry` clone [`Hub::new`] then registers the
-//! listener against) and runs against the sensor crate's
-//! [`MockFsWatcher`] (whose socketpair-backed `AsFd` surface lets
-//! reactor-integration tests run against a real reactor without any
-//! platform watcher backend). Tests inject `FsEvent`s through
-//! `reactor.watcher_mut().inject(...)`, drive signals through
-//! [`EngineDriver::dispatch_signal`] directly (real signals would
-//! race nextest's process-wide handlers), and exercise IPC through a
-//! real bound socket on a tempdir path.
+//! constructs a real [`mio::Poll`] via [`Reactor::new`] and mints the
+//! Hub's [`Registry`] clone through [`Reactor::registry_clone`]; it
+//! runs against the sensor crate's [`MockFsWatcher`] (whose
+//! socketpair-backed `AsFd` surface lets reactor-integration tests
+//! run against a real reactor without any platform watcher backend).
+//! Tests inject `FsEvent`s through `reactor.watcher_mut().inject(...)`,
+//! drive signals through [`EngineDriver::dispatch_signal`] directly
+//! (real signals would race nextest's process-wide handlers), and
+//! exercise IPC through a real bound socket on a tempdir path.
 
 use super::WakeHandle;
 use super::ipc::conns::{ACCEPT_CAP, ConnRole, MissedWindow};
@@ -95,8 +94,11 @@ struct TestRig {
     /// only sender so the reactor's `effect_complete_rx` observes
     /// Disconnected on the next `try_recv`.
     effect_complete_tx: Option<Sender<Input>>,
-    /// Shared [`WakeHandle`] clone — the Reactor holds one clone, the
-    /// rig holds another. Tests fire `waker.wake()` after writing to
+    /// Shared [`WakeHandle`] clone minted via
+    /// [`Reactor::wake_handle`]. The Reactor's `waker` field is the
+    /// canonical anchor; the rig holds this clone, the prober +
+    /// effect sinks (when wired by individual tests) hold further
+    /// clones. Tests fire `waker.wake()` after writing to
     /// `prober_response_tx` / `effect_complete_tx` to mirror the
     /// production wake-after-send semantics.
     waker: WakeHandle,
@@ -111,11 +113,12 @@ struct TestRig {
 
 /// Build a [`TestRig`] for the supplied config + config_path. Every
 /// kernel-side resource is freshly allocated per call: a bound
-/// `UnixListener`, a fresh `mio::Poll` (via `Reactor::new`, which hands
-/// back the `Registry` clone the [`Hub`] then registers the
-/// listener against), a fresh `Signals` iterator, two unbounded
-/// crossbeam channels for the wake'd Input streams, and a fresh
-/// `MockFsWatcher` with its socketpair-backed readiness substrate.
+/// `UnixListener`, a fresh `mio::Poll` (via [`Reactor::new`]), the
+/// Hub's `Registry` clone (via [`Reactor::registry_clone`]), a
+/// [`WakeHandle`] clone (via [`Reactor::wake_handle`]), a fresh
+/// `Signals` iterator, two unbounded crossbeam channels for the
+/// wake'd Input streams, and a fresh `MockFsWatcher` with its
+/// socketpair-backed readiness substrate.
 fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let socket_path = tmp.path().join("specter-test.sock");
@@ -125,7 +128,7 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     let signals = crate::signals::register_signal_handlers().expect("signal pipe init");
     let (prober_response_tx, prober_response_rx) = crossbeam::channel::unbounded::<Input>();
     let (effect_complete_tx, effect_complete_rx) = crossbeam::channel::unbounded::<Input>();
-    let (reactor, waker, registry_for_ipc) = Reactor::new(
+    let reactor = Reactor::new(
         watcher,
         None,
         signals,
@@ -133,6 +136,11 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
         effect_complete_rx,
     )
     .expect("reactor init");
+    // Mint the Registry clone + WakeHandle BEFORE the reactor moves
+    // into the driver constructor — once moved, the borrows are no
+    // longer reachable.
+    let registry_for_ipc = reactor.registry_clone().expect("registry clone");
+    let waker = reactor.wake_handle();
     let ipc = Hub::new(listener, registry_for_ipc).expect("ipc server init");
     let prober: Arc<MockProber> = Arc::new(MockProber::new());
     let (actuator_io, actuator_side) = ActuatorIO::pair();
