@@ -4,8 +4,8 @@
 
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
-    ActiveBurst, Diagnostic, EffectScope, EntryKind, FsEvent, Input, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig,
+    ActiveBurst, Diagnostic, EffectScope, EntryKind, FsEvent, Input, ProbeFailure, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig,
     SubAttachAnchor, SubAttachRequest,
 };
 use specter_engine::Engine;
@@ -152,16 +152,18 @@ fn pending_path_failed_probe_retains_state() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
         }),
         Instant::now(),
     );
 
-    assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::PendingPathProbeFailed { errno: 13, .. }))
-    );
+    assert!(out.diagnostics.iter().any(|d| matches!(
+        d,
+        Diagnostic::PendingPathProbeFailed {
+            failure: ProbeFailure::Anchor { errno: 13 },
+            ..
+        },
+    )));
     // Profile still pending (descent state lives on
     // `ProfileState::Pending`, not on a separate SecondaryMap).
     assert!(matches!(

@@ -34,7 +34,7 @@ use std::path::Path;
 // boundary to name the type. [`SendError`] is the workspace-shared
 // sender-error vocabulary — re-exported so callers naming
 // `sensor::SendError` keep their path stable across the consolidation.
-pub use specter_core::{OverflowScope, ProbeResponse, SendError, WatchFailure};
+pub use specter_core::{OverflowScope, ProbeFailure, ProbeResponse, SendError, WatchFailure};
 
 /// Sensor-side extension on [`WatchFailure`] that classifies an
 /// `io::Error` from a watch-install syscall.
@@ -69,6 +69,44 @@ impl WatchFailureExt for WatchFailure {
             libc::EMFILE | libc::ENFILE | libc::ENOSPC => Self::Pressure { errno },
             libc::ENOENT | libc::EACCES | libc::ELOOP | libc::ENOTDIR => Self::Resource { errno },
             _ => Self::Invariant { errno },
+        }
+    }
+}
+
+/// Sensor-side extension on [`ProbeFailure`] that classifies an
+/// `io::Error` from a probe-root syscall.
+///
+/// Cross-crate dual of [`WatchFailureExt`] — `ProbeFailure` lives in
+/// `specter-core` (libc-banned), so the errno-name match lives here.
+/// The constructor reads as `ProbeFailure::from_io(&e)` once the trait
+/// is in scope, mirroring the watch-side ergonomics.
+pub trait ProbeFailureExt: Sized {
+    /// Map an `io::Error` from the walker's probe-root syscalls
+    /// (`std::fs::symlink_metadata`) into the typed routing variant.
+    /// Called once at the walker stamp sites; the engine never
+    /// re-derives the classification from a raw `i32`.
+    ///
+    /// # Preconditions
+    ///
+    /// Classifies errors from **probe-root syscalls only** —
+    /// `symlink_metadata(target_path)` against the probe's anchor /
+    /// descent prefix / proxy. Mid-walk faults skip-and-continue in
+    /// the walker and never reach this trait. `ENOSPC` here is the
+    /// process-FD-pressure surface (root-`lstat` allocates a brief
+    /// kernel-internal FD), not "disk full"; mirrors
+    /// [`WatchFailureExt::from_io`]'s `ENOSPC` precondition.
+    fn from_io(e: &io::Error) -> Self;
+}
+
+impl ProbeFailureExt for ProbeFailure {
+    fn from_io(e: &io::Error) -> Self {
+        match e.raw_os_error() {
+            Some(n @ (libc::EMFILE | libc::ENFILE | libc::ENOSPC | libc::EAGAIN)) => {
+                Self::Transient { errno: n }
+            }
+            other => Self::Anchor {
+                errno: other.unwrap_or(libc::EIO),
+            },
         }
     }
 }

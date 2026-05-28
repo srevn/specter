@@ -252,8 +252,14 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::ProbeFailed {
             profile,
             intent,
-            errno,
-        } => tracing::warn!(?profile, ?intent, errno, "probe failed"),
+            failure,
+        } => tracing::warn!(
+            ?profile,
+            ?intent,
+            ?failure,
+            errno = failure.errno(),
+            "probe failed",
+        ),
         Diagnostic::EventClassDropped {
             resource,
             event,
@@ -290,11 +296,12 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::PendingPathProbeFailed {
             profile,
             prefix,
-            errno,
+            failure,
         } => tracing::warn!(
             ?profile,
             ?prefix,
-            errno,
+            ?failure,
+            errno = failure.errno(),
             "pending-path descent probe Failed",
         ),
         Diagnostic::ReapPendingCancelled { profile } => tracing::debug!(
@@ -512,11 +519,12 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::PromoterDescentFailed {
             promoter,
             prefix,
-            errno,
+            failure,
         } => tracing::warn!(
             ?promoter,
             ?prefix,
-            errno,
+            ?failure,
+            errno = failure.errno(),
             "promoter descent / enumeration probe Failed",
         ),
         Diagnostic::PromotionKindObserved {
@@ -547,11 +555,12 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::PromoterEnumerationFailed {
             promoter,
             proxy,
-            errno,
+            failure,
         } => tracing::warn!(
             ?promoter,
             ?proxy,
-            errno,
+            ?failure,
+            errno = failure.errno(),
             "promoter enumeration probe Failed (retaining proxy state)",
         ),
         Diagnostic::DynamicSubReaped {

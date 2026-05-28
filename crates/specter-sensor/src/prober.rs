@@ -26,9 +26,11 @@
 //! # Panic recovery
 //!
 //! Each `run_probe` call is wrapped in `catch_unwind`. A panic converts
-//! to `ProbeOutcome::Failed { errno: EIO }` and the worker continues on
-//! the next request. Aborts (`panic = "abort"` profile) bypass this and
-//! kill the worker — v1 uses the workspace's default unwind profile.
+//! to [`specter_core::ProbeOutcome::Failed`] carrying
+//! [`specter_core::ProbeFailure::Anchor`] with `errno = EIO` and the
+//! worker continues on the next request. Aborts (`panic = "abort"`
+//! profile) bypass this and kill the worker — v1 uses the workspace's
+//! default unwind profile.
 
 mod pool;
 mod walk;

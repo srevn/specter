@@ -39,8 +39,8 @@ pub use fs_id::FsIdentity;
 pub use ids::{CorrelationId, ProbeCorrelation, ProfileId, PromoterId, ResourceId, SubId, TimerId};
 pub use input::{FsEvent, Input, OverflowScope, WatchRegistryDiff};
 pub use op::{
-    EffectOp, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProofAuthority,
-    ProofObligation, WatchFailure, WatchOp,
+    EffectOp, ProbeFailure, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse,
+    ProofAuthority, ProofObligation, WatchFailure, WatchOp,
 };
 pub use output::{CancelEffects, ProbeOps, SortedEffects, StepOutput, StepOutputParts};
 pub use pattern::{PatternComponent, PatternError, PatternSpec};

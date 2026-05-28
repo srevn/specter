@@ -263,6 +263,64 @@ pub enum ProofAuthority {
     Undischarged { first_unread: Arc<Path> },
 }
 
+/// Typed failure stamped on [`ProbeOutcome::Failed`].
+///
+/// The engine routes `Failed` uniformly today (log + teardown), but the
+/// variant names the routing target so a future retry path can fork at
+/// the dispatch site without re-classifying errnos inside the engine.
+/// Backends translate libc errnos to this variant once, at the trait
+/// boundary in `specter-sensor`; the engine stays free of kernel
+/// vocabulary.
+///
+/// Cross-crate dual of [`WatchFailure`]. Naming follows the same rule —
+/// each variant carries "what the engine should do," not the kernel's
+/// error-class name. `errno` is diagnostic context (operator-visible
+/// integer on the IPC wire), not a behavioural switch.
+///
+/// The `From<io::Error>` translation lives in `specter-sensor` (via
+/// `ProbeFailureExt::from_io`) because errno-name matching needs `libc`,
+/// which is banned in `core` per `deny.toml`.
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
+pub enum ProbeFailure {
+    /// Path-fatal at the probe root: a non-`NotFound` I/O error from
+    /// the root `lstat` (`EACCES` / `ELOOP` / `ENOTDIR` / `EIO`).
+    /// Engine routes to its per-route `dispatch_*_failed` cleanup —
+    /// release the anchor's `watch_demand`, surface the diagnostic,
+    /// finish the burst.
+    ///
+    /// `ENOENT` is *not* an `Anchor` failure: the walker collapses
+    /// "path absent" into [`ProbeOutcome::Vanished`] before this enum
+    /// is reached.
+    Anchor { errno: i32 },
+    /// Backpressure or transient kernel-resource failure: the
+    /// process-wide or system-wide FD ceiling was hit at the
+    /// root-`lstat` syscall, or the walker retried into a transient
+    /// rate-limit (`EMFILE` / `ENFILE` / `ENOSPC` / `EAGAIN`).
+    ///
+    /// v1 dispatches identically to [`Self::Anchor`]; the variant names
+    /// the routing target for a future retry path. Calling it out at
+    /// the trait boundary keeps the sensor's kernel-vocabulary
+    /// classifier the single source — the engine never re-derives the
+    /// retry signal from a raw `i32`.
+    Transient { errno: i32 },
+}
+
+impl ProbeFailure {
+    /// Underlying errno carried by every variant. Convenience for
+    /// diagnostic logging and the IPC wire (which carries the integer,
+    /// not the variant kind: the routing target is engine-internal
+    /// today, not operator-actionable).
+    ///
+    /// Equivalent to a two-arm `match`; the `const` shape mirrors
+    /// [`WatchFailure::errno`].
+    #[must_use]
+    pub const fn errno(&self) -> i32 {
+        match self {
+            Self::Anchor { errno } | Self::Transient { errno } => *errno,
+        }
+    }
+}
+
 /// Walker outcome.
 ///
 /// Five variants. `Vanished` / `Failed` are intent-agnostic (the engine
@@ -304,8 +362,10 @@ pub enum ProbeOutcome {
     Vanished,
     /// I/O error at the *root* of the probe (root `lstat`, permission,
     /// `EIO`). Mid-walk errors don't surface here — they
-    /// skip-and-continue with `tracing::warn!`.
-    Failed { errno: i32 },
+    /// skip-and-continue with `tracing::warn!`. The inner
+    /// [`ProbeFailure`] is the sensor's classified routing target; the
+    /// engine never inspects the raw `errno`.
+    Failed(ProbeFailure),
 }
 
 #[derive(Debug, Clone)]

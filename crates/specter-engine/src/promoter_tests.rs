@@ -32,7 +32,7 @@ use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
     EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry, PatternSpec,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, Promoter,
+    ProbeFailure, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, Promoter,
     PromoterAttachRequest, PromoterId, PromoterState, ResourceId, ResourceKind, ResourceRole,
     ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
 };
@@ -1075,7 +1075,7 @@ fn prefix_pending_event_after_failed_descent_emits_fresh_descent_probe() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
         }),
         Instant::now(),
     );
@@ -1512,9 +1512,9 @@ fn enumeration_failed_retains_proxy_state_with_diagnostic() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),
             correlation: corr,
-            outcome: ProbeOutcome::Failed {
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor {
                 errno: 13, /* EACCES */
-            },
+            }),
         }),
         Instant::now(),
     );
@@ -1522,7 +1522,7 @@ fn enumeration_failed_retains_proxy_state_with_diagnostic() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::PromoterEnumerationFailed { promoter, proxy, errno }
+            Diagnostic::PromoterEnumerationFailed { promoter, proxy, failure: ProbeFailure::Anchor { errno } }
                 if *promoter == pid && *proxy == var_log && *errno == 13,
         )),
         "PromoterEnumerationFailed carries promoter, proxy, and errno: {:?}",

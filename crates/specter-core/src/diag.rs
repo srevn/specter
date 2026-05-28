@@ -6,7 +6,7 @@
 
 use crate::ids::{ProbeCorrelation, ProfileId, PromoterId, ResourceId, SubId, TimerId};
 use crate::input::{FsEvent, OverflowScope};
-use crate::op::{ProbeOwner, WatchFailure};
+use crate::op::{ProbeFailure, ProbeOwner, WatchFailure};
 use crate::profile::{BurstIntent, ProfileStateDiscriminant};
 use crate::resource::ResourceKind;
 use compact_str::CompactString;
@@ -251,12 +251,14 @@ pub enum Diagnostic {
         profile: ProfileId,
         intent: BurstIntent,
     },
-    /// Probe returned `Failed { errno }`. Treated identically to `Vanished`;
-    /// the variant preserves errno + intent.
+    /// Probe returned [`crate::op::ProbeOutcome::Failed`]. Treated
+    /// identically to `Vanished`; the variant preserves the typed
+    /// [`ProbeFailure`] routing target + intent. Operator-visible
+    /// errno reads off `failure.errno()` at the IPC seam.
     ProbeFailed {
         profile: ProfileId,
         intent: BurstIntent,
-        errno: i32,
+        failure: ProbeFailure,
     },
     /// `FsEvent` arrived for a covered descendant whose class (per the
     /// `fs_event_to_class` mapping) is not in the covering Profile's
@@ -311,13 +313,16 @@ pub enum Diagnostic {
         profile: ProfileId,
         prefix: ResourceId,
     },
-    /// Pending-path descent probe returned `Failed { errno }` for
-    /// `prefix`. The Engine retains the pending state and waits for the
-    /// next event at `prefix` (`on_descent_event`) before retrying.
+    /// Pending-path descent probe returned
+    /// [`crate::op::ProbeOutcome::Failed`] for `prefix`. The Engine
+    /// retains the pending state and waits for the next event at
+    /// `prefix` (`on_descent_event`) before retrying. `failure`
+    /// carries the typed routing target; the operator-visible errno
+    /// reads off `failure.errno()`.
     PendingPathProbeFailed {
         profile: ProfileId,
         prefix: ResourceId,
-        errno: i32,
+        failure: ProbeFailure,
     },
     /// A Profile's active burst carried [`crate::BurstFinish::Reap`]
     /// (the last Sub had detached mid-burst), then a fresh `attach_sub`
@@ -753,13 +758,15 @@ pub enum Diagnostic {
         promoter: PromoterId,
         prefix: ResourceId,
     },
-    /// Promoter literal-prefix descent probe returned `Failed { errno }`
-    /// for `prefix`. The engine retains the `PrefixPending` state and
-    /// awaits the next event at `prefix` before retrying.
+    /// Promoter literal-prefix descent probe returned
+    /// [`crate::op::ProbeOutcome::Failed`] for `prefix`. The engine
+    /// retains the `PrefixPending` state and awaits the next event at
+    /// `prefix` before retrying. `failure` carries the typed routing
+    /// target; the operator-visible errno reads off `failure.errno()`.
     PromoterDescentFailed {
         promoter: PromoterId,
         prefix: ResourceId,
-        errno: i32,
+        failure: ProbeFailure,
     },
     /// Promoter enumeration matched `path` and the engine minted a
     /// dynamic Sub for it; `kind` is the snapshot's kind for the
@@ -799,15 +806,18 @@ pub enum Diagnostic {
         promoter: PromoterId,
         proxy: ResourceId,
     },
-    /// Promoter enumeration probe at `proxy` returned `Failed { errno }`.
-    /// The engine retains proxy state; the next event at `proxy` will
-    /// re-trigger enumeration. Typical errnos are transient (`EACCES`,
-    /// `EIO`); a permanent failure leaves the proxy stalled until the
-    /// underlying condition clears or the operator restarts.
+    /// Promoter enumeration probe at `proxy` returned
+    /// [`crate::op::ProbeOutcome::Failed`]. The engine retains proxy
+    /// state; the next event at `proxy` will re-trigger enumeration.
+    /// Typical errnos are transient (`EACCES`, `EIO`); a permanent
+    /// failure leaves the proxy stalled until the underlying
+    /// condition clears or the operator restarts. `failure` carries
+    /// the typed routing target; the operator-visible errno reads off
+    /// `failure.errno()`.
     PromoterEnumerationFailed {
         promoter: PromoterId,
         proxy: ResourceId,
-        errno: i32,
+        failure: ProbeFailure,
     },
     /// A dynamic Sub minted by `promoter` at `path` was reaped because
     /// its anchor disappeared. Operator narration; if the path

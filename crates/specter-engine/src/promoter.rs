@@ -60,9 +60,9 @@ use crate::refcounts::{add_watch, sub_watch};
 use compact_str::{CompactString, format_compact};
 use specter_core::{
     ClassSet, ContribKey, DescentState, DetachReason, Diagnostic, DirSnapshot, EntryKind,
-    PatternComponent, PatternSpec, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Promoter,
-    PromoterAttachRequest, PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole,
-    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Tree,
+    PatternComponent, PatternSpec, ProbeFailure, ProbeOutcome, ProbeOwner, ProbeResponse,
+    ProbeSlot, Promoter, PromoterAttachRequest, PromoterId, PromoterState, ProxyState, ResourceId,
+    ResourceRole, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Tree,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -655,7 +655,7 @@ impl Engine {
                     self.dispatch_descent_ok(owner, &arc, now, out);
                 }
                 ProbeOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
-                ProbeOutcome::Failed { errno } => self.dispatch_descent_failed(owner, errno, out),
+                ProbeOutcome::Failed(failure) => self.dispatch_descent_failed(owner, failure, out),
                 ProbeOutcome::AnchorOk(_) | ProbeOutcome::SubtreeProven { .. } => {
                     // Descent probes a Dir prefix; the walker returns
                     // `DirEnumerated` / `Vanished`. `AnchorOk` /
@@ -679,8 +679,8 @@ impl Engine {
                 ProbeOutcome::Vanished => {
                     self.dispatch_promoter_enumeration_vanished(promoter_id, target, out);
                 }
-                ProbeOutcome::Failed { errno } => {
-                    self.dispatch_promoter_enumeration_failed(promoter_id, target, errno, out);
+                ProbeOutcome::Failed(failure) => {
+                    self.dispatch_promoter_enumeration_failed(promoter_id, target, failure, out);
                 }
                 ProbeOutcome::AnchorOk(_) | ProbeOutcome::SubtreeProven { .. } => {
                     // Enumeration probes a Dir proxy; the walker returns
@@ -1103,13 +1103,13 @@ impl Engine {
         &self,
         promoter_id: PromoterId,
         target: ResourceId,
-        errno: i32,
+        failure: ProbeFailure,
         out: &mut StepOutput,
     ) {
         out.diagnostics.push(Diagnostic::PromoterEnumerationFailed {
             promoter: promoter_id,
             proxy: target,
-            errno,
+            failure,
         });
     }
 

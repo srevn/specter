@@ -14,8 +14,8 @@ use crossbeam::channel::{Receiver, Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, GlobPattern, Input,
-    LeafEntry, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileId,
-    ProofObligation, ScanConfig,
+    LeafEntry, ProbeCorrelation, ProbeFailure, ProbeOutcome, ProbeOwner, ProbeRequest,
+    ProbeResponse, ProfileId, ProofObligation, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -1474,7 +1474,7 @@ fn run_worker_panic_in_probe_emits_failed_eio() {
     assert_eq!(responses.len(), 1);
     assert!(matches!(
         responses[0].outcome,
-        ProbeOutcome::Failed { errno: libc::EIO }
+        ProbeOutcome::Failed(ProbeFailure::Anchor { errno: libc::EIO })
     ));
 }
 
@@ -1497,12 +1497,12 @@ fn run_worker_panic_does_not_kill_loop() {
         assert!(req.owner() != panic_for, "simulated panic on first request");
         ProbeOutcome::Vanished
     });
-    // First panicked → Failed(EIO); second succeeded → Vanished. Both
-    // arrive — the worker survived the panic.
+    // First panicked → Failed(Anchor{EIO}); second succeeded →
+    // Vanished. Both arrive — the worker survived the panic.
     assert_eq!(responses.len(), 2);
     assert!(matches!(
         responses[0].outcome,
-        ProbeOutcome::Failed { errno: libc::EIO }
+        ProbeOutcome::Failed(ProbeFailure::Anchor { errno: libc::EIO })
     ));
     assert!(matches!(responses[1].outcome, ProbeOutcome::Vanished));
 }

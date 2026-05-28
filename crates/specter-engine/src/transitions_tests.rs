@@ -25,12 +25,12 @@ use specter_core::{
     ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta, DirSnapshot,
     DirtyProvenance, EffectCompletion, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT,
     FsEvent, FsIdentity, Input, LeafEntry, OverflowScope, PatternSpec, Placeholder, PostFireBurst,
-    PostFirePhase, PreFireBurst, PreFirePhase, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest,
-    ProbeResponse, ProbeSlot, ProfileIdentity, ProfileState, Promoter, PromoterAttachRequest,
-    PromoterRegistryDiff, PromoterState, ProofAuthority, ProofObligation, QuiescenceVerdict,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StableReason, StepOutput, SubAttachAnchor,
-    SubAttachRequest, SubId, SubParams, Termination, TimerKind, TreeSnapshot, WatchOp,
-    WatchRegistryDiff,
+    PostFirePhase, PreFireBurst, PreFirePhase, ProbeFailure, ProbeOp, ProbeOutcome, ProbeOwner,
+    ProbeRequest, ProbeResponse, ProbeSlot, ProfileIdentity, ProfileState, Promoter,
+    PromoterAttachRequest, PromoterRegistryDiff, PromoterState, ProofAuthority, ProofObligation,
+    QuiescenceVerdict, ResourceId, ResourceKind, ResourceRole, ScanConfig, StableReason,
+    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Termination, TimerKind,
+    TreeSnapshot, WatchOp, WatchRegistryDiff,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -753,7 +753,7 @@ fn probe_response_seed_failed_clears_baseline_and_diagnoses() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation,
-            outcome: ProbeOutcome::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
         }),
         now + SETTLE,
     );
@@ -762,7 +762,7 @@ fn probe_response_seed_failed_clears_baseline_and_diagnoses() {
             d,
             Diagnostic::ProbeFailed {
                 intent: BurstIntent::Seed,
-                errno: 13,
+                failure: ProbeFailure::Anchor { errno: 13 },
                 ..
             },
         )
@@ -4568,7 +4568,7 @@ fn dispatch_seed_failed_clears_profile_kind() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation,
-            outcome: ProbeOutcome::Failed { errno: 5 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 5 }),
         }),
         Instant::now(),
     );
@@ -4609,7 +4609,7 @@ fn dispatch_standard_failed_clears_profile_kind() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation,
-            outcome: ProbeOutcome::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
         }),
         now + SETTLE,
     );
@@ -4650,7 +4650,7 @@ fn dispatch_rebase_failed_clears_profile_kind() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation,
-            outcome: ProbeOutcome::Failed { errno: 5 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 5 }),
         }),
         now + SETTLE * 4,
     );
@@ -7077,7 +7077,7 @@ mod props {
                     Input::ProbeResponse(ProbeResponse {
                         owner: ProbeOwner::Profile(pid),
                         correlation: corr,
-                        outcome: ProbeOutcome::Failed { errno },
+                        outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno }),
                     }),
                     *t,
                 )
@@ -7298,7 +7298,7 @@ mod props {
             let outcome = match seed_outcome {
                 0 => ProbeOutcome::SubtreeProven { snapshot: dir_tree_snap(vec![]), authority: ProofAuthority::Authoritative },
                 1 => ProbeOutcome::Vanished,
-                _ => ProbeOutcome::Failed { errno: 13 },
+                _ => ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
             };
             let out = e.step(
                 Input::ProbeResponse(ProbeResponse { owner: ProbeOwner::Profile(pid),

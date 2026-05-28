@@ -23,10 +23,10 @@
 use compact_str::CompactString;
 use specter_core::testkit::{anchor_ok, dir_snap, empty_program, file_leaf};
 use specter_core::{
-    ClassSet, Diagnostic, EffectScope, EntryKind, FS_ROOT_SEGMENT, Input, OverflowScope, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, PromoterRegistryDiff, PromoterState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, WatchOp,
-    WatchRegistryDiff,
+    ClassSet, Diagnostic, EffectScope, EntryKind, FS_ROOT_SEGMENT, Input, OverflowScope,
+    ProbeFailure, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState,
+    PromoterRegistryDiff, PromoterState, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+    SubAttachAnchor, SubAttachRequest, WatchOp, WatchRegistryDiff,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -750,7 +750,7 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
             correlation: descent_corr,
-            outcome: ProbeOutcome::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
         }),
         now,
     );

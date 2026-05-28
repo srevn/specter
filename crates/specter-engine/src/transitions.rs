@@ -33,8 +33,8 @@ use specter_core::{
     ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind, ClassSet,
     ContribKey, DedupKey, DescentRemaining, DescentState, DetachReason, Diagnostic, Effect,
     EffectCommon, EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent,
-    PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Profile,
-    ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority,
+    PostFirePhase, PreFirePhase, ProbeFailure, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot,
+    Profile, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority,
     QuiescenceVerdict, QuiescenceWitness, ReapTrigger, Resource, ResourceId, ResourceKind,
     StableReason, StepOutput, SubAttachRequest, SubId, TimerId, TimerKind, TreeSnapshot,
     WatchFailure, WatchRegistryDiff, quiescence_verdict,
@@ -499,8 +499,8 @@ impl Engine {
                         self.dispatch_rebase_ok(profile_id, snapshot, verdict, now, out);
                     }
                     CertifiedResponse::Vanished => self.dispatch_rebase_vanished(profile_id, out),
-                    CertifiedResponse::Failed { errno } => {
-                        self.dispatch_rebase_failed(profile_id, errno, out);
+                    CertifiedResponse::Failed(failure) => {
+                        self.dispatch_rebase_failed(profile_id, failure, out);
                     }
                     CertifiedResponse::Regressed => {}
                 }
@@ -511,7 +511,7 @@ impl Engine {
                     self.dispatch_descent_ok(owner, &arc, now, out);
                 }
                 ProbeOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
-                ProbeOutcome::Failed { errno } => self.dispatch_descent_failed(owner, errno, out),
+                ProbeOutcome::Failed(failure) => self.dispatch_descent_failed(owner, failure, out),
                 ProbeOutcome::AnchorOk(_) | ProbeOutcome::SubtreeProven { .. } => {
                     // Walker contract: descent probes a Dir prefix and
                     // returns `DirEnumerated` / `Vanished`. `AnchorOk` /
@@ -665,7 +665,7 @@ impl Engine {
                 authority,
             } => (TreeSnapshot::Dir(snapshot), authority),
             ProbeOutcome::Vanished => return CertifiedResponse::Vanished,
-            ProbeOutcome::Failed { errno } => return CertifiedResponse::Failed { errno },
+            ProbeOutcome::Failed(failure) => return CertifiedResponse::Failed(failure),
             ProbeOutcome::DirEnumerated(_) => {
                 debug_assert!(
                     false,
@@ -828,9 +828,9 @@ impl Engine {
                 BurstIntent::Seed => self.dispatch_seed_vanished(profile_id, out),
                 BurstIntent::Standard => self.dispatch_standard_vanished(profile_id, out),
             },
-            CertifiedResponse::Failed { errno } => match intent {
-                BurstIntent::Seed => self.dispatch_seed_failed(profile_id, errno, out),
-                BurstIntent::Standard => self.dispatch_standard_failed(profile_id, errno, out),
+            CertifiedResponse::Failed(failure) => match intent {
+                BurstIntent::Seed => self.dispatch_seed_failed(profile_id, failure, out),
+                BurstIntent::Standard => self.dispatch_standard_failed(profile_id, failure, out),
             },
             CertifiedResponse::Regressed => {}
         }
@@ -2742,14 +2742,19 @@ impl Engine {
     /// Symmetric with `dispatch_standard_failed`: the probe failed at the
     /// anchor; release the anchor's `watch_demand` contribution. See
     /// `dispatch_seed_vanished` for the trichotomy-invariant rationale.
-    fn dispatch_seed_failed(&mut self, profile_id: ProfileId, errno: i32, out: &mut StepOutput) {
+    fn dispatch_seed_failed(
+        &mut self,
+        profile_id: ProfileId,
+        failure: ProbeFailure,
+        out: &mut StepOutput,
+    ) {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
         out.diagnostics.push(Diagnostic::ProbeFailed {
             profile: profile_id,
             intent: BurstIntent::Seed,
-            errno,
+            failure,
         });
         self.discard_anchor_state(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
@@ -2787,7 +2792,7 @@ impl Engine {
     fn dispatch_standard_failed(
         &mut self,
         profile_id: ProfileId,
-        errno: i32,
+        failure: ProbeFailure,
         out: &mut StepOutput,
     ) {
         if self.profiles.get(profile_id).is_none() {
@@ -2796,7 +2801,7 @@ impl Engine {
         out.diagnostics.push(Diagnostic::ProbeFailed {
             profile: profile_id,
             intent: BurstIntent::Standard,
-            errno,
+            failure,
         });
         self.discard_anchor_state(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
@@ -3018,7 +3023,12 @@ impl Engine {
     /// rebase. Same shape as `dispatch_rebase_vanished` — clear,
     /// release, finish. Diagnostic carries the burst's actual intent
     /// (Standard fallback on the same defensive path noted there).
-    fn dispatch_rebase_failed(&mut self, profile_id: ProfileId, errno: i32, out: &mut StepOutput) {
+    fn dispatch_rebase_failed(
+        &mut self,
+        profile_id: ProfileId,
+        failure: ProbeFailure,
+        out: &mut StepOutput,
+    ) {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
@@ -3026,7 +3036,7 @@ impl Engine {
         out.diagnostics.push(Diagnostic::ProbeFailed {
             profile: profile_id,
             intent,
-            errno,
+            failure,
         });
         self.discard_anchor_state(profile_id, out);
         self.finish_burst_to_idle(profile_id, out);
@@ -3974,9 +3984,7 @@ enum CertifiedResponse {
         verdict: QuiescenceVerdict,
     },
     Vanished,
-    Failed {
-        errno: i32,
-    },
+    Failed(ProbeFailure),
     Regressed,
 }
 

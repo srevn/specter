@@ -52,8 +52,8 @@ use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
     ClassSet, ContribKey, DescentRemaining, DescentState, Diagnostic, DirSnapshot, EntryKind,
-    FS_ROOT_SEGMENT, ProbeOwner, ProbeSlot, ProfileId, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, StepOutput, TreePath,
+    FS_ROOT_SEGMENT, ProbeFailure, ProbeOwner, ProbeSlot, ProfileId, ProfileState, ResourceId,
+    ResourceKind, ResourceRole, StepOutput, TreePath,
 };
 use std::time::Instant;
 
@@ -731,7 +731,7 @@ impl crate::Engine {
     pub(crate) fn dispatch_descent_failed(
         &self,
         owner: ProbeOwner,
-        errno: i32,
+        failure: ProbeFailure,
         out: &mut StepOutput,
     ) {
         let prefix = match self.descent_state(owner) {
@@ -739,7 +739,7 @@ impl crate::Engine {
             None => return,
         };
         out.diagnostics
-            .push(descent_failed_diagnostic(owner, prefix, errno));
+            .push(descent_failed_diagnostic(owner, prefix, failure));
         // Retain in-descent state; await next event at the prefix.
     }
 
@@ -808,24 +808,25 @@ const fn descent_vanished_diagnostic(owner: ProbeOwner, prefix: ResourceId) -> D
 }
 
 /// Per-owner diagnostic emitted when a descent probe returns
-/// `Failed { errno }`. Profile ships [`Diagnostic::PendingPathProbeFailed`];
-/// Promoter ships [`Diagnostic::PromoterDescentFailed`]. Sole caller is
+/// [`ProbeOutcome::Failed`](specter_core::ProbeOutcome::Failed). Profile
+/// ships [`Diagnostic::PendingPathProbeFailed`]; Promoter ships
+/// [`Diagnostic::PromoterDescentFailed`]. Sole caller is
 /// [`Engine::dispatch_descent_failed`].
 const fn descent_failed_diagnostic(
     owner: ProbeOwner,
     prefix: ResourceId,
-    errno: i32,
+    failure: ProbeFailure,
 ) -> Diagnostic {
     match owner {
         ProbeOwner::Profile(profile) => Diagnostic::PendingPathProbeFailed {
             profile,
             prefix,
-            errno,
+            failure,
         },
         ProbeOwner::Promoter(promoter) => Diagnostic::PromoterDescentFailed {
             promoter,
             prefix,
-            errno,
+            failure,
         },
     }
 }

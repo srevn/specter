@@ -597,12 +597,14 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
             Diagnostic::ProbeFailed {
                 profile,
                 intent,
-                errno,
+                failure,
             } => Self::ProbeFailed {
                 at: at.clone(),
                 profile: WireId::from(*profile),
                 intent: WireBurstIntent::from(*intent),
-                errno: *errno,
+                // Wire carries the operator-visible integer; the
+                // typed routing-target variant is engine-internal.
+                errno: failure.errno(),
             },
             Diagnostic::EventClassDropped {
                 resource,
@@ -637,12 +639,12 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
             Diagnostic::PendingPathProbeFailed {
                 profile,
                 prefix,
-                errno,
+                failure,
             } => Self::PendingPathProbeFailed {
                 at: at.clone(),
                 profile: WireId::from(*profile),
                 prefix: WireId::from(*prefix),
-                errno: *errno,
+                errno: failure.errno(),
             },
             Diagnostic::ReapPendingCancelled { profile } => Self::ReapPendingCancelled {
                 at: at.clone(),
@@ -852,12 +854,12 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
             Diagnostic::PromoterDescentFailed {
                 promoter,
                 prefix,
-                errno,
+                failure,
             } => Self::PromoterDescentFailed {
                 at: at.clone(),
                 promoter: WireId::from(*promoter),
                 prefix: WireId::from(*prefix),
-                errno: *errno,
+                errno: failure.errno(),
             },
             Diagnostic::PromotionKindObserved {
                 promoter,
@@ -893,12 +895,12 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
             Diagnostic::PromoterEnumerationFailed {
                 promoter,
                 proxy,
-                errno,
+                failure,
             } => Self::PromoterEnumerationFailed {
                 at: at.clone(),
                 promoter: WireId::from(*promoter),
                 proxy: WireId::from(*proxy),
-                errno: *errno,
+                errno: failure.errno(),
             },
             Diagnostic::DynamicSubReaped {
                 promoter,

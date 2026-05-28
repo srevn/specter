@@ -44,9 +44,10 @@
 //! the full [`ScanConfig::accepts`]; both consume the same predicate body,
 //! keeping walker and engine in lockstep across every scope axis.
 
+use crate::ProbeFailureExt;
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ProbeOutcome,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ProbeFailure, ProbeOutcome,
     ProofAuthority, ProofObligation, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -253,11 +254,7 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
     let meta = match std::fs::symlink_metadata(target_path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return ProbeOutcome::Vanished,
-        Err(e) => {
-            return ProbeOutcome::Failed {
-                errno: e.raw_os_error().unwrap_or(libc::EIO),
-            };
-        }
+        Err(e) => return ProbeOutcome::Failed(ProbeFailure::from_io(&e)),
     };
     if !meta.is_file() {
         return ProbeOutcome::Vanished;
@@ -291,11 +288,7 @@ fn walk_root<'a>(
     let root_meta_raw = match std::fs::symlink_metadata(target_path) {
         Ok(m) => m,
         Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ProbeOutcome::Vanished),
-        Err(e) => {
-            return Err(ProbeOutcome::Failed {
-                errno: e.raw_os_error().unwrap_or(libc::EIO),
-            });
-        }
+        Err(e) => return Err(ProbeOutcome::Failed(ProbeFailure::from_io(&e))),
     };
     if !root_meta_raw.is_dir() {
         return Err(ProbeOutcome::Vanished);

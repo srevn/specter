@@ -90,7 +90,9 @@
 use crate::prober::walk::{probe_anchor_file, probe_descent, probe_subtree};
 use crate::{Prober, ProberResponseSender};
 use crossbeam::channel::{Receiver, Sender};
-use specter_core::{ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse};
+use specter_core::{
+    ProbeCorrelation, ProbeFailure, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse,
+};
 use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
@@ -422,7 +424,12 @@ pub(super) fn run_worker<F>(
                     ?correlation,
                     "prober worker panicked; emitting Failed(EIO)",
                 );
-                ProbeOutcome::Failed { errno: libc::EIO }
+                // Worker panic isn't a kernel errno but the engine
+                // routes it the same as a fatal root-`lstat` failure
+                // (log + teardown), so the `Anchor` variant is the
+                // correct routing target. Synthetic `EIO` mirrors the
+                // pre-typed-payload backstop.
+                ProbeOutcome::Failed(ProbeFailure::Anchor { errno: libc::EIO })
             });
 
         // Post-run cleanup: remove iff still ours. A racing fresh

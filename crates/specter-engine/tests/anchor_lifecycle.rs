@@ -15,9 +15,9 @@
 
 use specter_core::testkit::{anchor_ok, dir_snap, empty_program, file_leaf};
 use specter_core::{
-    AnchorClaim, ClassSet, EffectScope, EntryKind, FsEvent, Input, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
+    AnchorClaim, ClassSet, EffectScope, EntryKind, FsEvent, Input, ProbeFailure, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProfileState, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -379,7 +379,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid_p),
             correlation: p_corr,
-            outcome: ProbeOutcome::Failed { errno: 5 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 5 }),
         }),
         p_at,
     );

@@ -13,8 +13,9 @@
 use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
     AnchorClaim, BurstFinish, ClassSet, DedupKey, Diagnostic, DirMeta, DirSnapshot, EntryKind,
-    FsEvent, FsIdentity, Input, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, TimerKind, WatchOp,
+    FsEvent, FsIdentity, Input, ProbeFailure, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, TimerKind,
+    WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -919,7 +920,7 @@ fn seed_failed_releases_anchor_claim() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
         }),
         at,
     );
@@ -1066,7 +1067,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation,
-            outcome: ProbeOutcome::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
         }),
         t2,
     );

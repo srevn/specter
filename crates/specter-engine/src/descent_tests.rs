@@ -18,9 +18,9 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta, DirSnapshot,
-    EffectScope, EntryKind, FS_ROOT_SEGMENT, FsIdentity, Input, LeafEntry, ProbeOp, ProbeOutcome,
-    ProbeOwner, ProbeRequest, ProbeResponse, ProfileIdentity, ReapTrigger, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest,
+    EffectScope, EntryKind, FS_ROOT_SEGMENT, FsIdentity, Input, LeafEntry, ProbeFailure, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileIdentity, ReapTrigger,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -342,15 +342,20 @@ fn descent_failed_retains_state() {
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
-            outcome: ProbeOutcome::Failed { errno: 13 },
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
         }),
         Instant::now(),
     );
 
-    let has_diag = out
-        .diagnostics
-        .iter()
-        .any(|d| matches!(d, Diagnostic::PendingPathProbeFailed { errno: 13, .. }));
+    let has_diag = out.diagnostics.iter().any(|d| {
+        matches!(
+            d,
+            Diagnostic::PendingPathProbeFailed {
+                failure: ProbeFailure::Anchor { errno: 13 },
+                ..
+            },
+        )
+    });
     assert!(has_diag);
     // Still pending; no probe in flight.
     let descent = e.descent_state(ProbeOwner::Profile(pid)).unwrap();
