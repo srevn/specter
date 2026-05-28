@@ -263,6 +263,20 @@ impl ClassSet {
     /// "this file's state changed".
     pub const DEFAULT_PER_FILE: Self = Self(0b110);
 
+    /// Classes whose subscription suffices to witness in-place writes
+    /// over a settle window — the semantic mask the verdict floor reads
+    /// via [`crate::Profile::events_witness_quiescence`] to decide
+    /// whether `EventsReliable` or the Layer-C hash channel folds the
+    /// quiescence verdict.
+    ///
+    /// Today reduces to [`Self::CONTENT`]: CONTENT events fire for
+    /// in-place writes — the only change kind that can span the settle
+    /// window invisibly. STRUCTURE and METADATA are point events
+    /// (atomic creates/renames; chmod/touch) and never bridge a gap.
+    /// Adding STREAM / SPARSE_GROW / XATTR to the witness vocabulary is
+    /// a one-line decision here.
+    pub const IN_PLACE_WRITES: Self = Self::CONTENT;
+
     /// True iff every bit in `other` is set in `self` AND `other` is
     /// non-empty.
     ///

@@ -494,6 +494,51 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     );
 }
 
+/// Walker contract: a Verifying / Rebasing probe response carries a
+/// quiescence observation (`AnchorOk` / `SubtreeProven` / `Vanished` /
+/// `Failed`). A `DirEnumerated` outcome — the descent-route shape —
+/// is a walker-side bug: the request was a `Subtree` quiescence read,
+/// not a structural enumeration. `certify_probe_response`'s
+/// `DirEnumerated` arm fires a `debug_assert!` in dev/CI and degrades
+/// to `CertifiedResponse::Regressed` in release. The test pins the
+/// dev/CI behaviour.
+///
+/// `probe_gate` does not filter on outcome variant (it routes on owner
+/// state + correlation), so this contract violation is the one
+/// debug_assert in the certifier's spine that the public test surface
+/// can synthesise — every other defensive arm is gated by `probe_gate`
+/// upstream.
+///
+/// Disabled in release builds via the standard `cfg_attr` discipline,
+/// mirroring `dispatch_descent_with_anchor_outcome_is_walker_contract_violation`.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "debug_assert! is compiled out in release"
+)]
+#[should_panic(expected = "walker contract violated")]
+fn certify_dir_enumerated_outcome_is_walker_contract_violation() {
+    let (mut e, pid, _sid, _r, now) = engine_with_attached_sub();
+    // Cold-arm Seed → Verifying probe in flight at burst construction.
+    assert_seed_verifying(&e);
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("cold-Seed Verifying probe in flight from start_seed_burst");
+    // `DirEnumerated` from a quiescence probe is structurally impossible
+    // from the production walker — the Subtree request never returns a
+    // bare directory enumeration. We synthesise the breach to exercise
+    // the walker-contract debug_assert in `certify_probe_response`.
+    let snap = dir_tree_snap(vec![]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation,
+            outcome: ProbeOutcome::DirEnumerated(snap),
+        }),
+        now,
+    );
+}
+
 /// `Engine::kind_agrees_or_finalize` boundary check: a `Profile.kind =
 /// Some(File)` receiving a Dir-shaped response is a structurally
 /// unreachable walker-contract violation (the typed `ProbeRequest`

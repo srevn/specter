@@ -88,8 +88,8 @@ pub struct PromoterAttachRequest {
 /// all-`pub`). The four **runtime** fields are module-private; the
 /// cross-crate write surface is this type's `pub fn`s, never a field
 /// assignment. Each runtime mutator owns its invariant structurally
-/// (matching `Profile`'s sealed state machine and CLAUDE.md "single
-/// source per transition"): the bidirectional `PrefixPending` ↔
+/// (matching `Profile`'s sealed state machine — single source per
+/// transition): the bidirectional `PrefixPending` ↔
 /// `Active` moves ([`Self::enter_active_empty`] forward,
 /// [`Self::reenter_prefix_pending`] the terminus-loss recovery
 /// inverse); the in-`state` linear [`ProbeSlot`]

@@ -2919,27 +2919,29 @@ impl Profile {
 
     /// True iff settle-window silence is a sufficient quiescence
     /// witness — the Profile's `events_union` covers every change class
-    /// that affects `leaf_hash`. Currently reduces to a single bit:
-    /// `events.contains(CONTENT)`.
+    /// that affects `leaf_hash`. Reduces to a single semantic mask:
+    /// <code>events.contains([ClassSet::IN_PLACE_WRITES])</code>.
     ///
-    /// `CONTENT` events are the only class that signal ongoing change.
-    /// In-place `write(2)` calls fire `NOTE_WRITE` on per-file FDs
-    /// (CONTENT class); without CONTENT subscription, either no per-file
-    /// FD is wired (`has_per_file_fds == false`) or the per-Profile
-    /// class filter drops the event. Either way, writes are invisible
-    /// to the Profile, and settle expiry witnesses kernel-silence
-    /// without tree-quiescence. `STRUCTURE` (create/delete/rename) and
+    /// [`ClassSet::IN_PLACE_WRITES`] names *what we are asking of the
+    /// mask* — that subscription suffices to catch in-place writes —
+    /// rather than naming the bit (currently `CONTENT`). In-place
+    /// `write(2)` calls fire `NOTE_WRITE` on per-file FDs (CONTENT
+    /// class); without that subscription, either no per-file FD is
+    /// wired (`has_per_file_fds == false`) or the per-Profile class
+    /// filter drops the event. Either way, writes are invisible to the
+    /// Profile, and settle expiry witnesses kernel-silence without
+    /// tree-quiescence. `STRUCTURE` (create/delete/rename) and
     /// `METADATA` (chmod/touch) changes are point events that cannot
     /// span a settle window invisibly.
     ///
-    /// `false` for a Profile whose `events_union` doesn't carry CONTENT
-    /// signals that fire-bearing bursts require the hash-equality
+    /// `false` for a Profile whose `events_union` doesn't carry the
+    /// mask signals that fire-bearing bursts require the hash-equality
     /// witness across two consecutive Authoritative samples — the
     /// safety net for events-incomplete masks. Invariant for the
     /// Profile's lifetime (folds into `config_hash` via [`Self::events`]).
     #[must_use]
     pub const fn events_witness_quiescence(&self) -> bool {
-        self.events().contains(ClassSet::CONTENT)
+        self.events().contains(ClassSet::IN_PLACE_WRITES)
     }
 
     /// The substitution-side projection of `ScanConfig.exclude` (source
@@ -3641,14 +3643,15 @@ mod tests {
         assert!(!p.has_per_file_fds());
     }
 
-    /// [`Profile::events_witness_quiescence`] is true iff CONTENT is in
-    /// the mask. STRUCTURE / METADATA without CONTENT do not catch
-    /// in-place writes, so settle-window silence is not a quiescence
-    /// witness on those masks. The predicate is the (per-Profile) gate
-    /// on whether the verdict floor's settle-natural fire path is
-    /// sound; events-incomplete Profiles need the hash-equality channel.
+    /// [`Profile::events_witness_quiescence`] is true iff the Profile's
+    /// `events_union` covers [`ClassSet::IN_PLACE_WRITES`]. Masks lacking
+    /// the in-place-writes vocabulary cannot witness an in-place write
+    /// over a settle window, so settle-window silence does not prove
+    /// quiescence on those masks. The predicate is the (per-Profile) gate
+    /// on whether the verdict floor's settle-natural fire path is sound;
+    /// events-incomplete Profiles need the hash-equality channel.
     #[test]
-    fn events_witness_quiescence_tracks_content_bit() {
+    fn events_witness_quiescence_tracks_in_place_writes_mask() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
 
@@ -3661,30 +3664,37 @@ mod tests {
         let structure = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE, None);
         assert!(
             !structure.events_witness_quiescence(),
-            "STRUCTURE alone misses in-place CONTENT writes (the scp regression)",
+            "STRUCTURE alone misses IN_PLACE_WRITES (the scp regression)",
         );
 
         let metadata = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::METADATA, None);
         assert!(
             !metadata.events_witness_quiescence(),
-            "METADATA alone drops CONTENT at the per-Profile class filter",
+            "METADATA alone drops IN_PLACE_WRITES at the per-Profile class filter",
         );
 
-        let content = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
-        assert!(
-            content.events_witness_quiescence(),
-            "CONTENT subscribes to in-place writes — settle-silence proves quiescence",
-        );
-
-        let structure_and_content = mk_profile(
+        let in_place = mk_profile(
             r,
             cfg(),
             MAX_SETTLE,
             SETTLE,
-            ClassSet::STRUCTURE | ClassSet::CONTENT,
+            ClassSet::IN_PLACE_WRITES,
             None,
         );
-        assert!(structure_and_content.events_witness_quiescence());
+        assert!(
+            in_place.events_witness_quiescence(),
+            "IN_PLACE_WRITES subscribes to in-place writes — settle-silence proves quiescence",
+        );
+
+        let structure_and_in_place = mk_profile(
+            r,
+            cfg(),
+            MAX_SETTLE,
+            SETTLE,
+            ClassSet::STRUCTURE | ClassSet::IN_PLACE_WRITES,
+            None,
+        );
+        assert!(structure_and_in_place.events_witness_quiescence());
 
         let structure_and_metadata = mk_profile(
             r,
@@ -3696,7 +3706,7 @@ mod tests {
         );
         assert!(
             !structure_and_metadata.events_witness_quiescence(),
-            "the predicate is one-bit: CONTENT alone unlocks settle-natural fire",
+            "the predicate is the IN_PLACE_WRITES mask: without it, no settle-natural fire",
         );
     }
 

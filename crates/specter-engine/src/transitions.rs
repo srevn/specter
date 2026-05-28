@@ -33,11 +33,11 @@ use specter_core::{
     ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind, ClassSet,
     ContribKey, DedupKey, DescentRemaining, DescentState, DetachReason, Diagnostic, Effect,
     EffectCommon, EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent,
-    PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeResponse,
-    ProbeSlot, Profile, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState,
-    ProofAuthority, QuiescenceVerdict, QuiescenceWitness, ReapTrigger, Resource, ResourceId,
-    ResourceKind, StableReason, StepOutput, SubAttachRequest, SubId, TimerId, TimerKind,
-    TreeSnapshot, WatchFailure, WatchRegistryDiff, quiescence_verdict,
+    PostFirePhase, PreFirePhase, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot, Profile,
+    ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority,
+    QuiescenceVerdict, QuiescenceWitness, ReapTrigger, Resource, ResourceId, ResourceKind,
+    StableReason, StepOutput, SubAttachRequest, SubId, TimerId, TimerKind, TreeSnapshot,
+    WatchFailure, WatchRegistryDiff, quiescence_verdict,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -483,15 +483,7 @@ impl Engine {
 
         match route {
             ProbeRoute::Verifying { intent, forced } => {
-                self.dispatch_burst_outcome(
-                    profile_id,
-                    received,
-                    intent,
-                    forced,
-                    response.outcome,
-                    now,
-                    out,
-                );
+                self.dispatch_burst_outcome(profile_id, intent, forced, response.outcome, now, out);
             }
 
             ProbeRoute::Rebasing { forced } => {
@@ -502,13 +494,7 @@ impl Engine {
                 // route to the rebase-specific cleanup; `Regressed`
                 // (kind mismatch, DirEnumerated) was already handled
                 // inside the certifier.
-                match self.certify_probe_response(
-                    profile_id,
-                    response.outcome,
-                    received,
-                    forced,
-                    out,
-                ) {
+                match self.certify_probe_response(profile_id, response.outcome, forced, out) {
                     CertifiedResponse::Proceed { snapshot, verdict } => {
                         self.dispatch_rebase_ok(profile_id, snapshot, verdict, now, out);
                     }
@@ -583,7 +569,17 @@ impl Engine {
     /// `DirEnumerated` is a walker-contract violation (a quiescence /
     /// rebase probe is a `Subtree` / `AnchorFile` request — a structural
     /// enumeration is not a quiescence observation): loud
-    /// `debug_assert!` + [`Diagnostic::StaleProbeResponse`], `Regressed`.
+    /// `debug_assert!`, `Regressed`. No diagnostic — `StaleProbeResponse`
+    /// names a correlation drift, which this is not; the `probe_gate`
+    /// already proved the response correlates to the live carrier.
+    ///
+    /// **Profile presence.** Bound at function entry from the
+    /// `probe_gate` ⇒ `take_owner_probe` dispatch contract (the floor is
+    /// reached only on `Active(Verifying | Rebasing)`). The guard
+    /// captures the one Profile bit the fold consumes
+    /// (`events_witness_quiescence`) before releasing the read borrow,
+    /// then `expect`s the `&mut self` re-fetch for the cat-(b) advance;
+    /// `kind_agrees_or_finalize` does not remove the Profile.
     ///
     /// **Kind agreement, before the fold.**
     /// [`Engine::kind_agrees_or_finalize`] runs once, *after* the
@@ -631,14 +627,35 @@ impl Engine {
     ///
     /// The callers diverge only on the *consequence* (per-intent
     /// fire/pin vs. the rebase-loop table).
+    #[must_use]
     fn certify_probe_response(
         &mut self,
         profile_id: ProfileId,
         outcome: ProbeOutcome,
-        correlation: ProbeCorrelation,
         forced: bool,
         out: &mut StepOutput,
     ) -> CertifiedResponse {
+        // Profile-presence guard. The `probe_gate` ⇒ `take_owner_probe`
+        // dispatch contract reaches this floor only on Active(Verifying |
+        // Rebasing), so the Profile must exist; the guard surfaces a
+        // contract violation in dev/CI and degrades to `Regressed` in
+        // release. Capture `events_witness_quiescence` here from the
+        // immutable borrow — it is invariant across the burst's lifetime
+        // (folds into `config_hash`) and lets us drop the borrow before
+        // the kind check and the cat-(b) `&mut self` re-fetch.
+        let Some(events_witness_quiescence) = self
+            .profiles
+            .get(profile_id)
+            .map(Profile::events_witness_quiescence)
+        else {
+            debug_assert!(
+                false,
+                "certify_probe_response: absent Profile {profile_id:?} — \
+                 probe_gate dispatches only on Active(Verifying | Rebasing)",
+            );
+            return CertifiedResponse::Regressed;
+        };
+
         let (snap, authority) = match outcome {
             ProbeOutcome::AnchorOk(leaf) => {
                 (TreeSnapshot::File(leaf), ProofAuthority::Authoritative)
@@ -656,10 +673,6 @@ impl Engine {
                      DirEnumerated — a structural enumeration is not a quiescence \
                      observation (profile = {profile_id:?})",
                 );
-                out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    owner: ProbeOwner::Profile(profile_id),
-                    correlation,
-                });
                 return CertifiedResponse::Regressed;
             }
         };
@@ -668,25 +681,20 @@ impl Engine {
         // `kind_agrees_or_finalize` already tore the burst down via
         // `finalize_anchor_lost`, so the caller does nothing
         // (`Regressed`). Folding a verdict over a soon-discarded
-        // snapshot would be meaningless.
+        // snapshot would be meaningless. The Profile itself stays in
+        // the registry — only the burst transitions to Idle — so the
+        // entry guard's presence proof survives this call.
         if !self.kind_agrees_or_finalize(profile_id, &snap, out) {
             return CertifiedResponse::Regressed;
         }
 
-        // Witness selection — sole pre-fold side computation. The hash
-        // channel engages iff the burst owes a proof AND the events
-        // stream is insufficient. Read both predicates under disjoint
-        // borrows: `burst_owes_quiescence_proof` reads `profiles + subs`;
-        // `events_witness_quiescence` reads a single Profile bit
-        // (invariant across the burst). Defaulting absent Profile to
-        // `events_witness_quiescence = true` short-circuits the channel
-        // — the dispatch arms guard on a present Profile anyway.
+        // Witness selection. The hash channel engages iff the burst
+        // owes a proof AND the events stream is insufficient. The
+        // events bit was captured at the entry guard; the proof
+        // predicate spans `profiles + subs` and lives on the engine.
         let response_hash = snap.hash();
-        let needs_hash_channel = self.burst_owes_quiescence_proof(profile_id)
-            && !self
-                .profiles
-                .get(profile_id)
-                .is_some_and(Profile::events_witness_quiescence);
+        let needs_hash_channel =
+            self.burst_owes_quiescence_proof(profile_id) && !events_witness_quiescence;
 
         // Cat-(b) carrier advance: the cascade
         // (`Profile::advance_certified_sample` →
@@ -698,9 +706,11 @@ impl Engine {
         // an unread region), and the EventsReliable path skips the
         // write entirely.
         let prior = if needs_hash_channel && matches!(authority, ProofAuthority::Authoritative) {
-            self.profiles
-                .get_mut(profile_id)
-                .and_then(|p| p.advance_certified_sample(response_hash))
+            let profile = self.profiles.get_mut(profile_id).expect(
+                "certify_probe_response: entry guard proved Profile presence; \
+                 kind_agrees_or_finalize does not remove the Profile",
+            );
+            profile.advance_certified_sample(response_hash)
         } else {
             None
         };
@@ -745,12 +755,21 @@ impl Engine {
     /// recovery Seed; no fire missed.
     ///
     /// **Structurally-unreachable defaults to `true`.** A missing
-    /// Profile or non-`Active` state at the verdict floor should not
-    /// occur (the floor is reached only on a response-bearing
-    /// `Active(Verifying | Rebasing)` transition); the safe default
-    /// preserves the proof requirement rather than silently bypassing.
+    /// Profile or non-`Active` state at the verdict floor cannot
+    /// occur — the floor is reached only through the `probe_gate` ⇒
+    /// `take_owner_probe` dispatch on `Active(Verifying | Rebasing)`
+    /// (see [`Self::certify_probe_response`]'s entry guard for the
+    /// sole caller). Both fall-through arms `debug_assert!(false)` to
+    /// surface a contract violation in dev/CI and degrade to the
+    /// proof-owing default in release, preserving the fire-safety
+    /// invariant rather than silently bypassing it.
     fn burst_owes_quiescence_proof(&self, profile_id: ProfileId) -> bool {
         let Some(profile) = self.profiles.get(profile_id) else {
+            debug_assert!(
+                false,
+                "burst_owes_quiescence_proof: absent Profile {profile_id:?} — \
+                 certify_probe_response's entry guard proves presence at this depth",
+            );
             return true;
         };
         match profile.state() {
@@ -765,7 +784,15 @@ impl Engine {
                     !pre.dirty.is_empty() || self.subs.any_fired(profile_id)
                 }
             },
-            ProfileState::Idle | ProfileState::Pending(_) => true,
+            ProfileState::Idle | ProfileState::Pending(_) => {
+                debug_assert!(
+                    false,
+                    "burst_owes_quiescence_proof: non-Active Profile {profile_id:?} \
+                     reached the verdict floor (probe_gate dispatches only on \
+                     Active(Verifying | Rebasing))",
+                );
+                true
+            }
         }
     }
 
@@ -787,14 +814,13 @@ impl Engine {
     fn dispatch_burst_outcome(
         &mut self,
         profile_id: ProfileId,
-        correlation: ProbeCorrelation,
         intent: BurstIntent,
         forced: bool,
         outcome: ProbeOutcome,
         now: Instant,
         out: &mut StepOutput,
     ) {
-        match self.certify_probe_response(profile_id, outcome, correlation, forced, out) {
+        match self.certify_probe_response(profile_id, outcome, forced, out) {
             CertifiedResponse::Proceed { snapshot, verdict } => {
                 self.dispatch_quiescence_ok(profile_id, snapshot, verdict, intent, now, out);
             }
@@ -2576,8 +2602,16 @@ impl Engine {
     /// `target` is the latest emitted probe target
     /// ([`specter_core::PreFireBurst::probe_target`]); the `p.resource`
     /// fallback on the structurally-unreachable non-PreFire arm matches
-    /// the prior `unwrap_or(anchor)`. `None` iff the Profile is gone
-    /// (every caller arm returns).
+    /// the prior `unwrap_or(anchor)`. `None` only on the
+    /// structurally-unreachable absent-Profile path (the caller arms
+    /// then return).
+    ///
+    /// Both fall-through arms `debug_assert!(false)` to surface a
+    /// dispatch-contract violation in dev/CI and degrade silently in
+    /// release: `dispatch_quiescence_ok` is reached only after
+    /// [`Self::certify_probe_response`]'s entry guard proved the
+    /// Profile present, and after `probe_gate` proved its state is
+    /// `Active(PreFire(Verifying))`.
     ///
     /// The covered-descendant fire-gate is **not** read here. It is a
     /// fire-only concern, so it lives at the single gate site
@@ -2587,10 +2621,25 @@ impl Engine {
     /// "derived then discarded on the non-fire arms" shape this
     /// unification dissolves.
     fn pre_fire_target(&self, profile_id: ProfileId) -> Option<ResourceId> {
-        let p = self.profiles.get(profile_id)?;
+        let Some(p) = self.profiles.get(profile_id) else {
+            debug_assert!(
+                false,
+                "pre_fire_target: absent Profile {profile_id:?} — \
+                 certify_probe_response's entry guard proves presence at this depth",
+            );
+            return None;
+        };
         Some(match p.pre_fire_burst() {
             Some(pre) => pre.probe_target,
-            None => p.resource(),
+            None => {
+                debug_assert!(
+                    false,
+                    "pre_fire_target: non-PreFire Profile {profile_id:?} \
+                     reached dispatch_quiescence_ok (probe_gate dispatches \
+                     Verifying only on Active(PreFire))",
+                );
+                p.resource()
+            }
         })
     }
 
@@ -2984,28 +3033,46 @@ impl Engine {
     }
 
     /// Resolve the intent of the burst owning the in-flight Rebase
-    /// probe. Returns the live `Burst.intent` when the Profile is
-    /// `Active(_)` (the production path). Defensive fallback to
-    /// [`BurstIntent::Standard`] for the structurally-unreachable
-    /// non-Active branch — the `on_probe_response` routing dispatches
-    /// `dispatch_rebase_*` only on `PostFirePhase::Rebasing`, and that
-    /// phase is reachable only from Active. Standard is the right
-    /// default because Rebasing is overwhelmingly a Standard-burst tail
-    /// (Seed-driven Rebasing requires a recovery + drift, the rare
-    /// path).
+    /// probe. Returns `PostFireBurst.intent` on the production path —
+    /// the only path `probe_gate` ⇒ `take_owner_probe` reaches the
+    /// `dispatch_rebase_*` callers from (`Active(PostFire(Rebasing))`).
+    ///
+    /// Every other arm `debug_assert!(false)`s a dispatch-contract
+    /// violation and degrades to a safe default in release: PreFire
+    /// keeps `pre.intent` (most accurate residual), and
+    /// absent/Idle/Pending fall back to [`BurstIntent::Standard`]
+    /// (Rebasing is overwhelmingly a Standard-burst tail; Seed-driven
+    /// Rebasing requires a recovery + drift, the rare path).
     fn rebase_burst_intent(&self, profile_id: ProfileId) -> BurstIntent {
-        // Rebasing lives in `Active(PostFire(_))` by construction;
-        // PostFireBurst carries `intent` precisely for this diagnostic
-        // payload. Non-PostFire is the structurally-unreachable
-        // defensive arm.
-        self.profiles
-            .get(profile_id)
-            .and_then(|p| match p.state() {
-                ProfileState::Active(ActiveBurst::PostFire(post), _) => Some(post.intent),
-                ProfileState::Active(ActiveBurst::PreFire(pre), _) => Some(pre.intent),
-                _ => None,
-            })
-            .unwrap_or(BurstIntent::Standard)
+        let Some(profile) = self.profiles.get(profile_id) else {
+            debug_assert!(
+                false,
+                "rebase_burst_intent: absent Profile {profile_id:?} — \
+                 certify_probe_response's entry guard proves presence at this depth",
+            );
+            return BurstIntent::Standard;
+        };
+        match profile.state() {
+            ProfileState::Active(ActiveBurst::PostFire(post), _) => post.intent,
+            ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
+                debug_assert!(
+                    false,
+                    "rebase_burst_intent: PreFire Profile {profile_id:?} reached \
+                     dispatch_rebase_* (probe_gate dispatches Rebasing only on \
+                     Active(PostFire(Rebasing)))",
+                );
+                pre.intent
+            }
+            ProfileState::Idle | ProfileState::Pending(_) => {
+                debug_assert!(
+                    false,
+                    "rebase_burst_intent: non-Active Profile {profile_id:?} \
+                     reached dispatch_rebase_* (probe_gate dispatches Rebasing only \
+                     on Active(PostFire(Rebasing)))",
+                );
+                BurstIntent::Standard
+            }
+        }
     }
 
     /// `burst_deadline` row — sets `forced := true` and either
