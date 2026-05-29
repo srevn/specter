@@ -16,6 +16,7 @@
 //! - [`show`] — `specter show <name>` round-trip.
 //! - [`disable`] — `specter disable <name>` round-trip.
 //! - [`enable`] — `specter enable <name>` round-trip.
+//! - [`absorb`] — `specter absorb <name> [--for <dur>]` round-trip.
 //! - [`reload`] — `specter reload` round-trip.
 //! - [`subscribe`] — shared Subscribe + ack + line-read scaffold for
 //!   the streaming verbs.
@@ -24,8 +25,8 @@
 //!
 //! Every one-shot handler follows the same shape:
 //! `connect::round_trip(verb, request)` → match the response →
-//! render. The unit-ack verbs (`disable`, `enable`, `reload`)
-//! collapse the match arm into [`connect::one_shot_unit`]. The two
+//! render. The unit-ack verbs (`disable`, `enable`, `reload`,
+//! `absorb`) collapse the match arm into [`connect::one_shot_unit`]. The two
 //! streaming handlers reach [`subscribe::Subscription`] instead of
 //! `round_trip` because the post-ack horizon is per-event, not
 //! per-call.
@@ -36,6 +37,7 @@
 //! etc.) are reached by [`crate::run`] via the top-level subcommand
 //! dispatcher in `lib.rs`.
 
+pub(crate) mod absorb;
 pub(crate) mod connect;
 pub(crate) mod disable;
 pub(crate) mod enable;

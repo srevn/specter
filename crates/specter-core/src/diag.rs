@@ -7,7 +7,7 @@
 use crate::ids::{ProbeCorrelation, ProfileId, PromoterId, ResourceId, SubId, TimerId};
 use crate::input::{FsEvent, OverflowScope};
 use crate::op::{ProbeFailure, ProbeOwner, WatchFailure};
-use crate::profile::{BurstIntent, ProfileStateDiscriminant};
+use crate::profile::{AbsorbMode, BurstIntent, ProfileStateDiscriminant};
 use crate::resource::ResourceKind;
 use compact_str::CompactString;
 use std::path::Path;
@@ -558,13 +558,18 @@ pub enum Diagnostic {
     /// (`forced` already propagates onto `Effect.forced`, visible
     /// downstream), so only the strong-signal arm earns a diagnostic.
     ///
-    /// Reachable only when the per-Profile hash channel was active —
-    /// the burst was fire-bearing AND
+    /// Reachable only when the per-Profile hash channel was engaged —
+    /// the burst owed quiescence proof (Standard / triggered Seed /
+    /// post-recovery Seed) AND
     /// [`crate::Profile::events_witness_quiescence`] was `false`
-    /// (events-incomplete mask). For events-reliable Profiles and
-    /// cold-Seed bursts the channel is bypassed and this variant is
-    /// unreachable by the fold (`hash_channel_disagreed` is always
-    /// `false`).
+    /// (events-incomplete mask). "Engaged," not "fired": a no-drift
+    /// post-recovery Seed engages the channel yet seals via `SilentPin`,
+    /// and a burst caught by an `absorb` window engages it yet commits
+    /// silently ([`Self::QuiescenceAbsorbed`]) — so this is a "committed
+    /// despite change" signal, independent of whether an Effect fired.
+    /// For events-reliable Profiles and cold-Seed bursts the channel is
+    /// bypassed and this variant is unreachable by the verdict fold
+    /// (`hash_channel_disagreed` is always `false`).
     QuiescenceCeilingForcedDespiteChange {
         profile: ProfileId,
         intent: BurstIntent,
@@ -689,6 +694,36 @@ pub enum Diagnostic {
         sub: SubId,
         profile: ProfileId,
         count: u32,
+    },
+    /// A burst folded instead of firing: an armed `absorb` window caught
+    /// a would-have-fired verdict, so the engine advanced the baseline
+    /// silently (the rebase-family seal) rather than running the Subs'
+    /// reactions. The fold counterpart of [`Self::SubFired`] — one
+    /// emission per folded episode, at the verdict floor's `AbsorbFold`
+    /// arm.
+    ///
+    /// Carries **no hash**: the metadata hash is meaningless across
+    /// machines, and folding a remote replication is the whole point.
+    /// `profile`-scoped, not `sub`-scoped, because a fold is
+    /// per-Profile — every Sub on the Profile folds together. Bumps the
+    /// per-Profile `absorb_count`.
+    ///
+    /// On a transfer longer than `max_settle` the forced ceiling can
+    /// emit [`Self::QuiescenceCeilingForcedDespiteChange`] *alongside*
+    /// this — both are truthful ("committed despite change" + "folded"),
+    /// not contradictory.
+    QuiescenceAbsorbed { profile: ProfileId },
+    /// An operator armed an `absorb` window on a Profile (the
+    /// [`crate::Input::ArmAbsorb`] handler). Emitted once per arm, so a
+    /// `tail` sees the *arm*, not only the eventual
+    /// [`Self::QuiescenceAbsorbed`] fold. `mode` distinguishes a
+    /// one-shot consume-on-first window from a time-boxed persist
+    /// window; the expiry instant is **not** carried (an `Instant` has
+    /// no clean wire wall-clock at this layer — `show` renders the
+    /// expiry from live Profile state instead).
+    AbsorbArmed {
+        profile: ProfileId,
+        mode: AbsorbMode,
     },
     /// A Sub was removed from the engine; `reason` demuxes the origin.
     /// Emitted once per Sub removal — the operator-facing lifecycle

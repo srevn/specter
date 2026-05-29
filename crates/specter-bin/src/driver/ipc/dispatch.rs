@@ -51,7 +51,26 @@ use mio::Token;
 use specter_core::Input;
 use specter_sensor::FsWatcher;
 use std::ops::ControlFlow;
-use std::time::Instant;
+use std::time::{Duration, Instant};
+
+/// Upper bound on an operator `absorb --for` window, clamped at the
+/// driver before the engine step.
+///
+/// The driver is the sole [`Input::ArmAbsorb`] producer, and the engine
+/// derives the window expiry as `now + duration`
+/// (`specter_engine`'s `on_arm_absorb`). `Instant + Duration` panics on
+/// overflow — on a u64-nanosecond `Instant` (macOS) a multi-century
+/// `Duration` overflows — so the duration is clamped here, where every
+/// client is covered, rather than guarded with defensive arithmetic in
+/// the (rightly-trusting, as it trusts config) engine.
+///
+/// **Not a policy cap.** An `absorb` window covers a replication
+/// transfer — seconds to hours — so ten years is unreachable by
+/// operator intent, yet leaves >50× headroom below the tightest
+/// `Instant` representation (a u64-nanosecond monotonic counter
+/// overflows ~584 years past its epoch). `parse_duration` (CLI) and the
+/// engine impose no cap by design; this is the lone overflow guard.
+const MAX_ABSORB_WINDOW: Duration = Duration::from_hours(10 * 365 * 24);
 
 impl<W: FsWatcher> EngineDriver<W> {
     /// Drain the per-conn readiness this tick into IPC verb
@@ -88,8 +107,8 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// because it doesn't need any IPC handler state.
     ///
     /// Returns [`ControlFlow::Break`] iff a handler observed
-    /// shutdown mid-apply (the `Reload`/`Disable`/`Enable` arms can
-    /// drive `engine.step` + `forward`, and a downstream-disconnect
+    /// shutdown mid-apply (the `Reload`/`Disable`/`Enable`/`Absorb`
+    /// arms can drive `engine.step` + `forward`, and a downstream-disconnect
     /// `forward` propagates Break upward). All other paths return
     /// [`ControlFlow::Continue`] — including malformed JSON, unknown
     /// names, and read failures, which surface to the operator as a
@@ -191,15 +210,16 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// # Mutating-verb shutdown gate
     ///
-    /// `Reload`, `Disable`, and `Enable` are gated on
+    /// `Reload`, `Disable`, `Enable`, and `Absorb` are gated on
     /// `EngineDriver::first_term.is_none()` — once the driver has
     /// observed a SIGINT / SIGTERM, mutating verbs refuse with
     /// [`WireErrorCode::ShuttingDown`]. The actuator is in the middle
     /// of its grace pipeline; admitting a fresh `engine.step` from
-    /// `Reload` (which can attach new Subs that arm probes) or
-    /// `Disable` / `Enable` (which mutate engine state) would
-    /// invalidate the shutdown's premise that the engine is winding
-    /// down. Read-only verbs (`Status`, `List`, `Show`) and
+    /// `Reload` (which can attach new Subs that arm probes),
+    /// `Disable` / `Enable` (which mutate engine state), or `Absorb`
+    /// (which arms a window and may retro-latch an in-flight burst)
+    /// would invalidate the shutdown's premise that the engine is
+    /// winding down. Read-only verbs (`Status`, `List`, `Show`) and
     /// `Subscribe` (bin-local mutation only — flips `conn.role`
     /// without touching engine state) stay accessible so operators
     /// can `tail` the wind-down.
@@ -221,14 +241,17 @@ impl<W: FsWatcher> EngineDriver<W> {
             }
         };
         // Mutating-verb shutdown gate — see the rustdoc above.
-        // Lives at this seam (not on each handler) so the four arms
-        // below stay focused on their happy path; the refusal carries
-        // the structured `ShuttingDown` code so operator scripts can
-        // branch deterministically.
+        // Lives at this seam (not on each handler) so the four
+        // mutating-verb arms below stay focused on their happy path;
+        // the refusal carries the structured `ShuttingDown` code so
+        // operator scripts can branch deterministically.
         if self.first_term.is_some()
             && matches!(
                 request,
-                WireRequest::Reload | WireRequest::Disable { .. } | WireRequest::Enable { .. }
+                WireRequest::Reload
+                    | WireRequest::Disable { .. }
+                    | WireRequest::Enable { .. }
+                    | WireRequest::Absorb { .. }
             )
         {
             self.respond(
@@ -269,6 +292,7 @@ impl<W: FsWatcher> EngineDriver<W> {
                     &self.disabled_runtime,
                     self.loader.current_config(),
                     name.as_str(),
+                    now,
                 );
                 self.respond(token, &ResponsePayload::Show(resp));
                 ControlFlow::Continue(())
@@ -286,6 +310,9 @@ impl<W: FsWatcher> EngineDriver<W> {
             }
             WireRequest::Disable { name } => self.handle_disable(token, name, now),
             WireRequest::Enable { name } => self.handle_enable(token, name.as_str(), now),
+            WireRequest::Absorb { name, duration_ms } => {
+                self.handle_absorb(token, name.as_str(), duration_ms, now)
+            }
         }
     }
 
@@ -505,6 +532,76 @@ impl<W: FsWatcher> EngineDriver<W> {
         let out = self
             .engine
             .step(Input::AttachSub(spec.to_attach_request()), now);
+        let outcome = self.forward(out);
+        self.respond(token, &ResponsePayload::Ok);
+        outcome
+    }
+
+    /// Operator-requested `absorb` window on a static Sub's Profile —
+    /// the runtime fold-without-fire signal. Arms a window so the next
+    /// fireable burst (or an in-flight one, retro-latched) advances the
+    /// baseline silently instead of firing, folding an expected
+    /// replication into the settled reference rather than echoing it.
+    ///
+    /// Mirrors [`Self::handle_disable`]'s resolution + gate shape, minus
+    /// the `disabled_runtime` interaction (absorb does not detach):
+    ///
+    /// 1. A name absent from the engine's `by_name` index is refused
+    ///    with [`WireErrorCode::UnknownSub`].
+    /// 2. A promoter-spawned dynamic Sub (`source_promoter.is_some()`)
+    ///    is refused with [`WireErrorCode::DynamicSubNoOp`] — the
+    ///    synthesised name is unstable across reloads, the same reason
+    ///    `disable` refuses it.
+    ///
+    /// On the apply path the operator's `duration_ms` is rebuilt into a
+    /// [`Duration`] **and clamped** to [`MAX_ABSORB_WINDOW`] before the
+    /// engine step — the lone overflow guard for the feature (see that
+    /// constant). A `None` duration threads through as the engine's
+    /// consume-on-first default (one `settle` interval).
+    ///
+    /// The reply is acked unconditionally after the work — same
+    /// discipline as [`Self::handle_disable`] / [`Self::handle_enable`].
+    fn handle_absorb(
+        &mut self,
+        token: Token,
+        name: &str,
+        duration_ms: Option<u64>,
+        now: Instant,
+    ) -> ControlFlow<()> {
+        let Some(sid) = self.engine.subs().find_by_name(name) else {
+            self.respond(
+                token,
+                &ResponsePayload::Err {
+                    code: WireErrorCode::UnknownSub,
+                    error: format!("no watch named {name}"),
+                },
+            );
+            return ControlFlow::Continue(());
+        };
+        let sub = self
+            .engine
+            .subs()
+            .get(sid)
+            .expect("by_name resolves to live SubId — registry lockstep invariant");
+        if sub.source_promoter.is_some() {
+            self.respond(
+                token,
+                &ResponsePayload::Err {
+                    code: WireErrorCode::DynamicSubNoOp,
+                    error: "cannot absorb on a promoter-spawned dynamic sub \
+                            (synthesised names are unstable across reloads)"
+                        .into(),
+                },
+            );
+            return ControlFlow::Continue(());
+        }
+        // `ProfileId` is `Copy`; capturing it ends the `&self.engine`
+        // borrow before the `&mut self.engine` step below.
+        let profile = sub.profile();
+        let duration = duration_ms.map(|ms| Duration::from_millis(ms).min(MAX_ABSORB_WINDOW));
+        let out = self
+            .engine
+            .step(Input::ArmAbsorb { profile, duration }, now);
         let outcome = self.forward(out);
         self.respond(token, &ResponsePayload::Ok);
         outcome

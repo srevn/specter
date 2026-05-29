@@ -353,6 +353,12 @@ impl Engine {
         let resource = p.resource();
         let settle = p.settle;
         let max_settle = p.max_settle();
+        // Birth consult, on the borrow already in hand: a Seed burst born
+        // under a live `absorb` window freezes the fold latch. A would-be
+        // first-fire / recovery-drift fire then folds; a redundant
+        // Cold-Seed stays `SilentPin` (non-firing), leaving the window
+        // unconsumed for the first genuinely fireable burst.
+        let fold_latched = p.absorb_window_live(now);
 
         // `burst_deadline` arms unconditionally — the worst-case bound
         // on both the triggered settle/verify loop and the cold walk
@@ -434,6 +440,7 @@ impl Engine {
                     dirty,
                     last_event_time,
                     last_certified_hash: None,
+                    fold_latched,
                 }),
                 // Fresh burst — directive starts at `ReturnToIdle`. Flips
                 // to `Reap` only on mid-burst `mark_active_for_reap`.
@@ -486,6 +493,10 @@ impl Engine {
         };
         let settle = p.settle;
         let max_settle = p.max_settle();
+        // Birth consult, on the borrow already in hand: a Standard burst
+        // born under a live `absorb` window freezes the fold latch, so
+        // its eventual fire folds into the baseline instead.
+        let fold_latched = p.absorb_window_live(now);
 
         let settle_timer = self
             .timers
@@ -517,6 +528,7 @@ impl Engine {
                     // re-inserting a fresh heap entry.
                     last_event_time: Some(now),
                     last_certified_hash: None,
+                    fold_latched,
                 }),
                 // Fresh burst — directive starts at `ReturnToIdle`. Flips
                 // to `Reap` only on mid-burst `mark_active_for_reap`.
@@ -1679,11 +1691,19 @@ impl Engine {
         // `transition_to_awaiting` uses for its inverse move: the
         // precondition already proved `Active(PostFire)`; the inner
         // `matches!` is the borrow discipline for the typed move below,
-        // not a duplicated guard.
-        let Some((settle, max_settle)) = self.profiles.get(profile_id).and_then(|p| {
-            matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _))
-                .then_some((p.settle, p.max_settle()))
-        }) else {
+        // not a duplicated guard. `fold_latched` is the restart's birth
+        // consult on the same borrow — the restart IS the next pre-fire
+        // burst's birth, so an `absorb` window armed during post-fire
+        // (still live at `now`) folds the residual-carried events too.
+        let Some((settle, max_settle, fold_latched)) =
+            self.profiles.get(profile_id).and_then(|p| {
+                matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _)).then_some((
+                    p.settle,
+                    p.max_settle(),
+                    p.absorb_window_live(now),
+                ))
+            })
+        else {
             return;
         };
 
@@ -1727,6 +1747,7 @@ impl Engine {
                                 burst_deadline,
                                 settle_timer,
                                 now,
+                                fold_latched,
                             )),
                             finish,
                         ),
@@ -2550,6 +2571,7 @@ mod tests {
             dirty,
             last_event_time: None,
             last_certified_hash: None,
+            fold_latched: false,
         }
     }
 

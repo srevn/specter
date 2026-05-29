@@ -12,15 +12,18 @@
 //! callsite, not inside the index.
 
 use std::collections::BTreeSet;
+use std::time::Instant;
 
 use compact_str::CompactString;
 use specter_config::Config;
-use specter_core::{Sub, SubId};
+use specter_core::{Profile, Sub, SubId};
 use specter_engine::Engine;
 
 use crate::driver::DriverState;
 use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId};
-use crate::ipc::wire::{WireEffectScope, WirePath, WireStateLabel, WireTime};
+use crate::ipc::wire::{
+    WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WirePath, WireStateLabel, WireTime,
+};
 
 use super::{program, project_wall};
 
@@ -44,6 +47,7 @@ pub(crate) fn show(
     disabled_runtime: &BTreeSet<CompactString>,
     config: &Config,
     name: &str,
+    now: Instant,
 ) -> ShowResponse {
     if let Some(sid) = engine.subs().find_by_name(name) {
         let sub = engine
@@ -51,7 +55,7 @@ pub(crate) fn show(
             .get(sid)
             .expect("by_name resolves to live SubId — registry lockstep invariant");
         if sub.source_promoter.is_none() {
-            return ShowResponse::Active(project_details(sid, sub, engine, ds));
+            return ShowResponse::Active(project_details(sid, sub, engine, ds, now));
         }
         return ShowResponse::Unknown {
             name: name.to_string(),
@@ -94,12 +98,29 @@ pub(crate) fn show(
 /// not yet resolved" (a Pending descent in flight, an Unwatch event
 /// that hasn't reconciled). The shape mirrors
 /// [`crate::ipc::protocol::ListRow::anchor`].
-fn project_details(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) -> SubDetails {
+fn project_details(
+    sid: SubId,
+    sub: &Sub,
+    engine: &Engine,
+    ds: &DriverState,
+    now: Instant,
+) -> SubDetails {
     let profile = engine.profiles().get(sub.profile());
     let state = profile.map(|p| WireStateLabel::from(p.state().label()));
     let anchor = profile
         .and_then(|p| engine.tree().path_of(p.resource()))
         .map(|arc| WirePath::from(&arc));
+    // Live-gate via the engine's own predicate: lazy expiry leaves an
+    // inert window resident in Profile state, and `absorb_window_if_live`
+    // is the single owner of the `now < expiry` rule, so the projection
+    // drops an inert window without re-stating the liveness test. The
+    // wall-clock projection runs only for the live `Some` the operator sees.
+    let absorb = profile
+        .and_then(|p| p.absorb_window_if_live(now))
+        .map(|w| WireAbsorbWindow {
+            expiry: WireTime::from(project_wall(ds.start_wall, ds.start_instant, w.expiry)),
+            mode: WireAbsorbMode::from(w.mode),
+        });
     SubDetails {
         name: sub.name.to_string(),
         sub: WireId::from(sid),
@@ -111,6 +132,8 @@ fn project_details(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) -> 
             .map(|t| WireTime::from(project_wall(ds.start_wall, ds.start_instant, t))),
         fire_count: sub.fire_count,
         dedup_suppressed_count: sub.dedup_suppressed_count,
+        absorb,
+        absorb_count: profile.map_or(0, Profile::absorb_count),
         settle_ms: u64::try_from(sub.settle.as_millis())
             .expect("Duration::as_millis fits u64 for any operator-meaningful settle window"),
         source_promoter: sub.source_promoter.map(WireId::from),
@@ -224,6 +247,7 @@ mod tests {
             &BTreeSet::new(),
             &config,
             "watched",
+            Instant::now(),
         );
         match r {
             ShowResponse::Active(d) => {
@@ -260,6 +284,7 @@ mod tests {
             &disabled,
             &Config::from_str("").expect("empty"),
             "paused",
+            Instant::now(),
         );
         match r {
             ShowResponse::Disabled { name, source } => {
@@ -283,6 +308,7 @@ mod tests {
             &BTreeSet::new(),
             &config,
             "off_by_toml",
+            Instant::now(),
         );
         match r {
             ShowResponse::Disabled { name, source } => {
@@ -304,6 +330,7 @@ mod tests {
             &BTreeSet::new(),
             &Config::from_str("").expect("empty"),
             "ghost",
+            Instant::now(),
         );
         match r {
             ShowResponse::Unknown { name } => assert_eq!(name, "ghost"),
@@ -332,11 +359,84 @@ mod tests {
             &disabled,
             &config,
             "engaged",
+            Instant::now(),
         );
         assert!(
             matches!(r, ShowResponse::Active(_)),
             "engine row wins precedence over the runtime-disabled set",
         );
+    }
+
+    /// An armed-and-live `absorb` window projects to
+    /// `SubDetails.absorb = Some(..)` with the matching mode, and an
+    /// inert (expired) window projects to `None` — the projection's
+    /// `expiry > now` live-gate. `absorb_count` projects independently
+    /// (0 here — arming does not fold). Arming with `Some(duration)`
+    /// yields `PersistUntil`; the window's `expiry` is `arm_now +
+    /// duration`, so a `now` before it is live and a `now` past it is
+    /// inert.
+    #[test]
+    fn show_absorb_window_live_gated_by_now() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let config = config_from_watches(&[("watched", tmp.path().to_str().unwrap(), true)]);
+        let mut engine = engine_with(&config);
+        let sid = engine
+            .subs()
+            .find_by_name("watched")
+            .expect("watched attached");
+        let profile = engine.subs().get(sid).expect("live sub").profile();
+
+        let arm_now = Instant::now();
+        let window = Duration::from_mins(1);
+        let _ = engine.step(
+            Input::ArmAbsorb {
+                profile,
+                duration: Some(window),
+            },
+            arm_now,
+        );
+
+        let guard = EngineGuard::wrap(engine);
+
+        // Before expiry ⇒ Some(PersistUntil).
+        let live = show(
+            guard.engine(),
+            &fresh_state(),
+            &BTreeSet::new(),
+            &config,
+            "watched",
+            arm_now,
+        );
+        match live {
+            ShowResponse::Active(d) => {
+                let w = d.absorb.as_ref().expect("live window projects Some");
+                assert_eq!(
+                    w.mode,
+                    crate::ipc::wire::WireAbsorbMode::PersistUntil,
+                    "Some(duration) ⇒ PersistUntil",
+                );
+                assert_eq!(d.absorb_count, 0, "arming folds nothing");
+            }
+            other => panic!("expected Active, got {other:?}"),
+        }
+
+        // Past expiry ⇒ None (the projection drops the inert window).
+        let inert = show(
+            guard.engine(),
+            &fresh_state(),
+            &BTreeSet::new(),
+            &config,
+            "watched",
+            arm_now + window + Duration::from_secs(1),
+        );
+        match inert {
+            ShowResponse::Active(d) => assert!(
+                d.absorb.is_none(),
+                "inert window (expiry <= now) projects None: {:?}",
+                d.absorb,
+            ),
+            other => panic!("expected Active, got {other:?}"),
+        }
     }
 
     /// A dynamic Sub's synthesised name resolves through
@@ -383,6 +483,7 @@ mod tests {
             &BTreeSet::new(),
             &Config::from_str("").expect("empty"),
             "promoter@/tmp/dyn_anchor",
+            Instant::now(),
         );
         match r {
             ShowResponse::Unknown { name } => {

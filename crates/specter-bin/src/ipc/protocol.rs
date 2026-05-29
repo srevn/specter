@@ -36,7 +36,9 @@ use slotmap::Key;
 use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
 
 use super::framing::InfallibleSerialize;
-use super::wire::{WireEffectScope, WirePath, WireReloadTrigger, WireStateLabel, WireTime};
+use super::wire::{
+    WireAbsorbWindow, WireEffectScope, WirePath, WireReloadTrigger, WireStateLabel, WireTime,
+};
 
 /// Operator-facing wire request — the shape the daemon parses from
 /// the socket and the client constructs at write time.
@@ -75,6 +77,22 @@ pub(crate) enum WireRequest {
     },
     Enable {
         name: CompactString,
+    },
+    /// Arm an `absorb` window on the named watch's Profile — fold the
+    /// next fireable burst into the baseline instead of firing (the
+    /// echo-suppression signal for an expected replication). `name`
+    /// resolves to a Profile driver-side; the wire carries no id, same
+    /// name-only addressing as every other verb. `duration_ms` is the
+    /// window length: `None` ⇒ the engine's default (one `settle`
+    /// interval, consume-on-first); `Some(ms)` ⇒ a time-boxed window.
+    /// The wire has no `Duration` type, so the duration rides as a
+    /// scalar millisecond count (matching [`WireTime`]'s
+    /// hand-rolled-scalar discipline); the driver rebuilds the
+    /// `Duration` — and clamps it — before lifting `Input::ArmAbsorb`.
+    Absorb {
+        name: CompactString,
+        #[serde(default)]
+        duration_ms: Option<u64>,
     },
     Reload,
     /// Subscribe to the diagnostic stream. `name` is optional — `None`
@@ -205,7 +223,7 @@ pub(crate) enum WireErrorCode {
     /// [`crate::driver::EngineDriver`]'s Subscribe arm.
     AlreadySubscribed,
     /// Daemon is winding down — mutating verbs (`Reload`, `Disable`,
-    /// `Enable`) refused. The gate fires iff
+    /// `Enable`, `Absorb`) refused. The gate fires iff
     /// `EngineDriver::first_term.is_some()` — the operator pulsed
     /// SIGINT / SIGTERM and the actuator is in the middle of its
     /// SIGTERM → grace → SIGKILL → reap-drain pipeline. Read-only
@@ -541,6 +559,18 @@ pub(crate) struct SubDetails {
     pub(crate) fire_count: u64,
     /// Cumulative B1-dedup suppressions.
     pub(crate) dedup_suppressed_count: u64,
+    /// Armed `absorb` window, live-gated: `Some` iff a window is armed
+    /// AND not yet inert (`expiry > now`) at projection time. The
+    /// engine's lazy expiry leaves an inert window resident in Profile
+    /// state; this projection hides it (renders absent) rather than
+    /// surfacing a stale `Some`. Per-Profile by construction — every
+    /// Sub on the Profile shares one window.
+    pub(crate) absorb: Option<WireAbsorbWindow>,
+    /// `Profile.absorb_count` — folds this Profile has absorbed. The
+    /// fold counterpart of `fire_count`; per-Profile (a fold is
+    /// per-Profile), projected here per-Sub alongside the per-Sub fire
+    /// counters.
+    pub(crate) absorb_count: u64,
     /// `Sub.settle.as_millis()`.
     pub(crate) settle_ms: u64,
     /// `Sub.source_promoter` projection — `Some(_)` iff the Sub
@@ -564,6 +594,7 @@ mod tests {
     };
     use crate::ipc::framing::parse_strict;
     use crate::ipc::wire::{WirePath, WireReloadTrigger, WireTime};
+    use compact_str::CompactString;
     use slotmap::KeyData;
     use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
     use std::path::Path;
@@ -630,6 +661,49 @@ mod tests {
                 assert_eq!(name.as_deref(), Some("foo"));
             }
             other => panic!("expected Subscribe(Some), got {other:?}"),
+        }
+    }
+
+    /// `WireRequest::Absorb` round-trips through serde with both the
+    /// absent and present `duration_ms`. `#[serde(default)]` on
+    /// `duration_ms` is the load-bearing detail — a bare
+    /// `{"op":"absorb","name":"foo"}` parses with `duration_ms: None`
+    /// (the engine's consume-on-first default), and an explicit
+    /// `Some(n)` survives the serialize→deserialize cycle.
+    #[test]
+    fn wire_request_absorb_round_trips_optional_duration() {
+        // Absent duration_ms ⇒ None (serde default).
+        let parsed: WireRequest = serde_json::from_str(r#"{"op":"absorb","name":"foo"}"#).unwrap();
+        match &parsed {
+            WireRequest::Absorb { name, duration_ms } => {
+                assert_eq!(name.as_str(), "foo");
+                assert_eq!(*duration_ms, None, "omitted duration_ms ⇒ None");
+            }
+            other => panic!("expected Absorb, got {other:?}"),
+        }
+        let again = serde_json::to_string(&parsed).unwrap();
+        let reparsed: WireRequest = serde_json::from_str(&again).unwrap();
+        assert!(matches!(
+            reparsed,
+            WireRequest::Absorb {
+                duration_ms: None,
+                ..
+            }
+        ));
+
+        // Explicit duration_ms ⇒ Some(n), preserved across the cycle.
+        let some = WireRequest::Absorb {
+            name: CompactString::const_new("bar"),
+            duration_ms: Some(30_000),
+        };
+        let json = serde_json::to_string(&some).unwrap();
+        let back: WireRequest = serde_json::from_str(&json).unwrap();
+        match back {
+            WireRequest::Absorb { name, duration_ms } => {
+                assert_eq!(name.as_str(), "bar");
+                assert_eq!(duration_ms, Some(30_000));
+            }
+            other => panic!("expected Absorb, got {other:?}"),
         }
     }
 

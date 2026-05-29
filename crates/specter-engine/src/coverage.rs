@@ -1151,6 +1151,7 @@ mod tests {
                 dirty: DirtyProvenance::new(),
                 last_event_time: None,
                 last_certified_hash: None,
+                fold_latched: false,
             }),
             BurstFinish::ReturnToIdle,
         ));

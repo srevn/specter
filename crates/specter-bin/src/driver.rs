@@ -196,8 +196,8 @@ pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     ///
     /// **Dual role: shutdown-in-flight gate.** `first_term.is_some()`
     /// is the IPC-mutating-verb gate read by
-    /// [`Self::handle_ipc_line`] — `Reload` / `Disable` / `Enable`
-    /// requests arriving after the first termination signal refuse
+    /// [`Self::handle_ipc_line`] — `Reload` / `Disable` / `Enable` /
+    /// `Absorb` requests arriving after the first termination signal refuse
     /// with [`crate::ipc::protocol::WireErrorCode::ShuttingDown`].
     /// Read-only verbs and `Subscribe` (bin-local mutation) stay
     /// accessible so operators can `specter tail` the wind-down. One

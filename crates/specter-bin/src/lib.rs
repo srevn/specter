@@ -49,6 +49,7 @@ pub fn run(cli: Cli) -> ExitCode {
         Command::Show(args) => ipc::client::show::run(&args),
         Command::Disable(args) => ipc::client::disable::run(&args),
         Command::Enable(args) => ipc::client::enable::run(&args),
+        Command::Absorb(args) => ipc::client::absorb::run(&args),
         Command::Reload(args) => ipc::client::reload::run(&args),
         Command::Tail(args) => ipc::client::tail::run(&args),
         Command::Wait(args) => ipc::client::wait::run(&args),

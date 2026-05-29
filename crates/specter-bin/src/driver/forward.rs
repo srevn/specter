@@ -492,6 +492,16 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             "sub fired (aggregated per emit_effects pass; SubtreeRoot count=1, \
              PerStableFile count=per-leaf matches)",
         ),
+        Diagnostic::QuiescenceAbsorbed { profile } => tracing::info!(
+            ?profile,
+            "burst folded by an armed absorb window — baseline advanced, no fire \
+             (expected replication absorbed)",
+        ),
+        Diagnostic::AbsorbArmed { profile, mode } => tracing::info!(
+            ?profile,
+            ?mode,
+            "absorb window armed (next fireable burst folds instead of firing)",
+        ),
         Diagnostic::SubDetached {
             sub,
             profile,
@@ -653,6 +663,8 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::PromoterReseededForOverflow { .. }
         | D::PerFileDriftDroppedOnRecovery { .. }
         | D::PerFileFireSkippedOnFreshSeed { .. }
+        | D::QuiescenceAbsorbed { .. }
+        | D::AbsorbArmed { .. }
         | D::PromoterAttached { .. }
         | D::PromoterReaped { .. }
         | D::PromoterDescentVanished { .. }

@@ -116,8 +116,8 @@ pub(crate) struct Hub {
 /// per-conn capacity verdict back to the caller along with a
 /// "conn-not-in-map" signal — the IPC handler's Subscribe arm needs
 /// to know whether the ack actually landed before flipping the role.
-/// Other handlers (`Reload`, `Disable`, `Enable`, projection paths)
-/// `let _ = ...` the outcome benignly: a refused or gone conn is
+/// Other handlers (`Reload`, `Disable`, `Enable`, `Absorb`, projection
+/// paths) `let _ = ...` the outcome benignly: a refused or gone conn is
 /// already on the path to termination, and re-acking is pointless.
 #[must_use]
 #[derive(Debug, Eq, PartialEq)]

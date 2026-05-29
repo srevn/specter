@@ -6250,6 +6250,7 @@ fn active_pre_fire_burst(
             dirty: DirtyProvenance::new(),
             last_event_time: None,
             last_certified_hash: None,
+            fold_latched: false,
         }),
         BurstFinish::ReturnToIdle,
     )
@@ -7192,6 +7193,629 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
          had fired was detached; its flag died with it, no purge needed",
     );
     let _ = e.cancel_all_in_flight_probes();
+}
+
+// ---------- absorb: runtime fold-without-fire ----------
+
+/// Drive an already-Idle Profile through one Standard burst to its
+/// quiescence verdict, pinning against `snap`. FsEvent at `root` →
+/// Settle expiry → single Authoritative response. Returns the verdict
+/// `StepOutput` (the fire/fold emission) so callers assert effects +
+/// diagnostics. Births the burst at `fs_event_at`; the caller arms the
+/// window before this call (birth-latch). The retro-latch path arms
+/// mid-Batching and drives the steps inline.
+fn drive_standard_verdict(
+    e: &mut Engine,
+    pid: specter_core::ProfileId,
+    root: ResourceId,
+    snap: Arc<DirSnapshot>,
+    fs_event_at: Instant,
+) -> StepOutput {
+    let _ = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::StructureChanged,
+        },
+        fs_event_at,
+    );
+    let settle_timer = match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
+            PreFirePhase::Batching { settle_timer } => *settle_timer,
+            other => panic!("expected Standard Batching; got {other:?}"),
+        },
+        other => panic!("expected Active(PreFire); got {other:?}"),
+    };
+    let _ = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::Settle,
+            id: settle_timer,
+        },
+        fs_event_at + SETTLE,
+    );
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight after Settle expiry");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: snap,
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        fs_event_at + SETTLE + Duration::from_millis(1),
+    )
+}
+
+/// `baseline().hash() == current().hash()` for a Dir-anchored Profile —
+/// the post-fold witness that the silent seal advanced the baseline onto
+/// the folded sample (the rebase family, not the suppress family).
+fn baseline_equals_current(e: &Engine, pid: specter_core::ProfileId) -> bool {
+    let p = e.profiles.get(pid).unwrap();
+    match (p.baseline(), p.current()) {
+        (Some(b), Some(c)) => b.hash() == c.hash(),
+        _ => false,
+    }
+}
+
+/// A Standard burst born under a live `absorb` window folds instead of
+/// firing: the firing `base` (`StandardFire`) is overridden to
+/// `AbsorbFold` at `classify_consequence`. No Effect; one
+/// `QuiescenceAbsorbed`; the baseline advances onto the (drifted)
+/// folded sample; the Sub's fire history is untouched; the Profile's
+/// `absorb_count` bumps to 1.
+#[test]
+fn standard_burst_born_under_window_folds_without_firing() {
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
+    let now = Instant::now();
+
+    // Arm the window BEFORE the FsEvent births the Standard burst, so
+    // the birth consult latches it.
+    e.step(
+        Input::ArmAbsorb {
+            profile: pid,
+            duration: None,
+        },
+        now,
+    );
+
+    // A drifted snapshot — a new child the baseline lacks. A fresh Sub
+    // on this burst would fire (`StandardFire`); the fold advances the
+    // baseline onto the drift without emitting.
+    let drift = dir_tree_snap(vec![("echo.rs", EntryKind::File, 7)]);
+    let out = drive_standard_verdict(&mut e, pid, root, Arc::clone(&drift), now);
+
+    assert!(
+        out.effects().is_empty(),
+        "fold-latched burst emits no Effect; got {:?}",
+        out.effects(),
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::QuiescenceAbsorbed { profile } if *profile == pid)),
+        "fold emits QuiescenceAbsorbed",
+    );
+    assert!(
+        matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
+        "fold finishes the burst to Idle via the silent seal",
+    );
+    assert!(
+        baseline_equals_current(&e, pid),
+        "fold advances the baseline onto the folded drift (rebase family)",
+    );
+    let post_baseline = match e.profiles.get(pid).unwrap().baseline() {
+        Some(TreeSnapshot::Dir(arc)) => arc.dir_hash(),
+        _ => panic!("baseline is Some(Dir) post-fold"),
+    };
+    assert_eq!(
+        post_baseline,
+        drift.dir_hash(),
+        "the advanced baseline is the drifted sample, not the pre-fold empty tree",
+    );
+    let sub = e.subs.get(sid).unwrap();
+    assert!(!sub.has_fired, "a fold is not a fire — has_fired untouched");
+    assert_eq!(sub.fire_count, 0, "a fold does not bump fire_count");
+    assert_eq!(
+        e.profiles.get(pid).unwrap().absorb_count(),
+        1,
+        "the fold bumps the Profile's absorb_count",
+    );
+}
+
+/// Reverse race: the window is armed AFTER the events arrive (the burst
+/// is already in Batching). `arm_absorb` retro-latches the in-flight
+/// pre-fire burst, so it folds at its verdict rather than firing.
+#[test]
+fn arming_window_retro_latches_in_flight_batching_burst() {
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
+    let now = Instant::now();
+
+    // FsEvent births the Standard burst (in Batching) BEFORE any window.
+    let _ = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::StructureChanged,
+        },
+        now,
+    );
+    assert!(
+        !e.profiles.get(pid).unwrap().state().burst_fold_latched(),
+        "burst is unlatched before the arm (born without a window)",
+    );
+    let settle_timer = crate::testkit::batching_settle_id(&e, pid);
+
+    // Arm the window while the burst is in Batching — the retro-latch.
+    e.step(
+        Input::ArmAbsorb {
+            profile: pid,
+            duration: None,
+        },
+        now,
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().state().burst_fold_latched(),
+        "arm_absorb retro-latches the in-flight Batching burst",
+    );
+
+    // Drive the retro-latched burst to its verdict → folds.
+    let _ = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::Settle,
+            id: settle_timer,
+        },
+        now + SETTLE,
+    );
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("Verifying probe in flight after Settle expiry");
+    let drift = dir_tree_snap(vec![("echo.rs", EntryKind::File, 7)]);
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: drift,
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        now + SETTLE + Duration::from_millis(1),
+    );
+
+    assert!(
+        out.effects().is_empty(),
+        "retro-latched burst folds, no Effect"
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::QuiescenceAbsorbed { profile } if *profile == pid)),
+        "retro-latched fold emits QuiescenceAbsorbed",
+    );
+    assert_eq!(e.profiles.get(pid).unwrap().absorb_count(), 1);
+    assert!(!e.subs.get(sid).unwrap().has_fired);
+}
+
+/// `ConsumeOnFirst` (the `None`-duration default) retires the window on
+/// the first fold. A second, separate episode then fires normally — the
+/// one-shot cover is spent.
+#[test]
+fn consume_on_first_folds_once_then_fires() {
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
+    let t0 = Instant::now();
+
+    e.step(
+        Input::ArmAbsorb {
+            profile: pid,
+            duration: None,
+        },
+        t0,
+    );
+    let drift1 = dir_tree_snap(vec![("a.rs", EntryKind::File, 1)]);
+    let fold_out = drive_standard_verdict(&mut e, pid, root, drift1, t0);
+    assert!(fold_out.effects().is_empty(), "first episode folds");
+    assert!(
+        e.profiles.get(pid).unwrap().absorb_window().is_none(),
+        "ConsumeOnFirst retires the window on the first fold",
+    );
+    assert_eq!(e.profiles.get(pid).unwrap().absorb_count(), 1);
+    assert!(!e.subs.get(sid).unwrap().has_fired, "fold did not fire");
+
+    // Second, separate episode — no live window ⇒ fires normally.
+    let t1 = t0 + SETTLE * 10;
+    let drift2 = dir_tree_snap(vec![
+        ("a.rs", EntryKind::File, 1),
+        ("b.rs", EntryKind::File, 2),
+    ]);
+    let fire_out = drive_standard_verdict(&mut e, pid, root, drift2, t1);
+    assert_eq!(
+        fire_out.effects().len(),
+        1,
+        "the consumed window does not cover the next episode — it fires",
+    );
+    assert_eq!(
+        e.profiles.get(pid).unwrap().absorb_count(),
+        1,
+        "a real fire does not bump absorb_count",
+    );
+    assert!(e.subs.get(sid).unwrap().has_fired, "second episode fired");
+}
+
+/// `PersistUntil` (a `Some(duration)` window) survives folds: two
+/// separate episodes within the window both fold. Once the clock passes
+/// `expiry`, the window reads inert and a burst fires.
+#[test]
+fn persist_until_folds_repeatedly_then_fires_after_expiry() {
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
+    let t0 = Instant::now();
+    // A window wide enough to span both fold episodes but expire before
+    // the third. Each episode consumes ~SETTLE of clock in the helper.
+    let window = SETTLE * 5;
+
+    e.step(
+        Input::ArmAbsorb {
+            profile: pid,
+            duration: Some(window),
+        },
+        t0,
+    );
+
+    let drift1 = dir_tree_snap(vec![("a.rs", EntryKind::File, 1)]);
+    let fold1 = drive_standard_verdict(&mut e, pid, root, drift1, t0);
+    assert!(
+        fold1.effects().is_empty(),
+        "first episode folds under PersistUntil"
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().absorb_window().is_some(),
+        "PersistUntil survives the first fold",
+    );
+
+    // Second episode, still inside the window (t0 + SETTLE < expiry).
+    let t1 = t0 + SETTLE + Duration::from_millis(1);
+    let drift2 = dir_tree_snap(vec![
+        ("a.rs", EntryKind::File, 1),
+        ("b.rs", EntryKind::File, 2),
+    ]);
+    let fold2 = drive_standard_verdict(&mut e, pid, root, drift2, t1);
+    assert!(
+        fold2.effects().is_empty(),
+        "second episode folds under PersistUntil"
+    );
+    assert_eq!(
+        e.profiles.get(pid).unwrap().absorb_count(),
+        2,
+        "both folds bumped the count",
+    );
+    assert!(!e.subs.get(sid).unwrap().has_fired, "no fold fired");
+
+    // Third episode, born after expiry ⇒ window inert ⇒ fires.
+    let t2 = t0 + window + Duration::from_millis(1);
+    let drift3 = dir_tree_snap(vec![
+        ("a.rs", EntryKind::File, 1),
+        ("c.rs", EntryKind::File, 3),
+    ]);
+    let fire_out = drive_standard_verdict(&mut e, pid, root, drift3, t2);
+    assert_eq!(
+        fire_out.effects().len(),
+        1,
+        "a burst born past the PersistUntil expiry fires",
+    );
+    assert!(
+        e.subs.get(sid).unwrap().has_fired,
+        "post-expiry episode fired"
+    );
+}
+
+/// Cold-Seed redundancy: a fold-latched Cold Seed (no driving event)
+/// resolves to `SilentPin`, not `AbsorbFold` — a Seed that owes no
+/// first-fire is not a firing `base`, so the override never engages. The
+/// window is therefore NOT consumed and survives for the first
+/// genuinely-fireable burst, which then consumes it.
+#[test]
+fn cold_seed_under_window_stays_silent_pin_and_preserves_window() {
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
+    let now = Instant::now();
+
+    // Arm a one-shot window on the now-Idle Profile.
+    e.step(
+        Input::ArmAbsorb {
+            profile: pid,
+            duration: None,
+        },
+        now,
+    );
+
+    // SensorOverflow reseeds the Idle Profile into a cold Verifying-first
+    // Seed burst, born fold-latched (the window is live at its birth).
+    let overflow_out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        now,
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().state().burst_fold_latched(),
+        "the cold Seed is born fold-latched under the live window",
+    );
+    let _ = overflow_out;
+
+    // Answer the cold Seed's probe Authoritative — no driving event, so
+    // the base is SilentPin (not firing) and the fold override is inert.
+    let correlation = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("cold Seed Verifying probe in flight");
+    let seed_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_tree_snap(vec![]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        now,
+    );
+    assert!(seed_out.effects().is_empty(), "a Seed never fires");
+    assert!(
+        !seed_out
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::QuiescenceAbsorbed { .. })),
+        "a redundant Cold Seed pins silently — no QuiescenceAbsorbed",
+    );
+    assert!(
+        e.profiles.get(pid).unwrap().absorb_window().is_some(),
+        "the SilentPin did NOT consume the window",
+    );
+    assert_eq!(
+        e.profiles.get(pid).unwrap().absorb_count(),
+        0,
+        "a redundant Cold Seed records no fold",
+    );
+
+    // The surviving window now covers the first genuinely-fireable burst:
+    // a Standard drift burst folds and consumes it.
+    let drift = dir_tree_snap(vec![("echo.rs", EntryKind::File, 9)]);
+    let fold_out = drive_standard_verdict(&mut e, pid, root, drift, now);
+    assert!(
+        fold_out.effects().is_empty(),
+        "the preserved window folds the first fireable burst",
+    );
+    assert_eq!(e.profiles.get(pid).unwrap().absorb_count(), 1);
+    assert!(
+        e.profiles.get(pid).unwrap().absorb_window().is_none(),
+        "the first fireable fold finally consumes the ConsumeOnFirst window",
+    );
+    assert!(
+        !e.subs.get(sid).unwrap().has_fired,
+        "the fireable burst folded, not fired"
+    );
+}
+
+/// Residual-restart latch: a window armed during post-fire applies to
+/// the burst the residual restart produces. The restarted Standard
+/// burst (born via `restart_burst_from_fire_tail_residual` →
+/// `into_pre_fire_residual`) freezes the live window at its birth and
+/// folds at its verdict.
+#[test]
+fn residual_restart_under_window_folds() {
+    let (mut e, pid, sid, root, _now) = engine_with_attached_sub();
+    let now = Instant::now();
+    // Fire once (real Effect), then drive the post-fire loop into
+    // Rebasing with an absorbed residual so the rebase response restarts
+    // a fresh Standard burst.
+    let stable_out = drive_to_first_effect(&mut e, pid, root, now);
+    assert_eq!(
+        stable_out.effects().len(),
+        1,
+        "first burst fires a real Effect"
+    );
+    let key = stable_out.effects()[0].key();
+
+    // The descendant the fire created — events on it route to the
+    // fire-tail residual.
+    let child = e
+        .tree
+        .lookup(Some(root), "a.rs")
+        .expect("the standard burst's reconcile created a.rs");
+
+    // EffectComplete::Ok → Settling.
+    let _ = e.step(
+        Input::EffectComplete(EffectCompletion {
+            sub: sid,
+            key,
+            outcome: EffectOutcome::Ok,
+        }),
+        now + SETTLE * 2,
+    );
+    let settle_id = crate::testkit::post_fire_settle_id(&e, pid);
+    // PostFireSettle expiry → Rebasing (probe in flight; dirty cleared).
+    let rebasing_at = now + SETTLE * 3;
+    let rearm_out = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::PostFireSettle,
+            id: settle_id,
+        },
+        rebasing_at,
+    );
+    let rebase_corr = crate::testkit::first_probe_correlation(&rearm_out)
+        .expect("Rebasing probe in flight after PostFireSettle");
+
+    // Arm the window DURING post-fire (Rebasing) — it cannot retro-latch
+    // a PostFire burst (no-op), but it stands for the next pre-fire
+    // birth, including the residual restart.
+    e.step(
+        Input::ArmAbsorb {
+            profile: pid,
+            duration: None,
+        },
+        rebasing_at,
+    );
+
+    // FsEvent during the Rebasing round-trip → absorbed into the
+    // final-window residual.
+    let _ = e.step(
+        Input::FsEvent {
+            resource: child,
+            event: FsEvent::Modified,
+        },
+        rebasing_at + Duration::from_millis(1),
+    );
+
+    // Authoritative rebase response with a non-empty residual ⇒ restart.
+    let restart_at = rebasing_at + Duration::from_millis(2);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: rebase_corr,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_tree_snap(vec![("a.rs", EntryKind::File, 1)]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        restart_at,
+    );
+
+    // The restarted burst is a fresh Standard Batching burst, born under
+    // the live window ⇒ fold-latched.
+    let settle_timer = match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
+            assert_eq!(
+                pre.intent,
+                BurstIntent::Standard,
+                "residual restart is Standard"
+            );
+            assert!(
+                pre.fold_latched,
+                "the restarted burst froze the live window at its birth",
+            );
+            match &pre.phase {
+                PreFirePhase::Batching { settle_timer } => *settle_timer,
+                other => panic!("residual restart re-enters Batching; got {other:?}"),
+            }
+        }
+        other => panic!("expected a restarted Active(PreFire) burst; got {other:?}"),
+    };
+    let absorb_count_before = e.profiles.get(pid).unwrap().absorb_count();
+    let fire_count_before = e.subs.get(sid).unwrap().fire_count;
+
+    // Drive the restarted burst to its verdict → folds.
+    let _ = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::Settle,
+            id: settle_timer,
+        },
+        restart_at + SETTLE,
+    );
+    let restart_probe = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("restarted burst's Verifying probe in flight");
+    let fold_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: restart_probe,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_tree_snap(vec![("a.rs", EntryKind::File, 1)]),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        restart_at + SETTLE + Duration::from_millis(1),
+    );
+    assert!(
+        fold_out.effects().is_empty(),
+        "the fold-latched residual restart emits no Effect; got {:?}",
+        fold_out.effects(),
+    );
+    assert!(
+        fold_out
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::QuiescenceAbsorbed { profile } if *profile == pid)),
+        "the residual-restart fold emits QuiescenceAbsorbed",
+    );
+    assert_eq!(
+        e.profiles.get(pid).unwrap().absorb_count(),
+        absorb_count_before + 1,
+        "the residual-restart fold bumps absorb_count",
+    );
+    assert_eq!(
+        e.subs.get(sid).unwrap().fire_count,
+        fire_count_before,
+        "the fold did not fire — fire_count unchanged across the restart fold",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// `on_arm_absorb` window math, asserted via `Profile::absorb_window()`
+/// and the `AbsorbArmed` diagnostic. `None` ⇒ `(now + settle,
+/// ConsumeOnFirst)`; `Some(d)` ⇒ `(now + d, PersistUntil)`.
+#[test]
+fn on_arm_absorb_derives_window_from_duration() {
+    let (mut e, pid, _sid, _root, _now) = engine_with_attached_sub();
+    complete_seed_burst(&mut e, pid);
+    let now = Instant::now();
+
+    // None ⇒ default one-shot, expiry = now + settle.
+    let none_out = e.step(
+        Input::ArmAbsorb {
+            profile: pid,
+            duration: None,
+        },
+        now,
+    );
+    assert_eq!(
+        e.profiles.get(pid).unwrap().absorb_window(),
+        Some(&specter_core::AbsorbWindow {
+            expiry: now + SETTLE,
+            mode: specter_core::AbsorbMode::ConsumeOnFirst,
+        }),
+        "None ⇒ (now + settle, ConsumeOnFirst)",
+    );
+    assert!(
+        none_out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::AbsorbArmed { profile, mode: specter_core::AbsorbMode::ConsumeOnFirst }
+                if *profile == pid,
+        )),
+        "None arm emits AbsorbArmed{{ConsumeOnFirst}}",
+    );
+
+    // Some(d) ⇒ time-boxed, expiry = now + d, PersistUntil (last-writer-wins).
+    let d = Duration::from_secs(30);
+    let some_out = e.step(
+        Input::ArmAbsorb {
+            profile: pid,
+            duration: Some(d),
+        },
+        now,
+    );
+    assert_eq!(
+        e.profiles.get(pid).unwrap().absorb_window(),
+        Some(&specter_core::AbsorbWindow {
+            expiry: now + d,
+            mode: specter_core::AbsorbMode::PersistUntil,
+        }),
+        "Some(d) ⇒ (now + d, PersistUntil)",
+    );
+    assert!(
+        some_out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::AbsorbArmed { profile, mode: specter_core::AbsorbMode::PersistUntil }
+                if *profile == pid,
+        )),
+        "Some(d) arm emits AbsorbArmed{{PersistUntil}}",
+    );
 }
 
 // ---------- Property tests ----------

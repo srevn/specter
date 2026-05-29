@@ -1,5 +1,7 @@
 //! Engine input variants and the normalized `FsEvent`.
 
+use std::time::Duration;
+
 use crate::effect::EffectCompletion;
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::op::{ProbeResponse, WatchFailure};
@@ -153,6 +155,29 @@ pub enum Input {
     /// [`crate::BurstFinish::Reap`]). Stale [`SubId`] yields a
     /// [`crate::Diagnostic::DetachUnknownSub`].
     DetachSub(SubId),
+    /// Arm the operator `absorb` window on a Profile — the runtime
+    /// fold-without-fire signal. The next fireable burst (or the
+    /// in-flight one, retro-latched) advances the baseline silently
+    /// instead of firing, folding an expected replication into the
+    /// settled reference rather than echoing it
+    /// ([`crate::Diagnostic::AbsorbArmed`] on the arm,
+    /// [`crate::Diagnostic::QuiescenceAbsorbed`] on each fold).
+    ///
+    /// `profile` is the honest identity: a window is per-Profile by
+    /// construction (every Sub on a Profile folds together), so the
+    /// driver resolves the operator's Sub name to its Profile before
+    /// lifting this — minimal-input discipline shared with
+    /// [`Self::DetachSub`]. `duration` is the window length: `None` ⇒
+    /// the engine's default (one `settle` interval, consume-on-first —
+    /// a one-shot cover for a single replication); `Some(d)` ⇒ a
+    /// time-boxed window persisting `d` (covering a run of them). The
+    /// engine derives `(expiry, mode)` from `duration` + the Profile's
+    /// `settle` in one place, so the wire carries only the raw
+    /// duration.
+    ArmAbsorb {
+        profile: ProfileId,
+        duration: Option<Duration>,
+    },
     /// Attach a Promoter. The engine renders the literal-prefix path,
     /// materialises the Tree, arms the Promoter's state-resident probe
     /// slot, and starts the Promoter in either `Active` (prefix

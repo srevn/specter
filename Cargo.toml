@@ -3,9 +3,9 @@ resolver = "3"
 members  = ["crates/*"]
 
 [workspace.package]
-version      = "0.3.2"
+version      = "0.3.3"
 edition      = "2024"
-rust-version = "1.95"
+rust-version = "1.96"
 license      = "MIT OR Apache-2.0"
 
 [profile.release]

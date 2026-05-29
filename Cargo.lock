@@ -784,7 +784,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 
 [[package]]
 name = "specter-actuator"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "compact_str",
  "crossbeam",
@@ -800,7 +800,7 @@ dependencies = [
 
 [[package]]
 name = "specter-bin"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "clap",
  "compact_str",
@@ -825,7 +825,7 @@ dependencies = [
 
 [[package]]
 name = "specter-config"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "clap",
  "compact_str",
@@ -844,7 +844,7 @@ dependencies = [
 
 [[package]]
 name = "specter-core"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "compact_str",
  "globset",
@@ -856,7 +856,7 @@ dependencies = [
 
 [[package]]
 name = "specter-engine"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "compact_str",
  "proptest",
@@ -868,7 +868,7 @@ dependencies = [
 
 [[package]]
 name = "specter-sensor"
-version = "0.3.2"
+version = "0.3.3"
 dependencies = [
  "compact_str",
  "crossbeam",

@@ -67,6 +67,8 @@ pub enum Command {
     Disable(NameTargetArgs),
     /// Enable a watch previously disabled via `specter disable`.
     Enable(NameTargetArgs),
+    /// Absorb the next change on a watch instead of firing.
+    Absorb(AbsorbArgs),
     /// Request a config reload (equivalent to SIGHUP).
     Reload(ClientArgs),
     /// Stream diagnostics from the daemon.
@@ -214,6 +216,24 @@ pub struct NameTargetArgs {
 
     #[command(flatten)]
     pub client: ClientArgs,
+}
+
+/// `specter absorb <name> [--for <dur>]` arguments — arm a
+/// fold-without-fire window on the named watch's Profile.
+#[derive(Debug, Args)]
+#[must_use]
+pub struct AbsorbArgs {
+    /// Name of the watch to absorb on.
+    pub name: String,
+
+    #[command(flatten)]
+    pub client: ClientArgs,
+
+    /// Window length. Omitted ⇒ a one-shot window covering the next
+    /// change; `--for <dur>` holds it open to absorb a run of changes.
+    /// humantime format (`500ms`, `30s`, `1m30s`).
+    #[arg(long = "for", value_parser = parse_duration)]
+    pub for_: Option<Duration>,
 }
 
 /// `specter tail` arguments.
@@ -453,6 +473,36 @@ mod tests {
     }
 
     #[test]
+    fn absorb_without_for_defaults_to_none() {
+        let cli = parse(&["specter", "absorb", "my-watch"]).unwrap();
+        match cli.command {
+            Command::Absorb(args) => {
+                assert_eq!(args.name, "my-watch");
+                assert_eq!(args.for_, None, "omitted --for ⇒ None (engine default)");
+            }
+            other => panic!("expected Absorb, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absorb_parses_for_duration() {
+        let cli = parse(&["specter", "absorb", "my-watch", "--for", "5s"]).unwrap();
+        match cli.command {
+            Command::Absorb(args) => {
+                assert_eq!(args.name, "my-watch");
+                assert_eq!(args.for_, Some(Duration::from_secs(5)));
+            }
+            other => panic!("expected Absorb, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn absorb_rejects_invalid_for_duration() {
+        let err = parse(&["specter", "absorb", "my-watch", "--for", "not-a-duration"]).unwrap_err();
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+    }
+
+    #[test]
     fn tail_collects_repeated_filter() {
         let cli = parse(&[
             "specter",
@@ -499,7 +549,8 @@ mod tests {
         cmd.write_long_help(&mut buf).unwrap();
         let help = String::from_utf8(buf).unwrap();
         for verb in [
-            "run", "status", "list", "show", "disable", "enable", "reload", "tail", "wait",
+            "run", "status", "list", "show", "disable", "enable", "absorb", "reload", "tail",
+            "wait",
         ] {
             assert!(help.contains(verb), "top-level help missing `{verb}`");
         }

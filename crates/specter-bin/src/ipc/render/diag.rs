@@ -29,9 +29,9 @@
 use std::fmt::Write as _;
 
 use crate::ipc::wire::{
-    WireBurstHelper, WireBurstIntent, WireClaimKind, WireDetachReason, WireDiagnostic, WireFsEvent,
-    WireProfileStateDiscriminant, WirePromoterClaimKind, WireReapTrigger, WireResourceKind,
-    WireSpliceFailureCause, WireTime,
+    WireAbsorbMode, WireBurstHelper, WireBurstIntent, WireClaimKind, WireDetachReason,
+    WireDiagnostic, WireFsEvent, WireProfileStateDiscriminant, WirePromoterClaimKind,
+    WireReapTrigger, WireResourceKind, WireSpliceFailureCause, WireTime,
 };
 
 /// Render one event as a single newline-terminated line into the
@@ -97,6 +97,8 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::PerFileFireSkippedOnFreshSeed { at, .. }
         | WireDiagnostic::SubAttached { at, .. }
         | WireDiagnostic::SubFired { at, .. }
+        | WireDiagnostic::QuiescenceAbsorbed { at, .. }
+        | WireDiagnostic::AbsorbArmed { at, .. }
         | WireDiagnostic::SubDetached { at, .. }
         | WireDiagnostic::SubRebound { at, .. }
         | WireDiagnostic::RebindUnknownSub { at, .. }
@@ -214,8 +216,17 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         }
         WireDiagnostic::ReapPendingCancelled { profile, .. }
         | WireDiagnostic::PerFileDriftDroppedOnRecovery { profile, .. }
-        | WireDiagnostic::PerFileFireSkippedOnFreshSeed { profile, .. } => {
+        | WireDiagnostic::PerFileFireSkippedOnFreshSeed { profile, .. }
+        | WireDiagnostic::QuiescenceAbsorbed { profile, .. } => {
             let _ = write!(out, "  profile={}", profile.0);
+        }
+        WireDiagnostic::AbsorbArmed { profile, mode, .. } => {
+            let _ = write!(
+                out,
+                "  profile={}  mode={}",
+                profile.0,
+                absorb_mode_str(*mode),
+            );
         }
         WireDiagnostic::ProfileReaped { profile, via, .. } => {
             let _ = write!(
@@ -580,6 +591,16 @@ const fn profile_state_discriminant_str(d: WireProfileStateDiscriminant) -> &'st
         WireProfileStateDiscriminant::Pending => "pending",
         WireProfileStateDiscriminant::ActivePreFire => "active_pre_fire",
         WireProfileStateDiscriminant::ActivePostFire => "active_post_fire",
+    }
+}
+
+/// Operator-visible label for [`WireAbsorbMode`] on the `tail` stream.
+/// Mirrors the snake_case serde rename so the human view matches the
+/// JSON (the `show` renderer uses its own hyphenated label table).
+const fn absorb_mode_str(m: WireAbsorbMode) -> &'static str {
+    match m {
+        WireAbsorbMode::ConsumeOnFirst => "consume_on_first",
+        WireAbsorbMode::PersistUntil => "persist_until",
     }
 }
 
@@ -949,6 +970,10 @@ mod tests {
             }),
             "sub_fired" => {
                 json!({"diag": tag, "at": at, "sub": id, "profile": id, "count": 1})
+            }
+            "quiescence_absorbed" => json!({"diag": tag, "at": at, "profile": id}),
+            "absorb_armed" => {
+                json!({"diag": tag, "at": at, "profile": id, "mode": "consume_on_first"})
             }
             "sub_detached" => json!({
                 "diag": tag, "at": at, "sub": id, "profile": id, "reason": "ipc_disabled",

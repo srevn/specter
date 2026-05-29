@@ -340,6 +340,43 @@ pub struct PreFireBurst {
     /// side opens a fresh [`PostFireBurst::last_certified_hash`], a
     /// separate sample sequence over the post-command tree.
     pub last_certified_hash: Option<u128>,
+    /// Frozen "this burst folds instead of fires" decision — the
+    /// operator's `absorb` signal, consulted once at burst birth and
+    /// never re-read at verdict time (a long transfer outlives the
+    /// settle window, so a verdict-time window check would always
+    /// miss). When set, a would-be-firing verdict is overridden to a
+    /// silent baseline advance ([`crate::Diagnostic::QuiescenceAbsorbed`]).
+    ///
+    /// **Orthogonal to [`Self::intent`].** Intent is the
+    /// proof-obligation axis (`Standard ⇒ Chains`, `Seed ⇒
+    /// WholeSubtree`); a fold-latched burst still runs its intent's
+    /// probe semantics in full and changes only the *terminal
+    /// consequence*. So this is a plain `bool`, never a `BurstIntent`
+    /// variant.
+    ///
+    /// **Born** at construction from the engine's birth consult
+    /// ([`Profile::absorb_window_live`] at the burst's birth instant),
+    /// set like [`Self::forced`] / [`Self::intent`] — a computed
+    /// construction value, not a post-hoc mutation.
+    ///
+    /// **Retro-latched** for the reverse race (operator arms *after*
+    /// the driving events already opened a pre-fire burst): the sole
+    /// in-life writer is [`Profile::arm_absorb`] via the
+    /// [`ActiveBurst::latch_fold`] cascade — the same single-writer
+    /// discipline documented on [`Self::last_certified_hash`]. The
+    /// latch is monotone (set-only) and idempotent under re-arm.
+    ///
+    /// **Preserved across pre-fire phase swaps.** The phase helpers
+    /// (`event_drives_batching`, `retry_drives_batching`,
+    /// `transition_to_{verifying,draining}`) mutate only their own
+    /// fields, so the latch rides through untouched — exactly as
+    /// [`Self::last_certified_hash`] does.
+    ///
+    /// **Dropped by omission** at [`Self::into_post_fire`] (the typed
+    /// fire move): a fold replaces the fire, so a latched burst must
+    /// never cross into post-fire. The move debug-asserts `!latched`
+    /// as the structural dual of the verdict-time override.
+    pub fold_latched: bool,
 }
 
 /// Pre-fire phase discriminator.
@@ -956,6 +993,18 @@ impl PreFireBurst {
         prior
     }
 
+    /// Set the fold latch — the retro-latch leaf of the
+    /// [`ActiveBurst::latch_fold`] cascade. Set-only (monotone) and
+    /// idempotent: an operator arming a window over an already-running
+    /// pre-fire burst flips it once and a re-arm is a no-op. The sole
+    /// in-life writer of [`Self::fold_latched`]; construction sets the
+    /// field directly from the birth consult. Total `&mut self`, no
+    /// phase gate — the carrier's lifetime is the burst's lifetime,
+    /// mirroring [`Self::advance_certified_sample`].
+    pub const fn latch_fold(&mut self) {
+        self.fold_latched = true;
+    }
+
     /// Typed move from pre-fire to post-fire — the fire transition.
     ///
     /// Drops, by leaving them out of the [`PostFireBurst::new`]
@@ -983,6 +1032,11 @@ impl PreFireBurst {
     ///   the post-command tree (a different tree than the one the
     ///   pre-fire carrier sampled, so cross-carrying a hash would be
     ///   a category error).
+    /// - `fold_latched` — pre-fire-only. A fold *replaces* the fire,
+    ///   so a latched burst must never reach this move; the entry
+    ///   `debug_assert` is the structural dual of the verdict-time
+    ///   `AbsorbFold` override, fail-stopping a classify-routing bug.
+    ///   Post-fire has no latch.
     ///
     /// `intent` is preserved (read by `dispatch_rebase_*` for the
     /// diagnostic).
@@ -990,6 +1044,12 @@ impl PreFireBurst {
     /// Sole production caller: `transition_to_awaiting` in `burst.rs`.
     #[must_use]
     pub fn into_post_fire(self, outstanding: u32, gate_deadline: TimerId) -> PostFireBurst {
+        debug_assert!(
+            !self.fold_latched,
+            "into_post_fire: fold-latched burst must not fire — a latched \
+             verdict folds to AbsorbFold (silent baseline advance), never \
+             crosses the fire boundary",
+        );
         PostFireBurst::new(
             self.intent,
             PostFirePhase::Awaiting {
@@ -1191,6 +1251,14 @@ impl PostFireBurst {
     /// `last_certified_hash: None`, exactly as a fresh
     /// `start_standard_burst`.
     ///
+    /// `fold_latched` is **threaded, not dropped** — it is a fresh
+    /// birth consult (a construction param like `burst_deadline` /
+    /// `settle_timer` / `now`), because the restart *is* the next
+    /// pre-fire burst's birth. This is what lets an operator arm a
+    /// window during post-fire and have it apply to the residual
+    /// restart that carries the final-window-race events: the caller
+    /// passes the live window's birth consult for the restart instant.
+    ///
     /// Sole production caller: `restart_burst_from_fire_tail_residual`
     /// in `burst.rs`.
     #[must_use]
@@ -1199,6 +1267,7 @@ impl PostFireBurst {
         burst_deadline: TimerId,
         settle_timer: TimerId,
         now: Instant,
+        fold_latched: bool,
     ) -> PreFireBurst {
         debug_assert!(
             !self.final_window_residual.is_empty(),
@@ -1214,6 +1283,7 @@ impl PostFireBurst {
             dirty: residual,
             last_event_time: Some(now),
             last_certified_hash: None,
+            fold_latched,
         }
     }
 }
@@ -1269,6 +1339,21 @@ impl ActiveBurst {
         match self {
             Self::PreFire(pre) => pre.advance_certified_sample(hash),
             Self::PostFire(post) => post.advance_certified_sample(hash),
+        }
+    }
+
+    /// Drive the fold latch onto the live pre-fire burst — the
+    /// lifecycle layer of the retro-latch cascade. **Asymmetric**, the
+    /// mirror image of [`Self::note_effect_completion`]: the latch
+    /// lives on [`PreFireBurst`] only, so `PreFire ⇒ set` and
+    /// `PostFire ⇒ no-op` (a post-fire burst has already crossed the
+    /// fire boundary — there is no pre-fire consequence left to fold).
+    /// Wildcard-free, so a future [`Self`] variant is a compile error,
+    /// not a silent miss.
+    pub const fn latch_fold(&mut self) {
+        match self {
+            Self::PreFire(pre) => pre.latch_fold(),
+            Self::PostFire(_) => {}
         }
     }
 }
@@ -1619,6 +1704,22 @@ impl ProfileState {
         }
     }
 
+    /// Drive the fold latch onto an in-flight pre-fire burst — the
+    /// state layer of the retro-latch cascade, the entry
+    /// [`Profile::arm_absorb`] calls. `Active ⇒` delegate to
+    /// [`ActiveBurst::latch_fold`] (itself a PreFire-set / PostFire-
+    /// no-op); `Idle | Pending ⇒` no-op — there is no burst whose
+    /// terminal consequence the window could override, so an arm in
+    /// those states only sets the window for the *next* burst's birth
+    /// consult. Wildcard-free, same layered shape as
+    /// [`Self::advance_certified_sample`].
+    pub const fn latch_fold(&mut self) {
+        match self {
+            Self::Active(burst, _) => burst.latch_fold(),
+            Self::Idle | Self::Pending(_) => {}
+        }
+    }
+
     /// True iff the state is `Active(PreFire(Draining))`. The
     /// reconfirm cascade (the `Draining → Verifying` re-probe) keys off
     /// this predicate: at every `finish_burst_to_idle` the engine
@@ -1663,6 +1764,28 @@ impl ProfileState {
         match self {
             Self::Active(burst, _) => matches!(burst.intent(), BurstIntent::Standard),
             Self::Idle | Self::Pending(_) => false,
+        }
+    }
+
+    /// True iff the live pre-fire burst carries the fold latch — the
+    /// read side of the cascade, the engine's verdict-time override
+    /// consult ([`PreFireBurst::fold_latched`]). Read via `.state()`,
+    /// exactly as [`Self::is_draining`] / [`Self::in_active_standard_burst`]
+    /// (no `Profile` delegate — the accessor convention is
+    /// `.state().<pred>()`).
+    ///
+    /// `Active(PreFire) ⇒` the burst's latch; every other state ⇒
+    /// `false`. The latch lives on [`PreFireBurst`] only, so post-fire
+    /// folds to `false` structurally — and the sole consult site
+    /// (`classify_consequence`) only ever resolves this on
+    /// `Active(PreFire(Verifying))`, a probe response having just
+    /// arrived. Wildcard-free: a future variant is a compile error,
+    /// not a silent `false`.
+    #[must_use]
+    pub const fn burst_fold_latched(&self) -> bool {
+        match self {
+            Self::Active(ActiveBurst::PreFire(pre), _) => pre.fold_latched,
+            Self::Idle | Self::Pending(_) | Self::Active(ActiveBurst::PostFire(_), _) => false,
         }
     }
 
@@ -2422,6 +2545,54 @@ struct TreeContributions {
     watch_root_parent: Option<ResourceId>,
 }
 
+/// How an [`AbsorbWindow`] retires.
+///
+/// Set by [`Profile::arm_absorb`] from the operator's `absorb` signal: a
+/// bare `absorb` (no duration) is [`Self::ConsumeOnFirst`] — a one-shot
+/// cover for the single expected replication; `absorb --for <dur>` is
+/// [`Self::PersistUntil`] — a time-boxed window covering a run of them.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum AbsorbMode {
+    /// Retire on the first *folded fire*. The window clears the moment a
+    /// would-have-fired burst folds. A non-firing fold (a Cold-Seed
+    /// `SilentPin`, which proves nothing) does **not** consume it — the
+    /// window survives for the first burst that would genuinely have
+    /// fired.
+    ConsumeOnFirst,
+    /// Persist until `expiry`, folding every fireable burst in between.
+    /// Untouched by burst completion — rides across sequential bursts
+    /// and goes inert by time alone.
+    PersistUntil,
+}
+
+/// Operator `absorb` window — the per-Profile record of intent that
+/// *outlives* individual bursts (a long replication transfer can outlast
+/// many settle windows).
+///
+/// Distinct from the per-burst fold decision
+/// ([`PreFireBurst::fold_latched`]), which is frozen at burst birth and
+/// dies with the burst: the window is the *intent*, the latch is one
+/// burst's *frozen verdict* of that intent.
+///
+/// **Plain data.** The lazy-expiry invariant — "a window past its
+/// `expiry` is absent" — is enforced by [`Profile`] keeping its
+/// [`Profile::absorb`] field private and live-gating every projection
+/// through [`Profile::absorb_window_if_live`] (the lone owner of the
+/// `now < expiry` rule, behind both the boolean
+/// [`Profile::absorb_window_live`] consult and the `show` surface).
+/// There is deliberately no `&mut` clear on the inert read: it would
+/// break the shared immutable borrow the birth consult takes, and an
+/// inert window is harmless (`*_live` is `false`, `show` hides it). No
+/// [`crate::TimerId`] backs it — an un-consumed window needs no wake-up
+/// to go inert.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct AbsorbWindow {
+    /// Wall-clock instant at or past which the window reads inert.
+    pub expiry: Instant,
+    /// Retirement discipline — see [`AbsorbMode`].
+    pub mode: AbsorbMode,
+}
+
 /// One stability state machine per `(Resource, ProfileIdentity)`,
 /// decomposed into single-concern substructures.
 ///
@@ -2442,7 +2613,9 @@ struct TreeContributions {
 /// The `Draining → Verifying` reconfirm is a *fresh query*
 /// ([`crate::ProfileState::in_active_standard_burst`] over the live
 /// tree), not a cached counter. (Effect fire history is per-Sub —
-/// [`crate::Sub::has_fired`] — not a Profile substructure.)
+/// [`crate::Sub::has_fired`] — not a Profile substructure; *fold*
+/// history is the mirror image — per-Profile, since folding is
+/// per-Profile — and lives here as [`Self::absorb`] / its count.)
 #[derive(Debug)]
 pub struct Profile {
     /// The Tree slot this Profile's stability machine anchors at — the
@@ -2501,6 +2674,27 @@ pub struct Profile {
     /// [`Self::set_watch_root_parent`] /
     /// [`Self::take_watch_root_parent`].
     contributions: TreeContributions,
+    /// Operator `absorb` window, or `None` when no fold is armed. The
+    /// per-Profile *intent* that drives each burst's per-burst fold
+    /// latch: a burst consults it once at birth
+    /// ([`Self::absorb_window_live`]) to freeze
+    /// [`PreFireBurst::fold_latched`]. Private — the lazy-expiry
+    /// invariant lives here, not on the plain-data [`AbsorbWindow`].
+    /// Written only by [`Self::arm_absorb`] (set + retro-latch the
+    /// in-flight burst) and [`Self::note_absorb_fold`]
+    /// (consume-on-first); read live-gated via
+    /// [`Self::absorb_window_if_live`] (and its boolean
+    /// [`Self::absorb_window_live`]), raw via [`Self::absorb_window`].
+    absorb: Option<AbsorbWindow>,
+    /// Count of folds this Profile has absorbed — the per-Profile
+    /// mirror of per-Sub fire history (`Sub::fire_count`). A fold is
+    /// per-Profile *by construction* (every Sub on a Profile folds
+    /// together), so the count lives where its identity is and shares
+    /// the window's lifetime (both reset when a config-hash change
+    /// rebuilds the Profile). Bumped by [`Self::note_absorb_fold`];
+    /// read via [`Self::absorb_count`] and projected per-Sub at the
+    /// `show` boundary.
+    absorb_count: u64,
 }
 
 impl Profile {
@@ -2580,6 +2774,8 @@ impl Profile {
                 anchor_claim: AnchorClaim::None,
                 watch_root_parent: None,
             },
+            absorb: None,
+            absorb_count: 0,
         }
     }
 
@@ -3312,6 +3508,92 @@ impl Profile {
         self.state.advance_certified_sample(hash)
     }
 
+    /// Arm (or re-arm) the operator `absorb` window **and** retro-latch
+    /// any in-flight pre-fire burst — one operation for one operator
+    /// event. Arming while a pre-fire burst is already batching the
+    /// replication's events must fold that burst too (the reverse race:
+    /// events arrive before the signal), so the set and the retro-latch
+    /// are inseparable. The latch delegates through
+    /// [`ProfileState::latch_fold`] — a no-op unless `Active(PreFire)`,
+    /// since `Idle` / `Pending` / post-fire have no pre-fire
+    /// consequence to override; the window still stands for the next
+    /// burst's birth consult.
+    ///
+    /// **Last-writer-wins, idempotent latch.** A re-arm overwrites the
+    /// window wholesale and re-drives the set-only latch; a burst born
+    /// under the prior window stays latched and folds per the *current*
+    /// window's mode at fold time ([`Self::note_absorb_fold`] reads the
+    /// live mode).
+    pub const fn arm_absorb(&mut self, expiry: Instant, mode: AbsorbMode) {
+        self.absorb = Some(AbsorbWindow { expiry, mode });
+        self.state.latch_fold();
+    }
+
+    /// Record one absorbed fold: bump the per-Profile count and, for a
+    /// live [`AbsorbMode::ConsumeOnFirst`] window, retire it. One
+    /// operation for one fold event — the consolidation mirroring
+    /// `SubRegistry::record_fired`'s bump-and-stamp.
+    ///
+    /// The count bumps **unconditionally**: the fold happened, even if
+    /// the window already went inert by time between the burst's birth
+    /// consult and this fold (the latch, frozen at birth, still folds).
+    /// The consume guards on a live `ConsumeOnFirst` window and reads
+    /// the **current** mode, so a burst born under an old mode retires
+    /// per the operator's latest intent. Saturating, to bound at
+    /// `u64::MAX` rather than wrap.
+    pub const fn note_absorb_fold(&mut self) {
+        self.absorb_count = self.absorb_count.saturating_add(1);
+        if matches!(
+            self.absorb,
+            Some(AbsorbWindow {
+                mode: AbsorbMode::ConsumeOnFirst,
+                ..
+            })
+        ) {
+            self.absorb = None;
+        }
+    }
+
+    /// Borrow the armed window **iff it is live** at `now`
+    /// (`now < expiry`) — the lone owner of the liveness predicate. Both
+    /// the burst-birth consult ([`Self::absorb_window_live`]) and the
+    /// `show` projection derive from this, so `now < expiry` is written
+    /// in exactly one place, not re-implemented at the projection site
+    /// across the crate boundary. An expired window reads `None` without
+    /// being cleared — lazy expiry, no `&mut`, so the read composes
+    /// inside the shared immutable birth borrow.
+    #[must_use]
+    pub fn absorb_window_if_live(&self, now: Instant) -> Option<&AbsorbWindow> {
+        self.absorb.as_ref().filter(|w| now < w.expiry)
+    }
+
+    /// The burst-birth consult: `true` iff a window is live at `now` —
+    /// the boolean projection of [`Self::absorb_window_if_live`]. The
+    /// single read that freezes [`PreFireBurst::fold_latched`] at
+    /// construction.
+    #[must_use]
+    pub fn absorb_window_live(&self, now: Instant) -> bool {
+        self.absorb_window_if_live(now).is_some()
+    }
+
+    /// Borrow the armed window **without** live-gating — the raw,
+    /// lossless accessor for tests and inspection that must tell an
+    /// inert-but-uncleared window apart from no window. Production
+    /// projection live-gates through [`Self::absorb_window_if_live`];
+    /// this exposes an expired window too. `None` iff no window is
+    /// currently armed.
+    #[must_use]
+    pub const fn absorb_window(&self) -> Option<&AbsorbWindow> {
+        self.absorb.as_ref()
+    }
+
+    /// Count of folds this Profile has absorbed — projected per-Sub at
+    /// the `show` boundary alongside the per-Sub fire counters.
+    #[must_use]
+    pub const fn absorb_count(&self) -> u64 {
+        self.absorb_count
+    }
+
     /// Take the live `current` snapshot, leaving the arm's `current`
     /// `None` and `settled` untouched — the covered-descendant
     /// claim-release primitive. The returned `Dir` snapshot's entries
@@ -3630,6 +3912,12 @@ mod tests {
         assert!(!p.current_is_some());
         assert_eq!(p.max_settle(), MAX_SETTLE);
         assert_eq!(p.settle, SETTLE);
+        // Absorb state initialises empty: no window armed, zero folds.
+        assert!(
+            p.absorb_window().is_none(),
+            "fresh Profile has no absorb window"
+        );
+        assert_eq!(p.absorb_count(), 0, "fresh Profile has folded nothing");
     }
 
     /// `Profile::new` debug-asserts `settle <= max_settle`. The burst
@@ -4218,9 +4506,9 @@ mod tests {
     // -----------------------------------------------------------------------
 
     use super::{
-        ActiveBurst, AwaitVerdict, BurstFinish, BurstIntent, DirtyProvenance, PostFireBurst,
-        PostFirePhase, PreFireBurst, PreFirePhase, QuiescenceVerdict, QuiescenceWitness,
-        StableReason, TimerKind, quiescence_verdict,
+        AbsorbMode, AbsorbWindow, ActiveBurst, AwaitVerdict, BurstFinish, BurstIntent,
+        DirtyProvenance, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase,
+        QuiescenceVerdict, QuiescenceWitness, StableReason, TimerKind, quiescence_verdict,
     };
     use crate::ids::{ProbeCorrelation, TimerId};
     use crate::op::ProofAuthority;
@@ -4359,6 +4647,7 @@ mod tests {
             dirty: DirtyProvenance::new(),
             last_event_time: None,
             last_certified_hash: None,
+            fold_latched: false,
         }
     }
 
@@ -4371,6 +4660,7 @@ mod tests {
             dirty: DirtyProvenance::new(),
             last_event_time: None,
             last_certified_hash: None,
+            fold_latched: false,
         }
     }
 
@@ -4996,6 +5286,7 @@ mod tests {
             tid(7),
             tid(8),
             now,
+            false,
         );
 
         assert_eq!(pre.burst_deadline, tid(7));
@@ -5033,6 +5324,7 @@ mod tests {
             tid(1),
             tid(2),
             std::time::Instant::now(),
+            false,
         );
         assert_eq!(
             pre.intent,
@@ -5057,7 +5349,7 @@ mod tests {
     #[should_panic(expected = "empty residual")]
     fn into_pre_fire_residual_empty_residual_trips_assert() {
         let _ = rebasing_post(BurstIntent::Standard, DirtyProvenance::new())
-            .into_pre_fire_residual(tid(1), tid(2), std::time::Instant::now());
+            .into_pre_fire_residual(tid(1), tid(2), std::time::Instant::now(), false);
     }
 
     /// The pre-fire N=2 sample carrier drops by omission at the fire
@@ -5103,11 +5395,248 @@ mod tests {
         assert_eq!(prior, None, "first sample on a fresh burst returns None");
         assert_eq!(post.last_certified_hash, Some(0xDEAD_BEEF_u128));
 
-        let pre = post.into_pre_fire_residual(tid(1), tid(2), std::time::Instant::now());
+        let pre = post.into_pre_fire_residual(tid(1), tid(2), std::time::Instant::now(), false);
         assert_eq!(
             pre.last_certified_hash, None,
             "the typed fire-tail restart drops the post-fire carrier by omission — \
              the restarted pre-fire burst opens its own fresh sample sequence",
+        );
+    }
+
+    /// A fold *replaces* the fire, so a latched pre-fire burst must never
+    /// reach the fire move. `into_post_fire`'s entry `debug_assert` is the
+    /// structural dual of the verdict-time `AbsorbFold` override —
+    /// reaching it means a classify-routing bug let a latched burst cross
+    /// the fire boundary. Debug-only: the assert is compiled out in release.
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "fold-latched burst must not fire")]
+    fn into_post_fire_panics_on_latched_burst_in_debug() {
+        let mut pre = batching_burst(tid(7), tid(99));
+        pre.latch_fold();
+        let _ = pre.into_post_fire(1, tid(55));
+    }
+
+    /// The fire-tail restart **threads** `fold_latched`, unlike the
+    /// carriers it drops — a still-live absorb window's latch survives the
+    /// move so the restarted Standard burst keeps folding. Complements
+    /// `post_fire_carrier_drops_at_into_pre_fire_residual`, which threads
+    /// `false`.
+    #[test]
+    fn into_pre_fire_residual_threads_fold_latched() {
+        let mut tree = Tree::new();
+        let anchor = tree.ensure_root("anchor", ResourceRole::User);
+        let c1 = tree
+            .ensure_child(anchor, "c1", ResourceRole::User)
+            .expect("live");
+        let residual = dirty_prov(&[(c1, "/w/c1")]);
+
+        let pre = rebasing_post(BurstIntent::Standard, residual).into_pre_fire_residual(
+            tid(1),
+            tid(2),
+            std::time::Instant::now(),
+            true,
+        );
+        assert!(
+            pre.fold_latched,
+            "the restart threads the latch — a live absorb window keeps folding the restarted burst",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // absorb window + fold-latch cascade
+    // -----------------------------------------------------------------------
+
+    /// `latch_fold` is a set-only monotone latch that reaches its target
+    /// only through `Active(PreFire)`; `burst_fold_latched` reads it back.
+    /// The cascade is asymmetric by construction: PostFire has no latch
+    /// (no-op), and `Idle` / `Pending` have no in-flight burst to override
+    /// (no-op). An unlatched `Active(PreFire)` reads `false` — the latch is
+    /// the only thing that flips it.
+    #[test]
+    fn latch_fold_cascade_reaches_only_active_prefire() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+
+        // Active(PreFire): latch flips the read.
+        let mut prefire = ProfileState::Active(
+            ActiveBurst::PreFire(batching_burst(tid(1), tid(2))),
+            BurstFinish::ReturnToIdle,
+        );
+        assert!(
+            !prefire.burst_fold_latched(),
+            "fresh PreFire reads unlatched",
+        );
+        prefire.latch_fold();
+        assert!(prefire.burst_fold_latched(), "latch flips the PreFire read");
+
+        // Active(PostFire): no latch field — latch is a no-op.
+        let mut postfire = ProfileState::Active(
+            ActiveBurst::PostFire(rebasing_post(BurstIntent::Standard, DirtyProvenance::new())),
+            BurstFinish::ReturnToIdle,
+        );
+        postfire.latch_fold();
+        assert!(
+            !postfire.burst_fold_latched(),
+            "PostFire has no latch — the cascade no-ops",
+        );
+
+        // Idle / Pending: no in-flight burst — latch is a no-op.
+        for mut state in [ProfileState::Idle, pending(r)] {
+            state.latch_fold();
+            assert!(
+                !state.burst_fold_latched(),
+                "no in-flight pre-fire burst ⇒ latch no-ops, read stays false",
+            );
+        }
+    }
+
+    /// `arm_absorb` is set-plus-retro-latch in one operation: it sets the
+    /// window unconditionally AND drives the latch cascade. On
+    /// `Active(PreFire)` the in-flight burst retro-latches; on a state with
+    /// no in-flight pre-fire burst (`Idle`) the window still stands for the
+    /// next burst's birth consult but nothing latches. Re-arm is
+    /// last-writer-wins over the whole window (mode AND expiry).
+    #[test]
+    fn arm_absorb_sets_window_and_retro_latches_active_prefire() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let base = std::time::Instant::now();
+
+        // (i) Active(PreFire): window set AND in-flight burst retro-latched.
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.transition_state(active_prefire());
+        assert!(!p.state().burst_fold_latched(), "unlatched before arm");
+        p.arm_absorb(base + SETTLE, AbsorbMode::ConsumeOnFirst);
+        assert_eq!(
+            p.absorb_window(),
+            Some(&AbsorbWindow {
+                expiry: base + SETTLE,
+                mode: AbsorbMode::ConsumeOnFirst,
+            }),
+        );
+        assert!(
+            p.state().burst_fold_latched(),
+            "arm retro-latches the in-flight PreFire burst",
+        );
+
+        // (ii) Idle: window stands for the next birth, nothing latches.
+        let mut idle = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        idle.arm_absorb(base + SETTLE, AbsorbMode::PersistUntil);
+        assert!(idle.absorb_window().is_some(), "window armed on Idle");
+        assert!(
+            !idle.state().burst_fold_latched(),
+            "Idle has no in-flight burst — nothing retro-latches",
+        );
+
+        // (iii) Re-arm: last-writer-wins over mode AND expiry.
+        let mut q = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        q.arm_absorb(base + SETTLE, AbsorbMode::ConsumeOnFirst);
+        q.arm_absorb(base + MAX_SETTLE, AbsorbMode::PersistUntil);
+        assert_eq!(
+            q.absorb_window(),
+            Some(&AbsorbWindow {
+                expiry: base + MAX_SETTLE,
+                mode: AbsorbMode::PersistUntil,
+            }),
+            "re-arm overwrites the window wholesale",
+        );
+    }
+
+    /// `note_absorb_fold` bumps `absorb_count` **unconditionally** (the
+    /// fold happened), then retires the window only when the current window
+    /// is a `ConsumeOnFirst`. `PersistUntil` survives the bump; an unarmed
+    /// (`None`) window stays `None` while the count still advances.
+    #[test]
+    fn note_absorb_fold_bumps_count_and_consumes_only_consume_on_first() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let base = std::time::Instant::now();
+
+        // ConsumeOnFirst: count bumps, window retires.
+        let mut consume = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        consume.arm_absorb(base + SETTLE, AbsorbMode::ConsumeOnFirst);
+        consume.note_absorb_fold();
+        assert_eq!(consume.absorb_count(), 1);
+        assert!(
+            consume.absorb_window().is_none(),
+            "ConsumeOnFirst retires on the first fold",
+        );
+
+        // PersistUntil: count bumps, window stands.
+        let mut persist = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        persist.arm_absorb(base + SETTLE, AbsorbMode::PersistUntil);
+        persist.note_absorb_fold();
+        assert_eq!(persist.absorb_count(), 1);
+        assert!(
+            persist.absorb_window().is_some(),
+            "PersistUntil survives the fold",
+        );
+
+        // No window: count still bumps unconditionally, stays None.
+        let mut unarmed = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        unarmed.note_absorb_fold();
+        assert_eq!(
+            unarmed.absorb_count(),
+            1,
+            "the bump is unconditional — the fold happened even with no live window",
+        );
+        assert!(unarmed.absorb_window().is_none());
+    }
+
+    /// `absorb_window_live` live-gates on `now < expiry`: `None` is never
+    /// live; an armed window is live strictly before its expiry and inert
+    /// at-or-after it (lazy expiry — the read never clears the window).
+    #[test]
+    fn absorb_window_live_gates_on_expiry() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let base = std::time::Instant::now();
+
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        assert!(!p.absorb_window_live(base), "no window armed ⇒ never live");
+
+        p.arm_absorb(base + SETTLE, AbsorbMode::PersistUntil);
+        assert!(p.absorb_window_live(base), "before expiry ⇒ live");
+        assert!(
+            !p.absorb_window_live(base + SETTLE),
+            "at expiry ⇒ inert (now < expiry is strict)",
+        );
+        assert!(
+            !p.absorb_window_live(base + SETTLE + SETTLE),
+            "beyond expiry ⇒ inert",
+        );
+    }
+
+    /// `absorb_window` borrows the armed window **without** live-gating —
+    /// the contrast with `absorb_window_live`. Arming with an already-past
+    /// expiry leaves the window observably `Some` for the projection
+    /// surface, while the live gate reads `false`.
+    #[test]
+    fn absorb_window_does_not_live_gate() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let now = std::time::Instant::now();
+        let past = now
+            .checked_sub(SETTLE)
+            .expect("monotonic clock past origin");
+
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.arm_absorb(past, AbsorbMode::PersistUntil);
+        assert_eq!(
+            p.absorb_window(),
+            Some(&AbsorbWindow {
+                expiry: past,
+                mode: AbsorbMode::PersistUntil,
+            }),
+            "absorb_window borrows the armed window regardless of expiry",
+        );
+        assert!(
+            !p.absorb_window_live(now),
+            "the same window is not live — the gate, not the borrow, applies expiry",
         );
     }
 

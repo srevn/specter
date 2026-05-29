@@ -14,7 +14,7 @@
 use std::fmt::Write as _;
 
 use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails};
-use crate::ipc::wire::{WireEffectScope, WireStateLabel};
+use crate::ipc::wire::{WireAbsorbMode, WireEffectScope, WireStateLabel};
 
 /// Render the response as one operator-readable block.
 pub(crate) fn render(resp: &ShowResponse) -> String {
@@ -42,8 +42,9 @@ const LABEL_WIDTH: usize = 16;
 /// anchor          /etc/specter
 /// scope           subtree-root
 /// settle          500ms
-/// fires           7 (suppressed: 2)
+/// fires           7 (suppressed: 2, absorbed: 1)
 /// last fired      2026-05-23T11:43:00Z
+/// absorbing       until 2026-05-23T11:50:00Z (persist)
 /// sub_id          1234
 /// profile_id      4321
 ///
@@ -75,13 +76,24 @@ fn render_active(d: &SubDetails) -> String {
     let _ = writeln!(out, "{:LABEL_WIDTH$}{}ms", "settle", d.settle_ms);
     let _ = writeln!(
         out,
-        "{:LABEL_WIDTH$}{} (suppressed: {})",
-        "fires", d.fire_count, d.dedup_suppressed_count,
+        "{:LABEL_WIDTH$}{} (suppressed: {}, absorbed: {})",
+        "fires", d.fire_count, d.dedup_suppressed_count, d.absorb_count,
     );
     let _ = match d.last_fired_at.as_ref() {
         Some(t) => writeln!(out, "{:LABEL_WIDTH$}{}", "last fired", t),
         None => writeln!(out, "{:LABEL_WIDTH$}-", "last fired"),
     };
+    // Only an armed, live window renders — the projection drops an
+    // inert one, so a present `absorb` is always operator-meaningful.
+    if let Some(w) = d.absorb.as_ref() {
+        let _ = writeln!(
+            out,
+            "{:LABEL_WIDTH$}until {} ({})",
+            "absorbing",
+            w.expiry,
+            absorb_mode_str(w.mode),
+        );
+    }
     if let Some(pid) = d.source_promoter {
         let _ = writeln!(out, "{:LABEL_WIDTH$}promoter {}", "source", pid.0);
     }
@@ -130,13 +142,41 @@ const fn disabled_source_str(s: DisabledSource) -> &'static str {
     }
 }
 
+/// Operator-visible mode label for the `absorbing until …` line.
+/// Hyphenated to match this view's label table (`subtree-root`,
+/// `per-stable-file`); `persist` is the bare form since the expiry
+/// instant already sits on the same line. The `tail` renderer uses its
+/// own snake_case table.
+const fn absorb_mode_str(m: WireAbsorbMode) -> &'static str {
+    match m {
+        WireAbsorbMode::ConsumeOnFirst => "consume-on-first",
+        WireAbsorbMode::PersistUntil => "persist",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::render;
     use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId};
-    use crate::ipc::wire::{WireEffectScope, WirePath, WireStateLabel};
+    use crate::ipc::wire::{
+        WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WirePath, WireStateLabel, WireTime,
+    };
+    use std::time::UNIX_EPOCH;
 
     fn details(name: &str, anchor: Option<WirePath>, program: Vec<String>) -> SubDetails {
+        details_full(name, anchor, program, None, 0)
+    }
+
+    /// `details` with explicit `absorb` window + `absorb_count` — the
+    /// fold-surface fields the absorb-render tests exercise; the
+    /// zero-arg `details` threads `None, 0` for every other test.
+    fn details_full(
+        name: &str,
+        anchor: Option<WirePath>,
+        program: Vec<String>,
+        absorb: Option<WireAbsorbWindow>,
+        absorb_count: u64,
+    ) -> SubDetails {
         SubDetails {
             name: name.to_string(),
             sub: WireId(1),
@@ -146,6 +186,8 @@ mod tests {
             last_fired_at: None,
             fire_count: 0,
             dedup_suppressed_count: 0,
+            absorb,
+            absorb_count,
             settle_ms: 500,
             source_promoter: None,
             scope: WireEffectScope::SubtreeRoot,
@@ -214,6 +256,76 @@ mod tests {
         assert!(
             state_line.contains('-'),
             "state=None must render as '-': {state_line:?}",
+        );
+    }
+
+    /// An armed `absorb` window renders an `absorbing   until <T> (mode)`
+    /// line with the hyphenated mode label, and the `fires` line always
+    /// carries the `absorbed: <n>` fold counter. A `None` window omits
+    /// the `absorbing` line entirely (the projection already dropped an
+    /// inert window, so a present `Some` is always operator-meaningful).
+    #[test]
+    fn show_human_active_renders_absorb_window_and_count() {
+        let d = details_full(
+            "foo",
+            None,
+            vec![],
+            Some(WireAbsorbWindow {
+                expiry: WireTime::from(UNIX_EPOCH),
+                mode: WireAbsorbMode::ConsumeOnFirst,
+            }),
+            4,
+        );
+        let out = render(&ShowResponse::Active(d));
+        let absorbing = out
+            .lines()
+            .find(|l| l.starts_with("absorbing"))
+            .expect("absorbing line present when window is Some");
+        assert!(
+            absorbing.contains("until 1970-01-01T00:00:00Z"),
+            "absorbing line carries the expiry: {absorbing:?}",
+        );
+        assert!(
+            absorbing.contains("(consume-on-first)"),
+            "absorbing line carries the hyphenated mode label: {absorbing:?}",
+        );
+        let fires = out
+            .lines()
+            .find(|l| l.starts_with("fires"))
+            .expect("fires line present");
+        assert!(
+            fires.contains("absorbed: 4"),
+            "fires line carries the fold counter: {fires:?}",
+        );
+    }
+
+    /// `PersistUntil` renders the bare `persist` mode label (the expiry
+    /// instant already sits on the same line), and a `None` window omits
+    /// the `absorbing` line.
+    #[test]
+    fn show_human_active_persist_label_and_absent_window() {
+        let with = details_full(
+            "foo",
+            None,
+            vec![],
+            Some(WireAbsorbWindow {
+                expiry: WireTime::from(UNIX_EPOCH),
+                mode: WireAbsorbMode::PersistUntil,
+            }),
+            0,
+        );
+        let out = render(&ShowResponse::Active(with));
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("absorbing") && l.contains("(persist)")),
+            "PersistUntil renders the bare `persist` label: {out}",
+        );
+
+        let without = details("foo", None, vec![]);
+        let out = render(&ShowResponse::Active(without));
+        assert!(
+            !out.lines().any(|l| l.starts_with("absorbing")),
+            "None window omits the absorbing line entirely: {out}",
         );
     }
 

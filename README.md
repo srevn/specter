@@ -21,9 +21,9 @@ inverts that contract:
   rather than treating them as a fresh burst.
 - **Hot config reload** — SIGHUP, an operator IPC verb, or
   edit-and-save against a watched config path.
-- **Operator control surface** — eight client verbs over a UNIX socket
-  (`status`, `list`, `show`, `disable`, `enable`, `reload`, `tail`,
-  `wait`) for live inspection and runtime overrides.
+- **Operator control surface** — nine client verbs over a UNIX socket
+  (`status`, `list`, `show`, `disable`, `enable`, `absorb`, `reload`,
+  `tail`, `wait`) for live inspection and runtime overrides.
 
 Under the hood, a pure engine drives a kqueue/inotify sensor (BSD,
 macOS, Linux) and a subprocess actuator over bounded channels.
@@ -73,6 +73,7 @@ specter list                        # every watch + state
 specter show <name>                 # one watch in detail
 specter disable <name>              # runtime override (survives reload)
 specter enable <name>               # clear the runtime override
+specter absorb <name> [--for …]     # fold the next change(s) instead of firing
 specter reload                      # equivalent to SIGHUP
 specter tail [--filter <tag> …]     # stream diagnostics
 specter wait <name> [--timeout …]   # block until the watch fires (or detaches)

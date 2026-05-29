@@ -30,9 +30,9 @@ use crate::refcounts::add_watch;
 use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
-    ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind, ClassSet,
-    ContribKey, DedupKey, DescentRemaining, DescentState, DetachReason, Diagnostic, Effect,
-    EffectCommon, EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent,
+    AbsorbMode, ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind,
+    ClassSet, ContribKey, DedupKey, DescentRemaining, DescentState, DetachReason, Diagnostic,
+    Effect, EffectCommon, EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent,
     PostFirePhase, PreFirePhase, ProbeFailure, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot,
     Profile, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority,
     QuiescenceVerdict, QuiescenceWitness, ReapTrigger, Resource, ResourceId, ResourceKind,
@@ -41,7 +41,7 @@ use specter_core::{
 };
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 impl Engine {
     /// Dispatch a normalized [`FsEvent`] for `resource`.
@@ -1984,6 +1984,44 @@ impl Engine {
         }
     }
 
+    /// Arm (or re-arm) the operator `absorb` window on a Profile — the
+    /// [`Input::ArmAbsorb`] handler. Deriving the window's `(expiry,
+    /// mode)` from the operator's `duration` is the one place this
+    /// policy lives: `None` ⇒ a one-shot window one `settle` interval
+    /// wide ([`AbsorbMode::ConsumeOnFirst`], to cover a single expected
+    /// replication); `Some(d)` ⇒ a `d`-wide window
+    /// ([`AbsorbMode::PersistUntil`], to cover a run of them). A
+    /// `--for 0s` yields `expiry == now`, which `absorb_window_live`
+    /// reads inert — a harmless operator-owned no-op, no validation.
+    ///
+    /// [`Profile::arm_absorb`] sets the window **and** retro-latches any
+    /// in-flight pre-fire burst in one operation (the reverse race —
+    /// the replication's events opened a burst before the signal
+    /// arrived — so a burst already batching folds too). A stale
+    /// `profile` (reaped between the driver's name resolution and this
+    /// step) no-ops silently: there is no Profile for the window to live
+    /// on. Narrates via [`Diagnostic::AbsorbArmed`] so a `tail` sees the
+    /// arm, not only the eventual [`Diagnostic::QuiescenceAbsorbed`] fold.
+    pub(crate) fn on_arm_absorb(
+        &mut self,
+        profile_id: ProfileId,
+        duration: Option<Duration>,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            let (expiry, mode) = match duration {
+                Some(d) => (now + d, AbsorbMode::PersistUntil),
+                None => (now + p.settle, AbsorbMode::ConsumeOnFirst),
+            };
+            p.arm_absorb(expiry, mode);
+            out.diagnostics.push(Diagnostic::AbsorbArmed {
+                profile: profile_id,
+                mode,
+            });
+        }
+    }
+
     /// Anchor terminal event (Removed/Renamed/Revoked at `Profile.resource`).
     /// Anchor-terminal dispatcher. Splits on whether every Sub on the
     /// Profile is dynamic (originates from a Promoter) versus the
@@ -2257,8 +2295,20 @@ impl Engine {
     /// consequences reached through different settled-reference
     /// reasoning, and the per-Sub vs per-Profile split is load-bearing
     /// for B1 dedup.
+    ///
+    /// **The fold override is the single, final layer** atop the intent
+    /// fork: a burst that froze the fold latch at birth (a live operator
+    /// `absorb` window — [`specter_core::ProfileState::burst_fold_latched`])
+    /// folds rather than fires. A firing `base` ([`Consequence::is_firing`])
+    /// becomes [`Consequence::AbsorbFold`]; a non-firing `base`
+    /// ([`Consequence::SilentPin`]) passes through, so a redundant
+    /// Cold-Seed leaves the window armed for the first fireable burst.
+    /// This is the **sole** verdict-time consult of the fold decision,
+    /// and it reads the burst's frozen latch, never the window — the
+    /// orthogonal-to-[`specter_core::BurstIntent`] terminal-consequence
+    /// switch the latch was designed to be.
     fn classify_consequence(&self, profile_id: ProfileId, intent: BurstIntent) -> Consequence {
-        match intent {
+        let base = match intent {
             BurstIntent::Standard => Consequence::StandardFire,
             BurstIntent::Seed => {
                 if self.seed_owes_first_fire(profile_id) {
@@ -2281,6 +2331,26 @@ impl Engine {
                     Consequence::SilentPin
                 }
             }
+        };
+
+        // The single fold override. A burst born (or retro-latched)
+        // under a live `absorb` window folds instead of firing: a
+        // firing `base` is replaced with the silent baseline advance.
+        // Read the *latch* the burst froze at birth — never the window
+        // — so a long transfer that outlived its settle window still
+        // folds (the window may already read inert; the latch does not).
+        // A non-firing `base` passes through untouched, so a Cold-Seed
+        // `SilentPin` (which proves nothing) leaves the window unconsumed
+        // for the first genuinely fireable burst.
+        if base.is_firing()
+            && self
+                .profiles
+                .get(profile_id)
+                .is_some_and(|p| p.state().burst_fold_latched())
+        {
+            Consequence::AbsorbFold
+        } else {
+            base
         }
     }
 
@@ -2296,12 +2366,14 @@ impl Engine {
     /// invariant under the graft, so the classification is
     /// order-stable.
     ///
-    /// [`Consequence::SilentPin`] is the only non-firing arm: it has
-    /// no Effect to defer, so it never consults the Draining gate. It
-    /// flags the per-file drop *while the witness is still live*, seals
-    /// `baseline := observed` (consuming the witness — the structural
-    /// end of the loss→recovery window), and finishes. The three firing
-    /// consequences cross the single gate in [`Engine::gated_fire`].
+    /// The two non-firing arms — [`Consequence::SilentPin`] and
+    /// [`Consequence::AbsorbFold`] — share the silent-seal terminus
+    /// ([`Engine::seal_baseline_silently`]): no Effect to defer, so
+    /// neither consults the Draining gate. `AbsorbFold` runs a
+    /// per-cause prologue first (the [`Diagnostic::QuiescenceAbsorbed`]
+    /// narration + the per-Profile count bump/consume), since the seal
+    /// may reap the Profile. The three firing consequences cross the
+    /// single gate in [`Engine::gated_fire`].
     fn fire_or_seal(
         &mut self,
         profile_id: ProfileId,
@@ -2347,17 +2419,42 @@ impl Engine {
                     out,
                 );
             }
-            Consequence::SilentPin => {
-                // Witness-drift honesty BEFORE the rebase consumes the
-                // witness; the predicate self-gates to a live witness +
-                // a `PerStableFile` Sub.
-                self.warn_perfile_dropped_on_recovery(profile_id, out);
+            Consequence::SilentPin => self.seal_baseline_silently(profile_id, out),
+            Consequence::AbsorbFold => {
+                // Per-cause prologue, then the SAME silent-seal terminus
+                // as `SilentPin`. The bookkeeping runs *before* the seal:
+                // `seal_baseline_silently` finishes the burst, which can
+                // reap the Profile (and its Subs), so the diagnostic and
+                // the count bump/consume must land while the Profile is
+                // still live.
+                out.diagnostics.push(Diagnostic::QuiescenceAbsorbed {
+                    profile: profile_id,
+                });
                 if let Some(p) = self.profiles.get_mut(profile_id) {
-                    p.rebase_baseline();
+                    p.note_absorb_fold();
                 }
-                self.finish_burst_to_idle(profile_id, out);
+                self.seal_baseline_silently(profile_id, out);
             }
         }
+    }
+
+    /// Seal `baseline := current` silently and finish the burst — the
+    /// shared terminus for a non-firing commit.
+    ///
+    /// Flags the per-file drop *while the witness is still live* (the
+    /// predicate self-gates to a live witness + a `PerStableFile` Sub),
+    /// then rebases and finishes. The warn must precede
+    /// [`specter_core::Profile::rebase_baseline`], which consumes the
+    /// witness it reads. No Effect to defer ⇒ never Draining-gated. The
+    /// caller ([`Engine::fire_or_seal`]) has already committed the
+    /// observed tree (`apply_snapshot`, once for every consequence), so
+    /// this seals over the post-graft `current`.
+    fn seal_baseline_silently(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        self.warn_perfile_dropped_on_recovery(profile_id, out);
+        if let Some(p) = self.profiles.get_mut(profile_id) {
+            p.rebase_baseline();
+        }
+        self.finish_burst_to_idle(profile_id, out);
     }
 
     /// The single Draining-gate site. Fire iff `forced` (the
@@ -2430,8 +2527,10 @@ impl Engine {
     ///   (strong signal — the hash channel observed
     ///   `prior != response` before the ceiling expired) the dispatch
     ///   emits [`Diagnostic::QuiescenceCeilingForcedDespiteChange`];
-    ///   the quiet `false` case stays silent (the `forced` bit is
-    ///   already operator-visible on the emitted Effect).
+    ///   the quiet `false` case stays silent — a forced *fire* carries
+    ///   the bit on its [`specter_core::Effect`], and a forced silent
+    ///   seal ([`Consequence::SilentPin`]) observed no change worth
+    ///   flagging.
     /// - [`QuiescenceVerdict::Retry`] — non-firing, non-terminal: the
     ///   walker certified but the hash channel observed
     ///   `prior != Some(response)` (events-incomplete fire-bearing
@@ -2476,14 +2575,15 @@ impl Engine {
             QuiescenceVerdict::Stable(StableReason::Forced {
                 hash_channel_disagreed,
             }) => {
-                // Bounded-ceiling fire path. The strong-signal
-                // diagnostic emits only when the hash channel observed
-                // a concrete prior/response disagreement before the
-                // deadline expired; the quiet ceiling fire stays
-                // silent (the `forced` bit is operator-visible on the
-                // emitted Effect itself). The fire path is the same
-                // either way — `forced = true` triggers the
-                // Draining-gate bypass in `gated_fire`.
+                // Bounded-ceiling path. The strong-signal diagnostic
+                // emits only when the hash channel observed a concrete
+                // prior/response disagreement before the deadline
+                // expired; the quiet `false` case stays silent — a
+                // forced fire carries the bit on its `Effect`, a forced
+                // silent seal observed no change worth flagging. The
+                // fire-or-seal routing is identical either way; on the
+                // firing arms `forced = true` triggers the Draining-gate
+                // bypass in `gated_fire`.
                 if hash_channel_disagreed {
                     out.diagnostics
                         .push(Diagnostic::QuiescenceCeilingForcedDespiteChange {
@@ -3917,16 +4017,54 @@ enum Consequence {
     /// certified-recovery decision** (pre-`Awaiting`);
     /// [`Diagnostic::PerFileDriftDroppedOnRecovery`] post-gate.
     RecoveryFire(SmallVec<[SubId; 2]>),
-    /// The only non-firing arm. Four disjoint origins reach it: a
-    /// fresh-static daemon restart (no witnessed activity, no baseline
-    /// to drift against), a no-drift recovery, a recovery whose fired
-    /// set is empty (PerFile-only), or a recovery whose fired set is
-    /// empty (all Subs detached). No emission; rebases the baseline
-    /// (consuming a live witness if any) and finishes; **never
-    /// Draining-gated** — no Effect to defer.
+    /// The non-firing arm reached by the *intent classification
+    /// itself*. Four disjoint origins reach it: a fresh-static daemon
+    /// restart (no witnessed activity, no baseline to drift against), a
+    /// no-drift recovery, a recovery whose fired set is empty
+    /// (PerFile-only), or a recovery whose fired set is empty (all Subs
+    /// detached). No emission; rebases the baseline (consuming a live
+    /// witness if any) and finishes; **never Draining-gated** — no
+    /// Effect to defer.
     /// [`Diagnostic::PerFileDriftDroppedOnRecovery`] (self-gating
     /// predicate) before the rebase.
     SilentPin,
+    /// The non-firing arm reached by the operator `absorb` *override* of
+    /// a would-have-fired verdict: the live pre-fire burst carries the
+    /// fold latch ([`specter_core::ProfileState::burst_fold_latched`]),
+    /// so a firing `base` ([`Self::is_firing`]) is replaced with a
+    /// silent baseline advance — the echo of an expected replication is
+    /// folded into the settled reference instead of re-fired.
+    ///
+    /// Shares [`Self::SilentPin`]'s seal *terminus*
+    /// ([`Engine::seal_baseline_silently`]) but is a **distinct
+    /// variant**, not a `SilentPin` flag: it differs in *bookkeeping*
+    /// (one [`Diagnostic::QuiescenceAbsorbed`] + a
+    /// [`specter_core::Profile::note_absorb_fold`] bump/consume) and in
+    /// *cause* (an operator window, not the intent fork), so burying it
+    /// in `SilentPin`'s four-origin arm would hide an operator-visible
+    /// event. No emission; **never Draining-gated** — like `SilentPin`,
+    /// no Effect to defer.
+    AbsorbFold,
+}
+
+impl Consequence {
+    /// True for the three arms that run the Subs' reactions
+    /// ([`Self::StandardFire`] / [`Self::FreshSeedFire`] /
+    /// [`Self::RecoveryFire`]); false for the two silent-seal arms
+    /// ([`Self::SilentPin`] / [`Self::AbsorbFold`]). The
+    /// [`Engine::classify_consequence`] override consults this to decide
+    /// whether a fold latch has a fire to override: a non-firing `base`
+    /// passes through untouched (so a Cold-Seed `SilentPin` leaves the
+    /// `absorb` window unconsumed for the first genuinely fireable
+    /// burst). Wildcard-free — a future firing variant is a compile
+    /// error here, not a silently-unfoldable fire.
+    #[must_use]
+    const fn is_firing(&self) -> bool {
+        match self {
+            Self::StandardFire | Self::FreshSeedFire | Self::RecoveryFire(_) => true,
+            Self::SilentPin | Self::AbsorbFold => false,
+        }
+    }
 }
 
 /// One Sub's fire verdict in an [`Engine::emit_effects`] pass — the

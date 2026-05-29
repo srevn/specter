@@ -69,8 +69,8 @@
 use compact_str::CompactString;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use specter_core::{
-    BurstHelper, BurstIntent, ClaimKind, DetachReason, Diagnostic, EffectScope, FsEvent,
-    OverflowScope, ProbeOwner, ProfileStateDiscriminant, PromoterClaimKind, ReapTrigger,
+    AbsorbMode, BurstHelper, BurstIntent, ClaimKind, DetachReason, Diagnostic, EffectScope,
+    FsEvent, OverflowScope, ProbeOwner, ProfileStateDiscriminant, PromoterClaimKind, ReapTrigger,
     ResourceKind, SpliceFailureCause, StateLabel, WatchFailure,
 };
 use std::path::{Path, PathBuf};
@@ -451,6 +451,15 @@ pub(crate) enum WireDiagnostic {
         profile: WireId,
         count: u32,
     },
+    QuiescenceAbsorbed {
+        at: WireTime,
+        profile: WireId,
+    },
+    AbsorbArmed {
+        at: WireTime,
+        profile: WireId,
+        mode: WireAbsorbMode,
+    },
     SubDetached {
         at: WireTime,
         sub: WireId,
@@ -817,6 +826,15 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 profile: WireId::from(*profile),
                 count: *count,
             },
+            Diagnostic::QuiescenceAbsorbed { profile } => Self::QuiescenceAbsorbed {
+                at: at.clone(),
+                profile: WireId::from(*profile),
+            },
+            Diagnostic::AbsorbArmed { profile, mode } => Self::AbsorbArmed {
+                at: at.clone(),
+                profile: WireId::from(*profile),
+                mode: WireAbsorbMode::from(*mode),
+            },
             Diagnostic::SubDetached {
                 sub,
                 profile,
@@ -983,6 +1001,8 @@ impl WireDiagnostic {
             Self::PerFileFireSkippedOnFreshSeed { .. } => "per_file_fire_skipped_on_fresh_seed",
             Self::SubAttached { .. } => "sub_attached",
             Self::SubFired { .. } => "sub_fired",
+            Self::QuiescenceAbsorbed { .. } => "quiescence_absorbed",
+            Self::AbsorbArmed { .. } => "absorb_armed",
             Self::SubDetached { .. } => "sub_detached",
             Self::SubRebound { .. } => "sub_rebound",
             Self::RebindUnknownSub { .. } => "rebind_unknown_sub",
@@ -1066,6 +1086,8 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "per_file_fire_skipped_on_fresh_seed",
     "sub_attached",
     "sub_fired",
+    "quiescence_absorbed",
+    "absorb_armed",
     "sub_detached",
     "sub_rebound",
     "rebind_unknown_sub",
@@ -1432,6 +1454,45 @@ impl From<EffectScope> for WireEffectScope {
     }
 }
 
+/// Retirement-discipline projection of [`specter_core::AbsorbMode`].
+/// Surfaces both in [`WireDiagnostic::AbsorbArmed`] (so a `tail` sees
+/// the arm's mode) and in [`WireAbsorbWindow::mode`] on the `show`
+/// detail block. The `show` human renderer maps it to the operator
+/// labels `consume-on-first` / `persist`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WireAbsorbMode {
+    ConsumeOnFirst,
+    PersistUntil,
+}
+
+impl From<AbsorbMode> for WireAbsorbMode {
+    fn from(m: AbsorbMode) -> Self {
+        match m {
+            AbsorbMode::ConsumeOnFirst => Self::ConsumeOnFirst,
+            AbsorbMode::PersistUntil => Self::PersistUntil,
+        }
+    }
+}
+
+/// `show`-detail projection of an armed [`specter_core::AbsorbWindow`].
+///
+/// Constructed field-by-field in the `show` projection
+/// ([`crate::driver::ipc::project`]) rather than through a `From`: the
+/// window's expiry is an engine-monotonic [`std::time::Instant`] with
+/// no wall-clock of its own, so the projection threads it through the
+/// driver's startup-anchor pair (`project_wall`) to reach a
+/// [`WireTime`]. The projection is live-gated at the call site — an
+/// inert window (`expiry <= now`) projects to `None`, never a stale
+/// `Some`. Surfaces in [`crate::ipc::protocol::SubDetails::absorb`].
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub(crate) struct WireAbsorbWindow {
+    /// Wall-clock projection of the window's expiry instant.
+    pub(crate) expiry: WireTime,
+    /// Retirement discipline — see [`WireAbsorbMode`].
+    pub(crate) mode: WireAbsorbMode,
+}
+
 /// Reload-trigger projection of [`crate::driver::ReloadTrigger`].
 /// The enum lives here to keep every wire shape (core- or bin-sourced)
 /// declared in one module; the `From` projection lives at the source
@@ -1458,8 +1519,8 @@ pub(crate) enum WireReloadTrigger {
 #[cfg(test)]
 mod tests {
     use super::{
-        KNOWN_WIRE_VARIANTS, WireBurstHelper, WireBurstIntent, WireClaimKind, WireDetachReason,
-        WireDiagnostic, WireFsEvent, WireOverflowScope, WirePath, WireProbeOwner,
+        KNOWN_WIRE_VARIANTS, WireAbsorbMode, WireBurstHelper, WireBurstIntent, WireClaimKind,
+        WireDetachReason, WireDiagnostic, WireFsEvent, WireOverflowScope, WirePath, WireProbeOwner,
         WireProfileStateDiscriminant, WirePromoterClaimKind, WireReapTrigger, WireResourceKind,
         WireSpliceFailureCause, WireTime, WireWatchFailure,
     };
@@ -1826,6 +1887,15 @@ mod tests {
                 sub: WireId(151),
                 profile: WireId(152),
                 count: 3,
+            },
+            WireDiagnostic::QuiescenceAbsorbed {
+                at: at(),
+                profile: WireId(157),
+            },
+            WireDiagnostic::AbsorbArmed {
+                at: at(),
+                profile: WireId(158),
+                mode: WireAbsorbMode::ConsumeOnFirst,
             },
             WireDiagnostic::SubDetached {
                 at: at(),

@@ -1,9 +1,9 @@
 # Control surface
 
-A running daemon exposes a UNIX-socket control plane for operators. Eight
+A running daemon exposes a UNIX-socket control plane for operators. Nine
 client verbs ship inside the same `specter` binary: read-only inspection
 (`status`, `list`, `show`), runtime mutation (`disable`, `enable`,
-`reload`), and streaming (`tail`, `wait`).
+`absorb`, `reload`), and streaming (`tail`, `wait`).
 
 ```sh
 specter status              # daemon snapshot
@@ -11,6 +11,7 @@ specter list                # every watch
 specter show <name>         # one watch in detail
 specter disable <name>      # runtime override; persists across reload
 specter enable <name>       # clear the runtime override
+specter absorb <name>       # fold the next change into the baseline, don't fire
 specter reload              # equivalent to SIGHUP
 specter tail                # stream every diagnostic
 specter wait <name>         # block until the named watch fires (or detaches)
@@ -83,7 +84,8 @@ A row's `DISABLED` column distinguishes the two disable sources:
 One watch in detail. Three outcomes:
 
 - `active` — the full `SubDetails` block: state, anchor, last-fired,
-  counters, scope, action program rendering.
+  fire / suppress / absorb counters, any live `absorb` window, scope,
+  action program rendering.
 - `disabled` — the watch is operator-declared but not attached; the
   response carries the `source` (`runtime` / `toml`) so the operator
   knows what to do next.
@@ -108,6 +110,53 @@ Clear the runtime override and re-attach the watch. Two failure modes:
 - `toml_disabled` — the override clears, but the watch is also
   TOML-disabled (or missing from the file). Edit the config and reload
   to attach.
+
+### `absorb <name>`
+
+Arm a **fold-without-fire window**: the next change Specter would fire on
+is instead folded silently into the baseline, advancing the settled
+reference without running the watch's actions. The signal for an
+*expected* change — most often a replication echo.
+
+The motivating case is two daemons watching the same tree on two hosts.
+A's fire `rsync`s the result to B; with no hint, B observes the rsync and
+fires its own redundant reaction. Sent over the same channel as the
+rsync, just ahead of it, `specter absorb <name>` tells B that the next
+change is that expected replication: absorb it, don't echo.
+
+A fold **advances** the baseline — it does not merely suppress one fire —
+so detection stays correct afterwards: a later, genuine change still
+fires.
+
+```sh
+specter absorb my-watch              # fold the next single change
+specter absorb my-watch --for 30s    # fold every change for the next 30s
+```
+
+- **Bare `absorb`** arms a one-shot window: it folds the first change
+  that would have fired, then retires. The window is one settle interval
+  wide, so the expected change must begin within roughly one settle of
+  the signal; if a fold-worthy change never arrives, the window lapses on
+  its own and nothing is folded.
+- **`absorb --for <dur>`** holds the window open for `dur` (humantime —
+  `500ms`, `30s`, `1m30s`), folding every change that would have fired in
+  that span. Reach for it when the replication starts after a setup delay
+  longer than the settle window, or spans a run of separate bursts.
+
+A window is **per-watch-Profile**: watches that share an anchor path and
+scan config fold together (the same grouping that shares a settle
+lifecycle), and the fold counter is likewise per-Profile. Re-arming
+replaces the current window outright.
+
+While a window is live, `show <name>` adds an `absorbing until <T>
+(<mode>)` line and the `fires` line carries a running `absorbed: <n>`
+counter. On the `tail` stream an arm emits `absorb_armed` and each fold
+emits `quiescence_absorbed`.
+
+Refuses **promoter-spawned dynamic Subs** (`dynamic_sub_no_op`), the same
+as `disable` / `enable`; an unknown name returns `unknown_sub`. Like the
+other mutating verbs it is refused with `shutting_down` once the daemon
+has begun a graceful exit.
 
 ### `reload`
 
@@ -187,7 +236,7 @@ A failed verb returns a structured error:
 | Code                 | Meaning                                                          |
 |----------------------|------------------------------------------------------------------|
 | `unknown_sub`        | Name not in any registry (engine, runtime-disabled, TOML).       |
-| `dynamic_sub_no_op`  | Operator targeted a promoter-spawned dynamic Sub with `disable`/`enable`. |
+| `dynamic_sub_no_op`  | Operator targeted a promoter-spawned dynamic Sub with `disable`/`enable`/`absorb`. |
 | `not_disabled`       | `enable` against a Sub not in the runtime-disable set.           |
 | `toml_disabled`      | `enable` cleared the override but the watch is TOML-disabled.    |
 | `busy`               | Connection cap reached.                                          |

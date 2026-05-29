@@ -221,6 +221,9 @@ impl Engine {
                 // directly with their own reason.
                 self.detach_sub_inner(sub, DetachReason::IpcDisabled, &mut out);
             }
+            Input::ArmAbsorb { profile, duration } => {
+                self.on_arm_absorb(profile, duration, now, &mut out);
+            }
             Input::AttachPromoter(req) => {
                 let _ = self.attach_promoter_inner(req, &mut out);
             }

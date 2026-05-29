@@ -3200,6 +3200,220 @@ fn ipc_enable_toml_disabled_clears_override_returns_err() {
     assert!(rig.driver.disabled_runtime.is_empty());
 }
 
+/// `absorb` against a name absent from the engine registry refuses
+/// with [`WireErrorCode::UnknownSub`] — the same name-resolution gate
+/// `disable` carries, minus the `disabled_runtime` interaction.
+#[test]
+fn ipc_absorb_unknown_name_returns_unknown_sub() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+    let mut client = ipc_connect(&rig);
+
+    let reply = ipc_round_trip(
+        &mut rig,
+        &mut client,
+        &WireRequest::Absorb {
+            name: CompactString::const_new("ghost"),
+            duration_ms: None,
+        },
+    );
+    match reply {
+        ResponsePayload::Err { code, error } => {
+            assert_eq!(code, WireErrorCode::UnknownSub);
+            assert!(error.contains("no watch named ghost"), "got {error:?}");
+        }
+        other => panic!("expected Err(UnknownSub), got {other:?}"),
+    }
+}
+
+/// `absorb` against a promoter-spawned dynamic Sub refuses with
+/// [`WireErrorCode::DynamicSubNoOp`] — the synthesised name is
+/// unstable across reloads, the same reason `disable` refuses it. The
+/// dynamic Sub is injected directly so the `source_promoter` gate
+/// fires.
+#[test]
+fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
+    use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
+    use specter_core::{
+        ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, ProfileIdentity,
+        PromoterId, ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
+    };
+
+    fn trivial_program() -> Arc<ActionProgram> {
+        let mut b = ProgramBuilder::new();
+        let h = b.emit(SpawnBody::Exec(ExecAction::new(
+            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
+            None,
+        )));
+        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
+        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
+        Arc::new(b.build().unwrap())
+    }
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = Config::from_str("").expect("empty config parses");
+    let mut rig = rig_for(config, cfg_path);
+
+    let dynamic_name = "promoter@/tmp/dyn_anchor";
+    let req = SubAttachRequest::from_parts(
+        SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
+        ProfileIdentity {
+            config: ScanConfig::builder().build(),
+            max_settle: Duration::from_hours(1),
+            events: ClassSet::DEFAULT_SUBTREE_ROOT,
+        },
+        SubParams {
+            name: CompactString::const_new(dynamic_name),
+            program: trivial_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: Duration::from_millis(100),
+            log_output: false,
+            source_promoter: Some(PromoterId::default()),
+        },
+    );
+    let _ = rig
+        .driver
+        .engine
+        .step(Input::AttachSub(req), Instant::now());
+
+    let mut client = ipc_connect(&rig);
+    let reply = ipc_round_trip(
+        &mut rig,
+        &mut client,
+        &WireRequest::Absorb {
+            name: CompactString::const_new(dynamic_name),
+            duration_ms: None,
+        },
+    );
+    match reply {
+        ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::DynamicSubNoOp),
+        other => panic!("expected Err(DynamicSubNoOp), got {other:?}"),
+    }
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// `absorb` against a live static Sub acks `Ok` and arms a window on
+/// the Sub's Profile — the engine step lands an `AbsorbWindow` the
+/// `show` projection can later surface.
+#[test]
+fn ipc_absorb_static_sub_acks_ok_and_arms_window() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_watch(tmp.path());
+    let mut rig = rig_for(config, cfg_path);
+    let _ = rig.driver.run_initial_attach();
+    let sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("build")
+        .expect("build attached");
+    let profile = rig
+        .driver
+        .engine
+        .subs()
+        .get(sid)
+        .expect("live sub")
+        .profile();
+    assert!(
+        rig.driver
+            .engine
+            .profiles()
+            .get(profile)
+            .expect("live profile")
+            .absorb_window()
+            .is_none(),
+        "no window armed before the absorb verb",
+    );
+
+    let mut client = ipc_connect(&rig);
+    let reply = ipc_round_trip(
+        &mut rig,
+        &mut client,
+        &WireRequest::Absorb {
+            name: CompactString::const_new("build"),
+            duration_ms: Some(30_000),
+        },
+    );
+    assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
+    assert!(
+        rig.driver
+            .engine
+            .profiles()
+            .get(profile)
+            .expect("live profile")
+            .absorb_window()
+            .is_some(),
+        "absorb verb armed a window on the Sub's Profile",
+    );
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// `absorb` is shutdown-gated: after a SIGINT arms `first_term`, the
+/// verb refuses with [`WireErrorCode::ShuttingDown`] and leaves engine
+/// state untouched — the same mutating-verb gate `Reload` / `Disable`
+/// / `Enable` sit behind.
+#[test]
+fn ipc_absorb_refused_mid_shutdown_with_shutting_down_code() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_watch(tmp.path());
+    let mut rig = rig_for(config, cfg_path);
+    let _ = rig.driver.run_initial_attach();
+    let sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("build")
+        .expect("build attached");
+    let profile = rig
+        .driver
+        .engine
+        .subs()
+        .get(sid)
+        .expect("live sub")
+        .profile();
+
+    let _ = rig
+        .driver
+        .dispatch_signal(signal_hook::consts::SIGINT, Instant::now());
+    assert!(rig.driver.first_term.is_some());
+
+    let mut client = ipc_connect(&rig);
+    let reply = ipc_round_trip(
+        &mut rig,
+        &mut client,
+        &WireRequest::Absorb {
+            name: CompactString::const_new("build"),
+            duration_ms: None,
+        },
+    );
+    match reply {
+        ResponsePayload::Err { code, error } => {
+            assert_eq!(code, WireErrorCode::ShuttingDown);
+            assert!(error.contains("shutting down"), "got {error:?}");
+        }
+        other => panic!("expected Err(ShuttingDown), got {other:?}"),
+    }
+    assert!(
+        rig.driver
+            .engine
+            .profiles()
+            .get(profile)
+            .expect("live profile")
+            .absorb_window()
+            .is_none(),
+        "absorb refused without arming a window",
+    );
+
+    let _ = rig.driver.begin_shutdown();
+}
+
 // ============================================================
 // Subscribe ack-ordering on the wire
 // ============================================================
