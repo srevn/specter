@@ -41,8 +41,13 @@
 //! Per-dirent scope filtering is delegated to
 //! [`ScanConfig::accepts_structural`] (pre-`lstat`) plus the pattern arm
 //! inline (post-`lstat`, when `is_dir` is known). `covers` (engine) calls
-//! the full [`ScanConfig::accepts`]; both consume the same predicate body,
-//! keeping walker and engine in lockstep across every scope axis.
+//! the full [`ScanConfig::accepts`]; both consume the same predicate body
+//! **and** measure `rel` from the same basis — the Profile anchor,
+//! shipped on `ProbeRequest::Subtree`'s `anchor_path` and re-derived per
+//! dirent via `strip_prefix`. Matching the predicate body alone is not
+//! enough: scope inputs must share an origin too, or an anchor-relative
+//! glob desyncs from an LCA-relative `rel`. The shared basis keeps walker
+//! and engine in lockstep across every scope axis.
 
 use crate::ProbeFailureExt;
 use compact_str::CompactString;
@@ -77,12 +82,22 @@ use std::sync::Arc;
 /// [`obligation_at_or_under`](Self::obligation_at_or_under) (the proof
 /// obligation that refuses skip).
 ///
-/// `root_dev` is the *anchor*'s device, captured once in [`walk_root`]
-/// from the top-level `lstat`. It is intentionally distinct from each
-/// recursion frame's `root_meta.fs_id.device` — the cross-filesystem
-/// gate refuses to descend whenever a child's device differs from the
-/// anchor's, regardless of whether the recursion has already crossed a
-/// sub-mount earlier.
+/// `anchor_path` is the **scope basis** — the Profile anchor the
+/// per-dirent `rel` is measured from (`child_path.strip_prefix(anchor_path)`).
+/// It is distinct from both the per-frame `path` (where the recursion
+/// currently sits) and the walk root (the `target_path` `read_dir` first
+/// descended into): a Standard burst roots the walk at the dirty-LCA for
+/// speed but must still measure `exclude` / `pattern` / depth from the
+/// anchor, or its scope desyncs from the engine's `covers`.
+///
+/// `root_dev` is the **walk root's** device — `target_path`'s, captured
+/// once in [`walk_root`] from the top-level `lstat`. It is the recursion
+/// root's device, not the anchor's; the two coincide only when the walk
+/// roots at the anchor (`target == anchor`), while a Standard burst can
+/// root at a dirty-LCA below the anchor. The cross-filesystem gate
+/// ([`should_recurse`](Self::should_recurse)) refuses to descend into any
+/// child whose device differs from `root_dev`, leaving a sub-mount below
+/// the recursion root uncovered.
 ///
 /// `Copy + Clone` because the struct is three thin/fat pointers + two
 /// `u64`s + one `bool` (`obligation` is a thin `&ProofObligation`).
@@ -274,12 +289,20 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
 /// any other root I/O error) — the caller wraps the `Ok` arm in its
 /// query-kind-specific outcome.
 ///
+/// The walk *roots* at `target_path` (the `read_dir` start) but *scopes*
+/// from `anchor_path` (the basis every dirent's `rel` is `strip_prefix`-ed
+/// against). They are the same path for Seed / Rebase / Descent and for a
+/// Standard burst whose dirty-LCA is the anchor; a Standard burst rooted
+/// at a deeper LCA passes the true anchor as the second argument so scope
+/// stays anchor-relative.
+///
 /// The non-`Copy` [`ProofLedger`] is the caller's: `probe_subtree`
 /// `certify`s it; `probe_descent` discards it. Splitting the wrap from
 /// the walk is what makes `probe_descent` *not* a `probe_subtree`
 /// delegation — a descent can no longer produce a `SubtreeProven`.
 fn walk_root<'a>(
     target_path: &'a Path,
+    anchor_path: &'a Path,
     config: &'a ScanConfig,
     captured_with: u64,
     baseline: Option<&Arc<DirSnapshot>>,
@@ -297,18 +320,24 @@ fn walk_root<'a>(
     }
     let root_meta = DirMeta::from_metadata(&root_meta_raw);
     let ctx = WalkContext {
-        anchor_path: target_path,
+        anchor_path,
         config,
         obligation,
         forced,
         captured_with,
+        // Walk root's device (from `lstat(target_path)`), deliberately
+        // not the anchor's: cross-fs refusal is scoped to sub-mounts
+        // below the recursion root, which is `target_path`.
         root_dev: root_meta.fs_id().device(),
     };
     Ok(snapshot_dir(&ctx, target_path, root_meta, baseline, ledger))
 }
 
-/// Subtree probe. Recursive DFS walk against `target_path` honoring
-/// `recursive`, `hidden`, `exclude`, `pattern`, and `max_depth`.
+/// Subtree probe. Recursive DFS walk rooted at `target_path` honoring
+/// `recursive`, `hidden`, `exclude`, `pattern`, and `max_depth` — each
+/// measured against `anchor_path`, the Profile anchor every dirent's
+/// `rel` is `strip_prefix`-ed from (equal to `target_path` unless the
+/// walk roots at a dirty-LCA below the anchor).
 ///
 /// Each recursion frame may short-circuit via mtime-skip when
 /// `!forced`, the frame is not at-or-above an `obligation` path, and a
@@ -330,6 +359,7 @@ fn walk_root<'a>(
 /// [`build_dir_child`] (`!recursive`, beyond `max_depth`, cross-fs).
 pub(super) fn probe_subtree(
     target_path: &Path,
+    anchor_path: &Path,
     config: &ScanConfig,
     captured_with: u64,
     baseline: Option<&Arc<DirSnapshot>>,
@@ -339,6 +369,7 @@ pub(super) fn probe_subtree(
     let mut ledger = ProofLedger::default();
     match walk_root(
         target_path,
+        anchor_path,
         config,
         captured_with,
         baseline,
@@ -399,7 +430,11 @@ pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
         .max_depth(None)
         .build();
     let mut sink = ProofLedger::default();
+    // Descent roots and scopes at the same path: target == anchor, so
+    // every dirent's `rel` is its bare segment. The override config
+    // admits every dirent regardless, so the basis is inert here.
     match walk_root(
+        target_path,
         target_path,
         &cfg,
         DESCENT_CAPTURED_WITH,

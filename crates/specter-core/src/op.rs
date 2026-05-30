@@ -201,13 +201,42 @@ pub enum ProbeRequest {
         owner: ProbeOwner,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
-        /// Filesystem path of the directory to walk. `Arc::clone` of
-        /// `tree.path_of(target_resource)` shipped on the wire — the
-        /// walker has no `Tree` and never needs the engine's
+        /// Filesystem path of the directory to walk — the **recursion
+        /// root** and graft point. The deepest start that still covers
+        /// every dirty path (the dirty-LCA for a Standard burst; the
+        /// anchor for Seed / Rebase), at-or-under `anchor_path`.
+        /// `Arc::clone` of `tree.path_of(target)` shipped on the wire —
+        /// the walker has no `Tree` and never needs the engine's
         /// `ResourceId`. An empty path is the lone failure mode (the
         /// engine's stale-id sentinel); the walker treats empty as
         /// `Vanished`.
         target_path: Arc<Path>,
+        /// Filesystem path of the Profile **anchor** — the scope basis,
+        /// distinct from `target_path`. The walker measures every
+        /// dirent's `rel` (hence its depth) as
+        /// `child_path.strip_prefix(anchor_path)`, so `exclude` /
+        /// `pattern` / `max_depth` / `recursive` resolve against the
+        /// same origin the engine's `covers` uses. Measuring from
+        /// `target_path` instead would silently desync the walker from
+        /// `covers` whenever the recursion root sits below the anchor —
+        /// an anchor-relative glob re-read against an LCA-relative `rel`
+        /// drops an in-scope obligation leaf and certifies a region it
+        /// never observed.
+        ///
+        /// Equals `target_path` exactly when the walk roots at the
+        /// anchor — Seed, post-fire Rebase, and any Standard burst whose
+        /// dirty-LCA resolves to the anchor; strictly above it when a
+        /// Standard burst's dirty events share a subtree deeper than the
+        /// anchor.
+        ///
+        /// **Invariant: `target_path` is at-or-under `anchor_path`.**
+        /// Producer-guaranteed — the engine resolves the recursion root
+        /// to a covered descendant of the anchor — so the walker's
+        /// `strip_prefix(anchor_path)` is total over the subtree it
+        /// reads. A violation is not unsound: the per-dirent
+        /// `strip_prefix` fails, drops the dirent, and degrades the
+        /// level ⇒ the proof refuses to fire.
+        anchor_path: Arc<Path>,
         /// `ScanConfig` to honour (recursive, hidden, exclude, pattern,
         /// `max_depth`). Cloned at emit time.
         scan_config: ScanConfig,

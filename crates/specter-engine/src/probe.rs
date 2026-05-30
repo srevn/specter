@@ -67,6 +67,7 @@ use specter_core::{
     ProbeCorrelation, ProbeOp, ProbeOwner, ProbeRequest, Profile, ProfileState, Promoter,
     PromoterState, ProofObligation, ResourceId, ResourceKind, StepOutput, subtree_at_dir,
 };
+use std::sync::Arc;
 
 /// State-derived routing class for a probe response — what the
 /// dispatcher needs that the response wire does not supply.
@@ -642,10 +643,26 @@ impl Engine {
                                      Subtree obligation builder"
                                 ),
                             };
+                            // Scope basis for the walker: the anchor. When
+                            // the recursion root *is* the anchor (Seed /
+                            // Rebase / a dirty-LCA that resolved to the
+                            // anchor) reuse `target_path` — a refcount
+                            // bump, not a second tree walk; otherwise
+                            // resolve the anchor's own path. `target` is
+                            // at-or-under `anchor` by `pre_fire_target`'s
+                            // covered-LCA resolution, so the walker's
+                            // `strip_prefix(anchor_path)` is total over
+                            // the subtree it reads.
+                            let anchor_path = if target == anchor {
+                                Arc::clone(&target_path)
+                            } else {
+                                self.tree.path_of(anchor).unwrap_or_else(empty_path)
+                            };
                             ProbeRequest::Subtree {
                                 owner,
                                 correlation,
                                 target_path,
+                                anchor_path,
                                 scan_config,
                                 captured_with,
                                 baseline_subtree,

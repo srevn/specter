@@ -43,8 +43,12 @@ use std::path::PathBuf;
 ///
 /// Per-prefix evaluation through the same predicate the walker
 /// consumes is what makes pattern/exclude/depth/recursive/hidden
-/// semantics co-evolve across the two callers — drift is structurally
-/// impossible.
+/// semantics co-evolve across the two callers. Drift is structurally
+/// impossible only because both also measure from the same origin: this
+/// builds each prefix's `rel` from the anchor, and the walker strips
+/// every dirent against the anchor shipped on `ProbeRequest::Subtree`'s
+/// `anchor_path` — same predicate body, same basis. A walker measuring
+/// `rel` from a deeper recursion root would silently diverge here.
 ///
 /// Returns `false` if `target` is not on the descendant chain of
 /// `profile.resource` (sibling, ancestor, or unrelated subtree), or if

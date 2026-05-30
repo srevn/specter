@@ -102,7 +102,7 @@ fn no_obligation() -> ProofObligation {
 /// Use the explicit form when the test wants to exercise mtime-skip /
 /// the obligation / forced.
 fn psub(path: &std::path::Path, cfg: &ScanConfig) -> ProbeOutcome {
-    probe_subtree(path, cfg, 0, None, &no_obligation(), false)
+    probe_subtree(path, path, cfg, 0, None, &no_obligation(), false)
 }
 
 /// Recursively collect every entry's relative path (segment from the
@@ -568,11 +568,11 @@ fn probe_then_reprobe_with_baseline(
     target: &std::path::Path,
     cfg: &ScanConfig,
 ) -> (Arc<DirSnapshot>, ProbeOutcome) {
-    let first = probe_subtree(target, cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(target, target, cfg, 0, None, &no_obligation(), false);
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = first else {
         panic!("first probe failed");
     };
-    let second = probe_subtree(target, cfg, 0, Some(&arc), &no_obligation(), false);
+    let second = probe_subtree(target, target, cfg, 0, Some(&arc), &no_obligation(), false);
     (arc, second)
 }
 
@@ -596,7 +596,15 @@ fn mtime_skip_does_not_match_when_mtime_differs() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven {
         snapshot: baseline, ..
     } = first
@@ -609,7 +617,15 @@ fn mtime_skip_does_not_match_when_mtime_differs() {
         baseline.captured_with(),
         baseline.entries().clone(),
     ));
-    let result = probe_subtree(tmp.path(), &cfg, 0, Some(&forged), &no_obligation(), false);
+    let result = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&forged),
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc2, .. } = result else {
         panic!("re-probe failed");
     };
@@ -624,7 +640,15 @@ fn mtime_skip_does_not_match_when_inode_differs() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven {
         snapshot: baseline, ..
     } = first
@@ -642,7 +666,15 @@ fn mtime_skip_does_not_match_when_inode_differs() {
         baseline.captured_with(),
         baseline.entries().clone(),
     ));
-    let result = probe_subtree(tmp.path(), &cfg, 0, Some(&forged), &no_obligation(), false);
+    let result = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&forged),
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc2, .. } = result else {
         panic!("re-probe failed");
     };
@@ -654,7 +686,15 @@ fn mtime_skip_does_not_match_when_device_differs() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven {
         snapshot: baseline, ..
     } = first
@@ -672,7 +712,15 @@ fn mtime_skip_does_not_match_when_device_differs() {
         baseline.captured_with(),
         baseline.entries().clone(),
     ));
-    let result = probe_subtree(tmp.path(), &cfg, 0, Some(&forged), &no_obligation(), false);
+    let result = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&forged),
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc2, .. } = result else {
         panic!("re-probe failed");
     };
@@ -687,7 +735,15 @@ fn mtime_skip_recursive_propagates_via_subtree_baseline() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven {
         snapshot: baseline, ..
     } = first
@@ -700,6 +756,7 @@ fn mtime_skip_recursive_propagates_via_subtree_baseline() {
             .expect("sub subtree present"),
     );
     let second = probe_subtree(
+        tmp.path(),
         tmp.path(),
         &cfg,
         0,
@@ -724,7 +781,15 @@ fn chains_with_path_in_set_refuses_skip() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven {
         snapshot: baseline, ..
     } = first
@@ -735,6 +800,7 @@ fn chains_with_path_in_set_refuses_skip() {
     let mut obligation = BTreeSet::new();
     obligation.insert(Arc::from(tmp.path()));
     let second = probe_subtree(
+        tmp.path(),
         tmp.path(),
         &cfg,
         0,
@@ -757,7 +823,15 @@ fn chains_with_descendant_in_set_refuses_skip_at_target() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven {
         snapshot: baseline, ..
     } = first
@@ -769,6 +843,7 @@ fn chains_with_descendant_in_set_refuses_skip_at_target() {
     let mut obligation = BTreeSet::new();
     obligation.insert(Arc::from(tmp.path().join("sub").join("file.c")));
     let second = probe_subtree(
+        tmp.path(),
         tmp.path(),
         &cfg,
         0,
@@ -787,7 +862,15 @@ fn chains_with_unrelated_path_does_not_affect_skip() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven {
         snapshot: baseline, ..
     } = first
@@ -798,6 +881,7 @@ fn chains_with_unrelated_path_does_not_affect_skip() {
     let mut obligation = BTreeSet::new();
     obligation.insert(Arc::from(Path::new("/totally/unrelated/path")));
     let second = probe_subtree(
+        tmp.path(),
         tmp.path(),
         &cfg,
         0,
@@ -822,7 +906,15 @@ fn chains_propagate_through_recursion_to_descendant() {
     std::fs::create_dir(tmp.path().join("dir_c")).unwrap();
     std::fs::write(tmp.path().join("dir_c/x.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven {
         snapshot: baseline, ..
     } = first
@@ -833,6 +925,7 @@ fn chains_propagate_through_recursion_to_descendant() {
     let mut obligation = BTreeSet::new();
     obligation.insert(Arc::from(tmp.path().join("dir_a").join("dir_b")));
     let second = probe_subtree(
+        tmp.path(),
         tmp.path(),
         &cfg,
         0,
@@ -856,7 +949,15 @@ fn forced_true_bypasses_mtime_skip_at_root() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven {
         snapshot: baseline, ..
     } = first
@@ -864,6 +965,7 @@ fn forced_true_bypasses_mtime_skip_at_root() {
         panic!("first probe failed");
     };
     let second = probe_subtree(
+        tmp.path(),
         tmp.path(),
         &cfg,
         0,
@@ -886,7 +988,15 @@ fn forced_true_bypasses_mtime_skip_in_recursion() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven {
         snapshot: baseline, ..
     } = first
@@ -895,6 +1005,7 @@ fn forced_true_bypasses_mtime_skip_in_recursion() {
     };
     let prior_sub_arc = Arc::clone(baseline.lookup_covered_dir("sub").unwrap());
     let second = probe_subtree(
+        tmp.path(),
         tmp.path(),
         &cfg,
         0,
@@ -973,7 +1084,15 @@ fn cache_transfer_matches_baseline_hash_on_identity_match() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"hello").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: real, .. } = first else {
         panic!("first probe failed");
     };
@@ -984,6 +1103,7 @@ fn cache_transfer_matches_baseline_hash_on_identity_match() {
 
     let baseline = baseline_at_unix_epoch(&real, None);
     let result = probe_subtree(
+        tmp.path(),
         tmp.path(),
         &cfg,
         0,
@@ -1010,7 +1130,15 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"hello").unwrap();
     let cfg = ScanConfig::builder().build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: real, .. } = first else {
         panic!("first probe failed");
     };
@@ -1034,6 +1162,7 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
     let baseline = baseline_at_unix_epoch(&real, Some(mismatch));
 
     let result = probe_subtree(
+        tmp.path(),
         tmp.path(),
         &cfg,
         0,
@@ -1069,7 +1198,15 @@ fn cache_transfer_threads_through_recursion() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"hello").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let first = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let first = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: real, .. } = first else {
         panic!("first probe failed");
     };
@@ -1108,6 +1245,7 @@ fn cache_transfer_threads_through_recursion() {
 
     let result = probe_subtree(
         tmp.path(),
+        tmp.path(),
         &cfg,
         0,
         Some(&baseline),
@@ -1138,7 +1276,15 @@ fn dir_snapshot_root_meta_carries_lstat_triple() {
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
     let raw = std::fs::symlink_metadata(tmp.path()).unwrap();
-    let result = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let result = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
         panic!("expected Ok(Dir)");
     };
@@ -1152,7 +1298,15 @@ fn dir_snapshot_captured_with_carries_request_value() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let result = probe_subtree(tmp.path(), &cfg, STAMP, None, &no_obligation(), false);
+    let result = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        STAMP,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
         panic!();
     };
@@ -1169,7 +1323,15 @@ fn dir_snapshot_uncovered_branches_have_subtree_none() {
         .recursive(true)
         .max_depth(Some(1))
         .build();
-    let result = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let result = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
         panic!();
     };
@@ -1192,7 +1354,15 @@ fn dir_snapshot_pattern_filtered_files_absent() {
     let cfg = ScanConfig::builder()
         .pattern(GlobPattern::compile("**/*.c").unwrap())
         .build();
-    let result = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let result = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
         panic!();
     };
@@ -1210,7 +1380,15 @@ fn dir_snapshot_excluded_paths_absent() {
         .recursive(true)
         .exclude(GlobPattern::compile("target/**").unwrap())
         .build();
-    let result = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let result = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
         panic!();
     };
@@ -1241,7 +1419,15 @@ fn entries_are_lex_sorted_by_btreemap() {
     std::fs::write(tmp.path().join("alpha"), b"x").unwrap();
     std::fs::write(tmp.path().join("mu"), b"x").unwrap();
     let cfg = ScanConfig::builder().build();
-    let result = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let result = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
         panic!();
     };
@@ -1262,8 +1448,24 @@ fn dir_hash_recursive_is_deterministic_across_two_probes_on_stable_fs() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
-    let r1 = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
-    let r2 = probe_subtree(tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let r1 = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
+    let r2 = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &no_obligation(),
+        false,
+    );
     let ProbeOutcome::SubtreeProven { snapshot: a1, .. } = r1 else {
         panic!();
     };

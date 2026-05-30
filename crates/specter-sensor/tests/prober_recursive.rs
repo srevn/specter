@@ -13,7 +13,7 @@ use specter_core::{
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tempfile::TempDir;
@@ -53,10 +53,13 @@ fn segments(
     cfg: ScanConfig,
 ) -> BTreeSet<String> {
     let p = fresh_profile_id();
+    let target_path: Arc<Path> = Arc::from(anchor);
+    let anchor_path = Arc::clone(&target_path);
     prober.submit(ProbeRequest::Subtree {
         owner: ProbeOwner::Profile(p),
         correlation: ProbeCorrelation::from(1),
-        target_path: Arc::from(anchor),
+        target_path,
+        anchor_path,
         scan_config: cfg,
         captured_with: 0,
         baseline_subtree: None,

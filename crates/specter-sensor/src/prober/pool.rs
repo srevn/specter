@@ -366,6 +366,7 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
         ProbeRequest::AnchorFile { target_path, .. } => probe_anchor_file(target_path),
         ProbeRequest::Subtree {
             target_path,
+            anchor_path,
             scan_config,
             captured_with,
             baseline_subtree,
@@ -374,6 +375,7 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
             ..
         } => probe_subtree(
             target_path,
+            anchor_path,
             scan_config,
             *captured_with,
             baseline_subtree.as_ref(),
