@@ -18,6 +18,7 @@ use compact_str::CompactString;
 use slotmap::{SecondaryMap, SlotMap};
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1041,9 +1042,16 @@ impl PreFireBurst {
     /// `intent` is preserved (read by `dispatch_rebase_*` for the
     /// diagnostic).
     ///
+    /// `outstanding: NonZeroU32` carries the "a fire emitted ≥1 Effect"
+    /// invariant as a type: a post-fire burst is born `Awaiting` at
+    /// least one completion. The stored `Awaiting.outstanding` is `u32`
+    /// (it decrements to zero via `note_effect_completion`); only the
+    /// birth param is non-zero. The zero case never reaches this move —
+    /// `fire_and_settle` routes it to `finish_burst_to_idle` instead.
+    ///
     /// Sole production caller: `transition_to_awaiting` in `burst.rs`.
     #[must_use]
-    pub fn into_post_fire(self, outstanding: u32, gate_deadline: TimerId) -> PostFireBurst {
+    pub fn into_post_fire(self, outstanding: NonZeroU32, gate_deadline: TimerId) -> PostFireBurst {
         debug_assert!(
             !self.fold_latched,
             "into_post_fire: fold-latched burst must not fire — a latched \
@@ -1053,7 +1061,7 @@ impl PreFireBurst {
         PostFireBurst::new(
             self.intent,
             PostFirePhase::Awaiting {
-                outstanding,
+                outstanding: outstanding.get(),
                 gate_deadline,
             },
             DirtyProvenance::new(),
@@ -1394,11 +1402,11 @@ impl ActiveBurst {
 /// (post-drain reap dispatch).
 ///
 /// The directive is preserved across the fire transition
-/// (`PreFireBurst::into_post_fire`'s caller carries it through the
-/// `mem::replace`) and across phase transitions within pre-fire
-/// (`transition_to_verifying`, `_draining`, etc.) — these helpers
-/// mutate the burst's inner state without touching the `Active`
-/// variant's outer shape.
+/// (`PreFireBurst::into_post_fire`'s caller threads it through
+/// `ProfileMap::map_state`'s transform closure) and across phase
+/// transitions within pre-fire (`transition_to_verifying`,
+/// `_draining`, etc.) — these helpers mutate the burst's inner state
+/// without touching the `Active` variant's outer shape.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq)]
 pub enum BurstFinish {
     /// Default. Burst-end transitions the Profile to [`ProfileState::Idle`].
@@ -3007,13 +3015,17 @@ impl Profile {
         }
     }
 
-    /// General-purpose `state` writer; returns the prior via
-    /// `mem::replace` so typed-move callers (`transition_to_awaiting` →
-    /// [`PreFireBurst::into_post_fire`]; `restart_burst_from_fire_tail_residual`
-    /// → [`PostFireBurst::into_pre_fire_residual`]; `finish_burst_to_idle`)
-    /// consume the prior burst without holding `&mut state` across the
-    /// move. Preconditions live at the engine boundary (`require_idle` /
-    /// `require_active_pre_fire`), not here.
+    /// General-purpose **push** `state` writer: installs the given
+    /// `new` and returns the prior via `mem::replace`. Reached (through
+    /// [`ProfileMap::transition_state`]) by the install-a-given-state
+    /// paths — `start_seed_burst` / `start_standard_burst` / descent
+    /// materialisation / the claims-ledger Idle reset — which discard
+    /// the returned prior, relying only on its drop (the claims reset
+    /// drops a disarmed `Pending` descent this way). The **transform**
+    /// dual — compute `new` from the *consumed* prior, for the typed
+    /// fire-boundary moves — is [`Self::map_state`]. Preconditions live
+    /// at the engine boundary (`require_idle` / `require_active_pre_fire`),
+    /// not here.
     ///
     /// [`Self::materialize_anchor`] is the single documented bypass —
     /// a three-field atomic `Pending → (Idle, AnchorClaim::Held,
@@ -3021,6 +3033,35 @@ impl Profile {
     /// invariant under it by construction.
     pub const fn transition_state(&mut self, new: ProfileState) -> ProfileState {
         std::mem::replace(&mut self.state, new)
+    }
+
+    /// Transform `state` in place: extract the prior by value, hand it
+    /// to `f`, and install the [`ProfileState`] `f` returns (alongside
+    /// its auxiliary `R`, threaded back out). The **transform** dual of
+    /// [`Self::transition_state`]'s **push** — for the callers that must
+    /// *consume* the prior to compute the next: the typed fire-boundary
+    /// moves [`PreFireBurst::into_post_fire`] /
+    /// [`PostFireBurst::into_pre_fire_residual`] and the burst-end
+    /// `finish_burst_to_idle`. `transition_state` cannot serve them — it
+    /// wants `new` up front, but `new = f(old)` needs `old` extracted
+    /// first.
+    ///
+    /// The `Idle` the `mem::replace` parks while `f` runs is never
+    /// observed: the engine step is synchronous and single-threaded, and
+    /// `f`'s returned state overwrites it before this returns. A panic
+    /// inside `f` would leave `state == Idle` with the prior burst
+    /// dropped — but in release the typed moves don't panic, and the
+    /// swap-to-Idle dance this replaces had the identical property, so
+    /// no regression and no `catch_unwind`.
+    ///
+    /// Not `const` — it invokes `f`, which `const fn` cannot;
+    /// `transition_state` stays `const`. Preconditions live at the
+    /// engine boundary, not here.
+    pub fn map_state<R>(&mut self, f: impl FnOnce(ProfileState) -> (ProfileState, R)) -> R {
+        let prior = std::mem::replace(&mut self.state, ProfileState::Idle);
+        let (next, r) = f(prior);
+        self.state = next;
+        r
     }
 
     /// Install the anchor claim. Idempotent against `Held`. Production
@@ -3620,9 +3661,10 @@ pub struct ProfileMap {
     /// Live count of Profiles satisfying [`Profile::is_nonsteady`] —
     /// the O(1) carrier gate the engine reads before the O(P)
     /// `classify_event_carriers` scan. `is_nonsteady` reads `state`
-    /// *and* anchor presence, so it is maintained at four points:
+    /// *and* anchor presence, so it is maintained at five points:
     /// [`Self::attach`] / [`Self::detach`] (the membership edges),
-    /// [`Self::transition_state`] (every `state` edge), and
+    /// [`Self::transition_state`] and [`Self::map_state`] (the two
+    /// `state` edges — push and transform), and
     /// [`Self::reconcile_nonsteady`] (the anchor-presence edge cleared
     /// by `Engine::discard_anchor_state` on a non-`Active` Profile).
     /// The `materialize_anchor` `state` bypass is delta-0 by
@@ -3718,9 +3760,10 @@ impl ProfileMap {
 
     /// Apply one [`Profile::is_nonsteady`] edge to [`Self::nonsteady`]
     /// — the single source of the carrier-count arithmetic, shared by
-    /// both reconcile paths: [`Self::transition_state`] (the `state`
-    /// edge) and [`Self::reconcile_nonsteady`] (the anchor-presence
-    /// edge). Saturating on the `−` side so a (debug-tripwired) missed
+    /// the three reconcile paths: [`Self::transition_state`] and
+    /// [`Self::map_state`] (the two `state` edges) and
+    /// [`Self::reconcile_nonsteady`] (the anchor-presence edge).
+    /// Saturating on the `−` side so a (debug-tripwired) missed
     /// `+` upstream degrades the gate to the status-quo scan rather
     /// than underflowing.
     const fn apply_nonsteady_edge(&mut self, before: bool, after: bool) {
@@ -3731,19 +3774,25 @@ impl ProfileMap {
         }
     }
 
-    /// The sole counter-reconciling path for a Profile **state** edge:
-    /// delegate to [`Profile::transition_state`] (the core `state`
-    /// chokepoint, returning the prior by value for the typed-move
-    /// callers) and reconcile [`Self::nonsteady`] across the edge from
+    /// The **push**-shape counter-reconciling path for a Profile
+    /// **state** edge — the sibling of [`Self::map_state`] (the
+    /// **transform** dual). Delegates to [`Profile::transition_state`]
+    /// (the core `state` chokepoint, installing the given `new`) and
+    /// reconciles [`Self::nonsteady`] across the edge from
     /// [`Profile::is_nonsteady`] read before and after the swap. Only
     /// the `state` discriminant moves here; the anchor-presence half
     /// of the predicate is reconciled by the sibling
     /// [`Self::reconcile_nonsteady`].
     ///
-    /// Returns `None` for a stale id (the `?` the typed-move callers
-    /// already branch on, replacing their prior `get_mut(id)?`). A
-    /// missed reconcile is perf-only — the debug full-scan tripwire in
-    /// `Engine::classify_event_carriers` surfaces a desync in CI.
+    /// Reached by the install-a-given-state callers —
+    /// `start_seed_burst` / `start_standard_burst` / descent
+    /// materialisation / the claims-ledger Idle reset — which discard
+    /// the returned prior (relying only on its drop; the claims reset
+    /// drops a disarmed `Pending` descent this way). Returns `None`
+    /// for a stale id, which the callers branch on via `?` or simply
+    /// discard. A missed reconcile is perf-only — the debug full-scan
+    /// tripwire in `Engine::classify_event_carriers` surfaces a desync
+    /// in CI.
     pub fn transition_state(&mut self, id: ProfileId, new: ProfileState) -> Option<ProfileState> {
         let p = self.profiles.get_mut(id)?;
         let before = p.is_nonsteady();
@@ -3751,6 +3800,33 @@ impl ProfileMap {
         let after = p.is_nonsteady();
         self.apply_nonsteady_edge(before, after);
         Some(prior)
+    }
+
+    /// The counter-reconciling path for a **transform** state edge —
+    /// the [`Self::transition_state`] sibling that delegates to
+    /// [`Profile::map_state`] (consume the prior, install `f`'s result)
+    /// rather than [`Profile::transition_state`] (install a given
+    /// `new`). Reconciles [`Self::nonsteady`] across the edge
+    /// identically: read [`Profile::is_nonsteady`] before and after the
+    /// swap, apply the one edge via [`Self::apply_nonsteady_edge`]. The
+    /// auxiliary `R` that `f` computed from the prior is threaded back
+    /// out.
+    ///
+    /// Returns `None` for a stale id — the same `?` short-circuit
+    /// `transition_state` offers, which the typed-move callers branch
+    /// on. A missed reconcile is perf-only, caught by the debug
+    /// full-scan tripwire in `Engine::classify_event_carriers`.
+    pub fn map_state<R>(
+        &mut self,
+        id: ProfileId,
+        f: impl FnOnce(ProfileState) -> (ProfileState, R),
+    ) -> Option<R> {
+        let p = self.profiles.get_mut(id)?;
+        let before = p.is_nonsteady();
+        let r = p.map_state(f);
+        let after = p.is_nonsteady();
+        self.apply_nonsteady_edge(before, after);
+        Some(r)
     }
 
     /// The counter-reconciling path for a Profile **anchor-presence**
@@ -3850,7 +3926,7 @@ mod tests {
         ProfileMap, ProfileState, ScanConfig, SettledState,
     };
     use crate::fs_id::FsIdentity;
-    use crate::ids::ResourceId;
+    use crate::ids::{ProfileId, ResourceId};
     use crate::output::StepOutput;
     use crate::probe::ProbeSlot;
     use crate::resource::{ResourceKind, ResourceRole};
@@ -4512,6 +4588,7 @@ mod tests {
     use crate::ids::{ProbeCorrelation, TimerId};
     use crate::op::ProofAuthority;
     use std::collections::BTreeSet;
+    use std::num::NonZeroU32;
     use std::path::Path;
 
     fn tid(n: u64) -> TimerId {
@@ -5366,7 +5443,7 @@ mod tests {
         assert_eq!(prior, None, "first sample on a fresh burst returns None");
         assert_eq!(pre.last_certified_hash, Some(0xCAFE_F00D_u128));
 
-        let post = pre.into_post_fire(1, tid(55));
+        let post = pre.into_post_fire(NonZeroU32::new(1).unwrap(), tid(55));
         assert_eq!(
             post.last_certified_hash, None,
             "the typed fire move drops the pre-fire carrier by omission — \
@@ -5416,7 +5493,7 @@ mod tests {
     fn into_post_fire_panics_on_latched_burst_in_debug() {
         let mut pre = batching_burst(tid(7), tid(99));
         pre.latch_fold();
-        let _ = pre.into_post_fire(1, tid(55));
+        let _ = pre.into_post_fire(NonZeroU32::new(1).unwrap(), tid(55));
     }
 
     /// The fire-tail restart **threads** `fold_latched`, unlike the
@@ -5703,6 +5780,74 @@ mod tests {
         let prior = p.transition_state(ProfileState::Idle);
         assert!(matches!(prior, ProfileState::Pending(_)));
         assert!(matches!(p.state(), ProfileState::Idle));
+    }
+
+    /// [`ProfileMap::map_state`] is the transform dual of
+    /// [`ProfileMap::transition_state`]: it hands the prior to the
+    /// closure by value, installs the [`ProfileState`] the closure
+    /// computes from it, threads the auxiliary `R` back out, and
+    /// reconciles [`ProfileMap::nonsteady`] across the one resulting
+    /// edge — the single reconcile that replaced the retired
+    /// swap-to-Idle dance's two. A stale id short-circuits to `None`
+    /// without running the closure: the `?` the fire-boundary callers
+    /// (`finish_burst_to_idle`'s `.flatten()`) branch on.
+    #[test]
+    fn map_state_transforms_reconciles_once_and_skips_stale() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut profiles = ProfileMap::new();
+        let pid = profiles.attach(
+            &mut tree,
+            mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
+        );
+        // A fresh Profile is Idle with the anchor absent ⇒ nonsteady.
+        assert_eq!(
+            profiles.nonsteady(),
+            1,
+            "fresh Idle-anchorless Profile counts as nonsteady",
+        );
+
+        // Transform Idle → Active(PreFire). The closure consumes the
+        // prior by value and computes the next from it; the auxiliary
+        // `R` is threaded back out. Idle(anchorless) → Active is a
+        // nonsteady true → false edge.
+        let aux = profiles.map_state(pid, |prior| {
+            assert!(
+                matches!(prior, ProfileState::Idle),
+                "the closure consumes the prior state by value",
+            );
+            (active_prefire(), 0xABCD_u32)
+        });
+        assert_eq!(
+            aux,
+            Some(0xABCD),
+            "the live-id path threads the auxiliary R out"
+        );
+        assert!(
+            matches!(
+                profiles.get(pid).unwrap().state(),
+                ProfileState::Active(_, _)
+            ),
+            "the closure's computed state is installed",
+        );
+        assert_eq!(
+            profiles.nonsteady(),
+            0,
+            "the single Active edge reconciled the carrier count once (1 → 0)",
+        );
+
+        // A stale id never runs the closure and returns `None` — the
+        // outer `None` `finish_burst_to_idle` flattens against.
+        let stale: Option<()> = profiles.map_state(ProfileId::default(), |s| (s, ()));
+        assert!(
+            stale.is_none(),
+            "stale id short-circuits to None without transforming"
+        );
+        assert_eq!(
+            profiles.nonsteady(),
+            0,
+            "a stale-id no-op leaves the carrier count untouched",
+        );
     }
 
     #[test]

@@ -125,6 +125,7 @@ use specter_core::{
     FsEvent, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOwner, ProbeSlot, Profile, ProfileId,
     ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId, TimerKind, Tree,
 };
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -949,12 +950,14 @@ impl Engine {
     /// transition: `fire_and_settle` calls this immediately after
     /// `emit_effects` returns a non-zero `EmitOutcome.count` — every
     /// fireable Seed/Standard consequence funnels through that one
-    /// helper. The match is structural (count > 0) — callers know they
-    /// pushed Effects.
+    /// helper. The "fire emitted ≥1 Effect" invariant rides the
+    /// `outstanding: NonZeroU32` param: `fire_and_settle` builds it from
+    /// `EmitOutcome.count` (the old `count > 0` test) and routes the
+    /// zero case to `finish_burst_to_idle` instead.
     ///
     /// `outstanding` is the count of in-flight Effects this Profile owns
-    /// (the `EmitOutcome.count` from the just-completed
-    /// [`crate::Engine::emit_effects`] call). `EffectComplete` arrivals
+    /// (the `EmitOutcome.count`, non-zero by the caller's construction).
+    /// Stored as `u32` on `Awaiting`; `EffectComplete` arrivals
     /// decrement it; reaching zero advances to `Rebasing` (or, when
     /// the burst carries [`BurstFinish::Reap`], finishes the burst
     /// directly).
@@ -974,34 +977,32 @@ impl Engine {
     /// the cheaper path and `BurstDeadline` carries no payload that
     /// would leak.
     ///
-    /// **Defensive precheck before scheduling.** The gate timer is
-    /// scheduled only after we verify the Profile is in
-    /// `Active(PreFire(_))`. Without the precheck, a defensive miss
-    /// (e.g., a future caller bypassing the post-fire phase check that
-    /// production gates already enforce) would leave the gate timer
-    /// orphaned in the heap; lazy-invalidated by `is_timer_referenced`
-    /// since no PostFire exists yet, but still allocated. The precheck
-    /// is one `matches!` lookup against a freshly-borrowed Profile —
-    /// trivially cheap.
+    /// **Scheduling order vs the fire move.** The gate timer is
+    /// scheduled after the entry gate and a live-id `max_settle` read
+    /// but before the `map_state` fire move — so a stale id early-returns
+    /// *before* scheduling and never orphans a timer. The fire move is
+    /// then infallible for a live id (`map_state` always installs the
+    /// closure's result; there is no "swap to Idle then fail to install"
+    /// two-step), so an orphaned gate timer is structurally impossible
+    /// here. A stray one would lazy-drop via `is_timer_referenced`
+    /// regardless.
     pub(crate) fn transition_to_awaiting(
         &mut self,
         profile_id: ProfileId,
-        outstanding: u32,
+        outstanding: NonZeroU32,
         now: Instant,
         out: &mut StepOutput,
     ) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToAwaiting, out) {
             return;
         }
-        // Re-borrow for `max_settle` capture under the same shape-checked
-        // window. Anything else here would be a routing breach the
-        // precondition would have caught — the inner `matches!` is the
-        // borrow-checker discipline for the typed move below, not a
-        // duplicated guard.
-        let Some(max_settle) = self.profiles.get(profile_id).and_then(|p| {
-            matches!(p.state(), ProfileState::Active(ActiveBurst::PreFire(_), _))
-                .then_some(p.max_settle())
-        }) else {
+        // `max_settle` is identity (folds into `config_hash`), so it is
+        // variant-independent — the entry gate already proved
+        // `Active(PreFire(_))`, and no shape re-check guards this read.
+        // The stale-id arm is dead after the gate (single-threaded step,
+        // nothing reaps between); kept as the cheap early-out that also
+        // avoids scheduling an orphan gate timer for a vanished id.
+        let Some(max_settle) = self.profiles.get(profile_id).map(Profile::max_settle) else {
             return;
         };
 
@@ -1015,46 +1016,36 @@ impl Engine {
             TimerKind::AwaitGateDeadline,
         );
 
-        // Typed move PreFire → PostFire via `transition_state` (the
-        // whole-value swap, returning the prior state). Structurally
-        // necessary: `into_post_fire` consumes the pre-fire by value,
-        // so we cannot project through `pre_fire_burst_mut`. Bracketing
-        // with the matches! shape-check above eliminates the transient
-        // Idle window's observability for production callers (a stray
-        // observer in dev/CI that races inside the helper would never
-        // reach this point on a non-PreFire Profile).
-        if self
-            .profiles
-            .get(profile_id)
-            .is_some_and(|p| matches!(p.state(), ProfileState::Active(ActiveBurst::PreFire(_), _)))
-            && let Some(prior) = self
-                .profiles
-                .transition_state(profile_id, ProfileState::Idle)
-        {
-            // Destructure with restore-on-mismatch. The matches! above
-            // guarantees the PreFire arm; the fallback exists so a
-            // future refactor widening the matches! pattern doesn't
-            // silently strand the Profile in `Idle` while dropping the
-            // owned burst.
-            match prior {
-                ProfileState::Active(ActiveBurst::PreFire(pre), finish) => {
-                    // Carry `finish` across the fire boundary. PreFire and
-                    // PostFire share the post-burst directive — a Reap set
-                    // mid-batching survives the fire and is honoured by
-                    // `finish_burst_to_idle` at PostFire end.
-                    self.profiles.transition_state(
-                        profile_id,
-                        ProfileState::Active(
-                            ActiveBurst::PostFire(pre.into_post_fire(outstanding, gate_deadline)),
-                            finish,
-                        ),
-                    );
-                }
-                other => {
-                    self.profiles.transition_state(profile_id, other);
-                }
+        // Typed fire move PreFire → PostFire. `into_post_fire` consumes
+        // the pre-fire burst by value, so the transform primitive
+        // `map_state` extracts the prior and installs the post-fire
+        // result in one reconcile — no swap-to-Idle-then-reinstall dance.
+        // `finish` rides across the fire boundary unchanged (a Reap set
+        // mid-batching survives the fire, honoured by
+        // `finish_burst_to_idle` at PostFire end). The non-PreFire arm is
+        // post-gate-impossible: it `debug_assert`s loudly and degrades by
+        // reinstalling the prior unchanged, never panicking a release
+        // daemon — the same should-never discipline as the timer handlers.
+        self.profiles.map_state(profile_id, |prior| match prior {
+            ProfileState::Active(ActiveBurst::PreFire(pre), finish) => (
+                ProfileState::Active(
+                    ActiveBurst::PostFire(pre.into_post_fire(outstanding, gate_deadline)),
+                    finish,
+                ),
+                (),
+            ),
+            other => {
+                debug_assert!(
+                    false,
+                    "transition_to_awaiting: entry gate proved \
+                     Active(PreFire(_)); map_state saw {:?}",
+                    other.discriminant(),
+                );
+                (other, ())
             }
-        }
+        });
+        // `map_state`'s `Option<()>` is dropped: `None` is a stale id,
+        // dead after the entry gate.
     }
 
     /// Arm the post-fire rebase-loop ceiling at the natural `Awaiting
@@ -1414,10 +1405,11 @@ impl Engine {
     ///
     /// **Cancel-first entry precondition.** No caller may reach here
     /// with `Profile(profile_id)`'s `ProbeSlot` still armed — the
-    /// swap-to-Idle destructures the prior burst, and an armed
-    /// Verifying/Rebasing slot reaching that drop trips `ProbeSlot`'s
-    /// linearity tripwire. Debug-asserted at entry; the proof that all
-    /// callers satisfy it lives at the assert.
+    /// burst-end `map_state` consumes the prior burst (its Active arm
+    /// discards the burst payload), and an armed Verifying/Rebasing slot
+    /// reaching that drop trips `ProbeSlot`'s linearity tripwire.
+    /// Debug-asserted at entry; the proof that all callers satisfy it
+    /// lives at the assert.
     ///
     /// **Draining-exit driver.** After the focal Profile is Idle, sweep
     /// *every* currently-`Draining` Profile and re-evaluate the pure
@@ -1447,23 +1439,27 @@ impl Engine {
     /// reap in `detach_sub_inner`. Otherwise the Profile rests at
     /// [`ProfileState::Idle`].
     pub(crate) fn finish_burst_to_idle(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        // Cancel-first entry precondition (debug). The swap-to-Idle
-        // below destructures the prior burst; an armed
-        // Verifying/Rebasing slot reaching that drop trips ProbeSlot's
-        // linearity tripwire. All 15 production callers consume the
-        // slot first:
-        //  - 10 response-path dispatchers (dispatch_{seed,standard,
-        //    rebase}_{ok,vanished,failed}) run only after
-        //    on_profile_probe_response disarmed via take_owner_probe;
+        // Cancel-first entry precondition (debug). The `map_state` below
+        // consumes the prior burst; an armed Verifying/Rebasing slot
+        // reaching that drop trips ProbeSlot's linearity tripwire. Every
+        // production caller consumes the slot first by structural
+        // category — the categories are mutually exclusive and each
+        // call site satisfies exactly one:
+        //  - Response-path dispatchers (every dispatch arm reached
+        //    through `on_probe_response`: dispatch_{seed,standard,
+        //    rebase}_{ok,vanished,failed}, plus the ceiling-forced /
+        //    ceiling-unreadable / walker-contract-violated arms) run
+        //    only after the typed demux disarmed via take_owner_probe;
         //    nothing between that disarm and the call re-arms.
-        //  - 2 Awaiting-phase callers (on_effect_complete reap,
+        //  - Awaiting-phase callers (on_effect_complete reap,
         //    handle_gate_deadline zombie) are guarded to
         //    Active(PostFire(Awaiting)) — Awaiting holds no slot.
-        //  - 2 pure-teardown callers (finalize_anchor_lost,
-        //    on_anchor_terminal_all_dynamic) cancel_owner_probe first.
-        //  - 1 overflow caller (on_sensor_overflow Active arm) disarms
-        //    first: take_owner_probe on reseed, cancel_owner_probe on
-        //    reap.
+        //  - Pure-teardown callers (finalize_anchor_lost,
+        //    on_anchor_terminal_all_dynamic, detach_sub_inner's
+        //    last-Sub Active arm, on_sensor_overflow's Active arm)
+        //    disarm first: cancel_owner_probe on teardown /
+        //    overflow-reap paths, take_owner_probe on the
+        //    overflow-reseed path.
         // Named at this boundary, not left solely to the far-end
         // ProbeSlot::drop tripwire — that fires frames downstream and
         // is structurally bypassed by every test that pre-consumes the
@@ -1485,42 +1481,35 @@ impl Engine {
              overflow-reap path; take_owner_probe on the response or \
              overflow-reseed path); profile = {profile_id:?}",
         );
-        // Take the burst-by-value via `transition_state(Idle)` and
-        // discriminate on the typed variant. `intent` is not read here:
-        // the Draining sweep below is intent-agnostic.
+        // Consume the prior burst via `map_state` and read its
+        // `BurstFinish` directive out. `intent` is not read here — the
+        // Draining sweep below is intent-agnostic.
         //
-        // After this point `p.state == Idle` for the whole helper
-        // window. The subsequent Draining-sweep `transition_to_verifying`
-        // / reap calls all run against a focal Profile in Idle — future
-        // observers (e.g., a hook firing on state transitions) would see
-        // the transition bracket cleanly. Idle-first is also
-        // load-bearing for the sweep: the finishing Profile is excluded
-        // from its own `has_active_standard_descendant` query precisely
-        // because it is no longer in an Active Standard burst.
-        let Some(prior) = self
+        // The Active arm installs `Idle` *inside* the transform, so the
+        // focal Profile is `Idle` for the rest of the helper — the
+        // load-bearing exclusion from its own
+        // `has_active_standard_descendant` query (it is no longer in an
+        // Active Standard burst) now holds structurally, not by
+        // post-swap sequencing. `finish` is captured here, not re-read
+        // after the swap, so the reap decision is locked in at burst-end
+        // entry; the consumed burst (whose `ProbeSlot` the cancel-first
+        // precondition guarantees disarmed) drops as the closure's `_`
+        // discards it. The Idle / Pending arm reinstalls the prior
+        // unchanged in the same single reconcile — no Idle-swap-then-
+        // restore — yielding `None`; the outer `None` is a stale id.
+        // Either flattens to "nothing to drain or reap" → return.
+        let Some(finish) = self
             .profiles
-            .transition_state(profile_id, ProfileState::Idle)
+            .map_state(profile_id, |prior| match prior {
+                ProfileState::Active(
+                    ActiveBurst::PreFire(_) | ActiveBurst::PostFire(_),
+                    finish,
+                ) => (ProfileState::Idle, Some(finish)),
+                other => (other, None),
+            })
+            .flatten()
         else {
             return;
-        };
-        // Capture `finish` from the consumed prior state. It is captured
-        // here — not re-read from `profiles.get(profile_id)` after the
-        // swap — so the directive is locked in at burst-end entry; a
-        // hypothetical future mid-helper write to a re-borrowed Profile
-        // can't flip the reap decision under us. The PostFire burst
-        // (whose `ProbeSlot` the cancel-first precondition guarantees
-        // disarmed) is dropped at the arm's end, exactly as before. Both
-        // Active arms carry the directive identically; the discriminant
-        // matters only to drop the right burst payload.
-        let finish = match prior {
-            ProfileState::Active(ActiveBurst::PreFire(_) | ActiveBurst::PostFire(_), finish) => {
-                finish
-            }
-            other => {
-                // Idle / Pending — no burst-end machinery to run. Restore.
-                self.profiles.transition_state(profile_id, other);
-                return;
-            }
         };
 
         // Intent-agnostic Draining sweep. The reconfirm condition
@@ -1562,7 +1551,8 @@ impl Engine {
         // Promoter teardown); we defer the reap to here so the Profile's
         // burst doesn't fire Effects against a Sub registry that no
         // longer holds the reference. `ReturnToIdle` leaves the Profile
-        // resting at Idle (the `mem::replace` above already wrote Idle).
+        // resting at Idle (the `map_state` Active arm above installed
+        // it as part of the same single reconcile).
         if matches!(finish, BurstFinish::Reap) {
             self.reap_profile(profile_id, ReapTrigger::DeferredFromBurst, out);
         }
@@ -1650,13 +1640,13 @@ impl Engine {
     /// no ancestor counter to balance either — the reconfirm is a fresh
     /// query.)
     ///
-    /// **Slot-consumed precondition.** The whole-value swap below
-    /// destructures the post-fire burst; an armed `Rebasing` slot
-    /// reaching that drop trips `ProbeSlot`'s linearity tripwire. The
-    /// sole caller runs only after `on_profile_probe_response` disarmed
-    /// via `take_owner_probe` — the same precondition
-    /// `finish_burst_to_idle` carries on the path this replaces.
-    /// Debug-asserted at entry.
+    /// **Slot-consumed precondition.** The `map_state` below consumes
+    /// the post-fire burst (its closure discards the burst payload); an
+    /// armed `Rebasing` slot reaching that drop trips `ProbeSlot`'s
+    /// linearity tripwire. The sole caller runs only after
+    /// `on_profile_probe_response` disarmed via `take_owner_probe` — the
+    /// same precondition `finish_burst_to_idle` carries on the path this
+    /// replaces. Debug-asserted at entry.
     ///
     /// The restart re-enters `Batching` (not an immediate re-probe), so
     /// it is settle-debounced and burst-deadline-bounded exactly like a
@@ -1687,22 +1677,16 @@ impl Engine {
              rebase response path); profile = {profile_id:?}",
         );
 
-        // Re-borrow for captures under the same shape-checked window
-        // `transition_to_awaiting` uses for its inverse move: the
-        // precondition already proved `Active(PostFire)`; the inner
-        // `matches!` is the borrow discipline for the typed move below,
-        // not a duplicated guard. `fold_latched` is the restart's birth
-        // consult on the same borrow — the restart IS the next pre-fire
-        // burst's birth, so an `absorb` window armed during post-fire
-        // (still live at `now`) folds the residual-carried events too.
-        let Some((settle, max_settle, fold_latched)) =
-            self.profiles.get(profile_id).and_then(|p| {
-                matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _)).then_some((
-                    p.settle,
-                    p.max_settle(),
-                    p.absorb_window_live(now),
-                ))
-            })
+        // `settle` / `max_settle` / `fold_latched` captured on a live-id
+        // read; the entry gate already proved `Active(PostFire(_))`, so
+        // no shape re-check guards them. `fold_latched` is the restart's
+        // birth consult — the restart IS the next pre-fire burst's
+        // birth, so an `absorb` window armed during post-fire (still
+        // live at `now`) folds the residual-carried events too.
+        let Some((settle, max_settle, fold_latched)) = self
+            .profiles
+            .get(profile_id)
+            .map(|p| (p.settle, p.max_settle(), p.absorb_window_live(now)))
         else {
             return;
         };
@@ -1717,47 +1701,41 @@ impl Engine {
             self.timers
                 .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
-        // Typed move PostFire → PreFire via `transition_state` (the
-        // whole-value swap returning the prior state):
-        // `into_pre_fire_residual` consumes the post-fire by value, so it
-        // cannot project through `post_fire_burst_mut`. Bracketing with
-        // the `matches!` above eliminates the transient-Idle window's
-        // observability for production callers; the restore-on-mismatch
-        // arm keeps a future pattern-widening refactor from stranding
-        // the Profile in `Idle` while dropping the owned burst.
-        if self
-            .profiles
-            .get(profile_id)
-            .is_some_and(|p| matches!(p.state(), ProfileState::Active(ActiveBurst::PostFire(_), _)))
-            && let Some(prior) = self
-                .profiles
-                .transition_state(profile_id, ProfileState::Idle)
-        {
-            match prior {
-                ProfileState::Active(ActiveBurst::PostFire(post), finish) => {
-                    // Carry `finish` across the restart. It is
-                    // `ReturnToIdle` by the caller's gate; preserving it
-                    // (rather than hard-writing) keeps a mid-tail
-                    // `mark_active_for_reap` honoured at the restarted
-                    // burst's end.
-                    self.profiles.transition_state(
-                        profile_id,
-                        ProfileState::Active(
-                            ActiveBurst::PreFire(post.into_pre_fire_residual(
-                                burst_deadline,
-                                settle_timer,
-                                now,
-                                fold_latched,
-                            )),
-                            finish,
-                        ),
-                    );
-                }
-                other => {
-                    self.profiles.transition_state(profile_id, other);
-                }
+        // Typed restart move PostFire → PreFire — the inverse of
+        // `transition_to_awaiting`'s fire move. `into_pre_fire_residual`
+        // consumes the post-fire burst by value, so the transform
+        // primitive `map_state` extracts the prior and installs the
+        // fresh `Batching` pre-fire result in one reconcile — no
+        // swap-to-Idle-then-reinstall dance. `finish` (ReturnToIdle by
+        // the caller's gate) rides across unchanged, preserving a
+        // mid-tail `mark_active_for_reap`. The non-PostFire arm is
+        // post-gate-impossible: it `debug_assert`s loudly and degrades
+        // by reinstalling the prior, never panicking a release daemon.
+        self.profiles.map_state(profile_id, |prior| match prior {
+            ProfileState::Active(ActiveBurst::PostFire(post), finish) => (
+                ProfileState::Active(
+                    ActiveBurst::PreFire(post.into_pre_fire_residual(
+                        burst_deadline,
+                        settle_timer,
+                        now,
+                        fold_latched,
+                    )),
+                    finish,
+                ),
+                (),
+            ),
+            other => {
+                debug_assert!(
+                    false,
+                    "restart_burst_from_fire_tail_residual: entry gate \
+                     proved Active(PostFire(_)); map_state saw {:?}",
+                    other.discriminant(),
+                );
+                (other, ())
             }
-        }
+        });
+        // `map_state`'s `Option<()>` is dropped: `None` is a stale id,
+        // dead after the entry gate.
     }
 }
 

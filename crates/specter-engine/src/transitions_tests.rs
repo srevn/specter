@@ -1400,6 +1400,101 @@ fn event_drives_batching_clears_pending_probe() {
     );
 }
 
+/// Carrier survival across the pre-fire phase swaps: `last_certified_hash`
+/// (the Layer-C hash-channel sample carrier) rides through them untouched.
+/// Neither `transition_to_verifying` (Batching → Verifying) nor
+/// `event_drives_batching` (Verifying → Batching) reconstructs the
+/// `PreFireBurst` — they rewrite only `PreFirePhase`, leaving the
+/// sibling carrier field intact. The preservation is convention-guarded
+/// today (phase swaps are raw `pre.phase = …` writes, no typed
+/// phase-mutation choke); this pins it as executable behaviour, so a
+/// future phase helper that rebuilt the burst — silently dropping the
+/// carrier — fails here loudly.
+#[test]
+fn last_certified_hash_survives_batching_verifying_batching() {
+    let (mut e, pid, _sid, root, _) = engine_with_attached_sub();
+    // Settle the Seed baseline → Idle so the next FsEvent opens a
+    // Standard debounce burst (the carrier's home).
+    complete_seed_burst(&mut e, pid);
+
+    // Idle → Active(PreFire(Batching)).
+    let t0 = Instant::now();
+    let _ = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Modified,
+        },
+        t0,
+    );
+    assert!(
+        matches!(
+            e.profiles.get(pid).unwrap().state(),
+            ProfileState::Active(ActiveBurst::PreFire(_), _)
+        ),
+        "FsEvent opens a Standard pre-fire burst",
+    );
+
+    // Stamp the hash-channel carrier on the Batching burst.
+    const CARRIER: u128 = 0xC6DE_F00D;
+    let prior = e
+        .profiles
+        .get_mut(pid)
+        .unwrap()
+        .advance_certified_sample(CARRIER);
+    assert_eq!(prior, None, "first sample on the fresh Standard burst");
+
+    // Batching → Verifying via the settle expiry (transition_to_verifying).
+    let t1 = t0 + SETTLE * 2;
+    while let Some(entry) = e.pop_expired(t1) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            t1,
+        );
+    }
+    match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
+            assert!(
+                matches!(pre.phase, PreFirePhase::Verifying { .. }),
+                "settle expiry reaches Verifying",
+            );
+            assert_eq!(
+                pre.last_certified_hash,
+                Some(CARRIER),
+                "carrier survives Batching → Verifying",
+            );
+        }
+        other => panic!("expected Active(PreFire(Verifying)); got {other:?}"),
+    }
+
+    // Verifying → Batching via an FsEvent (event_drives_batching).
+    let t2 = t1 + SETTLE;
+    let _ = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::Modified,
+        },
+        t2,
+    );
+    match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
+            assert!(
+                matches!(pre.phase, PreFirePhase::Batching { .. }),
+                "event re-arms Batching",
+            );
+            assert_eq!(
+                pre.last_certified_hash,
+                Some(CARRIER),
+                "carrier survives Verifying → Batching",
+            );
+        }
+        other => panic!("expected Active(PreFire(Batching)); got {other:?}"),
+    }
+}
+
 /// Field-discipline pin for `finalize_anchor_lost`: an anchor terminal
 /// event during Verifying cancels the in-flight probe and clears the
 /// channel. Replaces the pre-refactor `was_verifying` snapshot's role.

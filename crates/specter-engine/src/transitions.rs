@@ -42,6 +42,7 @@ use specter_core::{
     StableReason, StepOutput, SubAttachRequest, SubId, TimerId, TimerKind, TreeSnapshot,
     WatchFailure, WatchRegistryDiff, quiescence_verdict,
 };
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -2828,10 +2829,13 @@ impl Engine {
         {
             p.rebase_baseline();
         }
-        if outcome.count > 0 {
-            self.transition_to_awaiting(profile_id, outcome.count, now, out);
-        } else {
-            self.finish_burst_to_idle(profile_id, out);
+        // The "fire emitted ≥1 Effect" test IS the `NonZeroU32`
+        // constructor: `Some` carries the invariant into
+        // `transition_to_awaiting` as a type; the zero case finishes
+        // the burst directly.
+        match NonZeroU32::new(outcome.count) {
+            Some(count) => self.transition_to_awaiting(profile_id, count, now, out),
+            None => self.finish_burst_to_idle(profile_id, out),
         }
     }
 
