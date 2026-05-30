@@ -444,11 +444,23 @@ impl Engine {
     /// ([`crate::probe::ProbeRoute`] is [`Copy`]; the later disarm
     /// leaves the carrier variant intact). The old `Some(c)`/no-route
     /// regression case folds structurally into an absent gate (⇒
-    /// stale). A `ProbeRoute::Enumerating` (a Promoter-only class)
-    /// reaching the Profile handler stays a loud regression arm — its
-    /// gated correlation lives on exactly one Profile carrier. A
-    /// descent receiving `AnchorOk` is a walker-contract violation
-    /// handled in-arm; production walkers never emit that shape.
+    /// stale). Each route then *parses* the wire [`ProbeOutcome`] into
+    /// the typed engine-side outcome that route's consumers accept —
+    /// `ProofOutcome` for `Verifying` / `Rebasing`, `DescentOutcome`
+    /// for `Descent` — so an illegal `(route, outcome)` pairing is
+    /// unrepresentable past the parse and never reaches the certifier or
+    /// the descent dispatcher. A payload shape the route cannot accept
+    /// (a proof route receiving the structural `DirEnumerated`, or a
+    /// descent receiving an `AnchorOk` / `SubtreeProven` proof) is a
+    /// walker-contract violation: the parse fails and the arm routes to
+    /// the route-appropriate recovery — the burst recovery finishes the
+    /// burst to Idle (anchor/baseline survive; a walker defect is not an
+    /// anchor-identity change), the descent recovery abandons the
+    /// descent prefix — each emitting one honest `WalkerContractViolated`
+    /// and self-healing on the next `FsEvent`. `ProbeRoute::Enumerating`
+    /// is a Promoter-only class, unconstructable for a Profile owner —
+    /// an honest internal-invariant arm, not a walker-contract violation
+    /// (production walkers never emit a contract-violating shape).
     fn on_profile_probe_response(
         &mut self,
         profile_id: ProfileId,
@@ -549,8 +561,8 @@ impl Engine {
         }
     }
 
-    /// Certify a Verifying / Rebase probe response: lower the
-    /// [`ProbeOutcome`], verify kind agreement, and fold the carrier's
+    /// Certify a Verifying / Rebase probe response: lower the typed
+    /// `ProofOutcome`, guard kind agreement, and fold the carrier's
     /// quiescence verdict — the single verdict-construction site shared
     /// by the Verifying choke ([`Self::dispatch_burst_outcome`]) and the
     /// post-fire Rebase arm. The two routes the engine deliberately
@@ -559,6 +571,14 @@ impl Engine {
     /// own `Vanished` / `Failed` cleanup; only the
     /// lower→kind-check→fold spine is unified here, at the floor.
     ///
+    /// **Typed input.** The caller passes a `ProofOutcome`, not the wide
+    /// wire [`ProbeOutcome`]: the proof/descent split is parsed once at
+    /// the demux seam, so the structural `DirEnumerated` shape — a
+    /// walker-contract violation on a quiescence/rebase probe — is
+    /// unrepresentable here and the old defensive arm is gone. The
+    /// certifier sees only the four shapes a proof probe can legally
+    /// resolve to.
+    ///
     /// **Lowering.** `AnchorOk` → `(File, Authoritative)` — a single
     /// `lstat` has no mtime-skip concept, so an anchor read is
     /// definitionally authoritative and the engine injects the
@@ -566,32 +586,36 @@ impl Engine {
     /// → `(Dir, authority)`. `Vanished` / `Failed` are returned as-is
     /// for the caller's own per-route cleanup (the certifier is
     /// route-agnostic — folding a non-snapshot is meaningless).
-    /// `DirEnumerated` is a walker-contract violation (a quiescence /
-    /// rebase probe is a `Subtree` / `AnchorFile` request — a structural
-    /// enumeration is not a quiescence observation): loud
-    /// `debug_assert!`, `Regressed`. No diagnostic — `StaleProbeResponse`
-    /// names a correlation drift, which this is not; the `probe_gate`
-    /// already proved the response correlates to the live carrier.
     ///
-    /// **Profile presence.** Bound at function entry from the
-    /// `probe_gate` ⇒ `take_owner_probe` dispatch contract (the floor is
-    /// reached only on `Active(Verifying | Rebasing)`). The guard
-    /// captures the one Profile bit the fold consumes
-    /// (`events_witness_quiescence`) before releasing the read borrow,
-    /// then `expect`s the `&mut self` re-fetch for the cat-(b) advance;
-    /// `kind_agrees_or_finalize` does not remove the Profile.
+    /// **Fold context.** One immutable Profile resolution (`fold_context`)
+    /// captures every bit the fold consumes — `events_witness_quiescence`
+    /// (invariant across the burst, folds into `config_hash`), the prior
+    /// [`specter_core::Profile::kind`], and whether the burst owes a
+    /// quiescence proof (`owes_proof_from`, a predicate spanning
+    /// `profiles + subs`) — before any `&mut` re-fetch. An absent Profile
+    /// is a gate breach (the floor is reached only on `Active(Verifying |
+    /// Rebasing)` through the `probe_gate` ⇒ `take_owner_probe`
+    /// dispatch): `debug_assert!` in dev/CI, `Regressed` in release.
     ///
-    /// **Kind agreement, before the fold.**
-    /// [`Engine::kind_agrees_or_finalize`] runs once, *after* the
-    /// lowering and *before* the verdict fold. A kind-mismatched
-    /// response is not a valid observation of the anchor: folding a
-    /// verdict over it and advancing the certified-sample sequence with
-    /// its hash would be meaningless, and the burst is torn down through
-    /// `finalize_anchor_lost` inside the check — so the result is
-    /// `Regressed` (already finalized). First-classify (`kind == None`,
-    /// fresh Seed) passes; the snapshot's variant *is* the kind at the
+    /// **Kind agreement, before the fold.** The captured prior kind is
+    /// compared against the lowered snapshot's variant, *after* the
+    /// lowering and *before* the verdict fold. A kind-mismatched response
+    /// is not a valid observation of the anchor: folding a verdict over
+    /// it and advancing the certified-sample sequence with its hash would
+    /// be meaningless, so the burst is torn down through
+    /// [`Engine::finalize_anchor_lost`] (reusing the tested
+    /// `dispatch_*_vanished` cleanup chain rather than a fresh
+    /// "discard then graft" that leaks watch contributions and breaks the
+    /// cross-field invariant), after emitting
+    /// [`Diagnostic::AnchorKindMismatch`] — so the result is `Regressed`
+    /// (already finalized). First-classify (`kind == None`, fresh Seed)
+    /// passes; the snapshot's variant *is* the kind at the
     /// [`specter_core::Profile::install_dir_current`] /
-    /// [`specter_core::Profile::install_file_current`] commit.
+    /// [`specter_core::Profile::install_file_current`] commit. The guard
+    /// is unreachable in v1 — the walker collapses every Dir↔File swap to
+    /// `Vanished` — but operates on a *successful* lowering, so it stays
+    /// a semantic floor distinct from the payload-shape parse at the
+    /// demux seam.
     ///
     /// **Verdict fold.** [`specter_core::quiescence_verdict`] is the
     /// floor — a pure, total
@@ -615,7 +639,7 @@ impl Engine {
     ///   `events_union` covers in-place writes
     ///   ([`specter_core::Profile::events_witness_quiescence`]) OR the
     ///   burst's consequence does not require proof (cold-Seed
-    ///   `SilentPin`, see [`Self::burst_owes_quiescence_proof`]).
+    ///   `SilentPin`, see `owes_proof_from`).
     ///   [`QuiescenceWitness::HashChannel`] otherwise: this site
     ///   advances the per-burst `last_certified_hash` carrier through
     ///   the cat-(b) cascade
@@ -4132,14 +4156,18 @@ fn fire_decision(
 /// shared result of [`Engine::certify_probe_response`], routed
 /// differently by the two callers.
 ///
-/// The certifier performs the operation common to the Verifying choke
-/// and the post-fire Rebase arm — lower the outcome, verify kind
-/// agreement, fold the quiescence verdict (events-reliable witness for
-/// CONTENT-subscribed bursts, or the `last_certified_hash` channel
-/// otherwise) — and yields this 4-variant result. The callers own the
-/// consequence: Verifying fans `Proceed` out per [`BurstIntent`]; Rebase
-/// maps the verdict to the rebase-loop table. One verdict-construction
-/// site at the floor, two routes preserved.
+/// The certifier accepts a typed `ProofOutcome` (a proof-route probe
+/// resolves to exactly `AnchorOk` / `SubtreeProven` / `Vanished` /
+/// `Failed`; the structural `DirEnumerated` shape is parsed out at the
+/// demux seam, so it is unrepresentable here), then performs the
+/// operation common to the Verifying choke and the post-fire Rebase arm
+/// — lower the outcome, guard kind agreement, fold the quiescence
+/// verdict (events-reliable witness for CONTENT-subscribed bursts, or
+/// the `last_certified_hash` channel otherwise) — and yields this
+/// 4-variant result. The callers own the consequence: Verifying fans
+/// `Proceed` out per [`BurstIntent`]; Rebase maps the verdict to the
+/// rebase-loop table. One verdict-construction site at the floor, two
+/// routes preserved.
 ///
 /// - `Proceed`: lowered, kind-agreed, verdict folded — the caller acts
 ///   on `(snapshot, verdict)`.
@@ -4147,10 +4175,23 @@ fn fire_decision(
 ///   probe root; the caller routes to its own per-route cleanup (the
 ///   certifier is route-agnostic — folding a non-snapshot is
 ///   meaningless).
-/// - `Regressed`: a `DirEnumerated` on a quiescence/rebase probe, a
-///   kind mismatch (already routed through `finalize_anchor_lost`), or
-///   a `None` fold (no Active carrier) — the certifier already emitted
-///   the diagnostic / tore the burst down; the caller does nothing.
+/// - `Regressed`: the certifier resolved a terminal state and the
+///   caller does nothing. Two producers, both contract-violation
+///   degrades: a kind mismatch (the certifier emitted
+///   [`Diagnostic::AnchorKindMismatch`] and tore the burst down through
+///   [`Engine::finalize_anchor_lost`]), or an absent Profile at the
+///   floor (a gate breach — nothing to tear down).
+///
+/// **Reachability.** Every `Regressed` producer is a contract-violation
+/// degrade, and all are unreachable on a correct sensor: the
+/// payload-shape violation (a proof route receiving `DirEnumerated`) is
+/// rejected before the certifier by the typed demux decode; the absent
+/// Profile cannot occur because the gate dispatches only on
+/// `Active(Verifying | Rebasing)`; the kind mismatch cannot occur
+/// because the walker collapses every on-disk Dir↔File swap to
+/// `Vanished` rather than returning a kind-divergent snapshot. The
+/// channel exists to degrade these violations gracefully, not to handle
+/// a reachable fault.
 #[derive(Debug)]
 enum CertifiedResponse {
     Proceed {
