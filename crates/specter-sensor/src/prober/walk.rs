@@ -60,9 +60,11 @@ use std::sync::Arc;
 /// probe. Built once at probe entry ([`walk_root`]) from the
 /// `ProbeRequest::Subtree` payload, then threaded by reference into
 /// [`snapshot_dir`], [`enumerate_dir`], and [`build_dir_child`].
-/// Per-frame inputs (`path`, `baseline`, `depth`, `cmeta`, `name`) stay
-/// as positional arguments to those callees; the non-`Copy`
-/// [`ProofLedger`] threads as a separate `&mut`.
+/// Per-frame inputs (`path`, `baseline`, `cmeta`, `name`) stay as
+/// positional arguments to those callees; per-dirent depth derives
+/// from `rel` at the dirent (see [`enumerate_dir`]), not a threaded
+/// counter; the non-`Copy` [`ProofLedger`] threads as a separate
+/// `&mut`.
 ///
 /// Separating invariant from per-frame at the type level makes the
 /// distinction structural: a reader at any call site sees `ctx`
@@ -302,14 +304,7 @@ fn walk_root<'a>(
         captured_with,
         root_dev: root_meta.fs_id().device(),
     };
-    Ok(snapshot_dir(
-        &ctx,
-        target_path,
-        root_meta,
-        baseline,
-        0,
-        ledger,
-    ))
+    Ok(snapshot_dir(&ctx, target_path, root_meta, baseline, ledger))
 }
 
 /// Subtree probe. Recursive DFS walk against `target_path` honoring
@@ -443,14 +438,12 @@ fn snapshot_dir(
     path: &Path,
     root_meta: DirMeta,
     baseline: Option<&Arc<DirSnapshot>>,
-    depth: u32,
     ledger: &mut ProofLedger,
 ) -> Arc<DirSnapshot> {
     if let Some(prior) = ctx.try_mtime_skip(path, &root_meta, baseline) {
         return prior;
     }
-    let (entries, completeness) =
-        enumerate_dir(ctx, path, baseline.map(Arc::as_ref), depth, ledger);
+    let (entries, completeness) = enumerate_dir(ctx, path, baseline.map(Arc::as_ref), ledger);
     if completeness == Completeness::Incomplete {
         ledger.degraded.insert(Arc::from(path));
     }
@@ -480,7 +473,6 @@ fn enumerate_dir(
     ctx: &WalkContext<'_>,
     path: &Path,
     baseline: Option<&DirSnapshot>,
-    depth: u32,
     ledger: &mut ProofLedger,
 ) -> (BTreeMap<CompactString, ChildEntry>, Completeness) {
     let mut entries: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
@@ -505,14 +497,6 @@ fn enumerate_dir(
         }
     };
 
-    // Each dirent's depth is one below the directory's own — depth-0
-    // here means we're enumerating the anchor itself (dirents land at
-    // depth 1). Saturating add keeps the predicate well-typed at
-    // pathological depths; `should_recurse` (the recursion edge that
-    // produces the recursive calls into this function) already caps
-    // descent at `max_depth`, so reaching `u32::MAX` here is purely
-    // defensive.
-    let entry_depth = depth.saturating_add(1);
     for dirent_result in read_dir {
         let dirent = match dirent_result {
             Ok(d) => d,
@@ -545,6 +529,11 @@ fn enumerate_dir(
             completeness = Completeness::Incomplete;
             continue;
         };
+        // Depth shares `rel` with the exclude/pattern gates — one
+        // source, so it cannot desync. `try_from` saturates the
+        // PATH_MAX-bounded count (only a future iterative walker could
+        // approach u32::MAX).
+        let entry_depth = u32::try_from(rel.components().count()).unwrap_or(u32::MAX);
         // Pre-`lstat` scope gate: hidden / exclude / recursive /
         // max_depth (the last two are no-ops at this site — the
         // walker only reaches dirents at depths `should_recurse` has
@@ -596,7 +585,15 @@ fn enumerate_dir(
 
         let key = CompactString::new(name_str);
         let child_entry = if is_dir {
-            build_dir_child(ctx, &child_path, baseline, depth, &cmeta, name_str, ledger)
+            build_dir_child(
+                ctx,
+                &child_path,
+                baseline,
+                entry_depth,
+                &cmeta,
+                name_str,
+                ledger,
+            )
         } else {
             build_leaf_child(&cmeta, name_str, baseline)
         };
@@ -623,18 +620,13 @@ fn build_dir_child(
     ctx: &WalkContext<'_>,
     child_path: &Path,
     baseline: Option<&DirSnapshot>,
-    depth: u32,
+    child_depth: u32,
     cmeta: &std::fs::Metadata,
     name: &str,
     ledger: &mut ProofLedger,
 ) -> ChildEntry {
     let fs_id = FsIdentity::from_metadata(cmeta);
-    // Saturating: a recursion-based walker can never reach `u32::MAX`
-    // (the kernel's path-length limit caps depth far below that), but
-    // a future iterative walker could; computing once also kills the
-    // duplicate addition the two call sites would otherwise repeat.
-    let next_depth = depth.saturating_add(1);
-    if !ctx.should_recurse(next_depth, cmeta.dev()) {
+    if !ctx.should_recurse(child_depth, cmeta.dev()) {
         // Uncovered branch: not recursive, beyond max_depth, or cross-fs.
         // Walker stores the entry but does not recurse.
         return ChildEntry::Dir(DirChild::Uncovered(fs_id));
@@ -649,14 +641,7 @@ fn build_dir_child(
     // native lookup; `lookup_covered_dir` collapses the "Dir entry + covered"
     // gate into one named operation.
     let child_baseline = baseline.and_then(|b| b.lookup_covered_dir(name));
-    let arc = snapshot_dir(
-        ctx,
-        child_path,
-        root_meta,
-        child_baseline,
-        next_depth,
-        ledger,
-    );
+    let arc = snapshot_dir(ctx, child_path, root_meta, child_baseline, ledger);
     ChildEntry::Dir(DirChild::Covered(arc))
 }
 
