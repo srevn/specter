@@ -16,13 +16,14 @@
 //!   is the surviving member; a phase helper here would only enforce
 //!   it at a distance. The rebase-loop ceiling lifecycle (formerly
 //!   `rebase_ceiling: Option<TimerId>` + `forced: bool`, now the
-//!   `ceiling: CeilingState` sum) once lived in cat-b but folded back
-//!   into cat-a once `transition_to_settling` opened a true post-fire
-//!   settle-debounce window — the writes are co-located with their
-//!   phase transitions on this side. (The old `apply_dirty_delta`
-//!   counter edge was deleted with the `dirty_descendants` refcount —
-//!   the `Draining → Verifying` reconfirm is now a fresh query, not a
-//!   maintained count.)
+//!   `ceiling: CeilingState` sum) lives in cat-a: its `Armed` /
+//!   `Reached` writes are each co-located with a distinct post-fire
+//!   phase decision (`arm_rebase_loop_ceiling` at the rebase loop's
+//!   start, `force_pending_post_fire` at ceiling-expiry / gate-deadline
+//!   recovery), not a single-field invariant maintained at a distance.
+//!   (The old `apply_dirty_delta` counter edge was deleted with the
+//!   `dirty_descendants` refcount — the `Draining → Verifying`
+//!   reconfirm is now a fresh query, not a maintained count.)
 //! - **(c) The sanctioned cross-crate emission reader**:
 //!   [`Engine::emit_owner_probe`] (in `probe`) reads the pre-fire
 //!   Standard burst's `dirty` to project its captured paths to the
@@ -56,7 +57,7 @@
 //!   the sole site that crosses the fire boundary (via
 //!   `PreFireBurst::into_post_fire`).
 //! - `arm_rebase_loop_ceiling` (writes `post.ceiling =
-//!   CeilingState::Armed(t)` at the `Awaiting → Settling` natural
+//!   CeilingState::Armed(t)` at the `Awaiting → Rebasing` natural
 //!   entry) / `force_pending_post_fire` (writes `post.ceiling =
 //!   CeilingState::Reached` on ceiling expiry or gate-deadline
 //!   recovery) — post-fire single-field mutators on the
@@ -65,11 +66,12 @@
 //!   both in this module; the grep `self\.ceiling = ` lands exactly
 //!   the two writers plus the burst-fresh default in
 //!   `PostFireBurst::new`.
-//! - `transition_to_settling` (Awaiting | Rebasing → Settling) /
-//!   `transition_to_rebasing` (Settling → Rebasing or
-//!   gate-deadline-recovery Awaiting → Rebasing) — post-fire phase
-//!   swaps (mutate `PostFireBurst`), the symmetric mirror of pre-fire's
-//!   `event_drives_batching` / `transition_to_verifying`.
+//! - `transition_to_settling` (Rebasing → Settling, the `Retry`
+//!   loop-back) / `transition_to_rebasing` (Awaiting → Rebasing
+//!   natural + gate-deadline-recovery, or Settling → Rebasing
+//!   settle-expiry / ceiling) — post-fire phase swaps (mutate
+//!   `PostFireBurst`), the symmetric mirror of pre-fire's
+//!   `retry_drives_batching` / `transition_to_verifying`.
 //! - `reschedule_settling` (settle-timer re-point on absorbed events,
 //!   phase class unchanged) — single-field `PostFireBurst.phase`
 //!   mutator, the symmetric mirror of pre-fire's `reschedule_batching`.
@@ -188,13 +190,13 @@ impl Engine {
     /// `force_pending_post_fire` (from `Awaiting` /
     /// `Settling` / `Rebasing` — via `handle_rebase_ceiling` and
     /// `handle_gate_deadline`'s non-zombie arm),
-    /// `transition_to_settling` (entered from `Awaiting` via
-    /// `on_effect_complete::LastReached`, or from `Rebasing` via
+    /// `transition_to_settling` (entered from `Rebasing` via
     /// `dispatch_rebase_ok::Retry`),
-    /// `transition_to_rebasing` (entered from `Settling` via
-    /// `handle_post_fire_settle_expired` / `handle_rebase_ceiling`'s
-    /// drive-now arm, or from `Awaiting` via `handle_gate_deadline`'s
-    /// non-zombie skip), and
+    /// `transition_to_rebasing` (entered from `Awaiting` via
+    /// `on_effect_complete::LastReached` natural or
+    /// `handle_gate_deadline`'s non-zombie skip forced, or from
+    /// `Settling` via `handle_post_fire_settle_expired` /
+    /// `handle_rebase_ceiling`'s drive-now arm), and
     /// `absorb_event_into_fire_tail`. Callers further narrow to a
     /// specific `PostFirePhase` before invoking, but the gate stops at
     /// the variant level — narrower phase-level preconditions would
@@ -1031,7 +1033,7 @@ impl Engine {
     }
 
     /// Arm the post-fire rebase-loop ceiling at the natural `Awaiting
-    /// → Settling` entry — the rebase loop's bound, scheduled once
+    /// → Rebasing` entry — the rebase loop's bound, scheduled once
     /// per loop.
     ///
     /// Schedules a [`TimerKind::RebaseCeiling`] timer at `now +
@@ -1045,11 +1047,11 @@ impl Engine {
     /// the burst-fresh default in `PostFireBurst::new`.
     ///
     /// **Sole caller.** [`Engine::on_effect_complete`]'s `LastReached
-    /// + ReturnToIdle` arm (the natural `Awaiting → Settling` entry,
+    /// + ReturnToIdle` arm (the natural `Awaiting → Rebasing` entry,
     /// `outstanding` just hit zero). Invoked **before** calling
-    /// [`Self::transition_to_settling`], so the ceiling is armed at
+    /// [`Self::transition_to_rebasing`], so the ceiling is armed at
     /// the loop's *start* — its scope covers the whole
-    /// `Settling ⇄ Rebasing` loop, not each sample.
+    /// `Rebasing ⇄ Settling` loop, not each sample.
     ///
     /// `handle_gate_deadline`'s non-zombie arm does NOT call this
     /// helper — gate-deadline-recovery has already waited 4× max_settle
@@ -1143,22 +1145,38 @@ impl Engine {
         }
     }
 
-    /// `Settling → Rebasing` (the natural settle-expiry advance and
-    /// the ceiling-driven force) or `Awaiting → Rebasing` (the
-    /// gate-deadline-recovery skip). The post-fire baseline-capture
-    /// probe's emission edge — single-purpose: mint correlation, clear
-    /// residual, write phase, emit probe.
+    /// The post-fire baseline-capture probe's emission edge —
+    /// single-purpose: mint correlation, clear residual, write phase,
+    /// emit probe. This helper **never arms the ceiling** (that is
+    /// [`Self::arm_rebase_loop_ceiling`], at the loop's start); it is
+    /// reached by four paths over two prior phases:
     ///
-    /// **Ceiling arming lives elsewhere.** The rebase-loop ceiling is
-    /// armed at the natural `Awaiting → Settling` entry by
-    /// [`Engine::arm_rebase_loop_ceiling`], so by the time we reach
-    /// this helper the ceiling is already in place. The
-    /// gate-deadline-recovery caller
-    /// ([`Engine::handle_gate_deadline`]'s non-zombie arm) explicitly
-    /// skips the ceiling — it calls [`Self::force_pending_post_fire`]
-    /// then this helper directly; the `forced` bit drives the next
-    /// response to a commit terminal in one walk without needing a
-    /// loop bound (the actuator has already hung for 4× max_settle).
+    /// - `Awaiting → Rebasing`, **natural / unforced** —
+    ///   [`Engine::on_effect_complete`]'s `LastReached + ReturnToIdle`
+    ///   arm. The command's effects just drained, so go probe-first
+    ///   (no driving FS event — the Cold-Seed mirror). The caller
+    ///   armed the loop ceiling immediately before (`Armed`, not
+    ///   `Reached`), so the response folds normally and a HashChannel
+    ///   Profile still proves quiescence over N≥2 samples.
+    /// - `Awaiting → Rebasing`, **gate-deadline / forced** —
+    ///   [`Engine::handle_gate_deadline`]'s non-zombie arm. The
+    ///   actuator hung 4× max_settle; the caller latched
+    ///   [`CeilingState::Reached`] via
+    ///   [`Self::force_pending_post_fire`] first, so this response
+    ///   commits in one walk (no loop bound needed).
+    /// - `Settling → Rebasing`, **settle-expiry** —
+    ///   [`Engine::handle_post_fire_settle_expired`], the next sample
+    ///   of the HashChannel spacing loop (ceiling still `Armed`).
+    /// - `Settling → Rebasing`, **ceiling-driven** —
+    ///   [`Engine::handle_rebase_ceiling`]'s drive-now arm (the
+    ///   ceiling just latched `Reached`; this response commits the
+    ///   final sample).
+    ///
+    /// The shared `Awaiting → Rebasing` edge is taken **unforced** by
+    /// the natural completion and **forced** by the gate-deadline
+    /// recovery — same edge, different `CeilingState`; the `forced`
+    /// bit is read off the ceiling at the verdict fold, not threaded
+    /// through this helper.
     ///
     /// **Probe slot.** A fresh correlation is minted and the
     /// `Rebasing` phase is written already armed with it, in one move
@@ -1197,14 +1215,14 @@ impl Engine {
     /// the verdict.
     ///
     /// **Non-Active early return.** Every caller has verified
-    /// `Active(PostFire)` (phase `Settling` for the natural and
-    /// ceiling-driven entries, `Awaiting` for the
-    /// gate-deadline-recovery skip) before reaching here. Defensively
-    /// early-returning on non-Active matches `transition_to_verifying`'s
-    /// strict policy and avoids the latent bug where a stray call
-    /// mints a correlation and emits a Probe op while failing to
-    /// write the phase — orphaning the correlation, whose late
-    /// response would stale-detect against an unarmed state.
+    /// `Active(PostFire)` (phase `Awaiting` for the natural completion
+    /// and the gate-deadline-recovery skip, `Settling` for the
+    /// settle-expiry and ceiling-driven loop advances) before reaching
+    /// here. Defensively early-returning on non-Active matches
+    /// `transition_to_verifying`'s strict policy and avoids the latent
+    /// bug where a stray call mints a correlation and emits a Probe op
+    /// while failing to write the phase — orphaning the correlation,
+    /// whose late response would stale-detect against an unarmed state.
     pub(crate) fn transition_to_rebasing(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if !self.require_active_post_fire(profile_id, BurstHelper::TransitionToRebasing, out) {
             return;
@@ -1251,48 +1269,35 @@ impl Engine {
         self.emit_owner_probe(owner, out);
     }
 
-    /// `Awaiting | Rebasing → Settling`. The post-fire settle-debounce
-    /// entry — the symmetric mirror of pre-fire's `event_drives_batching`
-    /// / `retry_drives_batching` pair on the Settling side
-    /// (post-fire collapses the two pre-fire callers' work to one
-    /// helper, since there is no Cancel-vs-no-Cancel split: the prior
-    /// phase carries no probe slot in either arm).
+    /// `Rebasing → Settling`. Post-fire mirror of pre-fire's
+    /// `retry_drives_batching`: a `QuiescenceVerdict::Retry` rebase
+    /// response (HashChannel disagreement or transient walker refusal,
+    /// the ceiling not yet fired) loops the burst back through a
+    /// settle-sized spacing window before the next `WholeSubtree`
+    /// sample. The natural rebase entry is probe-first
+    /// (`Awaiting → Rebasing`), so this is the *only* post-fire
+    /// `Settling` entry — the spacing half of the bounded
+    /// `Rebasing ⇄ Settling` loop, not a debounce of the fire's own
+    /// events.
     ///
-    /// **Two prior phases.** The helper is reached from:
+    /// **Sole caller.** `dispatch_rebase_ok::Retry`. The loop ceiling
+    /// was armed once at the `Awaiting → Rebasing` entry
+    /// ([`Self::arm_rebase_loop_ceiling`]); no re-arm here.
     ///
-    /// 1. `Awaiting → Settling` — [`Engine::on_effect_complete`]'s
-    ///    `LastReached + ReturnToIdle` arm (the natural rebase entry,
-    ///    `outstanding` just hit zero). The caller invokes
-    ///    [`Self::arm_rebase_loop_ceiling`] **before** this helper to
-    ///    arm the loop's ceiling at its start; `last_event_time =
-    ///    Some(now)` is the EffectComplete instant — the Settling
-    ///    window reckons from there.
-    /// 2. `Rebasing → Settling` — `dispatch_rebase_ok::Retry` (the
-    ///    only surviving post-fire loop-back arm). The ceiling was
-    ///    armed at the loop's start (1); no re-arm here.
-    ///    `last_event_time = Some(now)` is the response instant — the
-    ///    next Settling window reckons from the unfavorable response,
-    ///    the same conservative anchor pre-fire's
-    ///    `retry_drives_batching` applies on `last_event_time =
-    ///    Some(now)` after a verify response.
+    /// Writes `phase = Settling { settle_timer }`, pins
+    /// `last_event_time = Some(now)` (the unfavorable-response
+    /// instant), and arms a fresh [`TimerKind::PostFireSettle`] timer.
+    /// Ceiling arming is not this helper's job — it is single-purpose.
     ///
-    /// Both arms write `phase = Settling { settle_timer }`, pin
-    /// `last_event_time = Some(now)`, and arm the fresh
-    /// [`TimerKind::PostFireSettle`] timer. Ceiling arming is the
-    /// caller's responsibility — this helper is single-purpose.
-    ///
-    /// **Prior phase carries no probe slot in either arm.** `Awaiting`
-    /// has no slot at all (its correlation token is `gate_deadline`).
-    /// `Rebasing`'s slot was disarmed by `take_owner_probe` at the
-    /// `on_profile_probe_response` entry, before `dispatch_rebase_ok`
-    /// ran. So the phase overwrite below drops either a `(outstanding,
-    /// gate_deadline)` payload (Awaiting) or an *empty* `ProbeSlot`
-    /// (Rebasing) — no linearity tripwire either way. The
-    /// `debug_assert!` pins the accepted prior-phase set.
+    /// **Prior phase carries no probe slot.** `Rebasing`'s slot was
+    /// disarmed by `take_owner_probe` at the `on_profile_probe_response`
+    /// entry, before `dispatch_rebase_ok` ran, so the phase overwrite
+    /// below drops an *empty* `ProbeSlot` — no linearity tripwire. The
+    /// `debug_assert!` pins the sole accepted prior phase.
     ///
     /// **`last_event_time` pinned to `Some(now)`.** Same rationale as
-    /// pre-fire's `retry_drives_batching` pin: removes the
-    /// `Instant` monotonicity dependency from
+    /// pre-fire's `retry_drives_batching` pin: removes the `Instant`
+    /// monotonicity dependency from
     /// [`Engine::handle_post_fire_settle_expired`]'s reschedule check.
     /// The freshly-scheduled `settle_timer` fires at `now + settle`,
     /// and the expiry handler sees `expiry_now − now ≥ settle` (true
@@ -1320,11 +1325,8 @@ impl Engine {
             .and_then(Profile::post_fire_burst_mut)
         {
             debug_assert!(
-                matches!(
-                    post.phase,
-                    PostFirePhase::Awaiting { .. } | PostFirePhase::Rebasing(_),
-                ),
-                "transition_to_settling off a non-Awaiting/non-Rebasing phase \
+                matches!(post.phase, PostFirePhase::Rebasing(_)),
+                "transition_to_settling off a non-Rebasing phase \
                  (profile = {profile_id:?})",
             );
             post.phase = PostFirePhase::Settling { settle_timer };
@@ -1345,12 +1347,12 @@ impl Engine {
     /// only the timer correlation moves.
     ///
     /// **Not `transition_to_settling` minus the schedule.** That
-    /// helper enters Settling from `Awaiting` (natural) or `Rebasing`
-    /// (undischarged loop-back) and pins `last_event_time = now`.
-    /// This path is *already* `Settling` and must **not** touch
-    /// `last_event_time`: pinning it would push the very deadline the
-    /// caller's just-made quiet-window decision is rescheduling
-    /// toward, defeating the check that chose to reschedule.
+    /// helper enters Settling from `Rebasing` (the `Retry` loop-back)
+    /// and pins `last_event_time = now`. This path is *already*
+    /// `Settling` and must **not** touch `last_event_time`: pinning it
+    /// would push the very deadline the caller's just-made quiet-window
+    /// decision is rescheduling toward, defeating the check that chose
+    /// to reschedule.
     ///
     /// **Timer math stays with the caller.**
     /// `handle_post_fire_settle_expired` owns the `now −

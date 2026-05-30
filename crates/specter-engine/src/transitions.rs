@@ -1121,21 +1121,21 @@ impl Engine {
     /// and zero-edge ([`specter_core::Profile::note_effect_completion`]);
     /// this only routes the verdict:
     /// - `LastReached` ⇒ route on [`BurstFinish`]: `ReturnToIdle` →
-    ///   arm the rebase-loop ceiling at the `Awaiting → Settling` edge
+    ///   arm the rebase-loop ceiling at the `Awaiting → Rebasing` edge
     ///   ([`Engine::arm_rebase_loop_ceiling`], scheduled at `now +
-    ///   max_settle`), then [`Engine::transition_to_settling`] to open
-    ///   the settle-debounce window (the `Settling → Rebasing` advance
-    ///   lands at settle expiry via
-    ///   `handle_post_fire_settle_expired`); `Reap` →
+    ///   max_settle`), then [`Engine::transition_to_rebasing`] to probe
+    ///   the post-command tree immediately — probe-first, no driving
+    ///   FS event to debounce (the Cold-Seed invariant); `Reap` →
     ///   `finish_burst_to_idle`.
     /// - `Decremented` ⇒ stay Awaiting.
     /// - else (non-Awaiting, stale, `NotAwaiting`) ⇒ late completion:
     ///   `EffectCompleteForUnknownSub` / `EffectCompleteOutsideAwaiting`.
     ///
-    /// `now` is the wall-clock instant of this completion. The
-    /// ceiling timer's deadline (`now + max_settle`) and the
-    /// `Settling` window's `last_event_time` both anchor on this
-    /// instant — the actual `Awaiting → Settling` edge.
+    /// `now` is the wall-clock instant of this completion — the actual
+    /// `Awaiting → Rebasing` edge. The ceiling timer's deadline
+    /// (`now + max_settle`) anchors on it; the immediate rebase probe
+    /// itself needs no `now` (the `WholeSubtree` walk reckons from its
+    /// response, not from a window deadline).
     pub(crate) fn on_effect_complete(
         &mut self,
         sub: SubId,
@@ -1177,10 +1177,10 @@ impl Engine {
         {
             Some(ProfileState::Active(ActiveBurst::PostFire(post), finish)) => match &post.phase {
                 PostFirePhase::Awaiting { .. } => CompletionRoute::CountDown(*finish),
-                // The counter drained at the `Awaiting → Settling`
+                // The counter drained at the `Awaiting → Rebasing`
                 // edge; a completion arriving anywhere in the rebase
-                // loop (Settling-debounce or in-flight Rebasing probe)
-                // is a late, untracked arrival.
+                // loop (in-flight Rebasing probe or the HashChannel
+                // spacing Settling) is a late, untracked arrival.
                 PostFirePhase::Rebasing(_) | PostFirePhase::Settling { .. } => {
                     CompletionRoute::Diagnose
                 }
@@ -1202,12 +1202,18 @@ impl Engine {
                 Some(AwaitVerdict::Decremented) => {}
                 Some(AwaitVerdict::LastReached) => match finish {
                     BurstFinish::ReturnToIdle => {
-                        // Arm the loop's ceiling at its start (this is
-                        // the only natural arming site post-§7.2), then
-                        // open the settle-debounce window. The Settling
-                        // → Rebasing advance lands at the settle expiry.
+                        // No driving FS event — the command's own writes
+                        // were absorbed during Awaiting and the
+                        // WholeSubtree rebase re-observes them regardless,
+                        // so go probe-first (the Cold-Seed invariant).
+                        // Arm the loop ceiling at its start (the sole
+                        // natural arming site), then drive the rebase now.
+                        // NOT force_pending_post_fire — that is the
+                        // gate-deadline forced variant; the natural path
+                        // folds the verdict normally, so a HashChannel
+                        // Profile still proves quiescence over N>=2 samples.
                         self.arm_rebase_loop_ceiling(profile_id, now);
-                        self.transition_to_settling(profile_id, now, out);
+                        self.transition_to_rebasing(profile_id, out);
                     }
                     // No Subs left to rebase for; finish_burst_to_idle
                     // runs the burst-end Draining-sweep reconfirm then
@@ -3349,15 +3355,19 @@ impl Engine {
             self.finish_burst_to_idle(profile_id, out);
         } else {
             // Symmetric mirror of pre-fire's `handle_burst_deadline →
-            // force_pending → drive Verifying now`. No follow-up
-            // timer is scheduled — the `forced` bit drives the next
-            // probe response to a commit terminal in one walk.
+            // force_pending → drive Verifying now`. Shares the
+            // `Awaiting → Rebasing` edge with the natural completion
+            // path (`on_effect_complete`) but takes it *forced*: no
+            // follow-up timer is scheduled — the `forced` bit drives
+            // the next probe response to a commit terminal in one walk.
             self.force_pending_post_fire(profile_id);
             self.transition_to_rebasing(profile_id, out);
         }
     }
 
-    /// `PostFireSettle` row — the post-fire settle-debounce expiry. The
+    /// `PostFireSettle` row — the HashChannel re-sample spacing expiry
+    /// (the only surviving post-fire `Settling` window; the natural
+    /// rebase entry is probe-first, `Awaiting → Rebasing`). The
     /// symmetric mirror of [`Engine::on_settle_expired`] on the
     /// pre-fire side, including the reschedule fork.
     ///
@@ -3375,12 +3385,12 @@ impl Engine {
     /// to [`Engine::transition_to_rebasing`] for the next sample.
     ///
     /// **Structurally unreachable: `last_event_time = None` on a
-    /// `Settling` expiry.** Both `Settling` entries
-    /// (`Awaiting → Settling`, `Rebasing → Settling`) flow through
-    /// [`Engine::transition_to_settling`], which pins `Some(now)`. The
-    /// match's `None` arm is therefore unreachable in production; it
-    /// carries `debug_assert!(false)` + the safe transition default
-    /// (the pre-fire mirror at `on_settle_expired`).
+    /// `Settling` expiry.** The sole `Settling` entry
+    /// (`Rebasing → Settling` via [`Engine::transition_to_settling`])
+    /// pins `Some(now)`. The match's `None` arm is therefore
+    /// unreachable in production; it carries `debug_assert!(false)` +
+    /// the safe transition default (the pre-fire mirror at
+    /// `on_settle_expired`).
     ///
     /// **Preconditions** (guaranteed by [`is_timer_referenced`]
     /// upstream): `Profile.state == Active(PostFire(Settling {
@@ -3422,7 +3432,7 @@ impl Engine {
                     false,
                     "handle_post_fire_settle_expired: last_event_time = None on \
                      Settling expiry for Profile {profile_id:?} — \
-                     transition_to_settling pins Some(now) at every Settling \
+                     transition_to_settling pins Some(now) at the sole Settling \
                      entry; reaching here means a future writer opened the \
                      unreachable arm",
                 );
@@ -3437,14 +3447,15 @@ impl Engine {
     /// [`Engine::force_pending_post_fire`] (the single-source
     /// [`specter_core::CeilingState::Armed`] → `Reached` writer), then
     /// mirrors `handle_burst_deadline`'s phase routing exactly: in
-    /// `Settling` no probe is in flight (the `Batching` analogue), so
-    /// drive the final sample *now* via
+    /// `Settling` no probe is in flight (the `Batching` analogue — the
+    /// HashChannel re-sample spacing window, now the only post-fire
+    /// `Settling`), so drive the final sample *now* via
     /// [`Engine::transition_to_rebasing`]; in `Rebasing` a probe is
     /// already in flight (the `Verifying` analogue), so set-only — its
     /// response carries the terminal. `Awaiting` is unreachable (the
-    /// ceiling is armed only at the natural `Awaiting → Settling`
-    /// entry) and folds to the no-op default, as does a vanished
-    /// Profile.
+    /// ceiling is armed only at the natural `Awaiting → Rebasing`
+    /// entry, and the burst leaves `Awaiting` in that same step) and
+    /// folds to the no-op default, as does a vanished Profile.
     fn handle_rebase_ceiling(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         // Single-source latch: `post.ceiling = CeilingState::Reached`,
         // collapsing the prior two-field `forced = true; rebase_ceiling

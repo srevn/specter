@@ -19,7 +19,7 @@ use specter_core::{
     PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
     ProfileIdentity, ProfileState, PromoterAttachRequest, PromoterId, ResourceId, ResourceKind,
     ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, TimerId,
-    TimerKind, WatchFailure,
+    WatchFailure,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -477,23 +477,21 @@ pub fn verify(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, start: In
 
 /// The clean post-fire rebase to Idle for `pid`.
 ///
-/// `pid` is already in `Active(PostFire(Settling))` (the caller has
-/// stepped `EffectComplete`, which advances `Awaiting → Settling` via
-/// `on_effect_complete::LastReached`). Drives `PostFireSettle` expiry
-/// by id (`Settling → Rebasing` via `handle_post_fire_settle_expired`),
-/// then answers the in-flight rebase probe with `proven(snap)`. The
-/// response folds through `quiescence_verdict` to
+/// `pid` is already in `Active(PostFire(Rebasing))` with the rebase
+/// probe in flight — `EffectComplete` drove `Awaiting → Rebasing`
+/// directly (probe-first), so there is no settle window before the
+/// first sample. Answers the in-flight rebase probe with `proven(snap)`;
+/// the response folds through `quiescence_verdict` to
 /// `Stable(StableReason::Natural)` → commit + finish (or restart on a
 /// non-empty residual).
 ///
-/// Returns every step output (`settle`, `finish`) and the finish
-/// instant so the caller can assert co-Profile state between each.
+/// Returns the finish step output and its instant.
 /// **Carve-out:** a test that injects a custom absorb in the final
 /// window or exercises the [`specter_core::QuiescenceVerdict::Retry`]
-/// loop-back composes the finer primitives inline.
+/// loop-back (which re-enters `Settling`) composes the finer primitives
+/// inline.
 #[derive(Debug)]
 pub struct RebasePostFire {
-    pub settle: StepOutput,
     pub finish: StepOutput,
     pub finish_at: Instant,
 }
@@ -503,33 +501,22 @@ pub fn rebase_post_fire_to_idle(
     e: &mut Engine,
     pid: ProfileId,
     snap: &Arc<DirSnapshot>,
-    start: Instant,
+    at: Instant,
 ) -> RebasePostFire {
-    let settle_id = post_fire_settle_id(e, pid);
-    let finish_at = start + SETTLE;
-    let settle = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
-        finish_at,
-    );
     let corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("PostFireSettle drives Settling → Rebasing with probe in flight");
+        .expect("EffectComplete drove Awaiting → Rebasing with the rebase probe in flight");
     let finish = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
             correlation: corr,
             outcome: proven(Arc::clone(snap)),
         }),
-        finish_at,
+        at,
     );
     RebasePostFire {
-        settle,
         finish,
-        finish_at,
+        finish_at: at,
     }
 }
 
@@ -559,24 +546,22 @@ pub fn descent_advance(
     )
 }
 
-/// Drive the burst's single completed Effect (`key`) into Settling.
+/// Drive the burst's single completed Effect (`key`) into Rebasing.
 ///
-/// Steps `EffectComplete::Ok`; the burst advances `Awaiting → Settling`
-/// via `on_effect_complete::LastReached + ReturnToIdle` and the step
-/// output is returned. The rebase probe is minted later, on
-/// `PostFireSettle` expiry, inside [`rebase_post_fire_to_idle`]. This
-/// is the single-`Ok`, single-effect prologue before
-/// [`rebase_post_fire_to_idle`]. Multi-effect / `Failed`-mix awaiting
-/// tests keep their explicit loop inline (they assert the
-/// outstanding-count decrement).
+/// Steps `EffectComplete::Ok`; the burst advances `Awaiting → Rebasing`
+/// (probe-first) via `on_effect_complete::LastReached + ReturnToIdle`,
+/// minting the `WholeSubtree` rebase probe immediately, and the step
+/// output is returned. This is the single-`Ok`, single-effect prologue
+/// before [`rebase_post_fire_to_idle`], which answers the now-in-flight
+/// probe. Multi-effect / `Failed`-mix awaiting tests keep their explicit
+/// loop inline (they assert the outstanding-count decrement).
 ///
 /// **Carve-out callers** that need the rebase probe correlation
-/// (e.g. answering with a custom `Vanished` / `Failed` outcome) compose
-/// inline: step the `EffectComplete::Ok`, drive `PostFireSettle`
-/// expiry by id (`post_fire_settle_id` reads the live token), then
-/// `pending_probe_for` returns the freshly-minted correlation.
+/// (e.g. answering with a custom `Vanished` / `Failed` outcome) read it
+/// via `pending_probe_for(ProbeOwner::Profile(pid))` right after this
+/// step — the probe is already in flight, no settle expiry between.
 #[must_use]
-pub fn complete_effect_to_settling(
+pub fn complete_effect_to_rebasing(
     e: &mut Engine,
     sid: SubId,
     key: DedupKey,

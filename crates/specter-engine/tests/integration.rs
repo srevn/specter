@@ -21,7 +21,7 @@ use specter_core::{
 };
 use specter_engine::testkit::{
     anchor_dir, assert_seed_verifying, attach_promoter, attach_returning,
-    complete_effect_to_settling, first_probe_correlation, pre_place_dir, rebase_post_fire_to_idle,
+    complete_effect_to_rebasing, first_probe_correlation, pre_place_dir, rebase_post_fire_to_idle,
     seed_to_idle,
 };
 use specter_engine::{Engine, covers};
@@ -216,11 +216,11 @@ fn golden_path_full_lifecycle() {
     assert_eq!(stable_out.effects().len(), 1);
     assert!(!stable_out.effects()[0].forced);
 
-    // EffectComplete::Ok drives the burst out of Awaiting and into
-    // Rebasing — a fresh probe is emitted at the anchor to capture the
-    // post-command tree.
+    // EffectComplete::Ok drives the burst out of Awaiting and directly
+    // into Rebasing (probe-first) — the WholeSubtree rebase probe is
+    // emitted in this very step to capture the post-command tree.
     let _ =
-        complete_effect_to_settling(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
+        complete_effect_to_rebasing(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
 
     // Post-fire rebase (idempotent — same snapshot) → Idle;
     // baseline := current (the post-command tree).
@@ -282,7 +282,7 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
     let stable_out = drive_standard_burst_to_stable(&mut e, pid, &snap, t1);
     assert_eq!(stable_out.effects().len(), 1, "first fire emits one Effect");
     let _ =
-        complete_effect_to_settling(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
+        complete_effect_to_rebasing(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
     // Post-fire rebase (idempotent) → Idle; baseline := the
     // post-command tree. The loop closes to Idle before the trailing
     // event below.

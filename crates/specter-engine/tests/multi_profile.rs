@@ -15,12 +15,12 @@ use specter_core::{
     FsEvent, Input, OverflowScope, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase,
     ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ProofAuthority,
     ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId,
-    TimerKind, WatchOp,
+    WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, post_fire_settle_id,
-    rebase_post_fire_to_idle, reconfirm_probed, seed_to_idle, verify,
+    DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, rebase_post_fire_to_idle,
+    reconfirm_probed, seed_to_idle, verify,
 };
 use std::time::{Duration, Instant};
 
@@ -260,10 +260,13 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     // Rebase tail kept inline (irregular: final-window absorb + residual
     // restart — not the clean rebase_post_fire_to_idle shape).
     //
-    // EffectComplete (last completion) routes Awaiting → Settling; the
-    // rebase probe is minted on PostFireSettle expiry. No finish, no
-    // sweep — the child stays Active(PostFire) for the whole loop.
-    let settle_out = e.step(
+    // EffectComplete (last completion, ReturnToIdle) routes Awaiting →
+    // Rebasing DIRECTLY (probe-first): the WholeSubtree rebase probe is
+    // minted in this very step — no first Settling window, no
+    // PostFireSettle timer. No finish, no sweep — the child stays
+    // Active(PostFire(Rebasing)) for the whole loop, so the parent stays
+    // gated.
+    let rebase_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid_c,
             key: child_effect.key(),
@@ -271,29 +274,13 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         }),
         child_parked_at,
     );
-    let settle_timer = post_fire_settle_id(&e, pid_child);
-    assert!(
-        !reconfirm_probed(&settle_out, pid_parent) && parent_is_draining(&e),
-        "parent does not reconfirm at EffectComplete (Settling has no probe)",
-    );
-
-    // PostFireSettle expiry (by id — scoped to the child, parent
-    // untouched) → child enters Rebasing with a fresh probe in flight.
-    let t_rebase = child_parked_at + SETTLE;
-    let rebase_out = e.step(
-        Input::TimerExpired {
-            profile: pid_child,
-            kind: TimerKind::PostFireSettle,
-            id: settle_timer,
-        },
-        t_rebase,
-    );
     let rebase_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid_child))
-        .expect("PostFireSettle expiry mints the child's Rebasing probe");
+        .expect("EffectComplete drove Awaiting → Rebasing with the rebase probe in flight");
     assert!(
         !reconfirm_probed(&rebase_out, pid_parent) && parent_is_draining(&e),
-        "parent does not reconfirm across PostFireSettle → Rebasing",
+        "parent does not reconfirm at EffectComplete → Rebasing (child stays \
+         Active(PostFire), gate held)",
     );
     assert!(
         matches!(
@@ -306,14 +293,14 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
                 _,
             ),
         ),
-        "child entered Active(PostFire(Rebasing)) on PostFireSettle expiry",
+        "child entered Active(PostFire(Rebasing)) directly on EffectComplete (probe-first)",
     );
 
     // Descendant edit absorbed during the Rebasing round-trip — the
     // final-window residual that seeds the restart. `last_event_time`
     // is also updated; no PostFireSettle is in flight while Rebasing,
     // so the absorb writes purely into the residual.
-    let t_absorb = t_rebase + Duration::from_millis(5);
+    let t_absorb = child_parked_at + SETTLE;
     let absorb_out = e.step(
         Input::FsEvent {
             resource: bar,
@@ -619,16 +606,14 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         "parent does not reconfirm until the child's burst finishes",
     );
 
-    // Child post-fire rebase loop: PostFireSettle expiry → Rebasing →
-    // response → commit. The child stays Active(PostFire) for the whole
-    // loop, so the parent does not reconfirm until the child's single
-    // finish_burst_to_idle.
+    // Child post-fire rebase: EffectComplete already drove Awaiting →
+    // Rebasing (probe-first), so this answers the in-flight rebase probe
+    // directly — response → commit → finish. The child stays
+    // Active(PostFire(Rebasing)) until that single response step (the
+    // EffectComplete step above already proved no reconfirm while it is
+    // Rebasing), so the parent reconfirms only at the child's single
+    // finish_burst_to_idle, which now runs on this rebase-response step.
     let r = rebase_post_fire_to_idle(&mut e, pid_child, &dir_snap(&[]), child_parked_at);
-    assert!(
-        !reconfirm_probed(&r.settle, pid_parent),
-        "parent does not reconfirm across the child's PostFireSettle expiry \
-         (Settling → Rebasing)",
-    );
 
     // Response Authoritative ⇒ commit → child finish_burst_to_idle. The
     // sweep re-evaluates the parent's fresh query (child now Idle,
@@ -873,15 +858,14 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
         !reconfirm_probed(&p_stable, pid_a) && !reconfirm_probed(&p_rebase_out, pid_a),
         "A does not reconfirm until P's burst actually finishes",
     );
-    // P's post-fire rebase loop: PostFireSettle expiry → Rebasing →
-    // response → commit. P stays Active(PostFire) for the whole loop,
-    // so A does not reconfirm until P's single finish_burst_to_idle.
+    // P's post-fire rebase: EffectComplete already drove Awaiting →
+    // Rebasing (probe-first), so this answers the in-flight rebase probe
+    // directly — response → commit → finish. P stays
+    // Active(PostFire(Rebasing)) until that single response step (the
+    // EffectComplete step above already proved no reconfirm while it is
+    // Rebasing), so A reconfirms only at P's single finish_burst_to_idle,
+    // which now runs on this rebase-response step.
     let p_r = rebase_post_fire_to_idle(&mut e, pid_p, &dir_snap(&[]), p_parked_at);
-    assert!(
-        !reconfirm_probed(&p_r.settle, pid_a),
-        "A does not reconfirm across P's PostFireSettle expiry \
-         (Settling → Rebasing)",
-    );
 
     // Response Authoritative ⇒ commit → P finish_burst_to_idle → the
     // sweep re-checks every Draining Profile.

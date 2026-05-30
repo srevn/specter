@@ -25,7 +25,7 @@ use specter_core::{
 use specter_engine::Engine;
 use specter_engine::testkit::{
     anchor_dir, attach_returning, attach_structure_only, batching_settle_id,
-    complete_effect_to_settling, first_probe_correlation, rebase_post_fire_to_idle, seed_to_idle,
+    complete_effect_to_rebasing, first_probe_correlation, rebase_post_fire_to_idle, seed_to_idle,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -179,7 +179,7 @@ fn drive_standard_fire_once(
         "post-baseline Standard burst fires exactly one Effect (now behaves as Standard)",
     );
     let key = stable_out.effects()[0].key();
-    let _co = complete_effect_to_settling(e, sid, key, t + Duration::from_millis(1));
+    let _co = complete_effect_to_rebasing(e, sid, key, t + Duration::from_millis(1));
     let _r = rebase_post_fire_to_idle(e, pid, snap_new, t + Duration::from_millis(2));
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
@@ -303,7 +303,7 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
     // Complete the fire cycle and prove the post-fire baseline is now
     // established and the Profile behaves as Standard thereafter.
     let key = eff.key();
-    let _co = complete_effect_to_settling(&mut e, sid, key, t1 + Duration::from_millis(1));
+    let _co = complete_effect_to_rebasing(&mut e, sid, key, t1 + Duration::from_millis(1));
     let _r = rebase_post_fire_to_idle(&mut e, pid, &snap, t1 + Duration::from_millis(2));
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
@@ -768,8 +768,11 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
             "the child's Effect is its own SubtreeRoot Subtree effect",
         );
 
-        // Child EffectComplete::Ok → Rebasing (idempotent `/bin/true`).
-        let child_rebase_out = complete_effect_to_settling(
+        // Child EffectComplete::Ok → Rebasing directly (probe-first;
+        // idempotent `/bin/true`). The WholeSubtree rebase probe is in
+        // flight in this step — the child stays Active(PostFire(Rebasing)),
+        // so the parent stays gated and does not reconfirm yet.
+        let child_rebase_out = complete_effect_to_rebasing(
             &mut e,
             sid_c,
             child_effect_key,

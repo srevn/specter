@@ -273,7 +273,7 @@ impl FoldLatch {
 
     /// Whether this burst folds its terminal verdict instead of firing.
     #[must_use]
-    pub(crate) const fn is_latched(&self) -> bool {
+    pub(crate) const fn is_latched(self) -> bool {
         self.0
     }
 }
@@ -554,8 +554,8 @@ pub struct PostFireBurst {
     /// events', a bounded ≤ one-`settle` extra re-fire latency.
     ///
     /// **Per-entry reset.** Cleared at *every* `Rebasing` entry
-    /// (`transition_to_rebasing`, both the first `Awaiting → Settling
-    /// → Rebasing` walk and each `Settling → Rebasing` re-arm), so
+    /// (`transition_to_rebasing`, both the first `Awaiting → Rebasing`
+    /// walk and each `Settling → Rebasing` re-arm), so
     /// when the loop terminates the residual holds only events from
     /// the **final** probe round-trip — the genuine final-window race
     /// (a change observed by the sensor's certifying walk's instant
@@ -571,20 +571,20 @@ pub struct PostFireBurst {
     pub final_window_residual: DirtyProvenance,
     /// Wall-clock instant of the most recent `FsEvent` absorbed into
     /// this post-fire burst by `absorb_event_into_fire_tail` (or the
-    /// `Awaiting | Rebasing → Settling` transition instant — the
-    /// settle-debounce window's deadline source of truth). The
-    /// post-fire mirror of [`PreFireBurst::last_event_time`]; born
-    /// `None` (the absorb tail reckons from its own first absorbed
-    /// event, not from the fire instant).
+    /// `Rebasing → Settling` transition instant via
+    /// `transition_to_settling` — the HashChannel spacing window's
+    /// deadline source of truth). The post-fire mirror of
+    /// [`PreFireBurst::last_event_time`]; born `None` (the absorb tail
+    /// reckons from its own first absorbed event, not from the fire
+    /// instant).
     ///
     /// **Writers** (cat-a, both `engine/burst.rs`):
     /// - `absorb_event_into_fire_tail` — on every absorbed event,
     ///   exactly mirroring `event_drives_batching`'s pre-fire write.
-    /// - `transition_to_settling` — at both Settling entries
-    ///   (`Awaiting → Settling` natural and `Rebasing → Settling`
-    ///   undischarged loop-back), pinning `Some(now)` so the settle
-    ///   window's quiet-check is anchored on the transition instant
-    ///   rather than a stale absorb instant.
+    /// - `transition_to_settling` — at the sole Settling entry
+    ///   (`Rebasing → Settling` undischarged loop-back), pinning
+    ///   `Some(now)` so the spacing window's quiet-check is anchored on
+    ///   the transition instant rather than a stale absorb instant.
     ///
     /// **Reader.** `handle_post_fire_settle_expired` consumes the
     /// timestamp to decide reschedule vs transition, mirroring
@@ -639,11 +639,14 @@ pub struct PostFireBurst {
 /// and finishes (or restarts on a non-empty residual), a
 /// [`QuiescenceVerdict::Retry`] verdict loops back through `Settling`.
 ///
-/// `Settling { settle_timer }`: settle-debounce wait for the
-/// post-command kernel-event tail to quiet — the post-fire mirror of
-/// [`PreFirePhase::Batching`]. No [`ProbeSlot`]: no probe is in flight
-/// during the settle window (the slot lives on `Rebasing`), only the
-/// settle-debounce timer. `absorb_event_into_fire_tail` updates
+/// `Settling { settle_timer }`: settle-sized spacing wait between
+/// rebase samples — the `Rebasing ⇄ Settling` retry loop, entered only
+/// on a [`QuiescenceVerdict::Retry`]. The post-fire mirror of
+/// [`PreFirePhase::Batching`] in its retry-spacing role (the natural
+/// rebase entry is probe-first, so `Settling` no longer debounces the
+/// command's own event tail). No [`ProbeSlot`]: no probe is in flight
+/// during the spacing window (the slot lives on `Rebasing`), only the
+/// settle timer. `absorb_event_into_fire_tail` updates
 /// [`PostFireBurst::last_event_time`] on every absorbed `FsEvent`;
 /// `handle_post_fire_settle_expired` reads the same field on expiry
 /// and either reschedules (events arrived since the timer was
@@ -666,8 +669,10 @@ pub enum PostFirePhase {
     /// let _: PostFirePhase = PostFirePhase::Rebasing;
     /// ```
     Rebasing(ProbeSlot),
-    /// Settle-debounce wait for the post-command kernel-event tail to
-    /// quiet — the post-fire mirror of [`PreFirePhase::Batching`].
+    /// Settle-sized spacing wait between rebase samples (the
+    /// `Rebasing ⇄ Settling` retry loop, entered only on a
+    /// [`QuiescenceVerdict::Retry`]) — the post-fire mirror of
+    /// [`PreFirePhase::Batching`] in its retry-spacing role.
     /// `settle_timer` is the live settle deadline; absorbed `FsEvent`s
     /// update [`PostFireBurst::last_event_time`], and on expiry
     /// `handle_post_fire_settle_expired` reschedules if events arrived
@@ -692,7 +697,7 @@ pub enum PostFirePhase {
 ///
 /// **Two writers, one edge each.** Both cat-a in `engine/burst.rs`:
 /// - `Engine::arm_rebase_loop_ceiling` — [`Self::NotStarted`] →
-///   [`Self::Armed`] at the natural `Awaiting → Settling` entry.
+///   [`Self::Armed`] at the natural `Awaiting → Rebasing` entry.
 ///   Single caller: `on_effect_complete::LastReached + ReturnToIdle`.
 /// - `Engine::force_pending_post_fire` — [`Self::Armed`] →
 ///   [`Self::Reached`] (natural ceiling expiry; the prior timer
@@ -1227,7 +1232,7 @@ impl PostFireBurst {
     /// total fn with no public setter that returns the edge, so the
     /// invariant cannot be enforced at a distance. `Rebasing` /
     /// `Settling` ⇒ [`AwaitVerdict::NotAwaiting`] (the counter drained
-    /// at the `Awaiting → Settling` edge; a completion arriving in the
+    /// at the `Awaiting → Rebasing` edge; a completion arriving in the
     /// rebase loop is a late, untracked arrival). Underflow (more
     /// completions than emitted Effects) trips a `debug_assert!`,
     /// saturates in release.
@@ -1972,8 +1977,8 @@ pub enum StateLabel {
     Awaiting,
     /// [`PostFirePhase::Rebasing`] — post-fire baseline-capture probe.
     Rebasing,
-    /// [`PostFirePhase::Settling`] — settle-debounce wait for the
-    /// post-command kernel-event tail to quiet.
+    /// [`PostFirePhase::Settling`] — re-sample spacing wait (the
+    /// `Rebasing ⇄ Settling` retry loop).
     Settling,
 }
 
@@ -2299,8 +2304,8 @@ pub enum BurstIntent {
 /// taking longer than expected (likely a hung child); the engine
 /// force-transitions to `Rebasing` to re-establish a baseline against
 /// disk reality.
-/// `PostFireSettle` — the post-fire mirror of `Settle`: the
-/// settle-debounce wait armed during [`PostFirePhase::Settling`]. On
+/// `PostFireSettle` — the post-fire mirror of `Settle`: the re-sample
+/// spacing wait armed during [`PostFirePhase::Settling`]. On
 /// expiry, [`crate::Engine::handle_post_fire_settle_expired`] decides
 /// whether to reschedule (events arrived since the timer was
 /// scheduled) or drive `Settling → Rebasing` for the next sample —

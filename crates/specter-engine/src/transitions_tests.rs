@@ -2966,9 +2966,8 @@ fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
     let now = Instant::now();
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
     let key = stable_out.effects()[0].key();
-    // EffectComplete::Ok lands the burst in Settling; the PostFireSettle
-    // expiry then drives Rebasing where transition_to_rebasing mints a
-    // fresh probe.
+    // EffectComplete::Ok drives Awaiting → Rebasing directly (probe-first),
+    // where transition_to_rebasing minted a fresh probe in the same step.
     let _ = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
@@ -2976,21 +2975,6 @@ fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
             outcome: EffectOutcome::Ok,
         }),
         now + SETTLE * 3,
-    );
-    let settle_id = match e.profiles.get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-            PostFirePhase::Settling { settle_timer } => *settle_timer,
-            s => panic!("expected Active(PostFire(Settling)) post-EffectComplete; got {s:?}"),
-        },
-        s => panic!("expected Active(PostFire); got {s:?}"),
-    };
-    let _ = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
-        now + SETTLE * 4,
     );
     let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => post,
@@ -4615,13 +4599,12 @@ fn drive_to_standard_verifying(
 }
 
 /// Drive into `Active(_, Rebasing)` by completing a Standard burst's
-/// stable verdict + Effect → EffectComplete::Ok + PostFireSettle
-/// expiry. Returns the rebase probe correlation so the caller can
-/// drive the rebase response.
+/// stable verdict + Effect → EffectComplete::Ok. Returns the rebase
+/// probe correlation so the caller can drive the rebase response.
 ///
-/// The natural post-`Awaiting` phase is `Settling`, with `Rebasing`
-/// reached via `PostFireSettle` expiry. The helper drives both
-/// transitions so the caller retains a rebase correlation.
+/// The last `EffectComplete::Ok` goes probe-first: `Awaiting → Rebasing`
+/// directly, minting the `WholeSubtree` rebase probe in the same step.
+/// There is no first `Settling` window before the first sample.
 fn drive_to_rebasing(
     e: &mut Engine,
     pid: specter_core::ProfileId,
@@ -4637,7 +4620,8 @@ fn drive_to_rebasing(
         stable_out.effects(),
     );
     let key = stable_out.effects()[0].key();
-    // EffectComplete::Ok lands the burst in Settling.
+    // EffectComplete::Ok drives Awaiting → Rebasing directly, with the
+    // WholeSubtree rebase probe already in flight.
     let _ = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
@@ -4646,27 +4630,16 @@ fn drive_to_rebasing(
         }),
         now + SETTLE * 3,
     );
-    // Drive PostFireSettle expiry to advance Settling → Rebasing,
-    // where the rebase probe is in flight.
-    let settle_id = match e.profiles.get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-            PostFirePhase::Settling { settle_timer } => *settle_timer,
-            other => panic!(
-                "expected Active(PostFire(Settling)) after EffectComplete::Ok, got {other:?}",
-            ),
-        },
+    match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => assert!(
+            matches!(post.phase, PostFirePhase::Rebasing(_)),
+            "expected Active(PostFire(Rebasing)) after EffectComplete::Ok, got {:?}",
+            post.phase,
+        ),
         other => panic!("expected Active(PostFire) after EffectComplete::Ok, got {other:?}"),
-    };
-    let _ = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
-        now + SETTLE * 4,
-    );
+    }
     e.pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("rebase probe in flight after PostFireSettle drove Settling → Rebasing")
+        .expect("rebase probe in flight after EffectComplete drove Awaiting → Rebasing")
 }
 
 #[test]
@@ -4968,30 +4941,15 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
         burst.final_window_residual.chains(),
     );
 
-    // EffectComplete::Ok lands the burst in Settling; the PostFireSettle
-    // expiry then drives Rebasing where the rebase probe is minted.
-    let _ = e.step(
+    // EffectComplete::Ok drives Awaiting → Rebasing directly (probe-first),
+    // minting the WholeSubtree rebase probe in the same step.
+    let rebase_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
             key,
             outcome: EffectOutcome::Ok,
         }),
         now + SETTLE * 3,
-    );
-    let settle_id = match e.profiles.get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-            PostFirePhase::Settling { settle_timer } => *settle_timer,
-            other => panic!("expected Active(PostFire(Settling)); got {other:?}"),
-        },
-        other => panic!("expected Active(PostFire); got {other:?}"),
-    };
-    let rebase_out = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
-        now + SETTLE * 4,
     );
 
     let req = rebase_out
@@ -5001,7 +4959,7 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
             ProbeOp::Probe { request } => Some(request),
             ProbeOp::Cancel { .. } => None,
         })
-        .expect("Rebase probe minted on PostFireSettle expiry (Settling → Rebasing)");
+        .expect("Rebase probe minted on EffectComplete (Awaiting → Rebasing)");
     match req {
         ProbeRequest::Subtree {
             obligation, forced, ..
@@ -5046,31 +5004,15 @@ fn rebasing_without_absorbs_still_probes_whole_subtree() {
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
     let key = stable_out.effects()[0].key();
 
-    // EffectComplete::Ok lands the burst in Settling. Drive
-    // PostFireSettle expiry to advance Settling → Rebasing where the
-    // rebase probe is minted.
-    let _ = e.step(
+    // EffectComplete::Ok drives Awaiting → Rebasing directly (probe-first),
+    // minting the WholeSubtree rebase probe in the same step.
+    let rebase_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
             key,
             outcome: EffectOutcome::Ok,
         }),
         now + SETTLE * 3,
-    );
-    let settle_id = match e.profiles.get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-            PostFirePhase::Settling { settle_timer } => *settle_timer,
-            other => panic!("expected Active(PostFire(Settling)); got {other:?}"),
-        },
-        other => panic!("expected Active(PostFire); got {other:?}"),
-    };
-    let rebase_out = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
-        now + SETTLE * 4,
     );
 
     let req = rebase_out
@@ -5080,7 +5022,7 @@ fn rebasing_without_absorbs_still_probes_whole_subtree() {
             ProbeOp::Probe { request } => Some(request),
             ProbeOp::Cancel { .. } => None,
         })
-        .expect("Rebase probe minted on PostFireSettle expiry (Settling → Rebasing)");
+        .expect("Rebase probe minted on EffectComplete (Awaiting → Rebasing)");
     match req {
         ProbeRequest::Subtree {
             obligation, forced, ..
@@ -5138,23 +5080,48 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
     let stable_out = drive_to_first_effect(&mut e, pid, root, now);
     let key = stable_out.effects()[0].key();
 
-    // EffectComplete::Ok → Awaiting → Settling. Capture the initial
-    // PostFireSettle timer id and the EffectComplete instant.
-    let now_a = now + SETTLE * 3;
+    // EffectComplete::Ok → Awaiting → Rebasing directly (probe-first),
+    // with the WholeSubtree rebase probe in flight.
     let _ = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
             key,
             outcome: EffectOutcome::Ok,
         }),
+        now + SETTLE * 3,
+    );
+    let rebase_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("rebase probe in flight after EffectComplete drove Awaiting → Rebasing");
+
+    // Fold the first rebase response to Retry (Undischarged + !terminal
+    // walker refusal) so the burst enters the spacing Settling window —
+    // the only post-fire Settling entry. `now_a` is the Retry-response
+    // instant: `last_event_time` and the PostFireSettle timer are set
+    // here, scheduled at `now_a + SETTLE`.
+    let now_a = now + SETTLE * 3;
+    let unread: std::sync::Arc<std::path::Path> =
+        std::sync::Arc::from(std::path::Path::new("anchor/opaque"));
+    let degraded = dir_tree_snap(vec![("ghost", EntryKind::File, 9)]);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: rebase_corr,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: degraded,
+                authority: ProofAuthority::Undischarged {
+                    first_unread: unread,
+                },
+            },
+        }),
         now_a,
     );
     let settle_timer_1 = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
             PostFirePhase::Settling { settle_timer } => *settle_timer,
-            other => panic!("expected Active(PostFire(Settling)); got {other:?}"),
+            other => panic!("Retry must loop into Settling; got {other:?}"),
         },
-        other => panic!("expected Active(PostFire); got {other:?}"),
+        other => panic!("expected Active(PostFire(Settling)); got {other:?}"),
     };
 
     // Absorb an anchor FsEvent strictly inside the settle window
@@ -5942,11 +5909,12 @@ fn rebase_loop_spacing_defeats_a_premature_stable_on_a_slow_writer() {
     );
     let key = stable_out.effects()[0].key();
 
-    // EffectComplete → Awaiting → Settling (the rebase loop's natural
-    // entry; `arm_rebase_loop_ceiling` armed `RebaseCeiling` here for the
-    // whole loop's bound — well past the three settle windows this test
-    // walks through). The helper advances `at += SETTLE * 2` per sample
-    // and fired on the second equal sample, so we are at
+    // EffectComplete → Awaiting → Rebasing directly (probe-first; the
+    // rebase loop's natural entry). `arm_rebase_loop_ceiling` armed
+    // `RebaseCeiling` here for the whole loop's bound — well past the
+    // settle windows this test walks through. Sample 1's WholeSubtree
+    // probe is already in flight. The helper advances `at += SETTLE * 2`
+    // per sample and fired on the second equal sample, so we are at
     // `fire_start + SETTLE * 4`.
     let after_fire = fire_start + SETTLE * 4 + Duration::from_millis(1);
     e.step(
@@ -5957,25 +5925,18 @@ fn rebase_loop_spacing_defeats_a_premature_stable_on_a_slow_writer() {
         }),
         after_fire,
     );
-    let settle_id = match e.profiles.get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-            PostFirePhase::Settling { settle_timer } => *settle_timer,
-            other => panic!("expected Settling after EffectComplete::Ok; got {other:?}"),
-        },
+    let corr1 = match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => {
+            assert!(
+                matches!(post.phase, PostFirePhase::Rebasing(_)),
+                "expected Rebasing after EffectComplete::Ok; got {:?}",
+                post.phase,
+            );
+            e.pending_probe_for(ProbeOwner::Profile(pid))
+                .expect("sample 1's rebase probe in flight after EffectComplete drove Rebasing")
+        }
         other => panic!("expected Active(PostFire) after EffectComplete::Ok; got {other:?}"),
     };
-    // PostFireSettle expiry → Rebasing. Sample 1's probe is in flight.
-    e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
-        after_fire + SETTLE,
-    );
-    let corr1 = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("rebase probe in flight after PostFireSettle drove Settling → Rebasing");
 
     // Sample 1: the writer's state at this instant (carrier prior None ⇒
     // Retry). Records carrier := hash(A); the response routes through
@@ -6261,9 +6222,9 @@ fn post_fire_forced_ceiling_observed_change_tracks_carrier_disagreement() {
         let seed_done = crate::testkit::seed_to_idle(&mut e, pid, &baseline, now);
 
         // Fire the Standard burst (events-incomplete pre-fire: N=2 with
-        // two equal samples) → EffectComplete → Settling →
-        // PostFireSettle expiry → Rebasing (rebase probe in flight;
-        // RebaseCeiling armed at the natural Awaiting→Settling entry).
+        // two equal samples) → EffectComplete → Awaiting → Rebasing
+        // directly (probe-first; rebase probe in flight; RebaseCeiling
+        // armed at the natural Awaiting→Rebasing entry).
         let fire_snap = dir_tree_snap(vec![("draft", EntryKind::File, 1)]);
         let fire_start = seed_done + Duration::from_millis(1);
         let stable_out = crate::testkit::drive_standard_n2_until_stable(
@@ -6283,24 +6244,18 @@ fn post_fire_forced_ceiling_observed_change_tracks_carrier_disagreement() {
             }),
             after_fire,
         );
-        let settle_id = match e.profiles.get(pid).unwrap().state() {
-            ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-                PostFirePhase::Settling { settle_timer } => *settle_timer,
-                other => panic!("expected Settling after EffectComplete::Ok; got {other:?}"),
-            },
+        let corr1 = match e.profiles.get(pid).unwrap().state() {
+            ProfileState::Active(ActiveBurst::PostFire(post), _) => {
+                assert!(
+                    matches!(post.phase, PostFirePhase::Rebasing(_)),
+                    "expected Rebasing after EffectComplete::Ok; got {:?}",
+                    post.phase,
+                );
+                e.pending_probe_for(ProbeOwner::Profile(pid))
+                    .expect("sample 1's rebase probe in flight after EffectComplete drove Rebasing")
+            }
             other => panic!("expected Active(PostFire); got {other:?}"),
         };
-        e.step(
-            Input::TimerExpired {
-                profile: pid,
-                kind: TimerKind::PostFireSettle,
-                id: settle_id,
-            },
-            after_fire + SETTLE,
-        );
-        let corr1 = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .expect("rebase probe in flight after PostFireSettle drove Settling → Rebasing");
 
         // Sample 1 in Rebasing: `first` ⇒ carrier prior=None ⇒ Retry ⇒
         // transition_to_settling (carrier := hash(first)).
@@ -7792,28 +7747,19 @@ fn residual_restart_under_window_folds() {
         .lookup(Some(root), "a.rs")
         .expect("the standard burst's reconcile created a.rs");
 
-    // EffectComplete::Ok → Settling.
-    let _ = e.step(
+    // EffectComplete::Ok → Awaiting → Rebasing directly (probe-first;
+    // probe in flight, dirty cleared at the loop entry).
+    let rebasing_at = now + SETTLE * 2;
+    let rearm_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
             key,
             outcome: EffectOutcome::Ok,
         }),
-        now + SETTLE * 2,
-    );
-    let settle_id = crate::testkit::post_fire_settle_id(&e, pid);
-    // PostFireSettle expiry → Rebasing (probe in flight; dirty cleared).
-    let rebasing_at = now + SETTLE * 3;
-    let rearm_out = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
         rebasing_at,
     );
     let rebase_corr = crate::testkit::first_probe_correlation(&rearm_out)
-        .expect("Rebasing probe in flight after PostFireSettle");
+        .expect("Rebasing probe in flight after EffectComplete drove Awaiting → Rebasing");
 
     // Arm the window DURING post-fire (Rebasing) — it cannot retro-latch
     // a PostFire burst (no-op), but it stands for the next pre-fire

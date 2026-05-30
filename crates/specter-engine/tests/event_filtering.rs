@@ -14,13 +14,12 @@ use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
     AnchorClaim, BurstFinish, ClassSet, DedupKey, Diagnostic, DirMeta, DirSnapshot, EntryKind,
     FsEvent, FsIdentity, Input, ProbeFailure, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, TimerKind,
-    WatchOp,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    anchor_dir, assert_seed_verifying, attach, attach_returning, complete_effect_to_settling,
-    drain_due, post_fire_settle_id, pre_place_dir, seed_to_idle, verify,
+    anchor_dir, assert_seed_verifying, attach, attach_returning, complete_effect_to_rebasing,
+    drain_due, pre_place_dir, seed_to_idle, verify,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -1483,9 +1482,11 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     // Lifecycle: Idle → Modified at root → Active(Verifying) →
     // ProbeResponse::Ok (stable, same snapshot) → emit_effects (one
     // Effect for the SubtreeRoot Sub) → Active(Awaiting) →
-    // EffectComplete::Ok → Active(Rebasing) → ProbeResponse::Vanished
-    // → dispatch_rebase_vanished. The release_descendant_claim wire-up
-    // walks Profile.current and reaps subdir.
+    // EffectComplete::Ok → Active(Rebasing) directly (probe-first; the
+    // WholeSubtree rebase probe is minted in that step) →
+    // ProbeResponse::Vanished → dispatch_rebase_vanished. The
+    // release_descendant_claim wire-up walks Profile.current and reaps
+    // subdir.
     let mut e = Engine::new();
     let (root, child, sid, pid) = setup_with_surviving_child(&mut e);
 
@@ -1524,23 +1525,14 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         ),
     ));
 
-    // EffectComplete::Ok lands the burst in Settling. Drive
-    // PostFireSettle expiry by id to advance to Rebasing where the
-    // rebase probe is in flight, then capture the correlation for the
-    // Vanished response below.
-    let _ = complete_effect_to_settling(&mut e, sid, effect.key(), t2);
-    let settle_id = post_fire_settle_id(&e, pid);
-    let _ = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
-        t2 + SETTLE,
-    );
+    // EffectComplete::Ok drives Awaiting → Rebasing directly
+    // (probe-first): the WholeSubtree rebase probe is minted in this very
+    // step, with no first Settling window. Read its correlation straight
+    // off the in-flight probe for the Vanished response below.
+    let _ = complete_effect_to_rebasing(&mut e, sid, effect.key(), t2);
     let rebase_corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("rebase probe in flight after PostFireSettle drove Settling → Rebasing");
+        .expect("EffectComplete drove Awaiting → Rebasing with the rebase probe in flight");
 
     // Pre-condition: descendant claim still intact going into Rebasing.
     assert!(

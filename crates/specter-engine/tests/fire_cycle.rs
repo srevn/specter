@@ -28,7 +28,7 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    anchor_dir, attach_structure_only, complete_effect_to_settling, drain_due,
+    anchor_dir, attach_structure_only, complete_effect_to_rebasing, drain_due,
     first_probe_correlation, pid_of, rebase_post_fire_to_idle, seed_to_idle,
 };
 use std::collections::BTreeMap;
@@ -209,11 +209,11 @@ fn drive_to_awaiting(
 fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     // Subtree-root Sub on /src; baseline = empty. FsEvent → Standard burst
     // → stable verdict (response == seed snap) → Awaiting (one Effect).
-    // EffectComplete::Ok → Settling → Rebasing. The post-fire rebase
-    // closes on the Authoritative response (idempotent command) →
-    // Idle, baseline == current. A fresh FsEvent identical to the
-    // first must NOT re-fire — hash dedup catches it because
-    // fired_subs matches the current view.
+    // EffectComplete::Ok → Rebasing directly (probe-first; the rebase
+    // probe is already in flight). The post-fire rebase closes on the
+    // Authoritative response (idempotent command) → Idle, baseline ==
+    // current. A fresh FsEvent identical to the first must NOT re-fire —
+    // hash dedup catches it because fired_subs matches the current view.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -238,10 +238,9 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
         PostFirePhase::Awaiting { outstanding: 1, .. }
     ));
 
-    // EffectComplete::Ok lands the burst in Settling. PostFireSettle
-    // expiry then advances to Rebasing (driven inside
-    // `rebase_post_fire_to_idle`).
-    let _ = complete_effect_to_settling(
+    // EffectComplete::Ok goes probe-first: Awaiting → Rebasing directly,
+    // with the WholeSubtree rebase probe already in flight in this step.
+    let _ = complete_effect_to_rebasing(
         &mut e,
         sid,
         effect_key,
@@ -249,12 +248,12 @@ fn fire_cycle_terminates_in_one_run_for_idempotent_command() {
     );
     let phase = match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PostFire(post), _) => &post.phase,
-        _ => panic!("expected Active(Settling)"),
+        _ => panic!("expected Active(Rebasing)"),
     };
-    assert!(matches!(phase, PostFirePhase::Settling { .. }));
+    assert!(matches!(phase, PostFirePhase::Rebasing(_)));
 
-    // Post-fire rebase loop (PostFireSettle → Rebasing → response → commit)
-    // → Idle, baseline rebased.
+    // Post-fire rebase (answer the in-flight probe → commit) → Idle,
+    // baseline rebased.
     let _ = rebase_post_fire_to_idle(&mut e, pid, &snap, seed_done + Duration::from_millis(30));
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
@@ -357,13 +356,13 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
 #[test]
 fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
     // Drive a Standard burst through the post-fire loop. An FsEvent
-    // absorbed during the Rebasing round-trip (between the Settling →
-    // Rebasing transition and the Authoritative response) is the
-    // genuine final-window residual — `transition_to_rebasing` clears
-    // `dirty` at the loop entry, so only the Rebasing round-trip's
-    // absorbs survive to the Authoritative verdict. A non-empty
-    // residual there restarts a fresh debounced Standard burst seeded
-    // from the residual via a typed PostFire→PreFire move that
+    // absorbed during the Rebasing round-trip (between the
+    // Awaiting → Rebasing transition and the Authoritative response) is
+    // the genuine final-window residual — `transition_to_rebasing`
+    // clears `dirty` at the loop entry, so only the Rebasing
+    // round-trip's absorbs survive to the Authoritative verdict. A
+    // non-empty residual there restarts a fresh debounced Standard burst
+    // seeded from the residual via a typed PostFire→PreFire move that
     // preserves the watched anchor — no refcount edge changes (no
     // Unwatch/re-Watch flicker).
     //
@@ -386,40 +385,31 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
         drive_to_awaiting(&mut e, pid, r, &snap, seed_done + Duration::from_millis(10));
     let effect_key = stable_out.effects()[0].key();
 
-    // EffectComplete::Ok lands the burst in Settling (not Rebasing).
-    let effect_complete_at = seed_done + Duration::from_millis(20);
-    e.step(
+    // EffectComplete::Ok goes probe-first: Awaiting → Rebasing directly.
+    // `transition_to_rebasing` clears `dirty` at the loop entry and arms
+    // the rebase probe, so the WholeSubtree probe is already in flight in
+    // this step's output.
+    let rebasing_at = seed_done + Duration::from_millis(20);
+    let rearm_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: effect_key,
             outcome: EffectOutcome::Ok,
         }),
-        effect_complete_at,
+        rebasing_at,
     );
-    let settle_timer = match e.profiles().get(pid).unwrap().state() {
+    match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(
             ActiveBurst::PostFire(PostFireBurst {
-                phase: PostFirePhase::Settling { settle_timer },
+                phase: PostFirePhase::Rebasing(_),
                 ..
             }),
             BurstFinish::ReturnToIdle,
-        ) => *settle_timer,
-        other => panic!("EffectComplete::Ok must land in Settling; got {other:?}"),
-    };
-
-    // PostFireSettle expiry past the settle window → transition_to_rebasing:
-    // clears `dirty` at the loop entry, arms the rebase probe.
-    let rebasing_at = effect_complete_at + SETTLE;
-    let rearm_out = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_timer,
-        },
-        rebasing_at,
-    );
+        ) => {}
+        other => panic!("EffectComplete::Ok must go probe-first to Rebasing; got {other:?}"),
+    }
     let rebase_corr = first_probe_correlation(&rearm_out)
-        .expect("PostFireSettle expiry advances Settling → Rebasing with probe in flight");
+        .expect("EffectComplete drives Awaiting → Rebasing with the rebase probe in flight");
 
     // FsEvent during the Rebasing round-trip → absorbed. The
     // Authoritative response that follows pins this absorb as the
@@ -801,32 +791,15 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
         drive_to_awaiting(&mut e, pid, r, &snap, seed_done + Duration::from_millis(10));
     let effect_key = stable_out.effects()[0].key();
 
-    // EffectComplete::Ok lands the burst in Settling. Drive
-    // PostFireSettle past the settle window to advance Settling →
-    // Rebasing.
-    let effect_complete_at = seed_done + Duration::from_millis(20);
+    // EffectComplete::Ok goes probe-first: Awaiting → Rebasing directly,
+    // rebase probe already in flight.
+    let rebasing_at = seed_done + Duration::from_millis(20);
     e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: effect_key,
             outcome: EffectOutcome::Ok,
         }),
-        effect_complete_at,
-    );
-    let settle_id = match e.profiles().get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-            PostFirePhase::Settling { settle_timer } => *settle_timer,
-            other => panic!("expected Active(PostFire(Settling)); got {other:?}"),
-        },
-        other => panic!("expected Active(PostFire); got {other:?}"),
-    };
-    let rebasing_at = effect_complete_at + SETTLE;
-    e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
         rebasing_at,
     );
     assert!(matches!(
@@ -917,48 +890,6 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
 }
 
 #[test]
-fn fire_cycle_standard_b1_suppressed_skips_awaiting() {
-    // Drive a complete fire cycle once (sets the Sub's has_fired).
-    // Then trigger an identical Standard burst whose stable verdict has
-    // the same hash — emit_effects returns count == 0 → finish_to_idle.
-    // Profile must NOT enter Awaiting.
-    let mut e = Engine::new();
-    let r = anchor_dir(&mut e, "src");
-    let now = Instant::now();
-    let snap = dir_snap(&[]);
-    let (sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, &snap, now);
-
-    // First fire cycle.
-    let stable_out =
-        drive_to_awaiting(&mut e, pid, r, &snap, seed_done + Duration::from_millis(10));
-    let effect_key = stable_out.effects()[0].key();
-    let _ = complete_effect_to_settling(
-        &mut e,
-        sid,
-        effect_key,
-        seed_done + Duration::from_millis(20),
-    );
-    let _ = rebase_post_fire_to_idle(&mut e, pid, &snap, seed_done + Duration::from_millis(30));
-    assert!(
-        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
-        "idempotent rebase loop closes Stable → Idle (empty residual ⇒ no restart)",
-    );
-
-    // Second burst: identical event/probe; hash matches → no Effect.
-    let later = seed_done + Duration::from_millis(40);
-    let second_out = drive_to_awaiting(&mut e, pid, r, &snap, later);
-    assert!(
-        second_out.effects().is_empty(),
-        "hash dedup suppresses the second fire — count == 0",
-    );
-    // Profile finished directly to Idle; no Awaiting.
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
-    ));
-}
-
-#[test]
 fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
     // Per-stable-file Sub on /src; baseline = empty. FsEvent batch
     // creates 2 files (driven via the test by injecting a snapshot with
@@ -1027,31 +958,18 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
         PostFirePhase::Awaiting { outstanding: 1, .. }
     ));
 
-    // Second completion: Failed → outstanding=0 → Settling.
+    // Second completion: Failed → outstanding=0 → LastReached. The last
+    // completion goes probe-first to Rebasing directly (the Failed
+    // outcome decrements the counter uniformly, same as Ok), with the
+    // rebase probe already in flight in this step's output.
     let second_complete_at = seed_done + Duration::from_millis(30);
-    e.step(
+    let rebase_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: key_b,
             outcome: EffectOutcome::Failed(Termination::Exit(1)),
         }),
         second_complete_at,
-    );
-    let settle_id = match e.profiles().get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-            PostFirePhase::Settling { settle_timer } => *settle_timer,
-            other => panic!("expected Active(PostFire(Settling)); got {other:?}"),
-        },
-        other => panic!("expected Active(PostFire); got {other:?}"),
-    };
-    // Drive PostFireSettle past the settle window → Rebasing.
-    let rebase_out = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
-        second_complete_at + SETTLE,
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
@@ -1065,7 +983,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
     ));
     assert!(
         first_probe_correlation(&rebase_out).is_some(),
-        "rebase probe emitted on PostFireSettle expiry"
+        "rebase probe emitted probe-first on the last EffectComplete"
     );
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -1211,7 +1129,8 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     );
     let effect_key = stable_out.effects()[0].key();
 
-    // User edits the child (concurrent with the in-flight Effect).
+    // User edits the child (concurrent with the in-flight Effect). The
+    // event is absorbed into the fire-tail during Awaiting.
     e.step(
         Input::FsEvent {
             resource: child,
@@ -1219,8 +1138,11 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
         },
         seed_done + Duration::from_millis(15),
     );
-    // Effect completes.
-    let _ = complete_effect_to_settling(
+    // Effect completes — probe-first: Awaiting → Rebasing directly. The
+    // absorbed edit is cleared from `dirty` at the Rebasing entry
+    // (`reset_residual`); the WholeSubtree rebase walk re-observes it
+    // regardless via the post-edit response below.
+    let _ = complete_effect_to_rebasing(
         &mut e,
         sid,
         effect_key,
@@ -1300,9 +1222,10 @@ fn fire_cycle_standard_b1_suppresses_post_rebase_phantom_for_non_idempotent_comm
     assert_eq!(stable_out.effects().len(), 1, "burst 1 fires one Effect");
     let effect_key = stable_out.effects()[0].key();
 
-    // EffectComplete::Ok → Settling → Rebasing → rebase probe in
-    // flight (driven inside rebase_post_fire_to_idle below).
-    let _ = complete_effect_to_settling(
+    // EffectComplete::Ok goes probe-first: Awaiting → Rebasing directly,
+    // rebase probe already in flight (answered inside
+    // rebase_post_fire_to_idle below).
+    let _ = complete_effect_to_rebasing(
         &mut e,
         sid,
         effect_key,
@@ -1413,10 +1336,10 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         "expected PerFile key for foo.rs",
     );
 
-    // EffectComplete::Ok lands the burst in Settling; the PostFireSettle
-    // expiry then drives Rebasing where the rebase probe is minted.
+    // EffectComplete::Ok goes probe-first: Awaiting → Rebasing directly,
+    // minting the WholeSubtree rebase probe in this step's output.
     let effect_complete_at = seed_done + Duration::from_millis(20);
-    let _ = e.step(
+    let rebase_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
             key: effect_key,
@@ -1424,22 +1347,8 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
         }),
         effect_complete_at,
     );
-    let settle_id = match e.profiles().get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-            PostFirePhase::Settling { settle_timer } => *settle_timer,
-            other => panic!("expected Active(PostFire(Settling)); got {other:?}"),
-        },
-        other => panic!("expected Active(PostFire); got {other:?}"),
-    };
-    let rebase_out = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
-        effect_complete_at + SETTLE,
-    );
-    let rebase_corr = first_probe_correlation(&rebase_out).expect("rebase probe");
+    let rebase_corr = first_probe_correlation(&rebase_out)
+        .expect("EffectComplete drives Awaiting → Rebasing with the rebase probe in flight");
 
     // Rebase response: foo.rs at the **same inode 42** (in-place
     // formatter rewrite, slot identity preserved) but `size = 1` —
@@ -1451,7 +1360,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
             correlation: rebase_corr,
             outcome: proven(post_effect.clone()),
         }),
-        effect_complete_at + SETTLE + Duration::from_millis(5),
+        effect_complete_at + Duration::from_millis(5),
     );
 
     // Post-rebase: baseline := current carries the post-Effect leaf
@@ -1534,10 +1443,10 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
     );
     let key1 = perfile1[0].key();
 
-    // EffectComplete::Ok → Settling → Rebasing. Idempotent command:
-    // rebase response leaves foo.rs unchanged (inode 42, size 0).
-    // baseline := current carries foo.rs.
-    let _ = complete_effect_to_settling(&mut e, sid, key1, seed_done + Duration::from_millis(20));
+    // EffectComplete::Ok goes probe-first to Rebasing. Idempotent
+    // command: rebase response leaves foo.rs unchanged (inode 42,
+    // size 0). baseline := current carries foo.rs.
+    let _ = complete_effect_to_rebasing(&mut e, sid, key1, seed_done + Duration::from_millis(20));
     // The rebase read leaves foo.rs unchanged (inode 42, size 0) →
     // Stable, baseline := current carries foo.rs.
     let _ = rebase_post_fire_to_idle(&mut e, pid, &v1, seed_done + Duration::from_millis(30));

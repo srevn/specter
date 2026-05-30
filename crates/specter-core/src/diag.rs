@@ -58,21 +58,21 @@ pub enum BurstHelper {
     /// `Engine::transition_to_awaiting` — fire transition
     /// (PreFire → PostFire).
     TransitionToAwaiting,
-    /// `Engine::transition_to_rebasing` — Settling → Rebasing
-    /// (natural settle-expiry or ceiling-driven force) or Awaiting →
-    /// Rebasing (gate-deadline-recovery skip). Rebase-loop ceiling
+    /// `Engine::transition_to_rebasing` — Awaiting → Rebasing (natural
+    /// post-`EffectComplete` unforced, or gate-deadline-recovery
+    /// forced) or Settling → Rebasing (settle-expiry or ceiling-driven
+    /// force, out of the HashChannel spacing loop). Rebase-loop ceiling
     /// arming lives separately on `Engine::arm_rebase_loop_ceiling`
-    /// (the natural `Awaiting → Settling` entry only); this helper is
+    /// (the natural `Awaiting → Rebasing` entry only); this helper is
     /// single-purpose (mint correlation, clear residual, write phase,
     /// emit probe).
     TransitionToRebasing,
-    /// `Engine::transition_to_settling` — post-fire settle-debounce
-    /// entry. Reached from the natural `Awaiting → Settling` advance
-    /// (`on_effect_complete::LastReached + ReturnToIdle`) and the
-    /// `Rebasing → Settling` retry loop-back
-    /// (`dispatch_rebase_ok::Retry`); the post-fire mirror of
-    /// pre-fire's `event_drives_batching` / `retry_drives_batching`
-    /// pair on the Settling side.
+    /// `Engine::transition_to_settling` — post-fire HashChannel
+    /// re-sample spacing. Reached only from the `Rebasing → Settling`
+    /// retry loop-back (`dispatch_rebase_ok::Retry`); the post-fire
+    /// mirror of pre-fire's `retry_drives_batching`. The natural rebase
+    /// entry is probe-first (`Awaiting → Rebasing`), so there is no
+    /// `Awaiting → Settling` advance.
     TransitionToSettling,
     /// `Engine::absorb_event_into_fire_tail` — post-fire FsEvent absorb.
     AbsorbEventIntoFireTail,
