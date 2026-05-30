@@ -410,13 +410,6 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             "quiescence ceiling unreadable (obligation chain frame mtime-skipped/degraded); \
              refused to fire/pin, burst finished to Idle (self-recovers if transient)",
         ),
-        Diagnostic::RebaseCeilingStillChanging { profile, intent } => tracing::warn!(
-            ?profile,
-            ?intent,
-            "post-fire rebase ceiling reached while the post-command tree was still changing; \
-             pinned the freshest observation as baseline and finished the burst (a streaming \
-             command, or settle shorter than its write cadence)",
-        ),
         Diagnostic::QuiescenceCeilingForcedDespiteChange { profile, intent } => tracing::warn!(
             ?profile,
             ?intent,
@@ -424,13 +417,31 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
              change (prior ≠ response) at the last sample; fired against the freshest \
              observation anyway (tree visibly moving when the deadline expired)",
         ),
-        Diagnostic::RebaseCeilingForcedDespiteChange { profile, intent } => tracing::warn!(
-            ?profile,
-            ?intent,
-            "post-fire rebase ceiling reached AND the hash channel observed concrete change \
-             (prior ≠ response) at the last sample; pinned the freshest observation as \
-             baseline anyway (post-command tree visibly moving when the ceiling expired)",
-        ),
+        Diagnostic::RebaseCeilingForced {
+            profile,
+            intent,
+            observed_change,
+        } => {
+            if *observed_change {
+                tracing::warn!(
+                    ?profile,
+                    ?intent,
+                    "post-fire rebase ceiling reached AND the hash channel observed concrete \
+                     change (prior ≠ response) at the last sample; pinned the freshest \
+                     observation as baseline anyway (post-command tree visibly moving when \
+                     the ceiling expired)",
+                );
+            } else {
+                tracing::warn!(
+                    ?profile,
+                    ?intent,
+                    "post-fire rebase ceiling reached without the hash channel confirming \
+                     quiescence (samples agreed at the last read, the ceiling forced the \
+                     first sample, or the channel was inactive); pinned the freshest \
+                     observation as baseline and finished the burst",
+                );
+            }
+        }
         Diagnostic::RebaseCeilingUnreadable {
             profile,
             first_unread,
@@ -661,8 +672,7 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::AwaitGateDeadlineReap { .. }
         | D::QuiescenceCeilingUnreadable { .. }
         | D::QuiescenceCeilingForcedDespiteChange { .. }
-        | D::RebaseCeilingStillChanging { .. }
-        | D::RebaseCeilingForcedDespiteChange { .. }
+        | D::RebaseCeilingForced { .. }
         | D::RebaseCeilingUnreadable { .. }
         | D::SensorOverflow { .. }
         | D::PromoterReseededForOverflow { .. }

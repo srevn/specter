@@ -5440,9 +5440,14 @@ fn gate_deadline_non_zombie_drives_rebase_with_forced_directly() {
     assert!(
         final_out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::RebaseCeilingStillChanging { profile, .. } if *profile == pid,
+            Diagnostic::RebaseCeilingForced {
+                profile,
+                observed_change: false,
+                ..
+            } if *profile == pid,
         )),
-        "forced=true commit emits the RebaseCeilingStillChanging diagnostic",
+        "forced=true commit emits RebaseCeilingForced; the single gate-deadline sample \
+         (prior=None) saw no disagreement ⇒ observed_change=false",
     );
 }
 
@@ -5602,10 +5607,14 @@ fn rebase_authoritative_at_ceiling_pins_freshest_and_diagnoses() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::RebaseCeilingStillChanging { profile, intent }
-                if *profile == pid && *intent == BurstIntent::Standard,
+            Diagnostic::RebaseCeilingForced {
+                profile,
+                intent,
+                observed_change: false,
+            } if *profile == pid && *intent == BurstIntent::Standard,
         )),
-        "Authoritative + forced=true emits the loud RebaseCeilingStillChanging diagnostic; got {:?}",
+        "Authoritative + forced=true emits the loud RebaseCeilingForced; the single \
+         sample (prior=None) saw no disagreement ⇒ observed_change=false; got {:?}",
         out.diagnostics,
     );
 }
@@ -5735,7 +5744,8 @@ fn rebase_ceiling_in_rebasing_is_set_only_inflight_response_applies_terminal() {
 /// in the same step — the post-fire mirror of `handle_burst_deadline`
 /// driving a verify when no Verifying probe is in flight. The
 /// `Stable(StableReason::Forced)` response then commits + emits
-/// `RebaseCeilingStillChanging`.
+/// `RebaseCeilingForced` (the Undischarged-retry withheld the carrier,
+/// so the forced sample sees `prior == None` ⇒ `observed_change == false`).
 #[test]
 fn rebase_ceiling_in_settling_drives_rebasing_with_forced() {
     let (mut e, pid, sid, root, now) = engine_with_attached_sub();
@@ -5834,9 +5844,14 @@ fn rebase_ceiling_in_settling_drives_rebasing_with_forced() {
     assert!(
         final_out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::RebaseCeilingStillChanging { profile, .. } if *profile == pid,
+            Diagnostic::RebaseCeilingForced {
+                profile,
+                observed_change: false,
+                ..
+            } if *profile == pid,
         )),
-        "ceiling terminal emits RebaseCeilingStillChanging; got {:?}",
+        "ceiling terminal emits RebaseCeilingForced (observed_change=false — the \
+         Undischarged-retry withheld the carrier, so prior=None); got {:?}",
         final_out.diagnostics,
     );
 }
@@ -6160,169 +6175,181 @@ fn pre_fire_forced_ceiling_with_hash_disagreement_emits_strong_signal_diagnostic
     );
 }
 
-/// The strong-signal post-fire ceiling diagnostic:
-/// `RebaseCeilingForcedDespiteChange` fires only when the hash channel
-/// was active AND observed concrete `prior != response` disagreement
-/// before the `RebaseCeiling` expired. It *replaces* (not supplements)
-/// the natural-ceiling [`Diagnostic::RebaseCeilingStillChanging`] —
-/// one diagnostic per forced rebase, picked by available evidence.
+/// U2 — the post-fire forced-ceiling diagnostic carries the carrier's
+/// disagreement bit in `observed_change`, end to end. Drives a
+/// structure-only Profile through the post-fire loop until the
+/// `RebaseCeiling` forces a commit, then varies only the second
+/// (forced) sample relative to the carried first sample:
 ///
-/// Drives a structure-only Profile through the post-fire loop: Sample 1
-/// in Rebasing (carrier := hash(A) ⇒ Retry ⇒ Settling); RebaseCeiling
-/// expires mid-Settling (`force_pending_post_fire` sets `forced=true`,
-/// `handle_rebase_ceiling` drives Rebasing); Sample 2 (hash(B) ≠
-/// hash(A)) folds to `Stable(Forced{disagreed=true})` ⇒ the strong-
-/// signal diagnostic emits exactly once alongside the bounded rebase.
+/// - second sample DIFFERS ⇒ `Stable(Forced{disagreed=true})` ⇒
+///   `RebaseCeilingForced { observed_change: true }` (the strong "tree
+///   visibly still moving at ceiling expiry" signal).
+/// - second sample EQUALS the first ⇒ `Stable(Forced{disagreed=false})`
+///   ⇒ `RebaseCeilingForced { observed_change: false }` — the same-step
+///   race the ceiling resolves: the samples agreed, but the ceiling ran
+///   out before two consecutive equal reads could fold a natural
+///   `Stable`, so the freshest observation is pinned anyway.
+///
+/// Exactly one `RebaseCeilingForced` per forced rebase either way; only
+/// the bit varies. The equal-sample (`prior == response`) arm is the
+/// path no other end-to-end test exercises — the case the retired
+/// `RebaseCeilingStillChanging` name libeled.
 #[test]
-fn post_fire_forced_ceiling_with_hash_disagreement_emits_strong_signal_diagnostic() {
-    let mut e = Engine::new();
-    let r = e.tree.ensure_root("anchor", ResourceRole::User);
-    e.tree.set_kind(r, ResourceKind::Dir);
-    let now = Instant::now();
-    let (sid, pid) = crate::testkit::attach_structure_only(&mut e, r, now);
-    let baseline = dir_tree_snap(vec![]);
-    let seed_done = crate::testkit::seed_to_idle(&mut e, pid, &baseline, now);
-
-    // Fire the Standard burst (events-incomplete pre-fire: N=2 with two
-    // equal samples) → EffectComplete → Settling → PostFireSettle
-    // expiry → Rebasing (rebase probe in flight; RebaseCeiling armed at
-    // the natural Awaiting→Settling entry).
-    let fire_snap = dir_tree_snap(vec![("draft", EntryKind::File, 1)]);
-    let fire_start = seed_done + Duration::from_millis(1);
-    let stable_out = crate::testkit::drive_standard_n2_until_stable(
-        &mut e,
-        pid,
-        r,
-        &[Arc::clone(&fire_snap), Arc::clone(&fire_snap)],
-        fire_start,
-    );
-    let key = stable_out.effects()[0].key();
-    let after_fire = fire_start + SETTLE * 4 + Duration::from_millis(1);
-    e.step(
-        Input::EffectComplete(EffectCompletion {
-            sub: sid,
-            key,
-            outcome: EffectOutcome::Ok,
-        }),
-        after_fire,
-    );
-    let settle_id = match e.profiles.get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-            PostFirePhase::Settling { settle_timer } => *settle_timer,
-            other => panic!("expected Settling after EffectComplete::Ok; got {other:?}"),
-        },
-        other => panic!("expected Active(PostFire); got {other:?}"),
-    };
-    e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::PostFireSettle,
-            id: settle_id,
-        },
-        after_fire + SETTLE,
-    );
-    let corr1 = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("rebase probe in flight after PostFireSettle drove Settling → Rebasing");
-
-    // Sample 1 in Rebasing: snap A ⇒ carrier prior=None ⇒ Retry ⇒
-    // transition_to_settling (carrier := hash(A)).
-    let a = dir_tree_snap(vec![("draft", EntryKind::File, 1)]);
-    let t_s1 = after_fire + SETTLE * 2;
-    let s1_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: corr1,
-            outcome: ProbeOutcome::SubtreeProven {
-                snapshot: Arc::clone(&a),
-                authority: ProofAuthority::Authoritative,
-            },
-        }),
-        t_s1,
-    );
-    assert!(
-        s1_out.diagnostics.iter().all(|d| !matches!(
-            d,
-            Diagnostic::RebaseCeilingForcedDespiteChange { .. }
-                | Diagnostic::RebaseCeilingStillChanging { .. }
-        )),
-        "Sample 1 (Retry + ceiling not yet reached) emits no rebase ceiling diagnostic; \
-         got {:?}",
-        s1_out.diagnostics,
-    );
-
-    // Fire the RebaseCeiling mid-Settling: `force_pending_post_fire`
-    // sets `forced=true` + drops `rebase_ceiling = None`;
-    // `handle_rebase_ceiling` drives Rebasing (Settling phase: no probe
-    // in flight).
-    let ceiling = rebase_ceiling_timer(&e, pid);
-    let ceiling_out = e.step(
-        Input::TimerExpired {
-            profile: pid,
-            kind: TimerKind::RebaseCeiling,
-            id: ceiling,
-        },
-        t_s1 + Duration::from_millis(1),
-    );
-    let corr2 = ceiling_out
-        .probe_ops()
-        .iter()
-        .find_map(|op| match op {
-            ProbeOp::Probe { request } => Some(request.correlation()),
-            ProbeOp::Cancel { .. } => None,
-        })
-        .expect("RebaseCeiling in Settling drives a fresh forced Rebasing probe");
-
-    // Sample 2: forced=true + carrier prior=Some(hash(A)),
-    // response=hash(B) (≠) ⇒ Stable(Forced{disagreed=true}) ⇒
-    // RebaseCeilingForcedDespiteChange (replaces StillChanging).
-    let b = dir_tree_snap(vec![
+fn post_fire_forced_ceiling_observed_change_tracks_carrier_disagreement() {
+    let first = dir_tree_snap(vec![("draft", EntryKind::File, 1)]);
+    let distinct = dir_tree_snap(vec![
         ("draft", EntryKind::File, 1),
         ("late", EntryKind::File, 5),
     ]);
     assert_ne!(
-        a.dir_hash(),
-        b.dir_hash(),
-        "the diagnostic-selection bit needs distinct sample hashes",
-    );
-    let s2_out = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
-            correlation: corr2,
-            outcome: ProbeOutcome::SubtreeProven {
-                snapshot: Arc::clone(&b),
-                authority: ProofAuthority::Authoritative,
-            },
-        }),
-        t_s1 + Duration::from_millis(2),
+        first.dir_hash(),
+        distinct.dir_hash(),
+        "the disagreement arm needs a distinct second-sample hash",
     );
 
-    assert!(
-        matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
-        "Stable(Forced) is the rebase-ceiling terminal → Idle",
-    );
-    assert_eq!(
-        baseline_hash(&e, pid),
-        Some(b.dir_hash()),
-        "Stable(Forced) pins the freshest observation as the rebased baseline",
-    );
-    assert!(
-        s2_out.diagnostics.iter().any(|d| matches!(
-            d,
-            Diagnostic::RebaseCeilingForcedDespiteChange { profile, intent }
-                if *profile == pid && *intent == BurstIntent::Standard,
-        )),
-        "forced=true + observed disagreement ⇒ strong-signal post-fire ceiling diagnostic; got {:?}",
-        s2_out.diagnostics,
-    );
-    assert!(
-        !s2_out
+    for (second, expected_observed_change) in
+        [(Arc::clone(&distinct), true), (Arc::clone(&first), false)]
+    {
+        let mut e = Engine::new();
+        let r = e.tree.ensure_root("anchor", ResourceRole::User);
+        e.tree.set_kind(r, ResourceKind::Dir);
+        let now = Instant::now();
+        let (sid, pid) = crate::testkit::attach_structure_only(&mut e, r, now);
+        let baseline = dir_tree_snap(vec![]);
+        let seed_done = crate::testkit::seed_to_idle(&mut e, pid, &baseline, now);
+
+        // Fire the Standard burst (events-incomplete pre-fire: N=2 with
+        // two equal samples) → EffectComplete → Settling →
+        // PostFireSettle expiry → Rebasing (rebase probe in flight;
+        // RebaseCeiling armed at the natural Awaiting→Settling entry).
+        let fire_snap = dir_tree_snap(vec![("draft", EntryKind::File, 1)]);
+        let fire_start = seed_done + Duration::from_millis(1);
+        let stable_out = crate::testkit::drive_standard_n2_until_stable(
+            &mut e,
+            pid,
+            r,
+            &[Arc::clone(&fire_snap), Arc::clone(&fire_snap)],
+            fire_start,
+        );
+        let key = stable_out.effects()[0].key();
+        let after_fire = fire_start + SETTLE * 4 + Duration::from_millis(1);
+        e.step(
+            Input::EffectComplete(EffectCompletion {
+                sub: sid,
+                key,
+                outcome: EffectOutcome::Ok,
+            }),
+            after_fire,
+        );
+        let settle_id = match e.profiles.get(pid).unwrap().state() {
+            ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
+                PostFirePhase::Settling { settle_timer } => *settle_timer,
+                other => panic!("expected Settling after EffectComplete::Ok; got {other:?}"),
+            },
+            other => panic!("expected Active(PostFire); got {other:?}"),
+        };
+        e.step(
+            Input::TimerExpired {
+                profile: pid,
+                kind: TimerKind::PostFireSettle,
+                id: settle_id,
+            },
+            after_fire + SETTLE,
+        );
+        let corr1 = e
+            .pending_probe_for(ProbeOwner::Profile(pid))
+            .expect("rebase probe in flight after PostFireSettle drove Settling → Rebasing");
+
+        // Sample 1 in Rebasing: `first` ⇒ carrier prior=None ⇒ Retry ⇒
+        // transition_to_settling (carrier := hash(first)).
+        let t_s1 = after_fire + SETTLE * 2;
+        let s1_out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation: corr1,
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: Arc::clone(&first),
+                    authority: ProofAuthority::Authoritative,
+                },
+            }),
+            t_s1,
+        );
+        assert!(
+            s1_out
+                .diagnostics
+                .iter()
+                .all(|d| !matches!(d, Diagnostic::RebaseCeilingForced { .. })),
+            "Sample 1 (Retry + ceiling not yet reached) emits no rebase ceiling \
+             diagnostic; got {:?}",
+            s1_out.diagnostics,
+        );
+
+        // Fire the RebaseCeiling mid-Settling: `force_pending_post_fire`
+        // sets `forced=true` + drops `rebase_ceiling = None`;
+        // `handle_rebase_ceiling` drives Rebasing (Settling phase: no
+        // probe in flight).
+        let ceiling = rebase_ceiling_timer(&e, pid);
+        let ceiling_out = e.step(
+            Input::TimerExpired {
+                profile: pid,
+                kind: TimerKind::RebaseCeiling,
+                id: ceiling,
+            },
+            t_s1 + Duration::from_millis(1),
+        );
+        let corr2 = ceiling_out
+            .probe_ops()
+            .iter()
+            .find_map(|op| match op {
+                ProbeOp::Probe { request } => Some(request.correlation()),
+                ProbeOp::Cancel { .. } => None,
+            })
+            .expect("RebaseCeiling in Settling drives a fresh forced Rebasing probe");
+
+        // Sample 2 (forced): carrier prior=Some(hash(first)),
+        // response=hash(second). `second == first` ⇒ p == response ⇒
+        // disagreed=false; `second != first` ⇒ disagreed=true.
+        let s2_out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: ProbeOwner::Profile(pid),
+                correlation: corr2,
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: Arc::clone(&second),
+                    authority: ProofAuthority::Authoritative,
+                },
+            }),
+            t_s1 + Duration::from_millis(2),
+        );
+
+        assert!(
+            matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
+            "Stable(Forced) is the rebase-ceiling terminal → Idle",
+        );
+        assert_eq!(
+            baseline_hash(&e, pid),
+            Some(second.dir_hash()),
+            "Stable(Forced) pins the freshest observation as the rebased baseline",
+        );
+        let forced: Vec<bool> = s2_out
             .diagnostics
             .iter()
-            .any(|d| matches!(d, Diagnostic::RebaseCeilingStillChanging { .. },)),
-        "the strong-signal diagnostic REPLACES the natural one — never both; got {:?}",
-        s2_out.diagnostics,
-    );
+            .filter_map(|d| match d {
+                Diagnostic::RebaseCeilingForced {
+                    profile,
+                    intent,
+                    observed_change,
+                } if *profile == pid && *intent == BurstIntent::Standard => Some(*observed_change),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            forced,
+            vec![expected_observed_change],
+            "exactly one RebaseCeilingForced per forced rebase; observed_change carries \
+             the carrier-disagreement bit; got {:?}",
+            s2_out.diagnostics,
+        );
+    }
 }
 
 // ---------- rebase_baseline witness clears at every site ----------
@@ -6603,17 +6630,14 @@ fn dispatch_quiescence_ok_abandon_emits_unreadable_and_finishes() {
 
 /// `dispatch_rebase_ok` contract — post-fire `Stable(Forced)` arm.
 /// The post-fire forced ceiling always commits (graft +
-/// `rebase_baseline`) AND emits exactly one ceiling diagnostic; the
-/// disagreement bit selects which:
-/// - `hash_channel_disagreed = true` ⇒
-///   [`Diagnostic::RebaseCeilingForcedDespiteChange`].
-/// - `hash_channel_disagreed = false` ⇒
-///   [`Diagnostic::RebaseCeilingStillChanging`].
-///
-/// The two are mutually exclusive — never both, never neither.
+/// `rebase_baseline`) AND emits exactly one
+/// [`Diagnostic::RebaseCeilingForced`], carrying the disagreement bit
+/// as `observed_change` — loud on both, because no `Effect` records the
+/// forced fallback downstream (the principled asymmetry with the
+/// pre-fire mirror, which stays silent on the quiet path).
 #[test]
 fn dispatch_rebase_ok_stable_forced_emits_exactly_one_ceiling_diagnostic() {
-    for (disagreed, expected_loud) in [(false, false), (true, true)] {
+    for disagreed in [false, true] {
         let (mut e, pid, _sid, _anchor, now) = engine_with_attached_sub();
         let _ = e.cancel_all_in_flight_probes();
 
@@ -6644,21 +6668,21 @@ fn dispatch_rebase_ok_stable_forced_emits_exactly_one_ceiling_diagnostic() {
             &mut out,
         );
 
-        let loud = out
+        let forced: Vec<bool> = out
             .diagnostics
             .iter()
-            .filter(|d| matches!(d, Diagnostic::RebaseCeilingForcedDespiteChange { .. }))
-            .count();
-        let quiet = out
-            .diagnostics
-            .iter()
-            .filter(|d| matches!(d, Diagnostic::RebaseCeilingStillChanging { .. }))
-            .count();
+            .filter_map(|d| match d {
+                Diagnostic::RebaseCeilingForced {
+                    observed_change, ..
+                } => Some(*observed_change),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            (loud, quiet),
-            (usize::from(expected_loud), usize::from(!expected_loud)),
-            "disagreed={disagreed}: exactly one ceiling diagnostic, picked by \
-             the disagreement bit; got {:?}",
+            forced,
+            vec![disagreed],
+            "disagreed={disagreed}: exactly one RebaseCeilingForced, observed_change \
+             carries the bit; got {:?}",
             out.diagnostics,
         );
         assert_eq!(

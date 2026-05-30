@@ -771,13 +771,14 @@ pub enum QuiescenceWitness {
 ///   No ceiling diagnostic owed.
 /// - [`Self::Forced`] — `BurstDeadline` / `RebaseCeiling` fallback
 ///   fired. Fire / rebase anyway against the freshest observation.
-///   The dispatch selects a diagnostic by `hash_channel_disagreed`:
-///   `true` ⇒ the strong-signal `*CeilingForcedDespiteChange` (the
-///   tree was visibly still moving — the hash channel observed a
-///   prior/response disagreement before the ceiling expired);
-///   `false` ⇒ post-fire emits the natural-ceiling
-///   [`crate::Diagnostic::RebaseCeilingStillChanging`]; pre-fire stays
-///   silent because `forced` propagates onto `Effect.forced` already.
+///   The dispatch maps `hash_channel_disagreed` to a diagnostic
+///   asymmetrically: post-fire always emits
+///   [`crate::Diagnostic::RebaseCeilingForced`] carrying the bit as
+///   `observed_change` (loud on both — no `Effect` records the forced
+///   fallback downstream); pre-fire emits the strong-signal
+///   `QuiescenceCeilingForcedDespiteChange` only on `true` and stays
+///   silent on `false` because `forced` already propagates onto
+///   `Effect.forced`.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum StableReason {
     /// Settle witness held — natural fire/pin/rebase path. No ceiling

@@ -88,8 +88,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::AwaitGateDeadlineReap { at, .. }
         | WireDiagnostic::QuiescenceCeilingUnreadable { at, .. }
         | WireDiagnostic::QuiescenceCeilingForcedDespiteChange { at, .. }
-        | WireDiagnostic::RebaseCeilingStillChanging { at, .. }
-        | WireDiagnostic::RebaseCeilingForcedDespiteChange { at, .. }
+        | WireDiagnostic::RebaseCeilingForced { at, .. }
         | WireDiagnostic::RebaseCeilingUnreadable { at, .. }
         | WireDiagnostic::SensorOverflow { at, .. }
         | WireDiagnostic::PromoterReseededForOverflow { at, .. }
@@ -343,18 +342,25 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
                 burst_intent_str(*intent),
             );
         }
-        WireDiagnostic::RebaseCeilingStillChanging {
-            profile, intent, ..
-        }
-        | WireDiagnostic::QuiescenceCeilingForcedDespiteChange {
-            profile, intent, ..
-        }
-        | WireDiagnostic::RebaseCeilingForcedDespiteChange {
+        WireDiagnostic::QuiescenceCeilingForcedDespiteChange {
             profile, intent, ..
         } => {
             let _ = write!(
                 out,
                 "  profile={}  intent={}",
+                profile.0,
+                burst_intent_str(*intent),
+            );
+        }
+        WireDiagnostic::RebaseCeilingForced {
+            profile,
+            intent,
+            observed_change,
+            ..
+        } => {
+            let _ = write!(
+                out,
+                "  profile={}  intent={}  observed_change={observed_change}",
                 profile.0,
                 burst_intent_str(*intent),
             );
@@ -960,11 +966,13 @@ mod tests {
                 "diag": tag, "at": at, "profile": id,
                 "first_unread": "/x", "intent": "standard",
             }),
-            "rebase_ceiling_still_changing"
-            | "quiescence_ceiling_forced_despite_change"
-            | "rebase_ceiling_forced_despite_change" => {
+            "quiescence_ceiling_forced_despite_change" => {
                 json!({"diag": tag, "at": at, "profile": id, "intent": "standard"})
             }
+            "rebase_ceiling_forced" => json!({
+                "diag": tag, "at": at, "profile": id,
+                "intent": "standard", "observed_change": false,
+            }),
             "sensor_overflow" => json!({"diag": tag, "at": at, "scope": global_scope}),
             "promoter_reseeded_for_overflow" | "promoter_reaped" => {
                 json!({"diag": tag, "at": at, "promoter": id})

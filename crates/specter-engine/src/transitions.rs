@@ -2979,17 +2979,12 @@ impl Engine {
     ///   - [`StableReason::Forced`] — the bounded `RebaseCeiling`
     ///     fired but the walker still certified. Pin the freshest
     ///     observation (a deliberate, loud terminal — not a wedge)
-    ///     and emit exactly one diagnostic, picked by available
-    ///     evidence:
-    ///     - `hash_channel_disagreed = true` ⇒
-    ///       [`Diagnostic::RebaseCeilingForcedDespiteChange`] (the
-    ///       strong signal: the hash channel observed
-    ///       `prior != response` before the ceiling expired).
-    ///     - `hash_channel_disagreed = false` ⇒
-    ///       [`Diagnostic::RebaseCeilingStillChanging`] (the
-    ///       natural-ceiling story: channel agreed at the last sample,
-    ///       or the channel was inactive on an events-reliable
-    ///       Profile).
+    ///     and emit one [`Diagnostic::RebaseCeilingForced`] carrying
+    ///     `observed_change = hash_channel_disagreed`: `true` is the
+    ///     strong signal (the hash channel observed `prior != response`
+    ///     before the ceiling expired); `false` is the quiet ceiling
+    ///     (the channel agreed at the last sample, was on its first
+    ///     sample, or was inactive on an events-reliable Profile).
     /// - [`QuiescenceVerdict::Retry`] — non-firing, non-terminal: the
     ///   walker certified but the hash channel observed
     ///   `prior != Some(response)` (events-incomplete fire-bearing
@@ -3097,25 +3092,18 @@ impl Engine {
                     StableReason::Forced {
                         hash_channel_disagreed,
                     } => {
-                        // Bounded terminal: the `RebaseCeiling`
-                        // already fired but the walker certified
-                        // anyway. Emit exactly one diagnostic, picked
-                        // by whether the hash channel observed
-                        // concrete disagreement before the ceiling
-                        // expired.
+                        // Bounded terminal: the `RebaseCeiling` already
+                        // fired but the walker certified anyway. Emit one
+                        // diagnostic unconditionally — no `Effect` records
+                        // the forced fallback downstream (the principled
+                        // asymmetry with the pre-fire mirror) — carrying
+                        // the disagreement bit as `observed_change`.
                         let intent = self.rebase_burst_intent(profile_id);
-                        let diag = if hash_channel_disagreed {
-                            Diagnostic::RebaseCeilingForcedDespiteChange {
-                                profile: profile_id,
-                                intent,
-                            }
-                        } else {
-                            Diagnostic::RebaseCeilingStillChanging {
-                                profile: profile_id,
-                                intent,
-                            }
-                        };
-                        out.diagnostics.push(diag);
+                        out.diagnostics.push(Diagnostic::RebaseCeilingForced {
+                            profile: profile_id,
+                            intent,
+                            observed_change: hash_channel_disagreed,
+                        });
                         self.finish_burst_to_idle(profile_id, out);
                     }
                 }
