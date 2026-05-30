@@ -1048,7 +1048,7 @@ impl Engine {
     /// arm is therefore unreachable in production; it carries
     /// `debug_assert!(false)` + the safe transition default to surface
     /// a future writer that opens the unreachable shape, the same
-    /// convention `owes_proof_from` and `pre_fire_target` use.
+    /// convention `owes_proof_from` and `verifying_probe_target` use.
     ///
     /// **Preconditions** (guaranteed by [`is_timer_referenced`]
     /// upstream): `Profile.state == Active(PreFire(_))` and
@@ -2582,11 +2582,11 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // Profile-presence guard + the snapshot-commit target (the
-        // latest emitted probe target). The covered-descendant fire-gate
-        // lives at the single gate site ([`Engine::gated_fire`]),
-        // short-circuited by `forced`.
-        let Some(target) = self.pre_fire_target(profile_id) else {
+        // Profile-presence guard + the snapshot-commit target read back
+        // off the in-flight Verifying probe (the latest emitted probe
+        // target). The covered-descendant fire-gate lives at the single
+        // gate site ([`Engine::gated_fire`]), short-circuited by `forced`.
+        let Some(target) = self.verifying_probe_target(profile_id) else {
             return;
         };
 
@@ -2726,15 +2726,24 @@ impl Engine {
             .is_some_and(|pre| !pre.dirty.is_empty())
     }
 
-    /// The pre-fire snapshot-commit target + Profile-presence guard —
-    /// the shared up-front read for [`Engine::dispatch_quiescence_ok`].
-    /// `target` is the in-flight probe's target, read off
-    /// [`specter_core::PreFirePhase::Verifying`]'s variant payload (set
-    /// at construction by [`crate::pre_fire_target`] and immutable for
-    /// the variant's lifetime). The `p.resource` fallback on the
-    /// structurally-unreachable non-Verifying arm matches the historical
-    /// `unwrap_or(anchor)`. `None` only on the structurally-unreachable
-    /// absent-Profile path (the caller arms then return).
+    /// Read back the in-flight Verifying probe's `target` — the pre-fire
+    /// snapshot-commit resource — plus the Profile-presence guard. The
+    /// shared up-front read for [`Engine::dispatch_quiescence_ok`].
+    ///
+    /// This is the **read-back twin** of the standalone target rule
+    /// [`crate::pre_fire_target`], not a second computation of it: that
+    /// function *computes* the dirty-LCA target at
+    /// [`Engine::transition_to_verifying`] and writes it onto
+    /// [`specter_core::PreFirePhase::Verifying`]'s payload (immutable for
+    /// the variant's lifetime); this method reads it back when the probe
+    /// responds, so the snapshot grafts at the resource the probe was
+    /// scoped to. The same value is also read back at the emission choke
+    /// ([`Engine::probe_emission_request`]) to render the wire: computed
+    /// once at the transition, read back wherever the probe's scope is
+    /// needed. The `p.resource` fallback on the structurally-unreachable
+    /// non-Verifying arm matches the historical `unwrap_or(anchor)`.
+    /// `None` only on the structurally-unreachable absent-Profile path
+    /// (the caller arms then return).
     ///
     /// Both fall-through arms `debug_assert!(false)` to surface a
     /// dispatch-contract violation in dev/CI and degrade silently in
@@ -2750,11 +2759,11 @@ impl Engine {
     /// `forced` deadline-fire. Computing it here would re-introduce the
     /// "derived then discarded on the non-fire arms" shape this
     /// unification dissolves.
-    fn pre_fire_target(&self, profile_id: ProfileId) -> Option<ResourceId> {
+    fn verifying_probe_target(&self, profile_id: ProfileId) -> Option<ResourceId> {
         let Some(p) = self.profiles.get(profile_id) else {
             debug_assert!(
                 false,
-                "pre_fire_target: absent Profile {profile_id:?} — \
+                "verifying_probe_target: absent Profile {profile_id:?} — \
                  certify_probe_response's entry guard proves presence at this depth",
             );
             return None;
@@ -2762,7 +2771,7 @@ impl Engine {
         let Some(pre) = p.pre_fire_burst() else {
             debug_assert!(
                 false,
-                "pre_fire_target: non-PreFire Profile {profile_id:?} \
+                "verifying_probe_target: non-PreFire Profile {profile_id:?} \
                  reached dispatch_quiescence_ok (profile_probe_gate dispatches \
                  Verifying only on Active(PreFire))",
             );
@@ -2773,7 +2782,7 @@ impl Engine {
             PreFirePhase::Batching { .. } | PreFirePhase::Draining => {
                 debug_assert!(
                     false,
-                    "pre_fire_target: non-Verifying pre-fire phase on \
+                    "verifying_probe_target: non-Verifying pre-fire phase on \
                      Profile {profile_id:?} reached dispatch_quiescence_ok \
                      (profile_probe_gate dispatches Verifying only on \
                      PreFirePhase::Verifying)",

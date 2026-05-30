@@ -124,7 +124,6 @@ use specter_core::{
     ActiveBurst, BurstFinish, BurstHelper, BurstIntent, CeilingState, Diagnostic, DirtyProvenance,
     FsEvent, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOwner, ProbeSlot, Profile, ProfileId,
     ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId, TimerKind, Tree,
-    TreeSnapshot,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -1762,13 +1761,6 @@ impl Engine {
     }
 }
 
-// `TreeSnapshot` reachable for downstream consumers via the burst module
-// surface — the lifecycle helpers thread `current.subtree_at` references
-// through that type.
-const _: fn() = || {
-    let _ = std::mem::size_of::<TreeSnapshot>();
-};
-
 /// Resolve a path to the live engine slot that should root the Standard
 /// pre-fire probe — and, read back, the response graft — at it.
 /// Descends the live `Tree` from the always-live `anchor` by `path`'s
@@ -1856,11 +1848,12 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 ///   (history), not surviving slot ids, so a slot reaped mid-burst
 ///   cannot collapse the scope below where an event landed; only the
 ///   live-id *resolution* may fall back to the anchor (strictly wider,
-///   never chain-clipping). An empty `dirty` yields the anchor — a
-///   should-never (a Standard burst always notes its trigger); the
-///   emission choke pairs that anchor with a `WholeSubtree` obligation
-///   under its own `debug_assert`, so the degrade proves the whole
-///   subtree rather than silently skipping it.
+///   never chain-clipping). An empty `dirty` is a should-never this arm
+///   `debug_assert!`s against (a Standard burst always notes its
+///   trigger); it then degrades to the anchor, which the emission choke
+///   pairs with a `WholeSubtree` obligation under its own `debug_assert`,
+///   so the degrade proves the whole subtree rather than silently
+///   skipping it.
 ///
 /// **Draining-reconfirm coverage.** The Draining → Verifying reconfirm
 /// folds into the Standard case because `dirty` is preserved across the
@@ -1877,7 +1870,18 @@ pub(crate) fn pre_fire_target(p: &Profile, pre: &PreFireBurst, tree: &Tree) -> R
                 p.resource(),
                 tree,
             ),
-            None => p.resource(),
+            None => {
+                debug_assert!(
+                    false,
+                    "pre_fire_target: Standard burst with empty `dirty` for \
+                     anchor {:?} — a Standard burst notes its trigger at \
+                     construction, so reaching here means a future writer \
+                     opened the unreachable arm; degrading to the anchor (the \
+                     emission choke pairs it with a WholeSubtree obligation)",
+                    p.resource(),
+                );
+                p.resource()
+            }
         },
     }
 }
@@ -2584,16 +2588,22 @@ mod tests {
     }
 
     #[test]
-    fn pre_fire_target_standard_empty_dirty_falls_back_to_anchor() {
-        // Standard intent, no captured paths: the should-never degrade
-        // resolves to the anchor (the emission choke pairs it with a
-        // WholeSubtree obligation under its own debug_assert). Also
-        // covers the Draining-reconfirm hypothetical where every dirty
-        // Resource was reaped between verify and reconfirm.
-        let (e, pid, root, _a, _b) = engine_with_two_children();
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "Standard burst with empty")]
+    fn pre_fire_target_standard_empty_dirty_panics_in_debug() {
+        // Standard intent, no captured paths: the empty-`dirty` arm is a
+        // should-never (a Standard burst notes its trigger at
+        // construction). `pre_fire_target` debug-asserts it — parity with
+        // the sibling timer-handler should-nevers — and in release degrades
+        // to the anchor (the emission choke pairs it with a WholeSubtree
+        // obligation). Also covers the Draining-reconfirm hypothetical where
+        // every dirty Resource was reaped between verify and reconfirm.
+        let (e, pid, _root, _a, _b) = engine_with_two_children();
         let pre = pre_fire_burst_for_test(BurstIntent::Standard, DirtyProvenance::new());
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
-        assert_eq!(target, root);
+        let _ = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
     }
 
     #[test]
