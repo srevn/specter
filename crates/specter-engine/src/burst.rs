@@ -2148,13 +2148,13 @@ mod tests {
     }
 
     /// C2 backstop: `finish_burst_to_idle` debug-asserts the owner's
-    /// `ProbeSlot` is already disarmed at function entry. Reaching it
-    /// with a *genuinely armed* `Active(PreFire(Verifying))` (the slot
-    /// in flight, NOT pre-consumed — the F-CRIT-1 reproduction shape)
-    /// must trip the assert loudly rather than silently dropping the
-    /// armed slot. `#[should_panic]` on a `debug_assert!` only triggers
-    /// under debug assertions; nextest runs the debug profile by
-    /// default, so this is exercised.
+    /// `ProbeSlot` is already disarmed at function entry. Reaching it with
+    /// a *genuinely armed* `Active(PreFire(Verifying))` (the slot in
+    /// flight, NOT pre-consumed) must trip the assert loudly rather than
+    /// silently dropping the armed slot and orphaning its correlation.
+    /// `#[should_panic]` on a `debug_assert!` only triggers under debug
+    /// assertions; nextest runs the debug profile by default, so this is
+    /// exercised.
     #[test]
     #[should_panic(expected = "finish_burst_to_idle: probe slot still armed")]
     fn finish_burst_to_idle_armed_slot_trips_debug_assert() {
@@ -2406,11 +2406,11 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // Precondition diagnostics — F-MED-7
+    // Precondition diagnostics
     //
-    // The Phase 3 precondition gates upgrade silent-return on state mismatch
-    // to a typed diagnostic (`InvalidBurstTransition`). The tests below pin
-    // each gate variant by invoking a helper on a deliberately wrong state.
+    // The precondition gates upgrade silent-return on state mismatch to a
+    // typed diagnostic (`InvalidBurstTransition`). The tests below pin each
+    // gate variant by invoking a helper on a deliberately wrong state.
     // ---------------------------------------------------------------------------
 
     #[test]
@@ -2962,6 +2962,139 @@ mod tests {
                 "Standard burst on Dir-anchored Profile must emit ProbeRequest::Subtree; \
                  got {other:?}",
             ),
+        }
+        let _ = e.cancel_all_in_flight_probes();
+    }
+
+    #[test]
+    fn transition_to_verifying_ships_anchor_basis_for_sub_anchor_lca() {
+        // Two dirty grandchildren /root/sub/{a,b} → component-LCA
+        // /root/sub, strictly below the anchor /root. The emitted Subtree
+        // probe ships target_path = /root/sub (recursion root) AND
+        // anchor_path = /root (scope basis). Measuring the walker's `rel`
+        // from target_path would desync exclude/pattern/depth from the
+        // engine's `covers` for any burst whose dirty-LCA sits below the
+        // anchor. (transition_to_verifying_standard_uses_lca covers only
+        // the sibling-LCA==anchor case; this pins the genuine split.)
+        let mut e = Engine::new();
+        let root = e.tree.ensure_root("/root", ResourceRole::User);
+        e.tree.set_kind(root, ResourceKind::Dir);
+        let sub = e
+            .tree
+            .ensure_child(root, "sub", ResourceRole::User)
+            .expect("live parent");
+        e.tree.set_kind(sub, ResourceKind::Dir);
+        let a = e
+            .tree
+            .ensure_child(sub, "a", ResourceRole::User)
+            .expect("live parent");
+        e.tree.set_kind(a, ResourceKind::Dir);
+        let b = e
+            .tree
+            .ensure_child(sub, "b", ResourceRole::User)
+            .expect("live parent");
+        e.tree.set_kind(b, ResourceKind::Dir);
+        let pid = e.profiles.attach(
+            &mut e.tree,
+            Profile::new(
+                root,
+                ProfileIdentity {
+                    config: ScanConfig::builder().recursive(true).build(),
+                    max_settle: MAX_SETTLE,
+                    events: NO_EVENTS,
+                },
+                SETTLE,
+                None,
+            ),
+        );
+        let (ap, bp) = (rpath(&e, a), rpath(&e, b));
+        let now = Instant::now();
+        let mut out = StepOutput::default();
+        e.start_standard_burst(pid, a, &ap, now, &mut out);
+        e.event_drives_batching(pid, b, &bp, now, &mut out);
+
+        let mut probe_out = StepOutput::default();
+        e.transition_to_verifying(pid, &mut probe_out);
+
+        let req = probe_out
+            .probe_ops()
+            .iter()
+            .find_map(|op| match op {
+                ProbeOp::Probe { request } => Some(request),
+                ProbeOp::Cancel { .. } => None,
+            })
+            .expect("Standard probe emitted");
+        let sub_path = e.tree.path_of(sub).expect("sub path resolves");
+        let root_path = e.tree.path_of(root).expect("anchor path resolves");
+        match req {
+            ProbeRequest::Subtree {
+                target_path,
+                anchor_path,
+                ..
+            } => {
+                assert_eq!(
+                    *target_path, sub_path,
+                    "recursion root is the dirty grandchildren's LCA",
+                );
+                assert_eq!(
+                    *anchor_path, root_path,
+                    "scope basis is the Profile anchor, not the LCA",
+                );
+                assert_ne!(
+                    target_path, anchor_path,
+                    "the split is real: the LCA is strictly below the anchor",
+                );
+            }
+            other => panic!("Standard burst must emit ProbeRequest::Subtree; got {other:?}"),
+        }
+        let _ = e.cancel_all_in_flight_probes();
+    }
+
+    #[test]
+    fn transition_to_verifying_reuses_target_arc_as_anchor_when_lca_is_anchor() {
+        // Sibling-LCA resolves to the anchor (target == anchor), so the
+        // producer takes the `Arc::clone(&target_path)` fast path: the
+        // emitted anchor_path is byte-equal to target_path AND the same
+        // allocation — a refcount bump, not a second `path_of` walk.
+        let (mut e, pid, root, a, b) = engine_with_two_children();
+        let (ap, bp) = (rpath(&e, a), rpath(&e, b));
+        let now = Instant::now();
+        let mut out = StepOutput::default();
+        e.start_standard_burst(pid, a, &ap, now, &mut out);
+        e.event_drives_batching(pid, b, &bp, now, &mut out);
+
+        let mut probe_out = StepOutput::default();
+        e.transition_to_verifying(pid, &mut probe_out);
+
+        let req = probe_out
+            .probe_ops()
+            .iter()
+            .find_map(|op| match op {
+                ProbeOp::Probe { request } => Some(request),
+                ProbeOp::Cancel { .. } => None,
+            })
+            .expect("Standard probe emitted");
+        let anchor_path = e.tree.path_of(root).expect("anchor path resolves");
+        match req {
+            ProbeRequest::Subtree {
+                target_path,
+                anchor_path: emitted_anchor,
+                ..
+            } => {
+                assert_eq!(
+                    *target_path, anchor_path,
+                    "sibling-LCA resolves to the anchor",
+                );
+                assert_eq!(
+                    *emitted_anchor, anchor_path,
+                    "anchor_path field carries the anchor",
+                );
+                assert!(
+                    Arc::ptr_eq(target_path, emitted_anchor),
+                    "target == anchor takes the Arc::clone fast path (one allocation)",
+                );
+            }
+            other => panic!("Standard burst must emit ProbeRequest::Subtree; got {other:?}"),
         }
         let _ = e.cancel_all_in_flight_probes();
     }

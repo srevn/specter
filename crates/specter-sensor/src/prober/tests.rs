@@ -15,11 +15,11 @@ use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, GlobPattern, Input,
     LeafEntry, NonEmptyChainSet, ProbeCorrelation, ProbeFailure, ProbeOutcome, ProbeOwner,
-    ProbeRequest, ProbeResponse, ProfileId, ProofObligation, ScanConfig,
+    ProbeRequest, ProbeResponse, ProfileId, ProofAuthority, ProofObligation, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -1475,6 +1475,266 @@ fn dir_hash_recursive_is_deterministic_across_two_probes_on_stable_fs() {
     assert_eq!(a1.dir_hash(), a2.dir_hash());
 }
 
+// ---------------------------------------------------------------- walk: anchor scope basis
+//
+// `ProbeRequest::Subtree` carries the Profile anchor distinct from the
+// recursion-root `target_path`. The walker measures every dirent's `rel`
+// (hence its depth) as `strip_prefix(anchor_path)`, so `exclude` /
+// `pattern` / `max_depth` / `recursive` resolve against the same origin
+// the engine's `covers` uses even when a Standard burst roots the walk at
+// a dirty-LCA below the anchor. These pins drive `target` strictly below
+// `anchor`, where measuring `rel` from the walk root instead of the anchor
+// would diverge from `covers`: a false `Authoritative` for path-shaped
+// filters (`exclude` / `pattern`), over-inclusion for depth-shaped ones
+// (`max_depth` / `recursive`).
+
+/// `<tmp>/sub/secret/a` under a recursive `exclude=["secret/**"]` config,
+/// plus the obligation chain through the nested leaf. The recursion root
+/// is `<tmp>/sub`; the *true* anchor is `<tmp>`. Shared by the keeps-it
+/// (true anchor) and drops-it (anchor set to the LCA) pins — they differ
+/// only in the `anchor_path` argument to `probe_subtree`.
+fn nested_secret_fixture(tmp: &TempDir) -> (PathBuf, ScanConfig, ProofObligation) {
+    let target = tmp.path().join("sub");
+    std::fs::create_dir_all(target.join("secret")).unwrap();
+    std::fs::write(target.join("secret/a"), b"x").unwrap();
+    let cfg = ScanConfig::builder()
+        .recursive(true)
+        .exclude(GlobPattern::compile("secret/**").unwrap())
+        .build();
+    let mut chain = BTreeSet::new();
+    chain.insert(Arc::from(target.join("secret/a")));
+    (target, cfg, chains_from(chain))
+}
+
+#[test]
+fn anchor_relative_glob_keeps_deep_nested_match() {
+    // anchor = <tmp>, recursion root = <tmp>/sub. The leaf's anchor-rel
+    // path is `sub/secret/a`, which the start-anchored `secret/**` does
+    // NOT match — so it stays in scope. Measuring `rel` from the LCA
+    // would yield `secret/a`, drop it, and certify `Authoritative` over a
+    // region never observed. Chain-through + `Authoritative` proves the
+    // on-chain leaf was observed, not filtered.
+    let tmp = TempDir::new().unwrap();
+    let (target, cfg, obligation) = nested_secret_fixture(&tmp);
+    let outcome = probe_subtree(&target, tmp.path(), &cfg, 0, None, &obligation, false);
+    let ProbeOutcome::SubtreeProven {
+        snapshot,
+        authority,
+    } = outcome
+    else {
+        panic!("expected SubtreeProven, got {outcome:?}");
+    };
+    let mut segs = Vec::new();
+    collect_paths(&snapshot, "", &mut segs);
+    assert!(
+        segs.iter().any(|s| s == "secret/a"),
+        "anchor-rel `sub/secret/a` is not matched by `secret/**`; the deep \
+         leaf stays in scope; got {segs:?}",
+    );
+    assert_eq!(
+        authority,
+        ProofAuthority::Authoritative,
+        "the on-chain leaf was observed, not filtered",
+    );
+}
+
+#[test]
+fn depth_is_anchor_relative_when_rooted_below_anchor() {
+    // The depth-shaped scope axis. Non-recursive, anchor = <tmp>; the lone
+    // dirty resource is the depth-1 sub*directory* <tmp>/d, so the
+    // recursion root is <tmp>/d, below the anchor. The file <tmp>/d/file is
+    // anchor-rel `d/file`, depth 2 → excluded by `depth > 1 && !recursive`.
+    // Rooting the walk at <tmp>/d does not relax that: every dirent's depth
+    // is `strip_prefix(anchor).components().count()`, not walk-root-relative
+    // (an LCA-relative depth of 1 would wrongly admit it). One pin covers
+    // the whole axis: `accepts_structural` and `should_recurse` both read
+    // that single `entry_depth`, so the `max_depth` gate re-bases
+    // identically.
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("d");
+    std::fs::create_dir(&target).unwrap();
+    std::fs::write(target.join("file"), b"x").unwrap();
+    let cfg = ScanConfig::builder().recursive(false).build();
+    let outcome = probe_subtree(&target, tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let segs = segments(&outcome);
+    assert!(
+        segs.is_empty(),
+        "the depth-2 grandchild (anchor-rel `d/file`) is out of scope for a \
+         non-recursive watch even though the walk roots at the subdir; got {segs:?}",
+    );
+}
+
+// ---------------------------------------------------------------- walk: on-chain filter-drop tripwire
+//
+// `WalkContext::note_filter_drop` is the runtime witness that walker scope
+// equals engine `covers`: an obligation-chain leaf the walker nonetheless
+// filters is a scope regression (the engine only chains covers()-accepted
+// paths, which are walker-accepted under the shared anchor basis). Feeding
+// the nested-secret fixture with `anchor_path == target` sets the scope
+// basis to the LCA instead of the true anchor, so the start-anchored
+// `secret/**` matches the LCA-relative `secret/a` and drops the on-chain
+// leaf. The walker refuses to certify it: loud in dev, degrade to
+// `Undischarged` in release.
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(expected = "scope regression")]
+fn on_chain_filter_drop_trips_debug_assert() {
+    let tmp = TempDir::new().unwrap();
+    let (target, cfg, obligation) = nested_secret_fixture(&tmp);
+    // anchor == target == the LCA, not the true anchor `<tmp>`. The walker
+    // measures the leaf at LCA-relative `secret/a`, which `secret/**`
+    // matches and drops; the drop is on-chain ⇒ debug_assert fires. Called
+    // directly (not via the pool, whose `catch_unwind` would convert the
+    // panic to `Failed`).
+    let _ = probe_subtree(&target, &target, &cfg, 0, None, &obligation, false);
+}
+
+#[cfg(not(debug_assertions))]
+#[test]
+fn on_chain_filter_drop_degrades_to_undischarged_in_release() {
+    let tmp = TempDir::new().unwrap();
+    let (target, cfg, obligation) = nested_secret_fixture(&tmp);
+    let outcome = probe_subtree(&target, &target, &cfg, 0, None, &obligation, false);
+    let ProbeOutcome::SubtreeProven { authority, .. } = outcome else {
+        panic!("expected SubtreeProven, got {outcome:?}");
+    };
+    assert!(
+        matches!(authority, ProofAuthority::Undischarged { .. }),
+        "an on-chain filter drop degrades the frame ⇒ refuse to fire; got {authority:?}",
+    );
+}
+
+// ---------------------------------------------------------------- walk: certify obligation fold
+//
+// `certify` folds the degrade ledger against the obligation. It is
+// unidirectional: a degraded frame `f` flags `Undischarged` only for a
+// chain `p` at-or-below it (`p.starts_with(f)`); a chain off the degraded
+// subtree stays `Authoritative`. And an *absent* (deleted) chain leaf is
+// observed-absent, not a hole — it never degrades a frame, so the
+// obligation discharges. These pin the fold both ways and the delete
+// safety the presence-check form would have broken.
+
+#[test]
+fn certify_on_chain_degraded_frame_is_undischarged() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let forbidden = tmp.path().join("forbidden");
+    std::fs::create_dir(&forbidden).unwrap();
+    std::fs::write(forbidden.join("inside.c"), b"x").unwrap();
+    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let cfg = ScanConfig::builder().recursive(true).build();
+    // The chain runs through the unreadable subtree, so the degraded
+    // `forbidden` frame lies at-or-above it ⇒ Undischarged.
+    let mut chain = BTreeSet::new();
+    chain.insert(Arc::from(forbidden.join("inside.c")));
+    let outcome = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &chains_from(chain),
+        false,
+    );
+
+    // Restore perms before TempDir drops, else cleanup fails.
+    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ProbeOutcome::SubtreeProven { authority, .. } = outcome else {
+        panic!("expected SubtreeProven, got {outcome:?}");
+    };
+    let ProofAuthority::Undischarged { first_unread } = authority else {
+        panic!("on-chain degraded frame must yield Undischarged, got {authority:?}");
+    };
+    assert_eq!(
+        first_unread.as_ref(),
+        forbidden.join("inside.c").as_path(),
+        "first_unread names the obligation path whose proof went undischarged",
+    );
+}
+
+#[test]
+fn certify_off_chain_degraded_frame_stays_authoritative() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let forbidden = tmp.path().join("forbidden");
+    std::fs::create_dir(&forbidden).unwrap();
+    std::fs::write(forbidden.join("inside.c"), b"x").unwrap();
+    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+    let other = tmp.path().join("other");
+    std::fs::create_dir(&other).unwrap();
+    std::fs::write(other.join("x.c"), b"x").unwrap();
+
+    let cfg = ScanConfig::builder().recursive(true).build();
+    // The chain runs through the readable `other` subtree, off the
+    // degraded `forbidden` frame ⇒ Authoritative despite the hole.
+    let mut chain = BTreeSet::new();
+    chain.insert(Arc::from(other.join("x.c")));
+    let outcome = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &chains_from(chain),
+        false,
+    );
+
+    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    let ProbeOutcome::SubtreeProven { authority, .. } = outcome else {
+        panic!("expected SubtreeProven, got {outcome:?}");
+    };
+    assert_eq!(
+        authority,
+        ProofAuthority::Authoritative,
+        "a degraded frame off every obligation chain must not flag; got {authority:?}",
+    );
+}
+
+#[test]
+fn certify_absent_chain_leaf_is_authoritative_not_undischarged() {
+    // A chain leaf created-then-removed within the settle window is absent
+    // from `read_dir`, so it never reaches a filter arm and never degrades
+    // a frame. `certify` must return `Authoritative` (fire), not
+    // `Undischarged`: a presence-check on chain leaves would wedge every
+    // legitimate delete (rm -rf, rename-away, editor temp) into never-fire.
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("kept.c"), b"x").unwrap();
+    let cfg = ScanConfig::builder().recursive(true).build();
+    // The obligation references a leaf that does not exist on disk.
+    let mut chain = BTreeSet::new();
+    chain.insert(Arc::from(tmp.path().join("deleted.c")));
+    let outcome = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &chains_from(chain),
+        false,
+    );
+    let ProbeOutcome::SubtreeProven {
+        snapshot,
+        authority,
+    } = outcome
+    else {
+        panic!("expected SubtreeProven, got {outcome:?}");
+    };
+    assert!(
+        !snapshot.entries().contains_key("deleted.c"),
+        "the chain leaf is genuinely gone from disk",
+    );
+    assert!(snapshot.entries().contains_key("kept.c"));
+    assert_eq!(
+        authority,
+        ProofAuthority::Authoritative,
+        "an absent (deleted) chain leaf is observed-absent, not a hole; got {authority:?}",
+    );
+}
+
 // ---------------------------------------------------------------- pool: run_probe dispatch
 //
 // `run_probe` is the variant-dispatch glue between `WorkerProber` and the
@@ -1967,6 +2227,88 @@ fn worker_prober_concurrent_submit_is_safe() {
     assert_eq!(received, 15, "all submits delivered");
     let mut prober = Arc::try_unwrap(prober).expect("only one strong ref");
     let _ = prober.shutdown();
+}
+
+// ---------------------------------------------------------------- pool: deep-tree worker stack
+//
+// The subtree walker recurses one frame-triple per directory level,
+// bounded by PATH_MAX. `PROBER_WORKER_STACK` (8 MiB) sizes each worker so
+// the deepest legal tree walks without a stack-overflow abort.
+
+#[test]
+fn deep_tree_walks_on_worker_without_stack_overflow() {
+    // Build the deepest absolute-path tree the filesystem allows (to the
+    // ENAMETOOLONG wall), then walk it on a real `WorkerProber` worker
+    // (8 MiB stack). A PATH_MAX-deep recursive walk on the old 2 MiB
+    // default thread stack could overflow and abort the process; this pins
+    // that the production worker stack absorbs the deepest tree the
+    // absolute-path walker can encounter. The walk MUST run on the worker
+    // (not this test thread) for the stack under test to be exercised.
+    // Meaningful on Linux (PATH_MAX ~4096 ⇒ ~2000 levels, ~2 MiB of
+    // stack); a shallower smoke test on macOS (PATH_MAX 1024).
+    let tmp = TempDir::new().unwrap();
+    let mut path = tmp.path().to_path_buf();
+    let mut depth = 0u32;
+    // Nest single-char dirs until the path outgrows PATH_MAX. The 6000 cap
+    // is a runaway backstop well above any real PATH_MAX.
+    while depth < 6000 {
+        let next = path.join("d");
+        match std::fs::create_dir(&next) {
+            Ok(()) => {
+                path = next;
+                depth += 1;
+            }
+            Err(e) if e.raw_os_error() == Some(libc::ENAMETOOLONG) => break,
+            Err(_) => break,
+        }
+    }
+    assert!(
+        depth > 64,
+        "fixture must be deep enough to exercise the recursion (got depth {depth})",
+    );
+
+    let (out_tx, out_rx) = unbounded::<Input>();
+    let mut prober = WorkerProber::new(sink(out_tx), nz(1)).unwrap();
+    let p = fresh_profile_ids(1)[0];
+    let root: Arc<Path> = Arc::from(tmp.path());
+    prober.submit(ProbeRequest::Subtree {
+        owner: ProbeOwner::Profile(p),
+        correlation: ProbeCorrelation::from(1),
+        target_path: Arc::clone(&root),
+        anchor_path: root,
+        scan_config: ScanConfig::builder().recursive(true).build(),
+        captured_with: 0,
+        baseline_subtree: None,
+        obligation: ProofObligation::WholeSubtree,
+        forced: false,
+    });
+
+    let recv_result = out_rx.recv_timeout(Duration::from_secs(20));
+    let _ = prober.shutdown();
+    // Tear the deep chain down bottom-up (iteratively) so neither TempDir's
+    // drop nor std's recursive remove_dir_all recurses PATH_MAX levels on
+    // this modest test-thread stack.
+    while path.as_path() != tmp.path() {
+        let _ = std::fs::remove_dir(&path);
+        if !path.pop() {
+            break;
+        }
+    }
+
+    let resp = match recv_result {
+        Ok(Input::ProbeResponse(r)) => r,
+        Ok(other) => panic!("unexpected input: {other:?}"),
+        Err(e) => panic!(
+            "deep-tree probe did not complete ({e:?}); a worker stack overflow \
+             aborts the whole process, so reaching this means the walk is wedged \
+             rather than overflowed",
+        ),
+    };
+    assert!(
+        matches!(resp.outcome, ProbeOutcome::SubtreeProven { .. }),
+        "deep recursive walk completes on the 8 MiB worker stack; got {:?}",
+        resp.outcome,
+    );
 }
 
 // Compile-time check that the prober trait surface is Send + Sync.
