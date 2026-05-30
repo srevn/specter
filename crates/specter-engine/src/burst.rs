@@ -108,7 +108,10 @@
 //!   variant payload for the choke to read back.
 //! - [`Engine::emit_owner_probe`] (in `probe`) — the single
 //!   owner-polymorphic emission choke. Each burst-launch helper is
-//!   `mint → arm (loud) → emit_owner_probe(owner)`; the choke resolves
+//!   `mint → arm → emit_owner_probe(owner)`, with every post-gate state
+//!   resolution loud (`unreachable!()` on the gate-proven-impossible
+//!   miss) and the arm guarded at its re-acquire edge (`ProbeSlot::arm`)
+//!   and destroy edge (`Drop` tripwire); the choke resolves
 //!   the owner's state once, reads the correlation back off the armed
 //!   slot, kind-dispatches, and materializes the per-carrier proof
 //!   obligation as a pure `&self` read (the pre-fire Standard burst's
@@ -830,65 +833,47 @@ impl Engine {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToVerifying, out) {
             return;
         }
-        // Compute target under one immutable borrow window. `&self.tree`
-        // and `&self.profiles.get(_)` are disjoint Engine-field borrows;
-        // the call returns a `ResourceId` (`Copy`), so neither borrow
-        // outlives this block. `pre_fire_target` is pure path math plus
-        // a bounded anchor-rooted Tree descent — it cannot fail, only
-        // fall back to the (always-live) anchor, so it threads no
-        // diagnostic.
-        let target = match self.profiles.get(profile_id) {
-            Some(p) => match p.state() {
-                ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
-                    pre_fire_target(p, pre, &self.tree)
-                }
-                _ => return,
-            },
-            None => return,
-        };
-
-        // No per-burst consumables are drained here. The post-fire
-        // phases never reach this helper — production callers (Settle
-        // expiry, BurstDeadline expiry, ancestor reconfirm from
-        // `finish_burst_to_idle`) are gated on pre-fire phases via
-        // `is_timer_referenced` and the Draining sweep's
-        // `is_draining()` filter respectively. A stray call that
-        // construct-arms a fresh `Verifying` slot while an effect wait
-        // is still in flight would orphan the prior correlation; the
-        // loud arm below (`unreachable!()` on a non-pre-fire state) is
-        // the guard, and the I5 `debug_assert` is its dev/CI backstop.
-        //
-        // The proof obligation (`ProofObligation::Chains` from
-        // `dirty`'s captured paths, or `WholeSubtree` for Seed) and
-        // `forced` are materialized by `emit_owner_probe` (the single
-        // probe-emission choke) off the armed `Verifying` slot it
-        // resolves — the transition threads nothing. `dirty` is
-        // preserved and read immutably by the choke (never drained):
-        // its captured paths carry both the probe-scope basis and the
-        // proof-obligation chains across the whole burst.
-
-        // Mint, then write the `Verifying` phase already armed with the
-        // correlation. The prior phase is `Batching` / `Draining`
-        // (gated above), neither of which carries a probe slot, so I5
-        // holds by representability; the assert is the loud dev/CI
-        // backstop. There is no ordering hazard to manage — the slot
-        // *is* the phase, so phase-without-correlation has no window.
         let owner = ProbeOwner::Profile(profile_id);
+        // I5: no probe may already be in flight — the construct-armed
+        // slot below would orphan its correlation. Holds by
+        // representability (the gated prior phase, `Batching` /
+        // `Draining`, carries no slot); the assert is the loud dev/CI
+        // backstop.
         debug_assert!(
             self.pending_probe_for(owner).is_none(),
             "I5: transition_to_verifying with a probe already in flight \
              (the construct-armed slot would orphan the prior correlation, \
              profile = {profile_id:?})",
         );
+
+        // Resolve the probe target, routed through `Profile::pre_fire_burst`
+        // (the pre-fire read path) rather than an inline `state()` re-match.
+        // `&self.tree` and `&self.profiles` are disjoint immutable field
+        // borrows and the call yields a `Copy` `ResourceId`, so both end
+        // with this statement — leaving `mint_probe_correlation` (`&mut
+        // self`) free. The read is *loud*: `require_active_pre_fire` proved
+        // `Active(PreFire)` and nothing mutates profile state between the
+        // gate and here, so a `None` is a broken state machine, not a
+        // silent no-probe wedge.
+        let tree = &self.tree;
+        let Some(target) = self
+            .profiles
+            .get(profile_id)
+            .and_then(|p| p.pre_fire_burst().map(|pre| pre_fire_target(p, pre, tree)))
+        else {
+            unreachable!(
+                "transition_to_verifying: Profile {profile_id:?} not \
+                 Active(PreFire) after require_active_pre_fire proved it"
+            );
+        };
+
         let correlation = self.mint_probe_correlation();
 
-        // Loud arm. `require_active_pre_fire` proved `Active(PreFire)`,
-        // so `pre_fire_burst_mut` resolving `None` means the state
-        // machine broke between the gate and the arm. Silent skip ⇒ the
-        // emit below reads an un-armed slot and produces no probe and no
-        // diagnostic (a wedge); loud ⇒ a crash. Co-required with the
-        // choke's read-back: read-back stops an orphaned wire, the loud
-        // arm stops the silent wedge — neither subsumes the other.
+        // Re-resolve mutably to arm — the same loud contract as the target
+        // read above and `transition_to_rebasing`'s single arm. Both loud
+        // resolutions and the choke's correlation read-back are co-required:
+        // read-back stops an orphaned wire, the loud resolutions stop a
+        // silent no-probe wedge — neither subsumes the others.
         let Some(pre) = self
             .profiles
             .get_mut(profile_id)
@@ -899,11 +884,12 @@ impl Engine {
                  Active(PreFire) after require_active_pre_fire proved it"
             );
         };
-        // One write: the armed slot and its target ship together as a
-        // single variant payload. The variant *is* the moment of probe
-        // construction, so a half-written Verifying — slot armed without
-        // target, or target written without an armed slot — is
-        // unconstructable.
+        // One write: the armed slot and target ship as a single variant
+        // payload, so a half-written `Verifying` is unconstructable. The
+        // choke later materializes the proof obligation (`Chains` from
+        // `dirty`'s captured paths for Standard, `WholeSubtree` for Seed)
+        // and `forced` off this armed slot — the transition threads
+        // neither, and `dirty` is read there immutably, never drained.
         pre.phase = PreFirePhase::Verifying {
             slot: ProbeSlot::armed(correlation, ()),
             target,
