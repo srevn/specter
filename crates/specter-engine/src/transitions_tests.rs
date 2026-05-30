@@ -1400,99 +1400,141 @@ fn event_drives_batching_clears_pending_probe() {
     );
 }
 
-/// Carrier survival across the pre-fire phase swaps: `last_certified_hash`
-/// (the Layer-C hash-channel sample carrier) rides through them untouched.
-/// Neither `transition_to_verifying` (Batching → Verifying) nor
-/// `event_drives_batching` (Verifying → Batching) reconstructs the
-/// `PreFireBurst` — they rewrite only `PreFirePhase`, leaving the
-/// sibling carrier field intact. The preservation is convention-guarded
-/// today (phase swaps are raw `pre.phase = …` writes, no typed
-/// phase-mutation choke); this pins it as executable behaviour, so a
-/// future phase helper that rebuilt the burst — silently dropping the
-/// carrier — fails here loudly.
+/// Hash-channel carrier survival across the pre-fire phase swaps, pinned
+/// through the **verdict** — the seal moved `last_certified_hash` to
+/// `pub(crate)` on core, so this crate can no longer read the field
+/// directly (the white-box read this test replaces). The Layer-C channel
+/// needs the prior sample to ride through every pre-fire swap for a
+/// *second, equal* Authoritative sample to fold `Stable(Natural)` and
+/// fire; if any phase helper reset the carrier the second sample's
+/// `prior` reverts to `None`, folding `Unstable` forever (never fires).
+/// The fire is therefore the executable witness that the carrier survived
+/// `transition_to_verifying` (Batching → Verifying), `retry_drives_batching`
+/// (the first sample's `Unstable` re-Batch), and `event_drives_batching`
+/// (an FsEvent during Verifying).
+///
+/// Requires a CONTENT-free (`STRUCTURE`-only) Profile so the channel
+/// engages (`events_witness_quiescence == false`); a CONTENT-bearing
+/// Profile closes the obligation on one `EventsReliable` sample and never
+/// threads the carrier.
 #[test]
-fn last_certified_hash_survives_batching_verifying_batching() {
-    let (mut e, pid, _sid, root, _) = engine_with_attached_sub();
-    // Settle the Seed baseline → Idle so the next FsEvent opens a
-    // Standard debounce burst (the carrier's home).
+fn hash_channel_carrier_survives_pre_fire_swaps_to_stable_resample() {
+    let mut e = Engine::new();
+    let anchor = e.tree.ensure_root("anchor", ResourceRole::User);
+    e.tree.set_kind(anchor, ResourceKind::Dir);
+    let t0 = Instant::now();
+    // STRUCTURE-only ⇒ the N=2 hash channel engages on the Standard burst.
+    let (_sid, pid) = crate::testkit::attach_structure_only(&mut e, anchor, t0);
+    // Cold-arm Seed pins on its first Authoritative sample (SilentPin owes
+    // no quiescence proof ⇒ EventsReliable), independent of the mask;
+    // baseline := empty dir.
     complete_seed_burst(&mut e, pid);
 
-    // Idle → Active(PreFire(Batching)).
-    let t0 = Instant::now();
+    // Both Standard samples share one non-empty snapshot: their certified
+    // hashes are equal (the fold's `prior == response` input) and differ
+    // from the empty baseline (so the fire is not B1-deduped).
+    let sample = || dir_tree_snap(vec![("a.rs", EntryKind::File, 1)]);
+
+    // Idle → Batching on the driving event.
     let _ = e.step(
         Input::FsEvent {
-            resource: root,
+            resource: anchor,
             event: FsEvent::Modified,
         },
         t0,
     );
+
+    // Batching → Verifying (#1) via settle expiry.
+    let t1 = t0 + SETTLE * 2;
+    crate::testkit::drain_due(&mut e, t1);
+    let corr1 = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("settle expiry reaches the first Verifying probe");
+
+    // Sample 1: Authoritative hash H. prior = None ⇒ Unstable ⇒
+    // retry_drives_batching re-Batches; carrier := Some(H).
+    let out1 = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: corr1,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: sample(),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t1,
+    );
+    assert!(
+        out1.effects().is_empty(),
+        "first hash-channel sample folds Unstable (prior None) — no fire",
+    );
     assert!(
         matches!(
             e.profiles.get(pid).unwrap().state(),
-            ProfileState::Active(ActiveBurst::PreFire(_), _)
+            ProfileState::Active(ActiveBurst::PreFire(pre), _)
+                if matches!(pre.phase, PreFirePhase::Batching { .. })
         ),
-        "FsEvent opens a Standard pre-fire burst",
+        "Unstable re-Batches via retry_drives_batching",
     );
 
-    // Stamp the hash-channel carrier on the Batching burst.
-    const CARRIER: u128 = 0xC6DE_F00D;
-    let prior = e
-        .profiles
-        .get_mut(pid)
-        .unwrap()
-        .advance_certified_sample(CARRIER);
-    assert_eq!(prior, None, "first sample on the fresh Standard burst");
+    // Batching → Verifying (#2) via settle expiry.
+    let t2 = t1 + SETTLE * 2;
+    crate::testkit::drain_due(&mut e, t2);
+    assert!(
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
+        "settle expiry reaches the second Verifying probe",
+    );
 
-    // Batching → Verifying via the settle expiry (transition_to_verifying).
-    let t1 = t0 + SETTLE * 2;
-    while let Some(entry) = e.pop_expired(t1) {
-        e.step(
-            Input::TimerExpired {
-                profile: entry.profile,
-                kind: entry.kind,
-                id: entry.id,
-            },
-            t1,
-        );
-    }
-    match e.profiles.get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
-            assert!(
-                matches!(pre.phase, PreFirePhase::Verifying { .. }),
-                "settle expiry reaches Verifying",
-            );
-            assert_eq!(
-                pre.last_certified_hash,
-                Some(CARRIER),
-                "carrier survives Batching → Verifying",
-            );
-        }
-        other => panic!("expected Active(PreFire(Verifying)); got {other:?}"),
-    }
-
-    // Verifying → Batching via an FsEvent (event_drives_batching).
-    let t2 = t1 + SETTLE;
+    // FsEvent during Verifying ⇒ event_drives_batching cancels the probe
+    // and re-Batches. The carrier (Some(H)) must ride through this swap.
     let _ = e.step(
         Input::FsEvent {
-            resource: root,
+            resource: anchor,
             event: FsEvent::Modified,
         },
         t2,
     );
-    match e.profiles.get(pid).unwrap().state() {
-        ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
-            assert!(
-                matches!(pre.phase, PreFirePhase::Batching { .. }),
-                "event re-arms Batching",
-            );
-            assert_eq!(
-                pre.last_certified_hash,
-                Some(CARRIER),
-                "carrier survives Verifying → Batching",
-            );
-        }
-        other => panic!("expected Active(PreFire(Batching)); got {other:?}"),
-    }
+    assert!(
+        matches!(
+            e.profiles.get(pid).unwrap().state(),
+            ProfileState::Active(ActiveBurst::PreFire(pre), _)
+                if matches!(pre.phase, PreFirePhase::Batching { .. })
+        ),
+        "event_drives_batching cancels the verify and re-Batches",
+    );
+
+    // Batching → Verifying (#3) via settle expiry.
+    let t3 = t2 + SETTLE * 2;
+    crate::testkit::drain_due(&mut e, t3);
+    let corr3 = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("settle expiry reaches the third Verifying probe");
+
+    // Sample 2: Authoritative, *equal* hash H. prior = Some(H) == response
+    // ⇒ Stable(Natural) ⇒ FIRE — iff the carrier survived swaps #1–#3.
+    let out2 = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: corr3,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: sample(),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        t3,
+    );
+    assert!(
+        !out2.effects().is_empty(),
+        "second equal Authoritative sample folds Stable(Natural) and fires — \
+         the surviving carrier; a reset would fold Unstable forever",
+    );
+    assert!(
+        matches!(
+            e.profiles.get(pid).unwrap().state(),
+            ProfileState::Active(ActiveBurst::PostFire(_), _)
+        ),
+        "the fire transitions the burst into the post-fire tail",
+    );
 }
 
 /// Field-discipline pin for `finalize_anchor_lost`: an anchor terminal
@@ -7810,16 +7852,18 @@ fn residual_restart_under_window_folds() {
 
     // The restarted burst is a fresh Standard Batching burst, born under
     // the live window ⇒ fold-latched.
+    // The latch read is sealed to core; assert it through the public
+    // `burst_fold_latched()` accessor before destructuring the burst.
+    assert!(
+        e.profiles.get(pid).unwrap().state().burst_fold_latched(),
+        "the restarted burst froze the live window at its birth",
+    );
     let settle_timer = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
             assert_eq!(
                 pre.intent,
                 BurstIntent::Standard,
                 "residual restart is Standard"
-            );
-            assert!(
-                pre.fold_latched,
-                "the restarted burst froze the live window at its birth",
             );
             match &pre.phase {
                 PreFirePhase::Batching { settle_timer } => *settle_timer,

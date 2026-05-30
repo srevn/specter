@@ -197,6 +197,87 @@ fn common_prefix<'a>(a: &'a Path, b: &Path) -> &'a Path {
     prefix
 }
 
+/// Sealed N=2 hash-channel sample carrier — the source of the verdict
+/// floor's [`QuiescenceWitness::HashChannel`] `prior` field. Owned by
+/// both [`PreFireBurst`] and [`PostFireBurst`] (a separate sample
+/// sequence each, across the fire boundary): `None` until the first
+/// Authoritative sample advances it, `Some(hash)` after.
+///
+/// The newtype *is* the single-writer discipline. The inner `Option` is
+/// private and [`Self::advance`] is the sole mutation; both that and
+/// [`Self::fresh`] are `pub(crate)`, so the engine — which holds a
+/// blanket `&mut` to the burst for cat-a phase swaps — has no syntactic
+/// name for the field and cannot reset it. The `transition_to_settling`
+/// carrier-clobber footgun is a compile error, not a silent quiescence
+/// regression. Mirrors [`DirtyProvenance`]'s `pub(crate)`-clear seal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct CertifiedSample(Option<u128>);
+
+impl CertifiedSample {
+    /// A carrier that has observed no sample yet — the birth value at
+    /// every burst construction. No construction path may seed a prior
+    /// sample (the no-bypass discipline): the post-command / post-rebase
+    /// tree a fresh burst samples is a *different* tree, so carrying a
+    /// hash across would be a category error.
+    #[must_use]
+    pub(crate) const fn fresh() -> Self {
+        Self(None)
+    }
+
+    /// Record `hash` as the current Authoritative sample and return the
+    /// prior (`None` on the first sample). The returned prior is the
+    /// [`QuiescenceWitness::HashChannel`] `prior` input. The
+    /// `Authoritative`-only contract sits at the caller (the verdict
+    /// choke in `certify_probe_response`, reached via
+    /// [`Profile::advance_certified_sample`]); the carrier itself is a
+    /// total `&mut` mutation with no phase gate, since its lifetime is
+    /// the burst's.
+    #[must_use]
+    pub(crate) const fn advance(&mut self, hash: u128) -> Option<u128> {
+        let prior = self.0;
+        self.0 = Some(hash);
+        prior
+    }
+}
+
+/// Sealed monotone fold latch — the frozen "this burst folds instead of
+/// fires" decision, owned by [`PreFireBurst`] only. Born from the
+/// operator's birth consult, set (never cleared) by the reverse-race
+/// retro-latch [`PreFireBurst::latch_fold`], and read at verdict time
+/// via [`ProfileState::burst_fold_latched`].
+///
+/// Like [`CertifiedSample`], the newtype *is* the seal: the inner `bool`
+/// is private and the constructor / mutator / reader are all
+/// `pub(crate)`, so the engine's blanket cat-a `&mut` cannot flip the
+/// latch outside the retro-latch edge.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct FoldLatch(bool);
+
+impl FoldLatch {
+    /// The birth value — the operator's `absorb` window state consulted
+    /// at the burst's birth instant ([`Profile::absorb_window_live`]).
+    /// `true` iff a window was already live, so the burst is born
+    /// folding; the reverse race (operator arms *after* birth) is
+    /// handled by [`Self::latch`].
+    #[must_use]
+    pub(crate) const fn born(consulted_live: bool) -> Self {
+        Self(consulted_live)
+    }
+
+    /// Set the latch — monotone (set-only) and idempotent under re-arm.
+    /// The sole in-life mutation, driven by the
+    /// [`ActiveBurst::latch_fold`] cascade for the reverse race.
+    pub(crate) const fn latch(&mut self) {
+        self.0 = true;
+    }
+
+    /// Whether this burst folds its terminal verdict instead of firing.
+    #[must_use]
+    pub(crate) const fn is_latched(&self) -> bool {
+        self.0
+    }
+}
+
 /// Pre-fire lifecycle — every phase before the fire transition.
 ///
 /// Fields are split across three roles:
@@ -310,74 +391,31 @@ pub struct PreFireBurst {
     ///   path) and `transition_to_draining` — phase swaps without
     ///   semantic resets.
     pub last_event_time: Option<Instant>,
-    /// Pre-fire N=2 sample carrier — the source of
-    /// [`QuiescenceWitness::HashChannel`]'s `prior` field at the
-    /// verdict floor. `None` on first sample (or when the channel is
-    /// not engaged); `Some(hash)` after the first Authoritative
-    /// response advances it.
-    ///
-    /// **Conditional engagement.** Read only when the burst owes
-    /// quiescence proof (Standard, triggered Seed, post-recovery Seed)
-    /// AND [`Profile::events_witness_quiescence`] is `false` — the
-    /// Profile's `events_union` doesn't cover `CONTENT`, so settle-
-    /// window silence cannot witness in-place writes. For events-
-    /// reliable Profiles or Cold Seeds, the field is born `None` and
-    /// never advanced; the fold consumes
-    /// [`QuiescenceWitness::EventsReliable`] instead.
-    ///
-    /// **Single writer.** [`Profile::advance_certified_sample`] — the
-    /// cat-(b) cascade. Called from the verdict choke on every
-    /// `ProofAuthority::Authoritative` response, regardless of the
-    /// verdict outcome ([`QuiescenceVerdict::Stable`] or
-    /// [`QuiescenceVerdict::Retry`]). A `ProofAuthority::Undischarged`
-    /// observation must not advance the carrier (the prior would then
-    /// reflect an unread region); the caller gates on authority.
-    ///
-    /// **Preserved across pre-fire phase swaps.**
-    /// `transition_to_{verifying,draining}`, `retry_drives_batching`,
-    /// and `event_drives_batching` mutate only their own fields, so
-    /// the carrier rides through untouched. **Dropped by omission** at
-    /// [`Self::into_post_fire`] (the typed fire move): the post-fire
-    /// side opens a fresh [`PostFireBurst::last_certified_hash`], a
-    /// separate sample sequence over the post-command tree.
-    pub last_certified_hash: Option<u128>,
-    /// Frozen "this burst folds instead of fires" decision — the
-    /// operator's `absorb` signal, consulted once at burst birth and
-    /// never re-read at verdict time (a long transfer outlives the
-    /// settle window, so a verdict-time window check would always
-    /// miss). When set, a would-be-firing verdict is overridden to a
-    /// silent baseline advance ([`crate::Diagnostic::QuiescenceAbsorbed`]).
+    /// Pre-fire N=2 sample carrier — see [`CertifiedSample`] for the
+    /// sealed single-writer contract. Engaged (read at the verdict
+    /// floor) only when the burst owes quiescence proof (Standard,
+    /// triggered Seed, post-recovery Seed) AND
+    /// [`Profile::events_witness_quiescence`] is `false`; otherwise born
+    /// fresh and never advanced — the fold consumes
+    /// [`QuiescenceWitness::EventsReliable`] instead. Dropped by
+    /// omission at [`Self::into_post_fire`]: the post-fire side opens
+    /// its own [`PostFireBurst::last_certified_hash`] sequence over the
+    /// post-command tree.
+    pub(crate) last_certified_hash: CertifiedSample,
+    /// Frozen "fold instead of fire" decision — see [`FoldLatch`] for
+    /// the sealed monotone-latch contract. When set, a would-be-firing
+    /// verdict is overridden to a silent baseline advance
+    /// ([`crate::Diagnostic::QuiescenceAbsorbed`]).
     ///
     /// **Orthogonal to [`Self::intent`].** Intent is the
     /// proof-obligation axis (`Standard ⇒ Chains`, `Seed ⇒
     /// WholeSubtree`); a fold-latched burst still runs its intent's
     /// probe semantics in full and changes only the *terminal
-    /// consequence*. So this is a plain `bool`, never a `BurstIntent`
-    /// variant.
-    ///
-    /// **Born** at construction from the engine's birth consult
-    /// ([`Profile::absorb_window_live`] at the burst's birth instant),
-    /// set like [`Self::forced`] / [`Self::intent`] — a computed
-    /// construction value, not a post-hoc mutation.
-    ///
-    /// **Retro-latched** for the reverse race (operator arms *after*
-    /// the driving events already opened a pre-fire burst): the sole
-    /// in-life writer is [`Profile::arm_absorb`] via the
-    /// [`ActiveBurst::latch_fold`] cascade — the same single-writer
-    /// discipline documented on [`Self::last_certified_hash`]. The
-    /// latch is monotone (set-only) and idempotent under re-arm.
-    ///
-    /// **Preserved across pre-fire phase swaps.** The phase helpers
-    /// (`event_drives_batching`, `retry_drives_batching`,
-    /// `transition_to_{verifying,draining}`) mutate only their own
-    /// fields, so the latch rides through untouched — exactly as
-    /// [`Self::last_certified_hash`] does.
-    ///
-    /// **Dropped by omission** at [`Self::into_post_fire`] (the typed
-    /// fire move): a fold replaces the fire, so a latched burst must
-    /// never cross into post-fire. The move debug-asserts `!latched`
-    /// as the structural dual of the verdict-time override.
-    pub fold_latched: bool,
+    /// consequence*. **Dropped by omission** at [`Self::into_post_fire`]
+    /// — a fold replaces the fire, so a latched burst must never cross
+    /// the boundary; the move debug-asserts `!latched` as the
+    /// structural dual of the verdict-time override.
+    pub(crate) fold_latched: FoldLatch,
 }
 
 /// Pre-fire phase discriminator.
@@ -564,40 +602,17 @@ pub struct PostFireBurst {
     /// [`TimerKind::RebaseCeiling`] reads the [`CeilingState::Armed`]
     /// payload.
     pub ceiling: CeilingState,
-    /// Post-fire N=2 sample carrier — the mirror of
-    /// [`PreFireBurst::last_certified_hash`] for the rebase loop's
-    /// `WholeSubtree` samples. `None` on first sample (or when the
-    /// channel is not engaged); `Some(hash)` after the first
-    /// Authoritative rebase response advances it.
-    ///
-    /// **Conditional engagement.** Read only when
-    /// [`Profile::events_witness_quiescence`] is `false` — a rebase
-    /// commits a new baseline and can never commit to a mid-write
-    /// state, so the post-fire loop always owes quiescence proof; the
-    /// `events_witness_quiescence` predicate is the *only* gate. For
-    /// events-reliable Profiles, the field is born `None` and never
-    /// advanced; the fold consumes
-    /// [`QuiescenceWitness::EventsReliable`] instead.
-    ///
-    /// **Single writer.** [`Profile::advance_certified_sample`] — the
-    /// same cat-(b) cascade that advances the pre-fire carrier; the
-    /// cascade dispatches to whichever burst variant is live.
-    ///
-    /// **Born fresh** at [`Self::new`] (`None`, an invariant-bearing
-    /// default the constructor takes no parameter for) — the
-    /// post-command tree is a *different tree* than the pre-fire
-    /// burst observed, so no pre-fire sample carries across. **Dropped
-    /// by omission** at [`Self::into_pre_fire_residual`] (the
-    /// post-fire → pre-fire restart): the restarted pre-fire burst
-    /// opens its own fresh `last_certified_hash`, a fresh sample
-    /// sequence over the now post-rebase tree.
-    ///
-    /// **Preserved across post-fire phase swaps.**
-    /// `transition_to_{settling,rebasing}`, `arm_rebase_loop_ceiling`,
-    /// `force_pending_post_fire`, and `absorb_event_into_fire_tail`
-    /// mutate only their own fields, so the carrier rides through
-    /// untouched.
-    pub last_certified_hash: Option<u128>,
+    /// Post-fire N=2 sample carrier — see [`CertifiedSample`] — for the
+    /// rebase loop's `WholeSubtree` samples. A rebase commits a new
+    /// baseline and can never commit a mid-write state, so the post-fire
+    /// loop always owes quiescence proof:
+    /// [`Profile::events_witness_quiescence`] `== false` is the *sole*
+    /// engagement gate (for events-reliable Profiles the field is born
+    /// fresh and never advanced; the fold consumes
+    /// [`QuiescenceWitness::EventsReliable`] instead). Dropped by
+    /// omission at [`Self::into_pre_fire_residual`] — the restarted
+    /// pre-fire burst opens its own sequence over the post-rebase tree.
+    pub(crate) last_certified_hash: CertifiedSample,
 }
 
 /// Post-fire phase discriminator — the structural mirror of
@@ -969,9 +984,9 @@ impl PreFireBurst {
     ///
     /// Born fresh, always: `forced` is `false` (the force-fire flag
     /// flips in-life only on `BurstDeadline` expiry, via the engine's
-    /// cat-a `force_pending`) and `last_certified_hash` is `None` (the
-    /// pre-fire N=2 sample carrier opens fresh; its sole in-life writer
-    /// is the cat-(b) [`Self::advance_certified_sample`]). Those
+    /// cat-a `force_pending`) and `last_certified_hash` opens
+    /// [`CertifiedSample::fresh`] (sole in-life writer: the cat-(b)
+    /// [`Self::advance_certified_sample`]). Those
     /// invariant-bearing fields take no parameter precisely because *no*
     /// construction path may seed them — the no-bypass discipline
     /// applied to construction, mirroring [`PostFireBurst::new`].
@@ -1001,8 +1016,8 @@ impl PreFireBurst {
             forced: false,
             dirty,
             last_event_time,
-            last_certified_hash: None,
-            fold_latched,
+            last_certified_hash: CertifiedSample::fresh(),
+            fold_latched: FoldLatch::born(fold_latched),
         }
     }
 
@@ -1031,9 +1046,7 @@ impl PreFireBurst {
     /// edge does not re-enforce that, by design.
     #[must_use]
     pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
-        let prior = self.last_certified_hash;
-        self.last_certified_hash = Some(hash);
-        prior
+        self.last_certified_hash.advance(hash)
     }
 
     /// Set the fold latch — the retro-latch leaf of the
@@ -1045,7 +1058,7 @@ impl PreFireBurst {
     /// phase gate — the carrier's lifetime is the burst's lifetime,
     /// mirroring [`Self::advance_certified_sample`].
     pub const fn latch_fold(&mut self) {
-        self.fold_latched = true;
+        self.fold_latched.latch();
     }
 
     /// Typed move from pre-fire to post-fire — the fire transition.
@@ -1095,7 +1108,7 @@ impl PreFireBurst {
     #[must_use]
     pub fn into_post_fire(self, outstanding: NonZeroU32, gate_deadline: TimerId) -> PostFireBurst {
         debug_assert!(
-            !self.fold_latched,
+            !self.fold_latched.is_latched(),
             "into_post_fire: fold-latched burst must not fire — a latched \
              verdict folds to AbsorbFold (silent baseline advance), never \
              crosses the fire boundary",
@@ -1161,9 +1174,9 @@ impl PostFireBurst {
     /// (no ceiling timer armed yet, no terminal latched),
     /// `last_event_time` is `None` (the absorb tail reckons from its
     /// own first absorbed event, not from the fire instant), and
-    /// `last_certified_hash` is `None` (the post-fire N=2 sample
-    /// carrier opens fresh — no pre-fire sample carries across the
-    /// fire). Those invariant-bearing fields take no parameter
+    /// `last_certified_hash` opens [`CertifiedSample::fresh`] — no
+    /// pre-fire sample carries across the fire. Those
+    /// invariant-bearing fields take no parameter
     /// precisely because *no* construction path may seed them — the
     /// only mutations are the cat-a engine helpers
     /// (`arm_rebase_loop_ceiling`, `force_pending_post_fire`,
@@ -1186,7 +1199,7 @@ impl PostFireBurst {
             final_window_residual,
             last_event_time: None,
             ceiling: CeilingState::NotStarted,
-            last_certified_hash: None,
+            last_certified_hash: CertifiedSample::fresh(),
         }
     }
 
@@ -1250,9 +1263,7 @@ impl PostFireBurst {
     /// [`Self::last_certified_hash`].
     #[must_use]
     pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
-        let prior = self.last_certified_hash;
-        self.last_certified_hash = Some(hash);
-        prior
+        self.last_certified_hash.advance(hash)
     }
 
     /// Typed move from post-fire back to a fresh pre-fire `Batching`
@@ -1832,7 +1843,7 @@ impl ProfileState {
     #[must_use]
     pub const fn burst_fold_latched(&self) -> bool {
         match self {
-            Self::Active(ActiveBurst::PreFire(pre), _) => pre.fold_latched,
+            Self::Active(ActiveBurst::PreFire(pre), _) => pre.fold_latched.is_latched(),
             Self::Idle | Self::Pending(_) | Self::Active(ActiveBurst::PostFire(_), _) => false,
         }
     }
@@ -5475,13 +5486,19 @@ mod tests {
     #[test]
     fn pre_fire_carrier_drops_at_into_post_fire() {
         let mut pre = batching_burst(tid(7), tid(99));
-        let prior = pre.advance_certified_sample(0xCAFE_F00D_u128);
-        assert_eq!(prior, None, "first sample on a fresh burst returns None");
-        assert_eq!(pre.last_certified_hash, Some(0xCAFE_F00D_u128));
-
-        let post = pre.into_post_fire(NonZeroU32::new(1).unwrap(), tid(55));
         assert_eq!(
-            post.last_certified_hash, None,
+            pre.advance_certified_sample(0xCAFE_F00D_u128),
+            None,
+            "first sample on a fresh burst returns None",
+        );
+
+        // The carrier is sealed (`pub(crate)` newtype) — assert the drop
+        // behaviorally: a surviving carrier would make the post-fire
+        // burst's first advance return `Some(0xCAFE_F00D)`.
+        let mut post = pre.into_post_fire(NonZeroU32::new(1).unwrap(), tid(55));
+        assert_eq!(
+            post.advance_certified_sample(0x1234_u128),
+            None,
             "the typed fire move drops the pre-fire carrier by omission — \
              the post-fire rebase loop opens its own fresh sample sequence",
         );
@@ -5503,13 +5520,19 @@ mod tests {
         let residual = dirty_prov(&[(c1, "/w/c1")]);
 
         let mut post = rebasing_post(BurstIntent::Standard, residual);
-        let prior = post.advance_certified_sample(0xDEAD_BEEF_u128);
-        assert_eq!(prior, None, "first sample on a fresh burst returns None");
-        assert_eq!(post.last_certified_hash, Some(0xDEAD_BEEF_u128));
-
-        let pre = post.into_pre_fire_residual(tid(1), tid(2), std::time::Instant::now(), false);
         assert_eq!(
-            pre.last_certified_hash, None,
+            post.advance_certified_sample(0xDEAD_BEEF_u128),
+            None,
+            "first sample on a fresh burst returns None",
+        );
+
+        // Sealed carrier — assert the drop behaviorally: a surviving
+        // carrier would make the restarted burst's first advance return
+        // `Some(0xDEAD_BEEF)`.
+        let mut pre = post.into_pre_fire_residual(tid(1), tid(2), std::time::Instant::now(), false);
+        assert_eq!(
+            pre.advance_certified_sample(0x5678_u128),
+            None,
             "the typed fire-tail restart drops the post-fire carrier by omission — \
              the restarted pre-fire burst opens its own fresh sample sequence",
         );
@@ -5553,7 +5576,7 @@ mod tests {
             true,
         );
         assert!(
-            pre.fold_latched,
+            pre.fold_latched.is_latched(),
             "the restart threads the latch — a live absorb window keeps folding the restarted burst",
         );
     }
