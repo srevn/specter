@@ -68,10 +68,11 @@
 use crate::Engine;
 use crate::path::empty_path;
 use specter_core::{
-    ActiveBurst, BurstIntent, CeilingState, DirSnapshot, LeafEntry, NonEmptyChainSet,
-    PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeFailure, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeRequest, Profile, ProfileId, ProfileState, Promoter, PromoterId, PromoterState,
-    ProofAuthority, ProofObligation, ResourceId, ResourceKind, StepOutput, subtree_at_dir,
+    ActiveBurst, BurstIntent, CeilingState, DirSnapshot, DirtyProvenance, LeafEntry,
+    NonEmptyChainSet, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeFailure, ProbeOp,
+    ProbeOutcome, ProbeOwner, ProbeRequest, Profile, ProfileId, ProfileState, Promoter, PromoterId,
+    PromoterState, ProofAuthority, ProofObligation, ResourceId, ResourceKind, StepOutput,
+    subtree_at_dir,
 };
 use std::sync::Arc;
 
@@ -354,6 +355,11 @@ impl Engine {
     /// the standalone *liveness* projection the launch guards, double-arm
     /// backstops, and integration tests read; the gate is the response
     /// path's additive fold, not a replacement.
+    ///
+    /// The emission-side twin is [`Self::probe_emission_request`] (driven
+    /// by [`Self::emit_owner_probe`]): the same one-`profiles`-resolution
+    /// shape, resolving the owner's state into the outgoing `ProbeRequest`
+    /// rather than this response-demux route.
     pub(crate) fn profile_probe_gate(
         &self,
         profile_id: ProfileId,
@@ -390,6 +396,10 @@ impl Engine {
     /// `StaleProbeResponse`. The Profile-only `Verifying` / `Rebasing`
     /// classes are unrepresentable in [`PromoterProbeRoute`], so the
     /// handler carries no cross-owner arm.
+    ///
+    /// Its emission-side twin is [`Self::probe_emission_request`] (driven
+    /// by [`Self::emit_owner_probe`]) — same one-resolution shape, wire
+    /// emission rather than route demux.
     pub(crate) fn promoter_probe_gate(
         &self,
         promoter_id: PromoterId,
@@ -455,11 +465,15 @@ impl Engine {
     /// - **Abandon** ([`Self::cancel_owner_probe`],
     ///   [`Self::cancel_all_in_flight_probes`], and the
     ///   `on_sensor_overflow` reseed arm that disarms without a wire
-    ///   `Cancel`): MUST NOT record. An abandon advances no dispatch,
-    ///   so the next legitimate dispatch is necessarily ≤ the abandoned
-    ///   correlation under engine-wide monotone minting, and recording
-    ///   the abandon would spuriously trip the strictly-greater assert
-    ///   on it.
+    ///   `Cancel`): MUST NOT record. The ledger's contract is that
+    ///   `high_water[owner]` is the greatest correlation actually
+    ///   *dispatched* for that owner; an abandon dispatches nothing, so
+    ///   recording it would advance the high-water past a never-dispatched
+    ///   correlation and dilute that meaning. It would *not* cause a false
+    ///   panic — engine-wide monotone minting guarantees the owner's next
+    ///   armed-then-dispatched correlation is strictly greater than any it
+    ///   abandoned (single slot, later mint) — the point is simply that
+    ///   the ledger records dispatches, and an abandon is not one.
     #[must_use]
     pub(crate) fn take_owner_probe(&mut self, owner: ProbeOwner) -> Option<ProbeCorrelation> {
         match owner {
@@ -542,22 +556,30 @@ impl Engine {
 
     /// The sole [`ProbeOp::Probe`] emission choke. Every launch path —
     /// Seed / Verify / Rebase, Profile & Promoter descent, Promoter
-    /// enumeration — is `mint → arm (loud) → emit_owner_probe(owner)`;
-    /// the caller passes nothing but the owner. Pushes **exactly one**
-    /// `ProbeOp::Probe` for an owner whose slot is armed, and **nothing**
-    /// for an owner whose slot is empty/absent: armed-iff-emitted is
-    /// structural here, because the correlation on the wire is the one
-    /// read back off the slot ([`Self::probe_emission_request`]), not a
-    /// caller-threaded copy that could outlive a skipped arm.
+    /// enumeration — is `mint → arm-or-construct-armed →
+    /// emit_owner_probe(owner)`; the caller passes nothing but the
+    /// owner. Pushes **exactly one** `ProbeOp::Probe` for an owner whose
+    /// slot is armed, and **nothing** for an owner whose slot is
+    /// empty/absent: armed-iff-emitted is structural here, because the
+    /// correlation on the wire is the one read back off the slot
+    /// ([`Self::probe_emission_request`]), not a caller-threaded copy
+    /// that could outlive a skipped arm.
     ///
     /// This is one half of a co-required pair, not a standalone
     /// guarantee. Read-back makes *armed ⇒ the wire carries exactly the
     /// slot's correlation* and *not-armed ⇒ no wire*. The launch sites'
-    /// loud arm makes *arm-guard miss ⇒ crash*. Without the loud arm a
-    /// missed arm would be a silent no-probe wedge (worse than the old
-    /// orphan-stall — it emits no diagnostic at all); without read-back a
-    /// missed arm would orphan a threaded correlation. Each kills a
-    /// distinct failure; neither is redundant.
+    /// arm step makes *arm-guard miss ⇒ crash*, loud at both of
+    /// [`specter_core::ProbeSlot`]'s linear edges: the *re-acquire edge*
+    /// ([`specter_core::ProbeSlot::arm`]'s assert, guarding the in-place
+    /// re-arm of an advancing descent / enumeration) and the *destroy
+    /// edge* (the [`Drop`] tripwire, guarding the construct-armed
+    /// [`specter_core::ProbeSlot::armed`] sites against overwriting a
+    /// still-armed slot), with the launch site's post-gate
+    /// `unreachable!()` closing the residual hole — a carrier that
+    /// reaches emission having never armed. So a missed arm is a crash,
+    /// never a silent no-probe wedge (worse than the old orphan-stall: no
+    /// diagnostic at all); a missed read-back would instead orphan a
+    /// threaded correlation. Neither half is redundant.
     pub(crate) fn emit_owner_probe(&self, owner: ProbeOwner, out: &mut StepOutput) {
         if let Some(request) = self.probe_emission_request(owner) {
             out.push_probe_op(ProbeOp::Probe { request });
@@ -603,13 +625,17 @@ impl Engine {
     ///    the prior positional constructors' fan-out dissolves into
     ///    struct literals.
     fn probe_emission_request(&self, owner: ProbeOwner) -> Option<ProbeRequest> {
-        // `Copy` carrier classification: which carrier, and (for the
-        // pre-fire carrier) the target + `forced` + `intent` read off
-        // state. No obligation source is carried here — the borrowed
-        // `dirty` provenance is not `Copy`; it is read immutably off the
-        // still-borrowed Profile in the render pass, keyed by this.
+        // `Copy` carrier classification: which carrier, and — for the
+        // pre-fire carrier — the target + `forced` + `intent` + a `Copy`
+        // borrow of the `dirty` provenance, all read off state.
+        // `&DirtyProvenance` is `Copy` (every `&T` is), so the obligation
+        // *source* rides the carrier directly; the obligation itself is
+        // still built lazily in the render pass's `Subtree` arm, because
+        // `chains()` allocates and a `File` anchor never builds one. The
+        // borrow is tied to the stable `&Profile` (`p`), so it stays
+        // valid for the whole resolution.
         #[derive(Clone, Copy)]
-        enum Carrier {
+        enum Carrier<'a> {
             /// Profile `Pending` / Promoter `PrefixPending` /
             /// Promoter `Active` enumeration — all path-only `Descent`
             /// wires; the target is fully resolved here. No
@@ -619,16 +645,21 @@ impl Engine {
             /// Profile `Verifying`. `target` = the variant payload's
             /// `target` (the live id `pre_fire_target` resolved from
             /// the captured paths' LCA, immutable for the Verifying
-            /// variant's lifetime), `forced` = `pre.forced`. `intent`
-            /// selects the obligation kind: Seed ⇒ `WholeSubtree` (no
-            /// trustworthy prior); Standard ⇒ `Chains` from the
-            /// *persisting* `dirty`'s captured paths (read immutably in
-            /// the render pass — the burst outlives this probe across
-            /// re-batching).
+            /// variant's lifetime), `forced` = `pre.forced`, `intent`
+            /// selects the obligation kind, and `dirty` is a `Copy`
+            /// borrow of the burst's [`DirtyProvenance`] — the
+            /// obligation source for the Standard arm. Seed ⇒
+            /// `WholeSubtree` (no trustworthy prior); Standard ⇒
+            /// `Chains` from `dirty`'s captured paths, read in the
+            /// render pass (`chains()` allocates, so the obligation
+            /// stays lazy — never built for a `File` anchor). The
+            /// *persisting* `dirty` outlives this probe across
+            /// re-batching, so the borrow is sound for the resolution.
             PreFire {
                 target: ResourceId,
                 forced: bool,
                 intent: BurstIntent,
+                dirty: &'a DirtyProvenance,
             },
             /// Profile `Rebasing` — target is the anchor; the
             /// emission ships `forced = false` because the obligation
@@ -656,7 +687,7 @@ impl Engine {
                 // carrier's private slot). `?` on an empty slot ⇒
                 // `None` ⇒ no probe: armed-iff-emitted, structurally.
                 // Then classify the carrier — target / `forced` /
-                // `intent` / kind-dispatch — independently of the
+                // `intent` / the `dirty` borrow — independently of the
                 // correlation just read. A `Some` correlation *implies*
                 // a probe-bearing carrier (Batching / Draining /
                 // Awaiting / Settling / Idle hold no slot), so those
@@ -671,6 +702,7 @@ impl Engine {
                             target: *target,
                             forced: pre.forced,
                             intent: pre.intent,
+                            dirty: &pre.dirty,
                         },
                         PreFirePhase::Batching { .. } | PreFirePhase::Draining => return None,
                     },
@@ -741,45 +773,30 @@ impl Engine {
                                 } => ProofObligation::WholeSubtree,
                                 // Standard: the event-dirty root→leaf
                                 // chains, the captured paths off the
-                                // *persisting* `dirty` (re-read
-                                // immutably — the carrier classified
-                                // PreFire and the stable `&Profile`
-                                // borrow makes an intervening state
-                                // change unrepresentable). Every captured
-                                // path is at-or-under `target` by
-                                // construction (`pre_fire_target`
-                                // resolved the captured paths' LCA), so
-                                // no subtree filter is needed.
-                                // `NonEmptyChainSet::new` rejects an
-                                // empty projection — degrade to
-                                // `WholeSubtree` so the walker proves
+                                // carrier's `Copy` borrow of the
+                                // *persisting* `dirty` (the burst
+                                // outlives this probe across
+                                // re-batching). Every captured path is
+                                // at-or-under `target` by construction
+                                // (`pre_fire_target` resolved the
+                                // captured paths' LCA), so no subtree
+                                // filter is needed. `NonEmptyChainSet::new`
+                                // rejects an empty projection — degrade
+                                // to `WholeSubtree` so the walker proves
                                 // the whole subtree rather than silently
                                 // certifying Authoritative against a
-                                // chain-less obligation. Production
-                                // never reaches the `None` arm (a
-                                // Standard burst notes its trigger), but
-                                // the type wrapper makes the silent-skip
-                                // failure mode structurally
-                                // unrepresentable regardless.
+                                // chain-less obligation. Production never
+                                // reaches the `None` arm (a Standard
+                                // burst notes its trigger), but the type
+                                // wrapper makes the silent-skip failure
+                                // mode structurally unrepresentable
+                                // regardless.
                                 Carrier::PreFire {
                                     intent: BurstIntent::Standard,
+                                    dirty,
                                     ..
-                                } => {
-                                    let ProfileState::Active(ActiveBurst::PreFire(pre), _) =
-                                        p.state()
-                                    else {
-                                        unreachable!(
-                                            "probe_emission_request: Profile {pid:?} left \
-                                             PreFire between carrier classification and the \
-                                             obligation build under one stable &Profile \
-                                             borrow"
-                                        )
-                                    };
-                                    NonEmptyChainSet::new(pre.dirty.chains()).map_or(
-                                        ProofObligation::WholeSubtree,
-                                        ProofObligation::Chains,
-                                    )
-                                }
+                                } => NonEmptyChainSet::new(dirty.chains())
+                                    .map_or(ProofObligation::WholeSubtree, ProofObligation::Chains),
                                 // Descent emits ProbeRequest::Descent in
                                 // the outer arm and never reaches the
                                 // Subtree obligation builder.
