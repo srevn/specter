@@ -47,7 +47,10 @@
 //! dirent via `strip_prefix`. Matching the predicate body alone is not
 //! enough: scope inputs must share an origin too, or an anchor-relative
 //! glob desyncs from an LCA-relative `rel`. The shared basis keeps walker
-//! and engine in lockstep across every scope axis.
+//! and engine in lockstep across every scope axis;
+//! [`WalkContext::note_filter_drop`] is the runtime witness of that
+//! lockstep — an obligation-chain leaf the walker nonetheless filters
+//! degrades the frame to `Undischarged` rather than silently dropping it.
 
 use crate::ProbeFailureExt;
 use compact_str::CompactString;
@@ -74,13 +77,16 @@ use std::sync::Arc;
 /// Separating invariant from per-frame at the type level makes the
 /// distinction structural: a reader at any call site sees `ctx`
 /// (unchanging across the recursion) plus the dirent-scope inputs that
-/// vary. The three methods name the walker's three coverage decisions:
+/// vary. The methods name the walker's coverage decisions:
 /// [`should_recurse`](Self::should_recurse) (the
-/// `Covered`/`Uncovered(fs_id)` gate at the dirent),
+/// `Covered`/`Uncovered(fs_id)` gate at the dirent) and
 /// [`try_mtime_skip`](Self::try_mtime_skip) (the no-op-when-unchanged
-/// primitive), and
-/// [`obligation_at_or_under`](Self::obligation_at_or_under) (the proof
-/// obligation that refuses skip).
+/// primitive). The two obligation-sensitive decisions —
+/// [`obligation_at_or_under`](Self::obligation_at_or_under) (the
+/// mtime-skip refusal) and [`note_filter_drop`](Self::note_filter_drop)
+/// (the on-chain filter-drop tripwire) — both project the obligation
+/// through the single [`chain_through`](Self::chain_through) query, so
+/// the chain structure is read one way.
 ///
 /// `anchor_path` is the **scope basis** — the Profile anchor the
 /// per-dirent `rel` is measured from (`child_path.strip_prefix(anchor_path)`).
@@ -235,27 +241,72 @@ impl WalkContext<'_> {
         Some(Arc::clone(prior))
     }
 
-    /// Returns `true` iff `path` lies at-or-above an obligation path
-    /// (`Chains`) or unconditionally (`WholeSubtree`, no trusted
-    /// prior). When true, [`try_mtime_skip`](Self::try_mtime_skip)
-    /// refuses to skip `path`.
+    /// True iff an obligation chain runs at-or-through `path` — some
+    /// chain path is at-or-below it (`NonEmptyChainSet::any_chain_starts_with`).
+    /// `WholeSubtree` carries no enumerable chain, so its projection is
+    /// empty (`false`).
     ///
-    /// Why `Path::starts_with` and not `==`: imagine `path = /a` and
-    /// the obligation is `{/a/b/c}`. If we skip at `/a`, we never
-    /// recurse into `/a/b/c` and miss the kernel's signal. Component-
-    /// wise `starts_with` catches this — at `/a`,
-    /// `(/a/b/c).starts_with(/a)` is true ⇒ refuse skip ⇒ enumerate
-    /// children. At `/a/b`, the same path triggers the same refusal
-    /// until we reach `/a/b/c`'s leaf, after which sibling subtrees
-    /// are mtime-skip-eligible again.
+    /// The single read of the obligation's chain structure, shared by the
+    /// two obligation-sensitive decisions:
+    /// [`obligation_at_or_under`](Self::obligation_at_or_under) (the
+    /// mtime-skip refusal) and [`note_filter_drop`](Self::note_filter_drop)
+    /// (the on-chain filter-drop tripwire).
     ///
-    /// Byte-lex via `BTreeSet::range` would erroneously match `/ab`
-    /// when probing `/a`; we need component-wise `Path::starts_with`.
+    /// Component-wise `Path::starts_with`, not byte-lex: probing `/a`
+    /// must match a chain `/a/b/c` (we descend toward the leaf, so `/a`
+    /// may not be skipped) but not a sibling `/ab`. A `BTreeSet::range`
+    /// byte-prefix would conflate the two.
     #[must_use]
-    fn obligation_at_or_under(&self, path: &Path) -> bool {
+    fn chain_through(&self, path: &Path) -> bool {
         match self.obligation {
             ProofObligation::Chains(chains) => chains.any_chain_starts_with(path),
-            ProofObligation::WholeSubtree => true,
+            ProofObligation::WholeSubtree => false,
+        }
+    }
+
+    /// True iff [`try_mtime_skip`](Self::try_mtime_skip) must refuse to
+    /// skip `path`: it lies at-or-above an obligation chain
+    /// ([`chain_through`](Self::chain_through)), or the obligation is
+    /// `WholeSubtree` (no trusted prior anywhere ⇒ every frame must be
+    /// freshly read, even off any chain).
+    #[must_use]
+    fn obligation_at_or_under(&self, path: &Path) -> bool {
+        self.chain_through(path) || matches!(self.obligation, ProofObligation::WholeSubtree)
+    }
+
+    /// Fold a **filter** drop into the running [`Completeness`], tripping
+    /// when the drop is a scope regression.
+    ///
+    /// [`enumerate_dir`] calls this at each scope-predicate `continue`
+    /// (the `accepts_structural` gate and the `pattern` arm) — the drops
+    /// that mean *out of scope*, distinct from an I/O fault (which
+    /// degrades the frame directly) and from an observed-absent delete
+    /// (absent from `read_dir`, so it never reaches a filter arm). The
+    /// walker measures scope from the anchor on the wire, the same basis
+    /// the engine's `covers` uses, so every obligation-chain leaf the
+    /// engine tracks is in scope for the walker too: a filter dropping an
+    /// on-chain dirent is a scope regression, never a legitimate exclusion.
+    ///
+    /// On regression it is loud in dev (`debug_assert`) and degrades in
+    /// release — returns [`Completeness::Incomplete`] so [`snapshot_dir`]
+    /// records this frame (an ancestor of `child_path`) and [`certify`]
+    /// flags `Undischarged` ⇒ refuse to fire. Otherwise returns `level`
+    /// unchanged. A delete never reaches a filter arm, so a
+    /// legitimately-removed chain leaf never trips this — absence and
+    /// filtering are distinguishable here by construction.
+    #[must_use]
+    fn note_filter_drop(&self, child_path: &Path, level: Completeness) -> Completeness {
+        let on_chain = self.chain_through(child_path);
+        debug_assert!(
+            !on_chain,
+            "scope regression: filter dropped on-chain dirent {} (obligation {:?})",
+            child_path.display(),
+            self.obligation
+        );
+        if on_chain {
+            Completeness::Incomplete
+        } else {
+            level
         }
     }
 }
@@ -492,9 +543,11 @@ fn snapshot_dir(
 /// never written here, only threaded through to recursive frames).
 ///
 /// Errors at this level are skip-and-continue. The level is `Incomplete`
-/// iff its own read was unfaithful: `read_dir` failed (non-NotFound),
-/// or a dirent / non-UTF-8 / `strip_prefix` / per-child `lstat`
-/// (non-NotFound) fault dropped an entry. Two faults stay `Complete`
+/// iff its own read was unfaithful: `read_dir` failed (non-NotFound), a
+/// dirent / non-UTF-8 / `strip_prefix` / per-child `lstat` (non-NotFound)
+/// fault dropped an entry, or [`WalkContext::note_filter_drop`] caught a
+/// scope filter dropping an on-chain dirent (a should-never-happen scope
+/// regression, loud in dev). Two faults stay `Complete`
 /// because they are *observed-absent*, not blindness, and self-correct
 /// (empty/short snapshot hash-differs → `Retry` → converge):
 /// `read_dir` `NotFound` (raced-empty dir) and a per-child `lstat`
@@ -577,6 +630,7 @@ fn enumerate_dir(
         // syscall on excluded subtrees (a `target/` tree in a Cargo
         // project is thousands of dirents).
         if !ctx.config.accepts_structural(rel, entry_depth) {
+            completeness = ctx.note_filter_drop(&child_path, completeness);
             continue;
         }
         let cmeta = match std::fs::symlink_metadata(&child_path) {
@@ -615,6 +669,7 @@ fn enumerate_dir(
             && let Some(pat) = &ctx.config.pattern
             && !pat.matches_path(rel)
         {
+            completeness = ctx.note_filter_drop(&child_path, completeness);
             continue;
         }
 
@@ -663,7 +718,10 @@ fn build_dir_child(
     let fs_id = FsIdentity::from_metadata(cmeta);
     if !ctx.should_recurse(child_depth, cmeta.dev()) {
         // Uncovered branch: not recursive, beyond max_depth, or cross-fs.
-        // Walker stores the entry but does not recurse.
+        // Walker stores the entry but does not recurse — the dirent is
+        // still observed, so this is not a filter drop and carries no
+        // `note_filter_drop` tripwire: any out-of-scope descendant below
+        // an Uncovered dir is on no obligation chain.
         return ChildEntry::Dir(DirChild::Uncovered(fs_id));
     }
     // Build the subdir's DirMeta from the caller-held `cmeta`: a second
