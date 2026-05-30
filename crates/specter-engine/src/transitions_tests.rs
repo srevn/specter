@@ -507,10 +507,12 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
 /// the burst to Idle (anchor/baseline preserved). The test pins the
 /// dev/CI panic.
 ///
-/// `probe_gate` does not filter on outcome variant (it routes on owner
-/// state + correlation), so this contract violation is the one the
-/// public test surface can synthesise — every other defensive arm is
-/// gated by `probe_gate` upstream.
+/// `profile_probe_gate` does not filter on outcome variant (it routes on
+/// owner state + correlation), so this payload-shape violation is the
+/// kind the public test surface can synthesise. The owner-split removed
+/// every cross-owner defensive arm at the type level (no `Enumerating` on
+/// the Profile side), so the only surviving runtime guards are these
+/// `WalkerContractViolation` payload-shape parses.
 ///
 /// Disabled in release builds via the standard `cfg_attr` discipline,
 /// mirroring `dispatch_descent_with_anchor_outcome_is_walker_contract_violation`.

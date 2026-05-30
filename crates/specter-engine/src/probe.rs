@@ -14,15 +14,20 @@
 //!    makes cross-space misuse (minting a
 //!    [`specter_core::CorrelationId`] from it, or vice versa) a compile
 //!    error, and saturation an unconditional panic.
-//! 2. **State-derived projections.** [`Engine::probe_gate`] is the
-//!    response path's sole projection: one `profiles`/`promoters`
-//!    resolution yielding the gated correlation (the staleness
-//!    identity) *and* the routing class together, so a `ProbeResponse`
-//!    resolves the owner's state twice (gate, then the
-//!    [`Engine::take_owner_probe`] disarm) instead of three times.
+//! 2. **State-derived projections.** [`Engine::profile_probe_gate`] and
+//!    [`Engine::promoter_probe_gate`] are the response path's sole
+//!    projection: one `profiles` / `promoters` resolution yielding the
+//!    gated correlation (the staleness identity) *and* the routing class
+//!    together, so a `ProbeResponse` resolves the owner's state twice
+//!    (gate, then the [`Engine::take_owner_probe`] disarm) instead of
+//!    three times. The two gates are owner-split — each yields an
+//!    owner-specific route enum ([`ProfileProbeRoute`] /
+//!    [`PromoterProbeRoute`]), so neither response handler carries a
+//!    cross-owner arm; an illegal owner/route pairing is unrepresentable
+//!    rather than a defensive runtime arm.
 //!    [`Engine::pending_probe_for`] stays the standalone *liveness*
 //!    projection every launch guard, double-arm backstop, and
-//!    integration test reads — `probe_gate` is additive, not its
+//!    integration test reads — the gates are additive, not its
 //!    replacement. "At most one probe per owner" (I5) is structural:
 //!    one owner is in one state variant, which holds exactly one
 //!    [`specter_core::ProbeSlot`]. The consume triad is layered:
@@ -49,10 +54,10 @@
 //!    are **co-required**, not redundant: read-back guarantees no
 //!    orphaned correlation reaches the wire; the loud arm guarantees an
 //!    arm-guard miss is a crash, not a silent no-probe wedge. Neither
-//!    subsumes the other. [`Engine::probe_gate`] (item 2) is the
+//!    subsumes the other. The owner-split gates (item 2) are the
 //!    response-side twin — same one-resolution shape, disjoint concern
 //!    (route demux vs. wire emission), so emission never depends on the
-//!    response-shaped `ProbeRoute`.
+//!    response-shaped route enums.
 //! 4. **Consume-once tripwire.** [`DispatchLedger`] (debug builds only)
 //!    records the high-water correlation dispatched per owner. The
 //!    structural laws (arm-once on the core slot, disarm-once via
@@ -65,44 +70,64 @@ use crate::path::empty_path;
 use specter_core::{
     ActiveBurst, BurstIntent, CeilingState, DirSnapshot, LeafEntry, NonEmptyChainSet,
     PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeFailure, ProbeOp, ProbeOutcome, ProbeOwner,
-    ProbeRequest, Profile, ProfileState, Promoter, PromoterState, ProofAuthority, ProofObligation,
-    ResourceId, ResourceKind, StepOutput, subtree_at_dir,
+    ProbeRequest, Profile, ProfileId, ProfileState, Promoter, PromoterId, PromoterState,
+    ProofAuthority, ProofObligation, ResourceId, ResourceKind, StepOutput, subtree_at_dir,
 };
 use std::sync::Arc;
 
-/// State-derived routing class for a probe response — what the
-/// dispatcher needs that the response wire does not supply.
+/// State-derived routing class for a **Profile** probe response — what
+/// the dispatcher needs that the response wire does not supply.
 ///
-/// Computed by [`Engine::probe_gate`] from the owner's *current* state
-/// alongside the gated correlation, so it is the minimal non-derivable
-/// read. It is [`Copy`] and is captured *before* the slot is disarmed:
-/// disarm empties the slot but leaves the carrier's variant intact, so
-/// a route captured first stays valid through dispatch.
+/// Owner-split from its Promoter twin [`PromoterProbeRoute`]: a Profile
+/// carrier can only be a `Pending` descent or an `Active` pre-/post-fire
+/// burst, so the route is total over exactly those three shapes and the
+/// Promoter-only `Enumerating` class is unrepresentable here. The
+/// response handler matches this directly — no cross-owner arm to guard.
+///
+/// Computed by [`Engine::profile_probe_gate`] from the Profile's
+/// *current* state alongside the gated correlation, so it is the minimal
+/// non-derivable read. It is [`Copy`] and is captured *before* the slot
+/// is disarmed: disarm empties the slot but leaves the carrier's variant
+/// intact, so a route captured first stays valid through dispatch.
 ///
 /// `Verifying` carries `(intent, forced)` because those drive the
 /// per-intent fan-out and are not recoverable from the state variant
-/// alone. `Rebasing` carries `forced` so the post-fire dispatch threads
-/// the bit symmetrically with its pre-fire twin — read off
-/// [`specter_core::PostFireBurst::forced`] at gate time, captured with
-/// the slot disarm. `Enumerating` carries the proxy `target` because
-/// the enumeration wire is path-only — the slot's tag is the sole
-/// authority for the dispatch key. `Descent` needs no payload — the
-/// owner the handler already holds is the whole routing decision.
+/// alone. `Rebasing` carries `forced` — the post-fire mirror of
+/// `Verifying`'s — projected from [`specter_core::CeilingState::Reached`]
+/// at gate time, so the post-fire dispatch has the same fold input the
+/// pre-fire dispatch does without re-reading state past the gate.
+/// `Descent` needs no payload — the owner the handler already holds is
+/// the whole routing decision.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub(crate) enum ProbeRoute {
-    /// Pending-path descent (Profile `Pending` or Promoter
-    /// `PrefixPending`). The handler routes on the owner it already
-    /// holds; the outcome variant selects advance / rewind / fail.
+pub(crate) enum ProfileProbeRoute {
+    /// Pending-path descent (Profile `Pending`). The handler routes on
+    /// the owner it already holds; the outcome variant selects advance /
+    /// rewind / fail.
     Descent,
     /// Profile pre-fire stability probe. `intent` / `forced` are read
     /// off the `PreFireBurst` for the per-intent dispatch fan-out.
     Verifying { intent: BurstIntent, forced: bool },
-    /// Profile post-fire rebase probe. `forced` is read off
-    /// [`specter_core::PostFireBurst::forced`] — the post-fire mirror
-    /// of [`Self::Verifying`]'s `forced` — so the post-fire dispatch
-    /// has the same fold input the pre-fire dispatch does without
-    /// re-reading state past the gate.
+    /// Profile post-fire rebase probe. `forced` projects the post-fire
+    /// [`specter_core::CeilingState::Reached`] latch — the mirror of
+    /// [`Self::Verifying`]'s pre-fire `forced` bit — so the post-fire
+    /// dispatch folds the same `forced` input symmetrically.
     Rebasing { forced: bool },
+}
+
+/// State-derived routing class for a **Promoter** probe response — the
+/// owner-split twin of [`ProfileProbeRoute`]. A Promoter carrier is
+/// either a `PrefixPending` literal-prefix descent or an `Active` proxy
+/// enumeration, so the route is total over exactly those two shapes and
+/// the Profile-only `Verifying` / `Rebasing` classes are unrepresentable
+/// here. Computed by [`Engine::promoter_probe_gate`]; [`Copy`] and
+/// captured pre-disarm, exactly as its Profile twin.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum PromoterProbeRoute {
+    /// Literal-prefix descent (Promoter `PrefixPending`). Shares the
+    /// `Descent` wire and the owner-polymorphic dispatch with
+    /// [`ProfileProbeRoute::Descent`]; each owner's route carries its
+    /// own variant because the gates are owner-specific.
+    Descent,
     /// Promoter proxy enumeration (`Active`). `target` is the proxy the
     /// probe enumerates, read from the enumeration slot's tag — the
     /// wire is path-only, so it is the canonical dispatch key across
@@ -297,75 +322,87 @@ impl Engine {
         }
     }
 
-    /// The owner's response-path gate: its in-flight probe correlation
-    /// **and** routing class, from one state resolution.
+    /// The Profile response-path gate: a Profile's in-flight probe
+    /// correlation **and** routing class, from one `profiles` resolution.
     ///
     /// Folds the staleness identity and the routing class into a single
-    /// `profiles`/`promoters` lookup. The correlation is read through
-    /// the public state surface
-    /// ([`specter_core::ProfileState::probe_correlation`] /
-    /// [`specter_core::PromoterState::probe_correlation`] — the same
+    /// lookup. The correlation is read through the public state surface
+    /// ([`specter_core::ProfileState::probe_correlation`] — the same
     /// projection [`Self::pending_probe_for`] exposes, so the engine
-    /// never reaches past that surface into a descent's slot), so a
-    /// `ProbeResponse` resolves the owner's state twice (here, then the
+    /// never reaches past that surface into a carrier's slot), so a
+    /// `ProbeResponse` resolves the Profile's state twice (here, then the
     /// [`Self::take_owner_probe`] disarm) rather than three times. The
     /// route is [`Copy`]; the caller gates on the correlation, disarms
     /// once, then dispatches on the route — the disarm leaves the
-    /// carrier variant intact, so the route stays valid through
-    /// dispatch.
+    /// carrier variant intact, so the route stays valid through dispatch.
     ///
-    /// `Some((correlation, route))` iff the owner is in a probe-bearing
-    /// carrier with an armed slot; `None` otherwise (⇒ the caller emits
-    /// `StaleProbeResponse`). "Armed slot but no route" is
-    /// unrepresentable: every state whose `probe_correlation` is `Some`
-    /// is, by the same case split, a routable carrier, so the dead
+    /// `Some((correlation, route))` iff the Profile is in a probe-bearing
+    /// carrier with an armed slot; `None` otherwise — an absent
+    /// `ProfileId`, a non-probe-bearing phase (`Idle` / `Batching` /
+    /// `Draining` / `Awaiting` / `Settling`), or no probe in flight — ⇒
+    /// the caller emits `StaleProbeResponse`. "Armed slot but no route"
+    /// is unrepresentable: every state whose `probe_correlation` is
+    /// `Some` is, by the same case split, a routable carrier, so the dead
     /// armed-but-unroutable arm the old open-coded staleness-gate +
     /// route-snapshot pair carried as a loud regression bail folds
-    /// structurally into this single `None`. The `Active` enumeration
-    /// arm reads the proxy `target` off the slot's tag — the wire is
-    /// path-only, so that tag is the route's sole authority for the
-    /// dispatch key.
+    /// structurally into this single `None`.
     ///
-    /// Distinct from [`Self::pending_probe_for`], which stays the
-    /// standalone *liveness* projection the launch guards, double-arm
-    /// backstops, and integration tests read; `probe_gate` is the
-    /// response path's additive fold, not a replacement.
-    pub(crate) fn probe_gate(&self, owner: ProbeOwner) -> Option<(ProbeCorrelation, ProbeRoute)> {
-        match owner {
-            ProbeOwner::Profile(pid) => {
-                let state = self.profiles.get(pid)?.state();
-                let correlation = state.probe_correlation()?;
-                let route = match state {
-                    ProfileState::Pending(_) => Some(ProbeRoute::Descent),
-                    ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
-                        PreFirePhase::Verifying { .. } => Some(ProbeRoute::Verifying {
-                            intent: pre.intent,
-                            forced: pre.forced,
-                        }),
-                        PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
-                    },
-                    ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
-                        PostFirePhase::Rebasing(_) => Some(ProbeRoute::Rebasing {
-                            forced: matches!(post.ceiling, CeilingState::Reached),
-                        }),
-                        PostFirePhase::Awaiting { .. } | PostFirePhase::Settling { .. } => None,
-                    },
-                    ProfileState::Idle => None,
-                }?;
-                Some((correlation, route))
-            }
-            ProbeOwner::Promoter(qid) => {
-                let state = self.promoters.get(qid)?.state();
-                let correlation = state.probe_correlation()?;
-                let route = match state {
-                    PromoterState::PrefixPending(_) => Some(ProbeRoute::Descent),
-                    PromoterState::Active { enumerating, .. } => enumerating
-                        .tag()
-                        .map(|target| ProbeRoute::Enumerating { target }),
-                }?;
-                Some((correlation, route))
-            }
-        }
+    /// Owner-split from [`Self::promoter_probe_gate`]: the two gates feed
+    /// owner-specific handlers off owner-specific route enums, so neither
+    /// handler carries a cross-owner arm (`Enumerating` is unrepresentable
+    /// in [`ProfileProbeRoute`]). Distinct from [`Self::pending_probe_for`],
+    /// the standalone *liveness* projection the launch guards, double-arm
+    /// backstops, and integration tests read; the gate is the response
+    /// path's additive fold, not a replacement.
+    pub(crate) fn profile_probe_gate(
+        &self,
+        profile_id: ProfileId,
+    ) -> Option<(ProbeCorrelation, ProfileProbeRoute)> {
+        let state = self.profiles.get(profile_id)?.state();
+        let correlation = state.probe_correlation()?;
+        let route = match state {
+            ProfileState::Pending(_) => Some(ProfileProbeRoute::Descent),
+            ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
+                PreFirePhase::Verifying { .. } => Some(ProfileProbeRoute::Verifying {
+                    intent: pre.intent,
+                    forced: pre.forced,
+                }),
+                PreFirePhase::Batching { .. } | PreFirePhase::Draining => None,
+            },
+            ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
+                PostFirePhase::Rebasing(_) => Some(ProfileProbeRoute::Rebasing {
+                    forced: matches!(post.ceiling, CeilingState::Reached),
+                }),
+                PostFirePhase::Awaiting { .. } | PostFirePhase::Settling { .. } => None,
+            },
+            ProfileState::Idle => None,
+        }?;
+        Some((correlation, route))
+    }
+
+    /// The Promoter response-path gate — the owner-split twin of
+    /// [`Self::profile_probe_gate`]. Same one-resolution shape (the gated
+    /// correlation + routing class in a single `promoters` lookup, the
+    /// [`Copy`] route captured pre-disarm); the `Active` enumeration arm
+    /// reads the proxy `target` off the slot's tag, since the path-only
+    /// wire cannot echo the `ResourceId` back. `None` covers every stale
+    /// path (absent `PromoterId`, no probe in flight) ⇒ the caller emits
+    /// `StaleProbeResponse`. The Profile-only `Verifying` / `Rebasing`
+    /// classes are unrepresentable in [`PromoterProbeRoute`], so the
+    /// handler carries no cross-owner arm.
+    pub(crate) fn promoter_probe_gate(
+        &self,
+        promoter_id: PromoterId,
+    ) -> Option<(ProbeCorrelation, PromoterProbeRoute)> {
+        let state = self.promoters.get(promoter_id)?.state();
+        let correlation = state.probe_correlation()?;
+        let route = match state {
+            PromoterState::PrefixPending(_) => Some(PromoterProbeRoute::Descent),
+            PromoterState::Active { enumerating, .. } => enumerating
+                .tag()
+                .map(|target| PromoterProbeRoute::Enumerating { target }),
+        }?;
+        Some((correlation, route))
     }
 
     /// Mint a fresh [`ProbeCorrelation`] off the engine-wide monotone
@@ -529,13 +566,14 @@ impl Engine {
 
     /// Resolve `owner`'s state **once** into the wire it should emit, or
     /// `None` if its slot is empty/absent (⇒ no probe). The emission-side
-    /// twin of [`Self::probe_gate`]: the same one-resolution shape, the
-    /// disjoint concern. `probe_gate` yields the `Copy` route the
-    /// *response* demuxes on; this yields the owned `ProbeRequest` the
-    /// *request* carries — heavier (`ScanConfig`, baseline `Arc`, the
-    /// proof obligation), so it is deliberately a separate function
-    /// rather than a `probe_gate` caller; emission never depends on the
-    /// response-shaped [`ProbeRoute`].
+    /// twin of the response gates ([`Self::profile_probe_gate`] /
+    /// [`Self::promoter_probe_gate`]): the same one-resolution shape, the
+    /// disjoint concern. The gates yield the `Copy` route the *response*
+    /// demuxes on; this yields the owned `ProbeRequest` the *request*
+    /// carries — heavier (`ScanConfig`, baseline `Arc`, the proof
+    /// obligation), so it is deliberately a separate function rather than
+    /// a gate caller; emission never depends on the response-shaped route
+    /// enums.
     ///
     /// A pure `&self` state→wire projection — like Descent, no
     /// accumulator drain. The post-fire fire-tail residual reset is
@@ -598,9 +636,9 @@ impl Engine {
             /// mutated the tree, so there is no trustworthy prior to
             /// mtime-skip against, exactly as Seed). The post-fire
             /// [`CeilingState::Reached`] latch is the *response-side*
-            /// `forced`, read by `probe_gate` for the
-            /// `ProbeRoute::Rebasing` payload — disjoint from the
-            /// emission knob.
+            /// `forced`, read by `profile_probe_gate` for the
+            /// [`ProfileProbeRoute::Rebasing`] payload — disjoint from
+            /// the emission knob.
             /// No accumulator drain — the fire-tail residual reset is
             /// owned by `transition_to_rebasing`.
             Rebase,
@@ -623,8 +661,8 @@ impl Engine {
                 // a probe-bearing carrier (Batching / Draining /
                 // Awaiting / Settling / Idle hold no slot), so those
                 // arms are structurally dead when the read-back
-                // succeeded; they fold to `None` exactly as
-                // `probe_gate`'s twin arms do.
+                // succeeded; they fold to `None` exactly as the
+                // response gate's twin arms do.
                 let correlation = p.state().probe_correlation()?;
                 let carrier = match p.state() {
                     ProfileState::Pending(d) => Carrier::Descent(d.current_prefix()),
@@ -801,5 +839,94 @@ impl Engine {
                 })
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{DescentOutcome, ProofOutcome, WalkerContractViolation};
+    use specter_core::{
+        DirMeta, DirSnapshot, EntryKind, FsIdentity, LeafEntry, ProbeFailure, ProbeOutcome,
+        ProofAuthority,
+    };
+    use std::collections::BTreeMap;
+    use std::sync::Arc;
+    use std::time::UNIX_EPOCH;
+
+    fn leaf() -> LeafEntry {
+        LeafEntry::synthetic(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(1, 0))
+    }
+
+    fn dir() -> Arc<DirSnapshot> {
+        Arc::new(DirSnapshot::new(
+            DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
+            0,
+            BTreeMap::new(),
+        ))
+    }
+
+    /// The proof-route parse (`Verifying` / `Rebasing`) accepts the four
+    /// quiescence shapes one-to-one and rejects the structural
+    /// `DirEnumerated` — the single walker-contract violation the typed
+    /// decode makes unrepresentable for the certifier downstream of the
+    /// demux seam.
+    #[test]
+    fn proof_outcome_try_from_accepts_proof_shapes_rejects_enumeration() {
+        assert!(matches!(
+            ProofOutcome::try_from(ProbeOutcome::AnchorOk(leaf())),
+            Ok(ProofOutcome::AnchorOk(_)),
+        ));
+        assert!(matches!(
+            ProofOutcome::try_from(ProbeOutcome::SubtreeProven {
+                snapshot: dir(),
+                authority: ProofAuthority::Authoritative,
+            }),
+            Ok(ProofOutcome::SubtreeProven { .. }),
+        ));
+        assert!(matches!(
+            ProofOutcome::try_from(ProbeOutcome::Vanished),
+            Ok(ProofOutcome::Vanished),
+        ));
+        assert!(matches!(
+            ProofOutcome::try_from(ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 })),
+            Ok(ProofOutcome::Failed(_)),
+        ));
+        assert!(matches!(
+            ProofOutcome::try_from(ProbeOutcome::DirEnumerated(dir())),
+            Err(WalkerContractViolation),
+        ));
+    }
+
+    /// The descent-route parse (Profile `Descent` and Promoter
+    /// descent / enumeration, all `ProbeRequest::Descent` on the wire)
+    /// accepts the enumeration shapes one-to-one and rejects an
+    /// `AnchorOk` / `SubtreeProven` proof — a descent never queries an
+    /// anchor's `lstat` shape or a subtree proof. `Vanished` / `Failed`
+    /// are shared with the proof route and accepted by both.
+    #[test]
+    fn descent_outcome_try_from_accepts_enumeration_shapes_rejects_proof() {
+        assert!(matches!(
+            DescentOutcome::try_from(ProbeOutcome::DirEnumerated(dir())),
+            Ok(DescentOutcome::DirEnumerated(_)),
+        ));
+        assert!(matches!(
+            DescentOutcome::try_from(ProbeOutcome::Vanished),
+            Ok(DescentOutcome::Vanished),
+        ));
+        assert!(matches!(
+            DescentOutcome::try_from(ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 })),
+            Ok(DescentOutcome::Failed(_)),
+        ));
+        assert!(matches!(
+            DescentOutcome::try_from(ProbeOutcome::AnchorOk(leaf())),
+            Err(WalkerContractViolation),
+        ));
+        assert!(matches!(
+            DescentOutcome::try_from(ProbeOutcome::SubtreeProven {
+                snapshot: dir(),
+                authority: ProofAuthority::Authoritative,
+            }),
+            Err(WalkerContractViolation),
+        ));
     }
 }

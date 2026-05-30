@@ -36,8 +36,9 @@
 //! `Active` slot for it.
 //!
 //! Response routing splits by state — [`Engine::on_promoter_probe_response`]
-//! gates on [`Engine::probe_gate`] (correlation + routing class in one
-//! resolution), disarms the slot once (consume-once), then dispatches:
+//! gates on [`Engine::promoter_probe_gate`] (correlation + routing class
+//! in one resolution), disarms the slot once (consume-once), then
+//! dispatches:
 //! - `PrefixPending` → descent: routes the outcome to the
 //!   owner-polymorphic [`Engine::dispatch_descent_ok`] /
 //!   [`Engine::dispatch_descent_vanished`] /
@@ -55,14 +56,14 @@
 
 use crate::Engine;
 use crate::descent::MaterializeResult;
-use crate::probe::ProbeRoute;
+use crate::probe::{DescentOutcome, PromoterProbeRoute, WalkerContractViolation};
 use crate::refcounts::{add_watch, sub_watch};
 use compact_str::{CompactString, format_compact};
 use specter_core::{
     ClassSet, ContribKey, DescentState, DetachReason, Diagnostic, DirSnapshot, EntryKind,
-    PatternComponent, PatternSpec, ProbeFailure, ProbeOutcome, ProbeOwner, ProbeResponse,
-    ProbeSlot, Promoter, PromoterAttachRequest, PromoterId, PromoterState, ProxyState, ResourceId,
-    ResourceRole, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Tree,
+    PatternComponent, PatternSpec, ProbeFailure, ProbeOwner, ProbeResponse, ProbeSlot, Promoter,
+    PromoterAttachRequest, PromoterId, PromoterState, ProxyState, ResourceId, ResourceRole,
+    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Tree,
 };
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
@@ -592,13 +593,13 @@ impl Engine {
 
     /// Promoter-side probe response handler. Mirrors the Profile-side
     /// shape: one gate yielding correlation + route, consume the slot
-    /// once, then dispatch.
+    /// once, then dispatch a typed outcome.
     ///
     /// Both Promoter probe carriers are state-resident — a
     /// `PrefixPending` descent on its `DescentState` slot, an `Active`
-    /// enumeration on `enumerating`. [`Engine::probe_gate`] resolves
-    /// the owner once for the gated correlation *and* the routing
-    /// class; `take_owner_probe` disarms once (consume-once); an
+    /// enumeration on `enumerating`. [`Engine::promoter_probe_gate`]
+    /// resolves the owner once for the gated correlation *and* the
+    /// routing class; `take_owner_probe` disarms once (consume-once); an
     /// absent gate or a `received` mismatch yields
     /// [`Diagnostic::StaleProbeResponse`] with no state change, and
     /// (load-bearing) returns *before* the tail drain so a stale
@@ -611,10 +612,19 @@ impl Engine {
     /// responses carry no wire payload; that pre-disarm route is the
     /// sole authority for the proxy `ResourceId`.
     ///
-    /// A route to a Profile-only class (`Verifying` / `Rebasing`) is
-    /// unconstructable for a Promoter owner — the no-route case folds
-    /// into the stale gate, and the loud arm is regression detection
-    /// for the cross-owner classes, not a reachable path.
+    /// **Typed decode, uniform with the Profile descent.** Both routes
+    /// ride the `Descent` wire, so both parse the outcome through
+    /// [`DescentOutcome::try_from`]: a descent advances /
+    /// rewinds / fails, an enumeration consumes / drops / retries. An
+    /// illegal `AnchorOk` / `SubtreeProven` proof (the walker contracted
+    /// to enumerate a directory, not lower an anchor) is a
+    /// walker-contract violation routed to the honest
+    /// [`Diagnostic::WalkerContractViolated`] recovery — the descent
+    /// abandons its prefix, the enumeration drops its proxy — never the
+    /// (matched) `StaleProbeResponse`. The match is total over
+    /// [`PromoterProbeRoute`]'s two variants: the Profile-only
+    /// `Verifying` / `Rebasing` classes are unrepresentable here, so the
+    /// owner-split carries no cross-owner arm at all.
     pub(crate) fn on_promoter_probe_response(
         &mut self,
         promoter_id: PromoterId,
@@ -632,7 +642,10 @@ impl Engine {
         // stale path; the early `return` is load-bearing — it skips
         // the tail drain below so a stale response never pumps the
         // enumeration queue.
-        let Some((_, route)) = self.probe_gate(owner).filter(|&(c, _)| c == received) else {
+        let Some((_, route)) = self
+            .promoter_probe_gate(promoter_id)
+            .filter(|&(c, _)| c == received)
+        else {
             out.diagnostics.push(Diagnostic::StaleProbeResponse {
                 owner,
                 correlation: received,
@@ -649,72 +662,40 @@ impl Engine {
         #[cfg(debug_assertions)]
         self.dispatch_ledger.record(owner, received);
 
+        // Both Promoter routes ride the `Descent` wire, so both parse the
+        // outcome through `DescentOutcome::try_from` — uniform with the
+        // Profile descent demux. An illegal `AnchorOk` / `SubtreeProven`
+        // proof is a walker-contract violation routed to the
+        // route-appropriate honest recovery, never the (matched)
+        // `StaleProbeResponse`. The match is total over
+        // `PromoterProbeRoute`'s two variants: the Profile-only
+        // `Verifying` / `Rebasing` classes are unrepresentable here.
         match route {
-            ProbeRoute::Descent => match response.outcome {
-                ProbeOutcome::DirEnumerated(arc) => {
-                    self.dispatch_descent_ok(owner, &arc, now, out);
-                }
-                ProbeOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
-                ProbeOutcome::Failed(failure) => self.dispatch_descent_failed(owner, failure, out),
-                ProbeOutcome::AnchorOk(_) | ProbeOutcome::SubtreeProven { .. } => {
-                    // Descent probes a Dir prefix; the walker returns
-                    // `DirEnumerated` / `Vanished`. `AnchorOk` /
-                    // `SubtreeProven` are walker-side regressions.
-                    debug_assert!(
-                        false,
-                        "walker contract violated: Promoter descent received a \
-                         non-enumeration outcome (promoter = {promoter_id:?})",
-                    );
-                    out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                        owner,
-                        correlation: received,
-                    });
-                }
+            PromoterProbeRoute::Descent => match DescentOutcome::try_from(response.outcome) {
+                Ok(descent) => self.dispatch_descent(owner, descent, now, out),
+                Err(WalkerContractViolation) => self.walker_contract_violated_descent(owner, out),
             },
 
-            ProbeRoute::Enumerating { target } => match response.outcome {
-                ProbeOutcome::DirEnumerated(arc) => {
-                    self.dispatch_promoter_enumeration_ok(promoter_id, target, &arc, now, out);
+            PromoterProbeRoute::Enumerating { target } => {
+                match DescentOutcome::try_from(response.outcome) {
+                    Ok(DescentOutcome::DirEnumerated(arc)) => {
+                        self.dispatch_promoter_enumeration_ok(promoter_id, target, &arc, now, out);
+                    }
+                    Ok(DescentOutcome::Vanished) => {
+                        self.dispatch_promoter_enumeration_vanished(promoter_id, target, out);
+                    }
+                    Ok(DescentOutcome::Failed(failure)) => {
+                        self.dispatch_promoter_enumeration_failed(
+                            promoter_id,
+                            target,
+                            failure,
+                            out,
+                        );
+                    }
+                    Err(WalkerContractViolation) => {
+                        self.walker_contract_violated_enumeration(promoter_id, target, out);
+                    }
                 }
-                ProbeOutcome::Vanished => {
-                    self.dispatch_promoter_enumeration_vanished(promoter_id, target, out);
-                }
-                ProbeOutcome::Failed(failure) => {
-                    self.dispatch_promoter_enumeration_failed(promoter_id, target, failure, out);
-                }
-                ProbeOutcome::AnchorOk(_) | ProbeOutcome::SubtreeProven { .. } => {
-                    // Enumeration probes a Dir proxy; the walker returns
-                    // `DirEnumerated` / `Vanished`. `AnchorOk` /
-                    // `SubtreeProven` are walker-side regressions.
-                    debug_assert!(
-                        false,
-                        "walker contract violated: Promoter enumeration received a \
-                         non-enumeration outcome (promoter = {promoter_id:?})",
-                    );
-                    out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                        owner,
-                        correlation: received,
-                    });
-                }
-            },
-
-            ProbeRoute::Verifying { .. } | ProbeRoute::Rebasing { .. } => {
-                // `Verifying` / `Rebasing` are Profile-only routing
-                // classes — unconstructable for a Promoter owner, whose
-                // gated correlation lives on exactly one Promoter
-                // carrier (descent / enumeration). The no-route case
-                // folded into the stale gate above; this stays the
-                // loud regression arm for the cross-owner classes.
-                debug_assert!(
-                    false,
-                    "Promoter probe response routed to a Profile-only class \
-                     (Verifying/Rebasing) — the gated correlation must live on a \
-                     Promoter carrier (promoter = {promoter_id:?})",
-                );
-                out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    owner,
-                    correlation: received,
-                });
             }
         }
 
@@ -1111,6 +1092,45 @@ impl Engine {
             proxy: target,
             failure,
         });
+    }
+
+    /// Recover a proxy enumeration from a walker-contract violation — an
+    /// enumeration (a `ProbeRequest::Descent` on the path-only wire) whose
+    /// payload resolved to an `AnchorOk` / `SubtreeProven` proof the route
+    /// cannot accept (an enumeration queries a directory listing, never an
+    /// anchor's `lstat` shape or a subtree proof). The typed
+    /// [`DescentOutcome`] parse rejected the payload at the demux seam;
+    /// this **drops the proxy subtree**.
+    ///
+    /// `debug_assert!` in dev/CI (a production walker never emits this
+    /// shape), then in release emits [`Diagnostic::WalkerContractViolated`]
+    /// and routes through [`Self::unregister_proxy_subtree`] — a proxy the
+    /// walker cannot enumerate is functionally vanished from the promoter's
+    /// view, so this reuses the same teardown the `Vanished` arm uses.
+    /// Loop-safe: the drop re-probes nothing, and the response handler's
+    /// tail drain advances the next queued target. This is the enumeration
+    /// analog of the descent abandon ([`Self::walker_contract_violated_descent`]):
+    /// an enumeration has no less-resolved state to rewind to, so giving up
+    /// releases the proxy. Self-healing — a fresh `[[watch]]` glob match
+    /// re-registers it. The enumeration slot was disarmed by
+    /// `take_owner_probe` before dispatch.
+    fn walker_contract_violated_enumeration(
+        &mut self,
+        promoter_id: PromoterId,
+        target: ResourceId,
+        out: &mut StepOutput,
+    ) {
+        debug_assert!(
+            false,
+            "walker contract violated: a Promoter enumeration (a Descent-wire probe) \
+             received a non-enumeration outcome (AnchorOk | SubtreeProven) — an \
+             enumeration queries a directory listing, never an anchor shape \
+             (promoter = {promoter_id:?})",
+        );
+        out.diagnostics.push(Diagnostic::WalkerContractViolated {
+            owner: ProbeOwner::Promoter(promoter_id),
+        });
+        self.unregister_proxy_subtree(promoter_id, target, out);
     }
 
     /// Whether `promoter_id` already has a live dynamic Sub anchored

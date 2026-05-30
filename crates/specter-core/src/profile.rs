@@ -49,8 +49,8 @@ use std::time::{Duration, Instant};
 /// the *post-command* tree. The same fold floor
 /// ([`quiescence_verdict`]) computes the post-fire verdict from the
 /// rebase response's `(authority, forced)` pair — `forced` projected
-/// from [`CeilingState::Reached`] at the `probe_gate` read — and no
-/// prior sample carries across the fire. The pre-fire fields that
+/// from [`CeilingState::Reached`] at the `profile_probe_gate` read — and
+/// no prior sample carries across the fire. The pre-fire fields that
 /// encode a fire decision do not cross the boundary — the typed
 /// [`PreFireBurst::into_post_fire`] move drops them, and the
 /// `BurstDeadline` timer becomes structurally irrelevant

@@ -404,7 +404,7 @@ impl crate::Engine {
         let prefix = descent.current_prefix();
 
         // The walker echoes `(owner, correlation)` verbatim — the
-        // `probe_gate` match in `on_*_probe_response` already
+        // owner-split gate match in `on_*_probe_response` already
         // enforces request/response pairing, so any divergence would
         // surface as `StaleProbeResponse`, not reach this point. The
         // snapshot itself carries pure content; engine identity stays
@@ -464,12 +464,12 @@ impl crate::Engine {
                 }
                 ProbeOwner::Promoter(pid) => {
                     // Loud arm — `on_promoter_probe_response`'s
-                    // `probe_gate` already proved this Promoter live and
-                    // in descent (a vanished Promoter's late response is
-                    // caught there as `StaleProbeResponse`, never
-                    // reaching dispatch). A silent `lpl = 0` fallback
-                    // would feed `enter_active` a bogus cursor and
-                    // install orphan contributions for a dead id;
+                    // `promoter_probe_gate` already proved this Promoter
+                    // live and in descent (a vanished Promoter's late
+                    // response is caught there as `StaleProbeResponse`,
+                    // never reaching dispatch). A silent `lpl = 0`
+                    // fallback would feed `enter_active` a bogus cursor
+                    // and install orphan contributions for a dead id;
                     // matches `advance_descent`'s loud re-projection.
                     let Some(lpl) = self
                         .promoters

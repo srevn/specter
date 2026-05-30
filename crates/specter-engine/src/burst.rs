@@ -298,10 +298,11 @@ impl Engine {
     /// **Intercept correctness (cold path).** An `FsEvent` arriving
     /// during the cold walk's round-trip routes through `drive_burst →
     /// event_drives_batching`, which Cancels the in-flight verify slot
-    /// (the late walker response then fails `probe_gate` and drops as
-    /// `StaleProbeResponse`), schedules a fresh `settle_timer`, writes
-    /// `last_event_time = Some(now)`, notes the event into `dirty`, and
-    /// re-enters `Batching`. No new code path: `Verifying → Batching`
+    /// (the late walker response then fails `profile_probe_gate` and
+    /// drops as `StaleProbeResponse`), schedules a fresh `settle_timer`,
+    /// writes `last_event_time = Some(now)`, notes the event into
+    /// `dirty`, and re-enters `Batching`. No new code path:
+    /// `Verifying → Batching`
     /// is already supported; the only novelty is that the *initial*
     /// phase was `Verifying` without a prior `Batching`. One walk is
     /// wasted on intercept — sub-ms on quiet trees (the common cold-

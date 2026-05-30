@@ -887,16 +887,17 @@ pub enum Diagnostic {
     },
     /// A probe response's payload shape contradicts the route the engine
     /// requested: a `Verifying` / `Rebasing` (proof) probe received the
-    /// structural `DirEnumerated`, or a `Descent` probe received an
-    /// `AnchorOk` / `SubtreeProven` proof. The engine recovers
+    /// structural `DirEnumerated`, or a `Descent` / enumeration probe
+    /// received an `AnchorOk` / `SubtreeProven` proof. The engine recovers
     /// route-appropriately — a burst finishes to `Idle` preserving its
-    /// anchor/baseline (a walker defect is not an anchor-identity
-    /// change), a descent abandons its prefix — and is self-healing
-    /// (a later `FsEvent` re-drives the burst / a fresh descent).
+    /// anchor/baseline (a walker defect is not an anchor-identity change),
+    /// a descent abandons its prefix, an enumeration drops the offending
+    /// proxy — and is self-healing (a later `FsEvent` re-drives the burst /
+    /// a fresh descent / a fresh `[[watch]]` glob match).
     ///
     /// Distinct from siblings on the same response path:
     /// - [`Self::StaleProbeResponse`] — a *correlation* drift; here the
-    ///   correlation matched (the `probe_gate` proved the response
+    ///   correlation matched (the response gate proved the response
     ///   correlates to the live carrier), so this variant carries no
     ///   correlation — it would be pure noise.
     /// - [`Self::AnchorKindMismatch`] — a *kind* divergence on a

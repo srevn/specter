@@ -9,11 +9,14 @@
 //!
 //! `on_probe_response` routes every response by *state*: the gated
 //! correlation lives on a state-resident [`specter_core::ProbeSlot`],
-//! and [`Engine::probe_gate`] reads that correlation *and* the routing
-//! class in one resolution (pre-disarm); the slot is then disarmed
-//! once on dispatch. This holds uniformly for Profile *and* Promoter
-//! owners — Promoter enumeration homes on the `Active` variant's slot
-//! like every other carrier.
+//! and the owner-split gate ([`Engine::profile_probe_gate`] /
+//! [`Engine::promoter_probe_gate`]) reads that correlation *and* the
+//! routing class in one resolution (pre-disarm); the slot is then
+//! disarmed once on dispatch. This holds uniformly for Profile *and*
+//! Promoter owners — Promoter enumeration homes on the `Active`
+//! variant's slot like every other carrier — but each owner has its own
+//! gate and route enum, so the demux match is total with no cross-owner
+//! arm.
 //! The Verifying choke and the post-fire Rebase arm share one
 //! certifier, `certify_probe_response`: lower the outcome, verify kind
 //! agreement, and fold the single quiescence verdict via
@@ -24,7 +27,7 @@
 use crate::Engine;
 use crate::engine::is_timer_referenced;
 use crate::path::empty_path;
-use crate::probe::{DescentOutcome, ProbeRoute, ProofOutcome, WalkerContractViolation};
+use crate::probe::{DescentOutcome, ProfileProbeRoute, ProofOutcome, WalkerContractViolation};
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use crate::refcounts::add_watch;
 use compact_str::CompactString;
@@ -382,33 +385,41 @@ impl Engine {
     /// Dispatch a [`ProbeResponse`] by routing to the per-owner
     /// handler.
     ///
-    /// **Gate.** Both handlers resolve the owner once through
-    /// [`Engine::probe_gate`], which yields the state-resident slot's
-    /// own correlation *and* its routing class together — uniform
-    /// across Profile and Promoter owners (descent, verify, rebase,
-    /// enumeration). The response is gated by the correlation match;
-    /// any mismatch or absent gate covers every stale path (stale id,
-    /// response after Cancel, response after a fresh mint, out-of-order
-    /// response, no probe in flight), leaves live state intact, and
-    /// yields [`Diagnostic::StaleProbeResponse`].
+    /// **Gate.** Each handler resolves its owner once through the
+    /// owner-split gate ([`Engine::profile_probe_gate`] /
+    /// [`Engine::promoter_probe_gate`]), which yields the state-resident
+    /// slot's own correlation *and* its routing class together — an
+    /// owner-specific route enum per owner ([`crate::probe::ProfileProbeRoute`]
+    /// for descent / verify / rebase; [`crate::probe::PromoterProbeRoute`]
+    /// for descent / enumeration). The response is gated by the
+    /// correlation match; any mismatch or absent gate covers every stale
+    /// path (stale id, response after Cancel, response after a fresh
+    /// mint, out-of-order response, no probe in flight), leaves live
+    /// state intact, and yields [`Diagnostic::StaleProbeResponse`].
     ///
     /// **Routing.** The route is captured *with* the gate (one
     /// [`Copy`] projection before the slot is disarmed); the
     /// correlation — and the enumeration `target` — lives on the
     /// carrier itself, so a routing-vs-identity divergence is
-    /// structurally unrepresentable.
+    /// structurally unrepresentable. The owner-split makes each route
+    /// total over its own owner's carriers, so neither handler carries a
+    /// cross-owner arm (no `Enumerating` on the Profile side, no
+    /// `Verifying` / `Rebasing` on the Promoter side).
     ///
-    /// **Walker-contract violations.** A descent probe receiving
-    /// `AnchorOk` / `SubtreeProven` (the walker contracted to return
-    /// `DirEnumerated` or `Vanished` for `ProbeRequest::Descent`) is a
-    /// walker bug; symmetrically a Verifying probe receiving
+    /// **Walker-contract violations.** A descent / enumeration probe
+    /// receiving `AnchorOk` / `SubtreeProven` (the walker contracted to
+    /// return `DirEnumerated` or `Vanished` for `ProbeRequest::Descent`)
+    /// is a walker bug; symmetrically a proof probe receiving
     /// `DirEnumerated` (a structural enumeration is not a quiescence
-    /// observation). The dispatch arms `debug_assert!` and emit
-    /// [`Diagnostic::StaleProbeResponse`] so the engine never grafts a
-    /// non-conforming payload. The mirror case (File-anchored Profile
-    /// receiving `SubtreeProven`) routes through the existing dispatch
-    /// arm — the lowering synthesises a `TreeSnapshot::Dir`, and graft
-    /// handles the kind change at the snapshot level.
+    /// observation). Both handlers parse the wire outcome into the typed
+    /// engine-side outcome the route accepts ([`ProofOutcome`] /
+    /// [`DescentOutcome`]); the `Err` arm `debug_assert!`s and emits the
+    /// honest [`Diagnostic::WalkerContractViolated`] before recovering
+    /// route-appropriately, so the engine never grafts a non-conforming
+    /// payload. The mirror case (File-anchored Profile receiving
+    /// `SubtreeProven`) routes through the existing dispatch arm — the
+    /// lowering synthesises a `TreeSnapshot::Dir`, and graft handles the
+    /// kind change at the snapshot level.
     pub(crate) fn on_probe_response(
         &mut self,
         response: ProbeResponse,
@@ -427,21 +438,22 @@ impl Engine {
     /// state-resident [`specter_core::ProbeSlot`]. One uniform
     /// sequence, no per-carrier branch:
     ///
-    /// **Gate.** `probe_gate(owner)` yields the gated slot's own
-    /// correlation and routing class in one resolution. The response
-    /// is gated by `correlation == received`; a mismatch, or an absent
-    /// gate (stale `ProfileId`, response after Cancel, response after a
-    /// fresh mint, out-of-order response, no probe in flight), leaves
-    /// live state intact and yields [`Diagnostic::StaleProbeResponse`].
+    /// **Gate.** `profile_probe_gate(profile_id)` yields the gated
+    /// slot's own correlation and routing class in one resolution. The
+    /// response is gated by `correlation == received`; a mismatch, or an
+    /// absent gate (stale `ProfileId`, response after Cancel, response
+    /// after a fresh mint, out-of-order response, no probe in flight),
+    /// leaves live state intact and yields
+    /// [`Diagnostic::StaleProbeResponse`].
     ///
     /// **Consume-once.** `take_owner_probe` disarms the slot exactly
     /// once, *after* the gate captured the route and *before* any
     /// dispatch. The received correlation is absent from state before
     /// dispatch, so it cannot route twice — disarm *is* the consume.
     ///
-    /// **Routing.** [`Engine::probe_gate`] captures the routing class
-    /// *with* the staleness correlation, one resolution
-    /// ([`crate::probe::ProbeRoute`] is [`Copy`]; the later disarm
+    /// **Routing.** [`Engine::profile_probe_gate`] captures the routing
+    /// class *with* the staleness correlation, one resolution
+    /// ([`crate::probe::ProfileProbeRoute`] is [`Copy`]; the later disarm
     /// leaves the carrier variant intact). The old `Some(c)`/no-route
     /// regression case folds structurally into an absent gate (⇒
     /// stale). Each route then *parses* the wire
@@ -458,10 +470,10 @@ impl Engine {
     /// burst to Idle (anchor/baseline survive; a walker defect is not an
     /// anchor-identity change), the descent recovery abandons the
     /// descent prefix — each emitting one honest `WalkerContractViolated`
-    /// and self-healing on the next `FsEvent`. `ProbeRoute::Enumerating`
-    /// is a Promoter-only class, unconstructable for a Profile owner —
-    /// an honest internal-invariant arm, not a walker-contract violation
-    /// (production walkers never emit a contract-violating shape).
+    /// and self-healing on the next `FsEvent`. The match is total over
+    /// `ProfileProbeRoute`'s three variants: the Promoter-only
+    /// `Enumerating` class is unrepresentable here, so the owner-split
+    /// removed the last defensive cross-owner arm at the type level.
     fn on_profile_probe_response(
         &mut self,
         profile_id: ProfileId,
@@ -477,7 +489,10 @@ impl Engine {
         // disarm — so it stays valid through dispatch (disarm empties
         // the slot but leaves the carrier variant intact). An absent
         // gate or a `received` mismatch is every stale path.
-        let Some((_, route)) = self.probe_gate(owner).filter(|&(c, _)| c == received) else {
+        let Some((_, route)) = self
+            .profile_probe_gate(profile_id)
+            .filter(|&(c, _)| c == received)
+        else {
             out.diagnostics.push(Diagnostic::StaleProbeResponse {
                 owner,
                 correlation: received,
@@ -499,7 +514,7 @@ impl Engine {
         // (the `Err` arm) is a walker-contract violation routed to the
         // route-appropriate recovery, unrepresentable past the parse.
         match route {
-            ProbeRoute::Verifying { intent, forced } => {
+            ProfileProbeRoute::Verifying { intent, forced } => {
                 match ProofOutcome::try_from(response.outcome) {
                     Ok(proof) => {
                         self.dispatch_burst_outcome(profile_id, intent, forced, proof, now, out);
@@ -510,50 +525,43 @@ impl Engine {
                 }
             }
 
-            ProbeRoute::Rebasing { forced } => match ProofOutcome::try_from(response.outcome) {
-                // Same certifier as the Verifying choke — the post-fire
-                // rebase response folds through `quiescence_verdict` over
-                // the post-command tree. The verdict drives the
-                // rebase-loop consequence table; `Vanished` / `Failed`
-                // route to the rebase-specific cleanup; `Regressed`
-                // (kind mismatch) was already handled inside the
-                // certifier.
-                Ok(proof) => match self.certify_probe_response(profile_id, proof, forced, out) {
-                    CertifiedResponse::Proceed { snapshot, verdict } => {
-                        self.dispatch_rebase_ok(profile_id, snapshot, verdict, now, out);
+            ProfileProbeRoute::Rebasing { forced } => {
+                match ProofOutcome::try_from(response.outcome) {
+                    // Same certifier as the Verifying choke — the
+                    // post-fire rebase response folds through
+                    // `quiescence_verdict` over the post-command tree.
+                    // The verdict drives the rebase-loop consequence
+                    // table; `Vanished` / `Failed` route to the
+                    // rebase-specific cleanup; `Regressed` (kind
+                    // mismatch) was already handled inside the certifier.
+                    Ok(proof) => {
+                        match self.certify_probe_response(profile_id, proof, forced, out) {
+                            CertifiedResponse::Proceed { snapshot, verdict } => {
+                                self.dispatch_rebase_ok(profile_id, snapshot, verdict, now, out);
+                            }
+                            CertifiedResponse::Vanished => {
+                                self.dispatch_rebase_vanished(profile_id, out);
+                            }
+                            CertifiedResponse::Failed(failure) => {
+                                self.dispatch_rebase_failed(profile_id, failure, out);
+                            }
+                            CertifiedResponse::Regressed => {}
+                        }
                     }
-                    CertifiedResponse::Vanished => self.dispatch_rebase_vanished(profile_id, out),
-                    CertifiedResponse::Failed(failure) => {
-                        self.dispatch_rebase_failed(profile_id, failure, out);
+                    Err(WalkerContractViolation) => {
+                        self.walker_contract_violated_burst(profile_id, owner, out);
                     }
-                    CertifiedResponse::Regressed => {}
-                },
-                Err(WalkerContractViolation) => {
-                    self.walker_contract_violated_burst(profile_id, owner, out);
                 }
-            },
+            }
 
-            ProbeRoute::Descent => match DescentOutcome::try_from(response.outcome) {
+            ProfileProbeRoute::Descent => match DescentOutcome::try_from(response.outcome) {
                 Ok(descent) => self.dispatch_descent(owner, descent, now, out),
                 Err(WalkerContractViolation) => self.walker_contract_violated_descent(owner, out),
             },
-
-            ProbeRoute::Enumerating { .. } => {
-                // Honest internal-invariant arm: `Enumerating` is a
-                // Promoter-only routing class, unconstructable for a
-                // Profile owner — the Profile branch of `probe_gate`
-                // never yields it. Not a walker-contract violation (the
-                // walker is not at fault), so no diagnostic and no
-                // recovery: nothing is wedged because nothing can route
-                // here. The full elimination is the owner-split route;
-                // until then this stays the loud dev/CI tripwire.
-                debug_assert!(
-                    false,
-                    "Profile probe response routed to Enumerating (a Promoter-only \
-                     class) — the gated correlation must live on a Profile carrier \
-                     (profile = {profile_id:?})",
-                );
-            }
+            // No `Enumerating` arm: it is unrepresentable in
+            // `ProfileProbeRoute` — the Promoter-only routing class the
+            // owner-split removed from the Profile handler at the type
+            // level (was the last defensive cross-owner arm here).
         }
     }
 
@@ -625,7 +633,7 @@ impl Engine {
     /// quiescence proof (`owes_proof_from`, a predicate spanning
     /// `profiles + subs`) — before any `&mut` re-fetch. An absent Profile
     /// is a gate breach (the floor is reached only on `Active(Verifying |
-    /// Rebasing)` through the `probe_gate` ⇒ `take_owner_probe`
+    /// Rebasing)` through the `profile_probe_gate` ⇒ `take_owner_probe`
     /// dispatch): `debug_assert!` in dev/CI, `Regressed` in release.
     ///
     /// **Kind agreement, before the fold.** The captured prior kind is
@@ -657,14 +665,14 @@ impl Engine {
     ///   obligation chain; `Undischarged` ⇒ refused. Set by the walker,
     ///   threaded as-is.
     /// - **Forced.** Set by the caller (read off the burst by
-    ///   [`Engine::probe_gate`], packed onto
-    ///   [`crate::probe::ProbeRoute`]'s `Verifying { forced }` /
+    ///   [`Engine::profile_probe_gate`], packed onto
+    ///   [`crate::probe::ProfileProbeRoute`]'s `Verifying { forced }` /
     ///   `Rebasing { forced }` payload, threaded here); both carriers —
     ///   pre-fire `PreFireBurst.forced` (a single bit) and post-fire
     ///   [`specter_core::CeilingState::Reached`] (projected to a bool
-    ///   at the `probe_gate` read) — pass through this one site
-    ///   symmetrically. `forced` distinguishes natural fire from the
-    ///   bounded `BurstDeadline` / `RebaseCeiling` fallback.
+    ///   at the gate read) — pass through this one site symmetrically.
+    ///   `forced` distinguishes natural fire from the bounded
+    ///   `BurstDeadline` / `RebaseCeiling` fallback.
     /// - **Witness (C2 vs. C3).** [`QuiescenceWitness::EventsReliable`]
     ///   when settle-window silence proves quiescence — the Profile's
     ///   `events_union` covers in-place writes
@@ -710,14 +718,14 @@ impl Engine {
         // One immutable resolution of every Profile bit the fold
         // consumes (events witness, prior kind, proof obligation), held
         // by value so the later `&mut self` re-fetch is borrow-clean. An
-        // absent Profile is a gate breach — `probe_gate` ⇒
+        // absent Profile is a gate breach — `profile_probe_gate` ⇒
         // `take_owner_probe` reaches this floor only on Active(Verifying
         // | Rebasing); degrade to `Regressed`.
         let Some(ctx) = self.fold_context(profile_id) else {
             debug_assert!(
                 false,
                 "certify_probe_response: absent Profile {profile_id:?} — \
-                 probe_gate dispatches only on Active(Verifying | Rebasing)",
+                 profile_probe_gate dispatches only on Active(Verifying | Rebasing)",
             );
             return CertifiedResponse::Regressed;
         };
@@ -838,7 +846,7 @@ impl Engine {
     /// **Non-`Active` defaults to `true`.** A non-`Active` state at the
     /// verdict floor cannot occur — `fold_context` already proved
     /// Profile presence, and the floor is reached only through the
-    /// `probe_gate` ⇒ `take_owner_probe` dispatch on `Active(Verifying |
+    /// `profile_probe_gate` ⇒ `take_owner_probe` dispatch on `Active(Verifying |
     /// Rebasing)`. The fall-through arm `debug_assert!(false)` to surface
     /// a contract violation in dev/CI and degrades to the proof-owing
     /// default in release, preserving the fire-safety invariant rather
@@ -861,7 +869,7 @@ impl Engine {
                 debug_assert!(
                     false,
                     "owes_proof_from: non-Active Profile {profile_id:?} reached the \
-                     verdict floor (probe_gate dispatches only on Active(Verifying | \
+                     verdict floor (profile_probe_gate dispatches only on Active(Verifying | \
                      Rebasing))",
                 );
                 true
@@ -2732,7 +2740,7 @@ impl Engine {
     /// dispatch-contract violation in dev/CI and degrade silently in
     /// release: `dispatch_quiescence_ok` is reached only after
     /// [`Self::certify_probe_response`]'s entry guard proved the
-    /// Profile present, and after `probe_gate` proved its state is
+    /// Profile present, and after `profile_probe_gate` proved its state is
     /// `Active(PreFire(Verifying))`.
     ///
     /// The covered-descendant fire-gate is **not** read here. It is a
@@ -2755,7 +2763,7 @@ impl Engine {
             debug_assert!(
                 false,
                 "pre_fire_target: non-PreFire Profile {profile_id:?} \
-                 reached dispatch_quiescence_ok (probe_gate dispatches \
+                 reached dispatch_quiescence_ok (profile_probe_gate dispatches \
                  Verifying only on Active(PreFire))",
             );
             return Some(p.resource());
@@ -2767,7 +2775,7 @@ impl Engine {
                     false,
                     "pre_fire_target: non-Verifying pre-fire phase on \
                      Profile {profile_id:?} reached dispatch_quiescence_ok \
-                     (probe_gate dispatches Verifying only on \
+                     (profile_probe_gate dispatches Verifying only on \
                      PreFirePhase::Verifying)",
                 );
                 p.resource()
@@ -3181,7 +3189,7 @@ impl Engine {
 
     /// Resolve the intent of the burst owning the in-flight Rebase
     /// probe. Returns `PostFireBurst.intent` on the production path —
-    /// the only path `probe_gate` ⇒ `take_owner_probe` reaches the
+    /// the only path `profile_probe_gate` ⇒ `take_owner_probe` reaches the
     /// `dispatch_rebase_*` callers from (`Active(PostFire(Rebasing))`).
     ///
     /// Every other arm `debug_assert!(false)`s a dispatch-contract
@@ -3205,7 +3213,7 @@ impl Engine {
                 debug_assert!(
                     false,
                     "rebase_burst_intent: PreFire Profile {profile_id:?} reached \
-                     dispatch_rebase_* (probe_gate dispatches Rebasing only on \
+                     dispatch_rebase_* (profile_probe_gate dispatches Rebasing only on \
                      Active(PostFire(Rebasing)))",
                 );
                 pre.intent
@@ -3214,7 +3222,7 @@ impl Engine {
                 debug_assert!(
                     false,
                     "rebase_burst_intent: non-Active Profile {profile_id:?} \
-                     reached dispatch_rebase_* (probe_gate dispatches Rebasing only \
+                     reached dispatch_rebase_* (profile_probe_gate dispatches Rebasing only \
                      on Active(PostFire(Rebasing)))",
                 );
                 BurstIntent::Standard

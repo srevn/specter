@@ -2013,3 +2013,96 @@ fn anchor_terminal_predicate_static_sub_makes_mixed() {
     let _ = pid; // pid only needed to anchor the Promoter alive
     let _ = e.cancel_all_in_flight_probes();
 }
+
+/// Walker contract (Promoter descent): a `PrefixPending` literal-prefix
+/// descent probes a Dir prefix, so the walker returns `DirEnumerated` /
+/// `Vanished`. An `AnchorOk` proof is a walker-side bug — descent never
+/// queries an anchor's `lstat` shape. After the owner-split the Promoter
+/// handler parses through `DescentOutcome::try_from` (uniform with the
+/// Profile descent) and routes the violation to the owner-polymorphic
+/// `walker_contract_violated_descent`, which fires a `debug_assert!` in
+/// dev/CI and, in release, emits the honest `WalkerContractViolated` and
+/// abandons the prefix — no lying `StaleProbeResponse`. The test pins the
+/// dev/CI panic; the parse rejection itself is pinned release-safe by
+/// `probe::tests::descent_outcome_try_from_*`.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "debug_assert! is compiled out in release"
+)]
+#[should_panic(expected = "a Descent probe received a non-enumeration outcome")]
+fn promoter_descent_with_anchor_outcome_is_walker_contract_violation() {
+    let mut e = Engine::new();
+    // No /var/log on disk → PrefixPending descent, probe in flight.
+    let out = e.step(
+        Input::AttachPromoter(req_for("logs", "/var/log/*.log")),
+        Instant::now(),
+    );
+    let pid =
+        specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
+    let corr = e
+        .pending_probe_for(ProbeOwner::Promoter(pid))
+        .expect("descent probe in flight at the literal prefix");
+
+    // `AnchorOk` from a Descent probe is structurally impossible from the
+    // production walker; synthesise the breach to exercise the
+    // walker-contract debug_assert.
+    let leaf = LeafEntry::synthetic(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(1, 0));
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::AnchorOk(leaf),
+        }),
+        Instant::now(),
+    );
+}
+
+/// Walker contract (Promoter enumeration): an `Active` proxy enumeration
+/// probes a Dir proxy, so the walker returns `DirEnumerated` /
+/// `Vanished`. A `SubtreeProven` proof is a walker-side bug — an
+/// enumeration queries a directory listing, never a subtree proof. After
+/// the owner-split the Promoter handler parses through
+/// `DescentOutcome::try_from` and routes the violation to the new
+/// `walker_contract_violated_enumeration`, which fires a `debug_assert!`
+/// in dev/CI and, in release, emits the honest `WalkerContractViolated`
+/// and drops the offending proxy (the enumeration analog of the descent
+/// abandon) — no lying `StaleProbeResponse`. The test pins the dev/CI
+/// panic; the parse rejection is pinned release-safe by
+/// `probe::tests::descent_outcome_try_from_*`.
+#[test]
+#[cfg_attr(
+    not(debug_assertions),
+    ignore = "debug_assert! is compiled out in release"
+)]
+#[should_panic(expected = "a Promoter enumeration")]
+fn promoter_enumeration_with_proof_outcome_is_walker_contract_violation() {
+    let mut e = Engine::new();
+    let _var_log = ensure_dir(&mut e, &["var", "log"]);
+    // Existing prefix → immediate Active, enumeration probe in flight at
+    // the proxy.
+    let out = e.step(
+        Input::AttachPromoter(req_for("logs", "/var/log/*.log")),
+        Instant::now(),
+    );
+    let pid =
+        specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
+    let corr = e
+        .pending_probe_for(ProbeOwner::Promoter(pid))
+        .expect("enumeration probe in flight at the proxy");
+
+    // `SubtreeProven` from an enumeration probe is structurally
+    // impossible from the production walker; synthesise the breach to
+    // exercise the walker-contract debug_assert.
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Promoter(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: dir_snap_at(&[]),
+                authority: specter_core::ProofAuthority::Authoritative,
+            },
+        }),
+        Instant::now(),
+    );
+}
