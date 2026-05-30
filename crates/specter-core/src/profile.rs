@@ -2790,8 +2790,8 @@ impl Profile {
     ///   (a re-graft within the same materialised epoch — fresh or
     ///   mid-recovery).
     /// - From `File`: a `File`-kinded Profile receiving a `Dir` graft
-    ///   is a dispatcher routing breach. The engine's
-    ///   `kind_agrees_or_finalize` boundary catches this and routes
+    ///   is a dispatcher routing breach. The certifier's inline kind
+    ///   guard catches this and routes
     ///   through `finalize_anchor_lost` (which clears to `Unclassified`)
     ///   *before* any graft, so this arm is defensively dead;
     ///   `debug_assert!` flags a future boundary bypass and release
@@ -3192,10 +3192,9 @@ impl Profile {
     /// Invariant for the Profile's lifetime (folds into `config_hash`
     /// via [`Self::events`]).
     ///
-    /// See also `Engine::burst_owes_quiescence_proof` — the orthogonal
-    /// predicate selecting *which* bursts owe a proof. The two compose
-    /// at the witness-selection join inside
-    /// `Engine::certify_probe_response`.
+    /// See also `Engine::owes_proof_from` — the orthogonal predicate
+    /// selecting *which* bursts owe a proof. The two compose at the
+    /// witness-selection join inside `Engine::certify_probe_response`.
     #[must_use]
     pub const fn events_witness_quiescence(&self) -> bool {
         self.events().witnesses_quiescence()
@@ -4401,8 +4400,8 @@ mod tests {
 
     /// Cross-arm misuse: grafting a `Dir` onto a `File`-classified
     /// Profile panics in debug builds. Production paths never reach
-    /// this branch — `Engine::kind_agrees_or_finalize` catches the
-    /// routing breach at the dispatcher boundary first.
+    /// this branch — the certifier's inline kind guard catches the
+    /// routing breach at the verdict floor first.
     #[test]
     #[cfg_attr(
         not(debug_assertions),
@@ -4414,8 +4413,8 @@ mod tests {
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
         p.install_file_current(empty_leaf_entry());
-        // Boundary-bypass: a future caller skips
-        // `kind_agrees_or_finalize`; the graft's debug_assert fires.
+        // Boundary-bypass: a future caller skips the certifier's inline
+        // kind guard; the graft's debug_assert fires.
         p.install_dir_current(empty_dir_snapshot());
     }
 

@@ -113,6 +113,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::PromoterEnumerationFailed { at, .. }
         | WireDiagnostic::DynamicSubReaped { at, .. }
         | WireDiagnostic::InvalidBurstTransition { at, .. }
+        | WireDiagnostic::WalkerContractViolated { at, .. }
         | WireDiagnostic::Missed { at, .. } => at,
     }
 }
@@ -482,6 +483,9 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
                 burst_helper_str(*helper),
                 profile_state_discriminant_str(*observed),
             );
+        }
+        WireDiagnostic::WalkerContractViolated { owner, .. } => {
+            let _ = write!(out, "  owner={owner}");
         }
         WireDiagnostic::Missed { count, .. } => {
             let _ = write!(out, "  count={count}");
@@ -1010,6 +1014,9 @@ mod tests {
                 "diag": tag, "at": at, "profile": id,
                 "helper": "transition_to_verifying", "observed": "idle",
             }),
+            "walker_contract_violated" => {
+                json!({"diag": tag, "at": at, "owner": profile_owner})
+            }
             "_missed" => json!({"diag": tag, "at": at, "count": 1}),
             other => panic!("synthesize_min_value: unknown tag {other}"),
         }

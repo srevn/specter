@@ -63,9 +63,10 @@
 use crate::Engine;
 use crate::path::empty_path;
 use specter_core::{
-    ActiveBurst, BurstIntent, CeilingState, NonEmptyChainSet, PostFirePhase, PreFirePhase,
-    ProbeCorrelation, ProbeOp, ProbeOwner, ProbeRequest, Profile, ProfileState, Promoter,
-    PromoterState, ProofObligation, ResourceId, ResourceKind, StepOutput, subtree_at_dir,
+    ActiveBurst, BurstIntent, CeilingState, DirSnapshot, LeafEntry, NonEmptyChainSet,
+    PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeFailure, ProbeOp, ProbeOutcome, ProbeOwner,
+    ProbeRequest, Profile, ProfileState, Promoter, PromoterState, ProofAuthority, ProofObligation,
+    ResourceId, ResourceKind, StepOutput, subtree_at_dir,
 };
 use std::sync::Arc;
 
@@ -107,6 +108,112 @@ pub(crate) enum ProbeRoute {
     /// wire is path-only, so it is the canonical dispatch key across
     /// every outcome (`DirEnumerated` / `Vanished` / `Failed`).
     Enumerating { target: ResourceId },
+}
+
+/// Engine-side proof-route payload. A `Verifying` / `Rebasing` probe —
+/// a `Subtree` / `AnchorFile` quiescence request — resolves to exactly
+/// these four shapes. [`TryFrom<ProbeOutcome>`] is the single parse from
+/// the protocol-erased wire enum; the structural [`ProbeOutcome::DirEnumerated`]
+/// is the one rejected shape (a proof route receiving a directory
+/// *enumeration* is a walker-contract violation — an enumeration is not
+/// a quiescence observation).
+///
+/// Parsing the wire enum into this narrower type at the demux seam makes
+/// the illegal pairing **unrepresentable** for the certifier and the
+/// pre-fire fan-out: [`ProbeOutcome::DirEnumerated`] cannot appear in a
+/// `ProofOutcome`, so the old `DirEnumerated`-defensive arm in the
+/// verdict floor ceases to exist at the type level rather than by
+/// assertion. `Vanished` / `Failed` are shared with [`DescentOutcome`] —
+/// a vanished anchor or a root I/O error is route-agnostic.
+#[derive(Debug)]
+pub(crate) enum ProofOutcome {
+    /// `AnchorFile` request returned a leaf observation. A single `lstat`
+    /// has no mtime-skip concept, so the lowering injects
+    /// [`ProofAuthority::Authoritative`] — the wire carries no certificate
+    /// on this arm.
+    AnchorOk(LeafEntry),
+    /// `Subtree` request returned a directory observation plus the
+    /// walker-stamped [`ProofAuthority`].
+    SubtreeProven {
+        snapshot: Arc<DirSnapshot>,
+        authority: ProofAuthority,
+    },
+    /// Anchor absent (`ENOENT`) or kind mismatch — routed to the
+    /// caller's per-route `*_vanished` cleanup.
+    Vanished,
+    /// Root I/O error — routed to the caller's per-route `*_failed`
+    /// cleanup.
+    Failed(ProbeFailure),
+}
+
+/// Engine-side descent-route payload. A `Descent` probe enumerates one
+/// Dir prefix level, so it resolves to `DirEnumerated` / `Vanished` /
+/// `Failed`. An `AnchorOk` / `SubtreeProven` proof is the
+/// walker-contract violation this type rejects at the seam — descent
+/// never queries an anchor's `lstat` shape or a subtree proof.
+#[derive(Debug)]
+pub(crate) enum DescentOutcome {
+    /// One enumerated prefix level. Descent reads `entries.get(name)`
+    /// and discards the rest, so it carries no proof.
+    DirEnumerated(Arc<DirSnapshot>),
+    /// Prefix absent — routed to the descent rewind / abandon terminal.
+    Vanished,
+    /// Root I/O error at the prefix — descent retains state and awaits
+    /// the next event.
+    Failed(ProbeFailure),
+}
+
+/// Zero-size error returned by the [`ProofOutcome`] / [`DescentOutcome`]
+/// `TryFrom<ProbeOutcome>` parses when the wire payload's shape
+/// contradicts the route — the walker-contract violation the typed
+/// decode rejects at the demux seam.
+///
+/// Carries no payload: the offending variant is statically known at
+/// each rejection site (a proof route can only be violated by
+/// `DirEnumerated`; a descent route only by `AnchorOk` / `SubtreeProven`),
+/// so the recovery helper that owns the route names the shape in its dev
+/// assert without threading the value back. The marker exists so the
+/// `Err` type is intent-revealing rather than a bare `()`.
+pub(crate) struct WalkerContractViolation;
+
+impl TryFrom<ProbeOutcome> for ProofOutcome {
+    type Error = WalkerContractViolation;
+
+    /// Parse a proof-route response. `DirEnumerated` is the sole
+    /// rejected shape; the other four map across one-to-one.
+    fn try_from(outcome: ProbeOutcome) -> Result<Self, Self::Error> {
+        match outcome {
+            ProbeOutcome::AnchorOk(leaf) => Ok(Self::AnchorOk(leaf)),
+            ProbeOutcome::SubtreeProven {
+                snapshot,
+                authority,
+            } => Ok(Self::SubtreeProven {
+                snapshot,
+                authority,
+            }),
+            ProbeOutcome::Vanished => Ok(Self::Vanished),
+            ProbeOutcome::Failed(failure) => Ok(Self::Failed(failure)),
+            ProbeOutcome::DirEnumerated(_) => Err(WalkerContractViolation),
+        }
+    }
+}
+
+impl TryFrom<ProbeOutcome> for DescentOutcome {
+    type Error = WalkerContractViolation;
+
+    /// Parse a descent-route response. `AnchorOk` / `SubtreeProven` are
+    /// the rejected shapes; `DirEnumerated` / `Vanished` / `Failed` map
+    /// across.
+    fn try_from(outcome: ProbeOutcome) -> Result<Self, Self::Error> {
+        match outcome {
+            ProbeOutcome::DirEnumerated(snapshot) => Ok(Self::DirEnumerated(snapshot)),
+            ProbeOutcome::Vanished => Ok(Self::Vanished),
+            ProbeOutcome::Failed(failure) => Ok(Self::Failed(failure)),
+            ProbeOutcome::AnchorOk(_) | ProbeOutcome::SubtreeProven { .. } => {
+                Err(WalkerContractViolation)
+            }
+        }
+    }
 }
 
 /// Debug-only consume-once tripwire.

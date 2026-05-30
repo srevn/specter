@@ -191,7 +191,7 @@ fn drive_standard_fire_once(
 /// on the worst-case mask. A `STRUCTURE`-only Profile fails
 /// `events_witness_quiescence`, so any *fire-bearing* burst on it owes
 /// the hash channel. But a cold Seed (no events, never fired) does NOT
-/// owe a quiescence proof — `burst_owes_quiescence_proof` projects to
+/// owe a quiescence proof — `owes_proof_from` projects to
 /// `false` on `(BurstIntent::Seed, dirty.is_empty(), !any_fired)`, and
 /// `certify_probe_response` skips the hash channel entirely (witness =
 /// `EventsReliable`). The single Authoritative response folds to
@@ -341,7 +341,7 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
 /// consequences. Anchor events bypass the class filter, so a single
 /// anchor `FsEvent::Modified` Cancels the cold-arm verify slot and
 /// re-enters Batching with `dirty` non-empty — a triggered (not cold)
-/// Seed whose `burst_owes_quiescence_proof` is `true`.
+/// Seed whose `owes_proof_from` is `true`.
 ///
 /// The three settle-spaced samples: read1=S1 (prior None ⇒ Retry,
 /// carrier := hash(S1)), read2=S2 ≠ S1 (prior hash(S1) ⇒ Retry,

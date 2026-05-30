@@ -885,4 +885,28 @@ pub enum Diagnostic {
         helper: BurstHelper,
         observed: ProfileStateDiscriminant,
     },
+    /// A probe response's payload shape contradicts the route the engine
+    /// requested: a `Verifying` / `Rebasing` (proof) probe received the
+    /// structural `DirEnumerated`, or a `Descent` probe received an
+    /// `AnchorOk` / `SubtreeProven` proof. The engine recovers
+    /// route-appropriately — a burst finishes to `Idle` preserving its
+    /// anchor/baseline (a walker defect is not an anchor-identity
+    /// change), a descent abandons its prefix — and is self-healing
+    /// (a later `FsEvent` re-drives the burst / a fresh descent).
+    ///
+    /// Distinct from siblings on the same response path:
+    /// - [`Self::StaleProbeResponse`] — a *correlation* drift; here the
+    ///   correlation matched (the `probe_gate` proved the response
+    ///   correlates to the live carrier), so this variant carries no
+    ///   correlation — it would be pure noise.
+    /// - [`Self::AnchorKindMismatch`] — a *kind* divergence on a
+    ///   successfully-lowered snapshot (`File` vs `Dir`), not a
+    ///   payload-shape violation. That arm operates one step later, on a
+    ///   response that already parsed as a proof.
+    ///
+    /// Structurally unreachable in v1 — the emission choke kinds each
+    /// probe off the owner's state and the pool dispatches 1:1, so a
+    /// correct walker never returns a shape the route cannot accept.
+    /// An emission signals a walker-side routing regression.
+    WalkerContractViolated { owner: ProbeOwner },
 }

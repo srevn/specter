@@ -432,10 +432,12 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
 /// Walker contract: a `Pending` Profile (descent state) probes a Dir
 /// prefix with `ProbeRequest::Descent`; the only valid responses are
 /// `DirEnumerated`, `Vanished`, or `Failed`. An `AnchorOk` in this slot is a
-/// walker-side bug — descent never queries an anchor's `lstat` shape. The
-/// `(DispatchTarget::Descent, ProbeOutcome::AnchorOk(_))` arm fires a
-/// `debug_assert!` in dev/CI and falls through to `StaleProbeResponse` in
-/// release. The test pins the dev/CI behaviour.
+/// walker-side bug — descent never queries an anchor's `lstat` shape.
+/// `DescentOutcome::try_from` rejects it at the demux seam and the
+/// Descent arm routes to `walker_contract_violated_descent`, which fires
+/// a `debug_assert!` in dev/CI and, in release, emits
+/// `WalkerContractViolated` and abandons the descent prefix (no re-probe
+/// loop against a buggy walker). The test pins the dev/CI panic.
 ///
 /// Disabled in release builds via the standard `cfg_attr` discipline,
 /// mirroring `mint_probe_correlation_panics_on_double_open`.
@@ -482,7 +484,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     // production walker — `probe_descent` calls `probe_subtree`, whose
     // root-`lstat` rejects non-Dir paths via `Vanished`. We synthesise the
     // breach to exercise the walker-contract debug_assert in
-    // `on_probe_response`.
+    // `walker_contract_violated_descent`.
     let leaf = file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -498,16 +500,17 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
 /// quiescence observation (`AnchorOk` / `SubtreeProven` / `Vanished` /
 /// `Failed`). A `DirEnumerated` outcome — the descent-route shape —
 /// is a walker-side bug: the request was a `Subtree` quiescence read,
-/// not a structural enumeration. `certify_probe_response`'s
-/// `DirEnumerated` arm fires a `debug_assert!` in dev/CI and degrades
-/// to `CertifiedResponse::Regressed` in release. The test pins the
-/// dev/CI behaviour.
+/// not a structural enumeration. `ProofOutcome::try_from` rejects it at
+/// the demux seam and the Verifying arm routes to
+/// `walker_contract_violated_burst`, which fires a `debug_assert!` in
+/// dev/CI and, in release, emits `WalkerContractViolated` and finishes
+/// the burst to Idle (anchor/baseline preserved). The test pins the
+/// dev/CI panic.
 ///
 /// `probe_gate` does not filter on outcome variant (it routes on owner
-/// state + correlation), so this contract violation is the one
-/// debug_assert in the certifier's spine that the public test surface
-/// can synthesise — every other defensive arm is gated by `probe_gate`
-/// upstream.
+/// state + correlation), so this contract violation is the one the
+/// public test surface can synthesise — every other defensive arm is
+/// gated by `probe_gate` upstream.
 ///
 /// Disabled in release builds via the standard `cfg_attr` discipline,
 /// mirroring `dispatch_descent_with_anchor_outcome_is_walker_contract_violation`.
@@ -527,7 +530,7 @@ fn certify_dir_enumerated_outcome_is_walker_contract_violation() {
     // `DirEnumerated` from a quiescence probe is structurally impossible
     // from the production walker — the Subtree request never returns a
     // bare directory enumeration. We synthesise the breach to exercise
-    // the walker-contract debug_assert in `certify_probe_response`.
+    // the walker-contract debug_assert in `walker_contract_violated_burst`.
     let snap = dir_tree_snap(vec![]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -539,12 +542,12 @@ fn certify_dir_enumerated_outcome_is_walker_contract_violation() {
     );
 }
 
-/// `Engine::kind_agrees_or_finalize` boundary check: a `Profile.kind =
+/// `certify_probe_response`'s inline kind guard: a `Profile.kind =
 /// Some(File)` receiving a Dir-shaped response is a structurally
-/// unreachable walker-contract violation (the typed `ProbeRequest`
-/// chain emits `AnchorFile` for File-kinded Profiles, and the walker's
-/// `ProbeOutcome` variant matches the request by construction). The
-/// boundary catches the case at dispatch time and routes through
+/// unreachable kind divergence (the typed `ProbeRequest` chain emits
+/// `AnchorFile` for File-kinded Profiles, and the walker collapses any
+/// Dir↔File swap to `Vanished` by construction). The guard catches the
+/// case at the verdict floor and routes through
 /// [`Engine::finalize_anchor_lost`] rather than misroute the Dir
 /// snapshot onto a File-kinded Profile (which would leak watch
 /// contributions and break the cross-field invariant).

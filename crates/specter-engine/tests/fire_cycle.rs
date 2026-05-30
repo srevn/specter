@@ -1594,7 +1594,7 @@ fn scp_into_structure_only_does_not_fire_during_growing_file() {
     let (_sid, pid) = attach_structure_only(&mut e, r, now);
 
     // Cold-Seed bypass: an empty-dir baseline pins on one Authoritative
-    // sample (no events, no fires ⇒ `burst_owes_quiescence_proof` is
+    // sample (no events, no fires ⇒ `owes_proof_from` is
     // false ⇒ `EventsReliable` witness even on a structure-only mask).
     let seed_done = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 

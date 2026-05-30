@@ -533,6 +533,10 @@ pub(crate) enum WireDiagnostic {
         helper: WireBurstHelper,
         observed: WireProfileStateDiscriminant,
     },
+    WalkerContractViolated {
+        at: WireTime,
+        owner: WireProbeOwner,
+    },
     /// Fan-out back-pressure marker — not derived from any
     /// `specter_core::Diagnostic`. Emitted by
     /// [`crate::driver::Hub::dispatch_to_subscribers`]
@@ -940,6 +944,10 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 helper: WireBurstHelper::from(*helper),
                 observed: WireProfileStateDiscriminant::from(*observed),
             },
+            Diagnostic::WalkerContractViolated { owner } => Self::WalkerContractViolated {
+                at: at.clone(),
+                owner: WireProbeOwner::from(*owner),
+            },
         }
     }
 }
@@ -1017,6 +1025,7 @@ impl WireDiagnostic {
             Self::PromoterEnumerationFailed { .. } => "promoter_enumeration_failed",
             Self::DynamicSubReaped { .. } => "dynamic_sub_reaped",
             Self::InvalidBurstTransition { .. } => "invalid_burst_transition",
+            Self::WalkerContractViolated { .. } => "walker_contract_violated",
             Self::Missed { .. } => "_missed",
         }
     }
@@ -1102,6 +1111,7 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "promoter_enumeration_failed",
     "dynamic_sub_reaped",
     "invalid_burst_transition",
+    "walker_contract_violated",
     "_missed",
 ];
 
@@ -1969,6 +1979,12 @@ mod tests {
                 profile: WireId(180),
                 helper: WireBurstHelper::TransitionToVerifying,
                 observed: WireProfileStateDiscriminant::Idle,
+            },
+            WireDiagnostic::WalkerContractViolated {
+                at: at(),
+                owner: WireProbeOwner::Promoter {
+                    promoter: WireId(181),
+                },
             },
             WireDiagnostic::Missed { at: at(), count: 5 },
         ]

@@ -48,6 +48,7 @@
 //!    `StructureChanged` at `current_prefix`. I5: drops the event if a
 //!    probe is already in flight (the descent slot is armed).
 
+use crate::probe::DescentOutcome;
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
@@ -304,6 +305,65 @@ impl crate::Engine {
         // Step 4: the choke reads the correlation back off the Pending
         // descent slot and resolves the prefix target off state.
         self.emit_owner_probe(owner, out);
+    }
+
+    /// Fan a typed descent response out to its terminal helper —
+    /// symmetric with [`Self::dispatch_burst_outcome`], total over the
+    /// three [`DescentOutcome`] variants. The illegal `AnchorOk` /
+    /// `SubtreeProven` shapes were already rejected by the
+    /// `DescentOutcome::try_from` parse at the demux seam, so they never
+    /// reach here. Owner-polymorphic: the same body serves Profile
+    /// `Pending` descents and Promoter `PrefixPending` descents.
+    pub(crate) fn dispatch_descent(
+        &mut self,
+        owner: ProbeOwner,
+        outcome: DescentOutcome,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        match outcome {
+            DescentOutcome::DirEnumerated(snapshot) => {
+                self.dispatch_descent_ok(owner, &snapshot, now, out);
+            }
+            DescentOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
+            DescentOutcome::Failed(failure) => self.dispatch_descent_failed(owner, failure, out),
+        }
+    }
+
+    /// Recover a descent from a walker-contract violation — a `Descent`
+    /// probe whose payload resolved to an `AnchorOk` / `SubtreeProven`
+    /// proof the route cannot accept (descent never queries an anchor's
+    /// `lstat` shape or a subtree proof). The typed [`DescentOutcome`]
+    /// parse rejected the payload at the demux seam; this **abandons**
+    /// the descent prefix.
+    ///
+    /// `debug_assert!` in dev/CI (a production walker never emits this
+    /// shape), then in release emits [`Diagnostic::WalkerContractViolated`]
+    /// and routes through [`Self::release_owner_descent_prefix`] — the
+    /// per-owner abandon terminal (the same release path the
+    /// root-prefix `dispatch_descent_vanished` branch uses), **not**
+    /// `dispatch_descent_vanished` itself: that rewinds to the parent and
+    /// re-arms a fresh probe, which against a persistently-buggy walker
+    /// is a tight re-probe loop. Abandoning leaves the owner
+    /// operator-recoverable (Profile: stuck Idle; Promoter: stuck
+    /// Active{empty}) and self-healing on a fresh descent. The probe
+    /// slot was disarmed by `take_owner_probe` before dispatch and the
+    /// descent state is unflipped at entry, so the release helper's
+    /// preconditions hold.
+    pub(crate) fn walker_contract_violated_descent(
+        &mut self,
+        owner: ProbeOwner,
+        out: &mut StepOutput,
+    ) {
+        debug_assert!(
+            false,
+            "walker contract violated: a Descent probe received a non-enumeration \
+             outcome (AnchorOk | SubtreeProven) — descent never queries an anchor \
+             shape (owner = {owner:?})",
+        );
+        out.diagnostics
+            .push(Diagnostic::WalkerContractViolated { owner });
+        self.release_owner_descent_prefix(owner, out);
     }
 
     /// Dispatch a successful descent response. The walker honoured the

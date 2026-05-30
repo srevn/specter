@@ -593,6 +593,11 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?observed,
             "burst lifecycle helper precondition failed (state-machine routing breach)",
         ),
+        Diagnostic::WalkerContractViolated { owner } => tracing::error!(
+            ?owner,
+            "probe response payload shape contradicts the requested route \
+             (walker contract violation; recovered route-appropriately)",
+        ),
     }
 }
 
@@ -675,7 +680,8 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::PromoterEnumerationVanished { .. }
         | D::PromoterEnumerationFailed { .. }
         | D::DynamicSubReaped { .. }
-        | D::InvalidBurstTransition { .. } => None,
+        | D::InvalidBurstTransition { .. }
+        | D::WalkerContractViolated { .. } => None,
     }
 }
 

@@ -24,7 +24,7 @@
 use crate::Engine;
 use crate::engine::is_timer_referenced;
 use crate::path::empty_path;
-use crate::probe::ProbeRoute;
+use crate::probe::{DescentOutcome, ProbeRoute, ProofOutcome, WalkerContractViolation};
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
 use crate::refcounts::add_watch;
 use compact_str::CompactString;
@@ -33,8 +33,8 @@ use specter_core::{
     AbsorbMode, ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind,
     ClassSet, ContribKey, DedupKey, DescentRemaining, DescentState, DetachReason, Diagnostic,
     Effect, EffectCommon, EffectOutcome, EffectScope, FsEvent, OverflowScope, PatternComponent,
-    PostFirePhase, PreFirePhase, ProbeFailure, ProbeOutcome, ProbeOwner, ProbeResponse, ProbeSlot,
-    Profile, ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority,
+    PostFirePhase, PreFirePhase, ProbeFailure, ProbeOwner, ProbeResponse, ProbeSlot, Profile,
+    ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority,
     QuiescenceVerdict, QuiescenceWitness, ReapTrigger, Resource, ResourceId, ResourceKind,
     StableReason, StepOutput, SubAttachRequest, SubId, TimerId, TimerKind, TreeSnapshot,
     WatchFailure, WatchRegistryDiff, quiescence_verdict,
@@ -444,7 +444,8 @@ impl Engine {
     /// ([`crate::probe::ProbeRoute`] is [`Copy`]; the later disarm
     /// leaves the carrier variant intact). The old `Some(c)`/no-route
     /// regression case folds structurally into an absent gate (⇒
-    /// stale). Each route then *parses* the wire [`ProbeOutcome`] into
+    /// stale). Each route then *parses* the wire
+    /// [`ProbeOutcome`](specter_core::ProbeOutcome) into
     /// the typed engine-side outcome that route's consumers accept —
     /// `ProofOutcome` for `Verifying` / `Rebasing`, `DescentOutcome`
     /// for `Descent` — so an illegal `(route, outcome)` pairing is
@@ -493,20 +494,31 @@ impl Engine {
         #[cfg(debug_assertions)]
         self.dispatch_ledger.record(owner, received);
 
+        // Parse the wire `ProbeOutcome` into the typed engine-side
+        // outcome the route's consumers accept; an illegal pairing
+        // (the `Err` arm) is a walker-contract violation routed to the
+        // route-appropriate recovery, unrepresentable past the parse.
         match route {
             ProbeRoute::Verifying { intent, forced } => {
-                self.dispatch_burst_outcome(profile_id, intent, forced, response.outcome, now, out);
+                match ProofOutcome::try_from(response.outcome) {
+                    Ok(proof) => {
+                        self.dispatch_burst_outcome(profile_id, intent, forced, proof, now, out);
+                    }
+                    Err(WalkerContractViolation) => {
+                        self.walker_contract_violated_burst(profile_id, owner, out);
+                    }
+                }
             }
 
-            ProbeRoute::Rebasing { forced } => {
+            ProbeRoute::Rebasing { forced } => match ProofOutcome::try_from(response.outcome) {
                 // Same certifier as the Verifying choke — the post-fire
                 // rebase response folds through `quiescence_verdict` over
                 // the post-command tree. The verdict drives the
                 // rebase-loop consequence table; `Vanished` / `Failed`
                 // route to the rebase-specific cleanup; `Regressed`
-                // (kind mismatch, DirEnumerated) was already handled
-                // inside the certifier.
-                match self.certify_probe_response(profile_id, response.outcome, forced, out) {
+                // (kind mismatch) was already handled inside the
+                // certifier.
+                Ok(proof) => match self.certify_probe_response(profile_id, proof, forced, out) {
                     CertifiedResponse::Proceed { snapshot, verdict } => {
                         self.dispatch_rebase_ok(profile_id, snapshot, verdict, now, out);
                     }
@@ -515,50 +527,68 @@ impl Engine {
                         self.dispatch_rebase_failed(profile_id, failure, out);
                     }
                     CertifiedResponse::Regressed => {}
-                }
-            }
-
-            ProbeRoute::Descent => match response.outcome {
-                ProbeOutcome::DirEnumerated(arc) => {
-                    self.dispatch_descent_ok(owner, &arc, now, out);
-                }
-                ProbeOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
-                ProbeOutcome::Failed(failure) => self.dispatch_descent_failed(owner, failure, out),
-                ProbeOutcome::AnchorOk(_) | ProbeOutcome::SubtreeProven { .. } => {
-                    // Walker contract: descent probes a Dir prefix and
-                    // returns `DirEnumerated` / `Vanished`. `AnchorOk` /
-                    // `SubtreeProven` are walker-side regressions.
-                    debug_assert!(
-                        false,
-                        "walker contract violated: Profile descent received a \
-                         non-enumeration outcome (profile = {profile_id:?})",
-                    );
-                    out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                        owner,
-                        correlation: received,
-                    });
+                },
+                Err(WalkerContractViolation) => {
+                    self.walker_contract_violated_burst(profile_id, owner, out);
                 }
             },
 
+            ProbeRoute::Descent => match DescentOutcome::try_from(response.outcome) {
+                Ok(descent) => self.dispatch_descent(owner, descent, now, out),
+                Err(WalkerContractViolation) => self.walker_contract_violated_descent(owner, out),
+            },
+
             ProbeRoute::Enumerating { .. } => {
-                // `Enumerating` is a Promoter-only routing class —
-                // unconstructable for a Profile owner, whose gated
-                // correlation lives on exactly one Profile carrier
-                // (descent / verify / rebase). The no-route case
-                // folded into the stale gate above; this stays the
-                // loud regression arm for the cross-owner class.
+                // Honest internal-invariant arm: `Enumerating` is a
+                // Promoter-only routing class, unconstructable for a
+                // Profile owner — the Profile branch of `probe_gate`
+                // never yields it. Not a walker-contract violation (the
+                // walker is not at fault), so no diagnostic and no
+                // recovery: nothing is wedged because nothing can route
+                // here. The full elimination is the owner-split route;
+                // until then this stays the loud dev/CI tripwire.
                 debug_assert!(
                     false,
                     "Profile probe response routed to Enumerating (a Promoter-only \
                      class) — the gated correlation must live on a Profile carrier \
                      (profile = {profile_id:?})",
                 );
-                out.diagnostics.push(Diagnostic::StaleProbeResponse {
-                    owner,
-                    correlation: received,
-                });
             }
         }
+    }
+
+    /// Recover a pre-fire (`Verifying`) or post-fire (`Rebasing`) burst
+    /// from a walker-contract violation — a proof-route probe whose
+    /// payload resolved to the structural `DirEnumerated` shape the route
+    /// cannot accept. The typed [`ProofOutcome`] parse rejected the
+    /// payload at the demux seam; this recovers the burst.
+    ///
+    /// `debug_assert!` in dev/CI (a production walker never emits this
+    /// shape), then in release emits [`Diagnostic::WalkerContractViolated`]
+    /// and routes through [`Self::finish_burst_to_idle`] — **not**
+    /// [`Self::finalize_anchor_lost`]: a walker defect is not an
+    /// anchor-identity change, so the anchor watch and the prior
+    /// baseline / current are preserved. The probe slot was disarmed by
+    /// `take_owner_probe` before dispatch, so `finish_burst_to_idle`'s
+    /// cancel-first precondition holds (this is the tested post-disarm
+    /// path), and the helper accepts both `PreFire(Verifying)` and
+    /// `PostFire(Rebasing)` carriers. Self-healing: the next `FsEvent`
+    /// opens a fresh burst.
+    fn walker_contract_violated_burst(
+        &mut self,
+        profile_id: ProfileId,
+        owner: ProbeOwner,
+        out: &mut StepOutput,
+    ) {
+        debug_assert!(
+            false,
+            "walker contract violated: a Verifying/Rebasing (proof) probe received \
+             a non-proof outcome (DirEnumerated) — a structural enumeration is not a \
+             quiescence observation (owner = {owner:?})",
+        );
+        out.diagnostics
+            .push(Diagnostic::WalkerContractViolated { owner });
+        self.finish_burst_to_idle(profile_id, out);
     }
 
     /// Certify a Verifying / Rebase probe response: lower the typed
@@ -572,7 +602,8 @@ impl Engine {
     /// lower→kind-check→fold spine is unified here, at the floor.
     ///
     /// **Typed input.** The caller passes a `ProofOutcome`, not the wide
-    /// wire [`ProbeOutcome`]: the proof/descent split is parsed once at
+    /// wire [`ProbeOutcome`](specter_core::ProbeOutcome): the
+    /// proof/descent split is parsed once at
     /// the demux seam, so the structural `DirEnumerated` shape — a
     /// walker-contract violation on a quiescence/rebase probe — is
     /// unrepresentable here and the old defensive arm is gone. The
@@ -656,23 +687,33 @@ impl Engine {
     fn certify_probe_response(
         &mut self,
         profile_id: ProfileId,
-        outcome: ProbeOutcome,
+        proof: ProofOutcome,
         forced: bool,
         out: &mut StepOutput,
     ) -> CertifiedResponse {
-        // Profile-presence guard. The `probe_gate` ⇒ `take_owner_probe`
-        // dispatch contract reaches this floor only on Active(Verifying |
-        // Rebasing), so the Profile must exist; the guard surfaces a
-        // contract violation in dev/CI and degrades to `Regressed` in
-        // release. Capture `events_witness_quiescence` here from the
-        // immutable borrow — it is invariant across the burst's lifetime
-        // (folds into `config_hash`) and lets us drop the borrow before
-        // the kind check and the cat-(b) `&mut self` re-fetch.
-        let Some(events_witness_quiescence) = self
-            .profiles
-            .get(profile_id)
-            .map(Profile::events_witness_quiescence)
-        else {
+        // Lower the typed proof outcome to (snapshot, authority).
+        // `Vanished` / `Failed` return as-is for the caller's per-route
+        // cleanup; `DirEnumerated` is unrepresentable here — parsed out
+        // at the demux seam, so the old defensive arm is gone.
+        let (snap, authority) = match proof {
+            ProofOutcome::AnchorOk(leaf) => {
+                (TreeSnapshot::File(leaf), ProofAuthority::Authoritative)
+            }
+            ProofOutcome::SubtreeProven {
+                snapshot,
+                authority,
+            } => (TreeSnapshot::Dir(snapshot), authority),
+            ProofOutcome::Vanished => return CertifiedResponse::Vanished,
+            ProofOutcome::Failed(failure) => return CertifiedResponse::Failed(failure),
+        };
+
+        // One immutable resolution of every Profile bit the fold
+        // consumes (events witness, prior kind, proof obligation), held
+        // by value so the later `&mut self` re-fetch is borrow-clean. An
+        // absent Profile is a gate breach — `probe_gate` ⇒
+        // `take_owner_probe` reaches this floor only on Active(Verifying
+        // | Rebasing); degrade to `Regressed`.
+        let Some(ctx) = self.fold_context(profile_id) else {
             debug_assert!(
                 false,
                 "certify_probe_response: absent Profile {profile_id:?} — \
@@ -681,45 +722,40 @@ impl Engine {
             return CertifiedResponse::Regressed;
         };
 
-        let (snap, authority) = match outcome {
-            ProbeOutcome::AnchorOk(leaf) => {
-                (TreeSnapshot::File(leaf), ProofAuthority::Authoritative)
-            }
-            ProbeOutcome::SubtreeProven {
-                snapshot,
-                authority,
-            } => (TreeSnapshot::Dir(snapshot), authority),
-            ProbeOutcome::Vanished => return CertifiedResponse::Vanished,
-            ProbeOutcome::Failed(failure) => return CertifiedResponse::Failed(failure),
-            ProbeOutcome::DirEnumerated(_) => {
-                debug_assert!(
-                    false,
-                    "walker contract violated: a quiescence/rebase probe received \
-                     DirEnumerated — a structural enumeration is not a quiescence \
-                     observation (profile = {profile_id:?})",
-                );
-                return CertifiedResponse::Regressed;
-            }
+        // Kind guard before the fold. Unreachable in v1 (the walker
+        // collapses Dir↔File swaps to `Vanished`), but a kind-mismatched
+        // response is not a valid observation of the anchor: tear the
+        // burst down through `finalize_anchor_lost` — the tested
+        // anchor-loss cleanup — rather than fold a verdict over a
+        // soon-discarded snapshot. First-classify (`prior == None`,
+        // fresh Seed) passes; the snapshot's variant *is* the kind at
+        // the `install_*_current` commit.
+        let response_kind = match &snap {
+            TreeSnapshot::Dir(_) => ResourceKind::Dir,
+            TreeSnapshot::File(_) => ResourceKind::File,
         };
-
-        // Kind check before the fold: on disagreement
-        // `kind_agrees_or_finalize` already tore the burst down via
-        // `finalize_anchor_lost`, so the caller does nothing
-        // (`Regressed`). Folding a verdict over a soon-discarded
-        // snapshot would be meaningless. The Profile itself stays in
-        // the registry — only the burst transitions to Idle — so the
-        // entry guard's presence proof survives this call.
-        if !self.kind_agrees_or_finalize(profile_id, &snap, out) {
+        if let Some(prior_kind) = ctx.prior_kind
+            && prior_kind != response_kind
+        {
+            debug_assert!(
+                false,
+                "walker contract violated: response {response_kind:?} \
+                 for kind {prior_kind:?} (profile = {profile_id:?})",
+            );
+            out.diagnostics.push(Diagnostic::AnchorKindMismatch {
+                profile: profile_id,
+                prior_kind,
+                response_kind,
+            });
+            self.finalize_anchor_lost(profile_id, out);
             return CertifiedResponse::Regressed;
         }
 
-        // Witness selection. The hash channel engages iff the burst
-        // owes a proof AND the events stream is insufficient. The
-        // events bit was captured at the entry guard; the proof
-        // predicate spans `profiles + subs` and lives on the engine.
+        // Witness selection. The hash channel engages iff the burst owes
+        // a proof AND the events stream is insufficient — both captured
+        // in the fold context above.
         let response_hash = snap.hash();
-        let needs_hash_channel =
-            self.burst_owes_quiescence_proof(profile_id) && !events_witness_quiescence;
+        let needs_hash_channel = ctx.owes_proof && !ctx.events_witness;
 
         // Cat-(b) carrier advance: the cascade
         // (`Profile::advance_certified_sample` →
@@ -731,11 +767,13 @@ impl Engine {
         // an unread region), and the EventsReliable path skips the
         // write entirely.
         let prior = if needs_hash_channel && matches!(authority, ProofAuthority::Authoritative) {
-            let profile = self.profiles.get_mut(profile_id).expect(
-                "certify_probe_response: entry guard proved Profile presence; \
-                 kind_agrees_or_finalize does not remove the Profile",
-            );
-            profile.advance_certified_sample(response_hash)
+            self.profiles
+                .get_mut(profile_id)
+                .expect(
+                    "certify_probe_response: fold_context proved Profile presence; \
+                     the kind-mismatch path returned before reaching here",
+                )
+                .advance_certified_sample(response_hash)
         } else {
             None
         };
@@ -754,6 +792,22 @@ impl Engine {
         }
     }
 
+    /// One immutable Profile resolution into the [`FoldContext`] the
+    /// verdict fold consumes. `None` iff the Profile is absent (a gate
+    /// breach — the floor is reached only on `Active(Verifying |
+    /// Rebasing)`); the caller degrades to `Regressed`. Holds no borrow
+    /// on return (every field is `Copy`), so the caller is free to take
+    /// the `&mut self` re-fetch for the cat-(b) advance or the
+    /// anchor-loss finalize afterward.
+    fn fold_context(&self, profile_id: ProfileId) -> Option<FoldContext> {
+        let profile = self.profiles.get(profile_id)?;
+        Some(FoldContext {
+            events_witness: profile.events_witness_quiescence(),
+            prior_kind: profile.kind(),
+            owes_proof: self.owes_proof_from(profile, profile_id),
+        })
+    }
+
     /// Whether the burst's consequence at the verdict floor requires a
     /// tree-quiescence proof (Contract B — "fire when the tree
     /// settles") rather than mere baseline establishment (Contract A —
@@ -766,9 +820,11 @@ impl Engine {
     /// (any), Seed with witnessed activity, recovery Seed (`any_fired`),
     /// any `PostFire` (Rebase) — owes a quiescence proof.
     ///
-    /// **Composed.** Reads `Profile.state()` (intent + `dirty.is_empty()`)
-    /// and `SubRegistry::any_fired`. The predicate spans two stores so
-    /// it lives on `Engine`, not as a `Profile` method.
+    /// **Composed.** Reads `profile.state()` (intent + `dirty.is_empty()`)
+    /// and `SubRegistry::any_fired`. The predicate spans two stores, so
+    /// it lives on `Engine` rather than as a `Profile` method, taking the
+    /// already-resolved `&Profile` from [`Self::fold_context`] (no
+    /// redundant `get`) plus its `profile_id` for the `subs` lookup.
     ///
     /// **Conservative for recovery Seed.** `any_fired = true` Seed
     /// bursts with `dirty.is_empty()` are marked proof-owing even
@@ -779,24 +835,16 @@ impl Engine {
     /// before pinning if drift was absent on a structure-only
     /// recovery Seed; no fire missed.
     ///
-    /// **Structurally-unreachable defaults to `true`.** A missing
-    /// Profile or non-`Active` state at the verdict floor cannot
-    /// occur — the floor is reached only through the `probe_gate` ⇒
-    /// `take_owner_probe` dispatch on `Active(Verifying | Rebasing)`
-    /// (see [`Self::certify_probe_response`]'s entry guard for the
-    /// sole caller). Both fall-through arms `debug_assert!(false)` to
-    /// surface a contract violation in dev/CI and degrade to the
-    /// proof-owing default in release, preserving the fire-safety
-    /// invariant rather than silently bypassing it.
-    fn burst_owes_quiescence_proof(&self, profile_id: ProfileId) -> bool {
-        let Some(profile) = self.profiles.get(profile_id) else {
-            debug_assert!(
-                false,
-                "burst_owes_quiescence_proof: absent Profile {profile_id:?} — \
-                 certify_probe_response's entry guard proves presence at this depth",
-            );
-            return true;
-        };
+    /// **Non-`Active` defaults to `true`.** A non-`Active` state at the
+    /// verdict floor cannot occur — `fold_context` already proved
+    /// Profile presence, and the floor is reached only through the
+    /// `probe_gate` ⇒ `take_owner_probe` dispatch on `Active(Verifying |
+    /// Rebasing)`. The fall-through arm `debug_assert!(false)` to surface
+    /// a contract violation in dev/CI and degrades to the proof-owing
+    /// default in release, preserving the fire-safety invariant rather
+    /// than silently bypassing it.
+    #[must_use]
+    fn owes_proof_from(&self, profile: &Profile, profile_id: ProfileId) -> bool {
         match profile.state() {
             ProfileState::Active(ActiveBurst::PostFire(_), _) => true,
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => match pre.intent {
@@ -812,9 +860,9 @@ impl Engine {
             ProfileState::Idle | ProfileState::Pending(_) => {
                 debug_assert!(
                     false,
-                    "burst_owes_quiescence_proof: non-Active Profile {profile_id:?} \
-                     reached the verdict floor (probe_gate dispatches only on \
-                     Active(Verifying | Rebasing))",
+                    "owes_proof_from: non-Active Profile {profile_id:?} reached the \
+                     verdict floor (probe_gate dispatches only on Active(Verifying | \
+                     Rebasing))",
                 );
                 true
             }
@@ -841,11 +889,11 @@ impl Engine {
         profile_id: ProfileId,
         intent: BurstIntent,
         forced: bool,
-        outcome: ProbeOutcome,
+        proof: ProofOutcome,
         now: Instant,
         out: &mut StepOutput,
     ) {
-        match self.certify_probe_response(profile_id, outcome, forced, out) {
+        match self.certify_probe_response(profile_id, proof, forced, out) {
             CertifiedResponse::Proceed { snapshot, verdict } => {
                 self.dispatch_quiescence_ok(profile_id, snapshot, verdict, intent, now, out);
             }
@@ -880,12 +928,11 @@ impl Engine {
     /// File-shaped-prior detection at the single boundary that already
     /// owns the Profile borrow shape.
     ///
-    /// **Kind agreement is a caller responsibility.** Callers MUST
-    /// invoke [`Engine::kind_agrees_or_finalize`] before this helper.
-    /// The setters' debug_assert is a defensive backstop for any
-    /// future caller bypassing the boundary; production paths through
-    /// the dispatchers always pass the agreement check before
-    /// reaching here.
+    /// **Kind agreement is a caller responsibility.** Production callers
+    /// reach this helper only after [`Engine::certify_probe_response`]'s
+    /// inline kind guard passed (Verifying via `dispatch_burst_outcome`,
+    /// Rebasing via the post-fire arm). The setters' debug_assert is a
+    /// defensive backstop for any future caller bypassing the boundary.
     pub(crate) fn apply_snapshot(
         &mut self,
         profile_id: ProfileId,
@@ -919,59 +966,6 @@ impl Engine {
                 if let Some(p) = self.profiles.get_mut(profile_id) {
                     p.install_file_current(leaf);
                 }
-            }
-        }
-    }
-
-    /// Validate that the response's `TreeSnapshot` shape agrees with
-    /// `Profile.kind`. Returns `true` on agreement (or on
-    /// `kind == None`, the first-classify case).
-    ///
-    /// On disagreement — a walker-contract violation, structurally
-    /// unreachable in v1 under the typed [`crate::ProbeRequest`]
-    /// dispatch chain — emit a
-    /// [`Diagnostic::AnchorKindMismatch`] diagnostic and route the
-    /// Profile through [`Engine::finalize_anchor_lost`]. The prior
-    /// baseline / current become invalid under the new on-disk shape,
-    /// the anchor watch is released, and the parent watch is preserved
-    /// for descent re-recovery via `Profile.watch_root_parent`.
-    ///
-    /// Choosing `finalize_anchor_lost` over a `debug_assert! + drop`
-    /// is deliberate: the symmetric path with `dispatch_*_vanished`
-    /// re-uses a well-tested cleanup chain rather than introducing a
-    /// fresh "discard then graft" composition (which leaks watch
-    /// contributions and breaks the cross-field invariant — the
-    /// original-plan hazard the boundary check exists to prevent).
-    pub(crate) fn kind_agrees_or_finalize(
-        &mut self,
-        profile_id: ProfileId,
-        snapshot: &TreeSnapshot,
-        out: &mut StepOutput,
-    ) -> bool {
-        let prior = self
-            .profiles
-            .get(profile_id)
-            .and_then(specter_core::Profile::kind);
-        let response_kind = match snapshot {
-            TreeSnapshot::Dir(_) => ResourceKind::Dir,
-            TreeSnapshot::File(_) => ResourceKind::File,
-        };
-        match prior {
-            None => true,
-            Some(prior_kind) if prior_kind == response_kind => true,
-            Some(prior_kind) => {
-                debug_assert!(
-                    false,
-                    "walker contract violated: response {response_kind:?} \
-                     for kind {prior_kind:?} (profile = {profile_id:?})",
-                );
-                out.diagnostics.push(Diagnostic::AnchorKindMismatch {
-                    profile: profile_id,
-                    prior_kind,
-                    response_kind,
-                });
-                self.finalize_anchor_lost(profile_id, out);
-                false
             }
         }
     }
@@ -1046,8 +1040,7 @@ impl Engine {
     /// arm is therefore unreachable in production; it carries
     /// `debug_assert!(false)` + the safe transition default to surface
     /// a future writer that opens the unreachable shape, the same
-    /// convention `burst_owes_quiescence_proof` and `pre_fire_target`
-    /// use.
+    /// convention `owes_proof_from` and `pre_fire_target` use.
     ///
     /// **Preconditions** (guaranteed by [`is_timer_referenced`]
     /// upstream): `Profile.state == Active(PreFire(_))` and
@@ -4201,6 +4194,27 @@ enum CertifiedResponse {
     Vanished,
     Failed(ProbeFailure),
     Regressed,
+}
+
+/// The Profile bits [`Engine::certify_probe_response`]'s verdict fold
+/// consumes, captured in one immutable resolution
+/// ([`Engine::fold_context`]) before any `&mut` re-fetch. Every field is
+/// `Copy`, so the context holds no borrow on the Profile — the caller is
+/// free to take the cat-(b) `&mut self` advance or the anchor-loss
+/// finalize afterward.
+///
+/// - `events_witness`: whether the Profile's `events_union` covers
+///   in-place writes
+///   ([`specter_core::Profile::events_witness_quiescence`]) — invariant
+///   across the burst (folds into `config_hash`).
+/// - `prior_kind`: the prior [`specter_core::Profile::kind`], or `None`
+///   for a fresh (first-classify) Seed.
+/// - `owes_proof`: whether the burst's consequence requires a
+///   tree-quiescence proof ([`Engine::owes_proof_from`]).
+struct FoldContext {
+    events_witness: bool,
+    prior_kind: Option<ResourceKind>,
+    owes_proof: bool,
 }
 
 /// Pass-1 routing class for [`Engine::on_effect_complete`]: which way
