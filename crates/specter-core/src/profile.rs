@@ -965,6 +965,47 @@ impl PreFireBurst {
         }
     }
 
+    /// Construct a pre-fire burst — the single construction seam.
+    ///
+    /// Born fresh, always: `forced` is `false` (the force-fire flag
+    /// flips in-life only on `BurstDeadline` expiry, via the engine's
+    /// cat-a `force_pending`) and `last_certified_hash` is `None` (the
+    /// pre-fire N=2 sample carrier opens fresh; its sole in-life writer
+    /// is the cat-(b) [`Self::advance_certified_sample`]). Those
+    /// invariant-bearing fields take no parameter precisely because *no*
+    /// construction path may seed them — the no-bypass discipline
+    /// applied to construction, mirroring [`PostFireBurst::new`].
+    ///
+    /// `fold_latched` *is* a parameter — the operator's birth consult
+    /// ([`Profile::absorb_window_live`] at the burst's birth instant), a
+    /// computed construction value like `intent`; its only in-life
+    /// writer is the reverse-race retro-latch [`Self::latch_fold`].
+    ///
+    /// Production callers: the engine's `start_seed_burst` /
+    /// `start_standard_burst`, and
+    /// [`PostFireBurst::into_pre_fire_residual`] (the typed residual
+    /// restart, which threads its own birth consult).
+    #[must_use]
+    pub const fn new(
+        burst_deadline: TimerId,
+        phase: PreFirePhase,
+        intent: BurstIntent,
+        dirty: DirtyProvenance,
+        last_event_time: Option<Instant>,
+        fold_latched: bool,
+    ) -> Self {
+        Self {
+            burst_deadline,
+            phase,
+            intent,
+            forced: false,
+            dirty,
+            last_event_time,
+            last_certified_hash: None,
+            fold_latched,
+        }
+    }
+
     /// Advance the pre-fire N=2 sample carrier — the sole in-life
     /// mutator of [`Self::last_certified_hash`]. Records `hash` as
     /// the current Authoritative sample and returns the prior value
@@ -1284,16 +1325,14 @@ impl PostFireBurst {
              seed; the caller must gate on a non-empty fire-tail residual",
         );
         let residual = self.final_window_residual;
-        PreFireBurst {
+        PreFireBurst::new(
             burst_deadline,
-            phase: PreFirePhase::Batching { settle_timer },
-            intent: BurstIntent::Standard,
-            forced: false,
-            dirty: residual,
-            last_event_time: Some(now),
-            last_certified_hash: None,
+            PreFirePhase::Batching { settle_timer },
+            BurstIntent::Standard,
+            residual,
+            Some(now),
             fold_latched,
-        }
+        )
     }
 }
 
@@ -4714,31 +4753,27 @@ mod tests {
     }
 
     fn batching_burst(settle: TimerId, deadline: TimerId) -> PreFireBurst {
-        PreFireBurst {
-            burst_deadline: deadline,
-            phase: PreFirePhase::Batching {
+        PreFireBurst::new(
+            deadline,
+            PreFirePhase::Batching {
                 settle_timer: settle,
             },
-            intent: BurstIntent::Standard,
-            forced: false,
-            dirty: DirtyProvenance::new(),
-            last_event_time: None,
-            last_certified_hash: None,
-            fold_latched: false,
-        }
+            BurstIntent::Standard,
+            DirtyProvenance::new(),
+            None,
+            false,
+        )
     }
 
     fn unit_pre(phase: PreFirePhase, deadline: TimerId) -> PreFireBurst {
-        PreFireBurst {
-            burst_deadline: deadline,
+        PreFireBurst::new(
+            deadline,
             phase,
-            intent: BurstIntent::Standard,
-            forced: false,
-            dirty: DirtyProvenance::new(),
-            last_event_time: None,
-            last_certified_hash: None,
-            fold_latched: false,
-        }
+            BurstIntent::Standard,
+            DirtyProvenance::new(),
+            None,
+            false,
+        )
     }
 
     /// Settle on Batching returns the carried token.

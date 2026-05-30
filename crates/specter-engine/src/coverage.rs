@@ -1145,18 +1145,16 @@ mod tests {
             None,
         );
         p.transition_state(ProfileState::Active(
-            ActiveBurst::PreFire(PreFireBurst {
-                burst_deadline: TimerId::from(1),
-                phase: PreFirePhase::Batching {
+            ActiveBurst::PreFire(PreFireBurst::new(
+                TimerId::from(1),
+                PreFirePhase::Batching {
                     settle_timer: TimerId::from(2),
                 },
                 intent,
-                forced: false,
-                dirty: DirtyProvenance::new(),
-                last_event_time: None,
-                last_certified_hash: None,
-                fold_latched: false,
-            }),
+                DirtyProvenance::new(),
+                None,
+                false,
+            )),
             BurstFinish::ReturnToIdle,
         ));
         profiles.attach(tree, p)

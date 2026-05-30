@@ -6369,16 +6369,14 @@ fn active_pre_fire_burst(
         .timers
         .schedule(now + MAX_SETTLE, pid, TimerKind::BurstDeadline);
     ProfileState::Active(
-        ActiveBurst::PreFire(PreFireBurst {
+        ActiveBurst::PreFire(PreFireBurst::new(
             burst_deadline,
             phase,
             intent,
-            forced: false,
-            dirty: DirtyProvenance::new(),
-            last_event_time: None,
-            last_certified_hash: None,
-            fold_latched: false,
-        }),
+            DirtyProvenance::new(),
+            None,
+            false,
+        )),
         BurstFinish::ReturnToIdle,
     )
 }

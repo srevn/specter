@@ -431,7 +431,7 @@ impl Engine {
         self.profiles.transition_state(
             profile_id,
             ProfileState::Active(
-                ActiveBurst::PreFire(PreFireBurst {
+                ActiveBurst::PreFire(PreFireBurst::new(
                     burst_deadline,
                     // Cold-walk: `phase = Verifying { slot, target: anchor }`
                     // — built above. Triggered: `phase = Batching { .. }`
@@ -439,13 +439,11 @@ impl Engine {
                     // `transition_to_verifying` constructs the Verifying
                     // variant with the freshly computed target.
                     phase,
-                    intent: BurstIntent::Seed,
-                    forced: false,
+                    BurstIntent::Seed,
                     dirty,
                     last_event_time,
-                    last_certified_hash: None,
                     fold_latched,
-                }),
+                )),
                 // Fresh burst — directive starts at `ReturnToIdle`. Flips
                 // to `Reap` only on mid-burst `mark_active_for_reap`.
                 BurstFinish::ReturnToIdle,
@@ -515,25 +513,23 @@ impl Engine {
         self.profiles.transition_state(
             profile_id,
             ProfileState::Active(
-                ActiveBurst::PreFire(PreFireBurst {
+                ActiveBurst::PreFire(PreFireBurst::new(
                     burst_deadline,
                     // Standard bursts are Batching-first; no probe is in
                     // flight at construction so the variant carries no
                     // target. `transition_to_verifying` constructs the
                     // Verifying variant with the freshly computed target
                     // on settle expiry / force-fire.
-                    phase: PreFirePhase::Batching { settle_timer },
-                    intent: BurstIntent::Standard,
-                    forced: false,
+                    PreFirePhase::Batching { settle_timer },
+                    BurstIntent::Standard,
                     dirty,
                     // The burst-start FsEvent IS the first event; seed the
                     // settle-deadline source of truth with `now`. Subsequent
                     // events update this in `event_drives_batching` without
                     // re-inserting a fresh heap entry.
-                    last_event_time: Some(now),
-                    last_certified_hash: None,
+                    Some(now),
                     fold_latched,
-                }),
+                )),
                 // Fresh burst — directive starts at `ReturnToIdle`. Flips
                 // to `Reap` only on mid-burst `mark_active_for_reap`.
                 BurstFinish::ReturnToIdle,
@@ -2529,19 +2525,17 @@ mod tests {
     /// `dirty` is the only field the helper reads (besides `intent`); the
     /// rest are stub values the helper never inspects.
     fn pre_fire_burst_for_test(intent: BurstIntent, dirty: DirtyProvenance) -> PreFireBurst {
-        PreFireBurst {
-            burst_deadline: TimerId::default(),
-            phase: PreFirePhase::Verifying {
+        PreFireBurst::new(
+            TimerId::default(),
+            PreFirePhase::Verifying {
                 slot: ProbeSlot::empty(),
                 target: ResourceId::default(),
             },
             intent,
-            forced: false,
             dirty,
-            last_event_time: None,
-            last_certified_hash: None,
-            fold_latched: false,
-        }
+            None,
+            false,
+        )
     }
 
     /// `dirty` carrying each resource id paired with its *real* tree path,
