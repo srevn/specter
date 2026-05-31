@@ -349,6 +349,26 @@ pub(crate) enum DisabledSource {
     Toml,
 }
 
+impl DisabledSource {
+    /// Wire-form token — mirrors the snake_case serde rename. Surfaces
+    /// in `list -o human`'s `DISABLED` column and `show -o human`'s
+    /// disabled-arm parenthetical via [`Self::Display`]; the renderer
+    /// paths reach the wire form through `{}` with no intermediate
+    /// helper.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Runtime => "runtime",
+            Self::Toml => "toml",
+        }
+    }
+}
+
+impl std::fmt::Display for DisabledSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Daemon-wide status snapshot. Surfaced by `specter status` —
 /// uptime, reload bookkeeping, Sub / Profile / Promoter counts, and
 /// the canonical paths the daemon is currently bound to.
@@ -872,6 +892,30 @@ mod tests {
                 assert_eq!(error, "conn already in subscribe mode");
             }
             other => panic!("expected Err(AlreadySubscribed), got {other:?}"),
+        }
+    }
+
+    /// [`DisabledSource`] follows the same `as_str` ↔ serde-rename ↔
+    /// `Display` discipline as [`WireErrorCode`] — every variant
+    /// projects to the wire token and round-trips identically. Mirrors
+    /// the per-enum drift tests in [`super::super::wire::tests`].
+    #[test]
+    fn disabled_source_round_trips_every_variant() {
+        const ALL: &[DisabledSource] = &[DisabledSource::Runtime, DisabledSource::Toml];
+        for &src in ALL {
+            let json = serde_json::to_string(&src).expect("serialize");
+            let stripped = json
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .expect("JSON form is a bare quoted token");
+            assert_eq!(stripped, src.as_str(), "JSON form must equal as_str()");
+            assert_eq!(
+                src.to_string(),
+                src.as_str(),
+                "Display must write as_str() for {src:?}",
+            );
+            let back: DisabledSource = serde_json::from_str(&json).expect("deserialize wire form");
+            assert_eq!(back, src);
         }
     }
 

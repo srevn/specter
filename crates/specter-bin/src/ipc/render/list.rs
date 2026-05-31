@@ -14,8 +14,7 @@
 
 use std::fmt::Write as _;
 
-use crate::ipc::protocol::{DisabledSource, ListResponse, ListRow};
-use crate::ipc::wire::WireStateLabel;
+use crate::ipc::protocol::{ListResponse, ListRow};
 
 /// Render the response as one operator-readable block.
 ///
@@ -179,8 +178,7 @@ fn col_name(row: &ListRow) -> String {
 }
 
 fn col_state(row: &ListRow) -> String {
-    row.state
-        .map_or_else(|| "-".to_string(), |s| state_label_str(s).to_string())
+    row.state.map_or_else(|| "-".to_string(), |s| s.to_string())
 }
 
 fn col_anchor(row: &ListRow) -> String {
@@ -201,11 +199,8 @@ fn col_fires(row: &ListRow) -> String {
 }
 
 fn col_disabled(row: &ListRow) -> String {
-    match row.disabled {
-        None => "-".to_string(),
-        Some(DisabledSource::Runtime) => "runtime".to_string(),
-        Some(DisabledSource::Toml) => "toml".to_string(),
-    }
+    row.disabled
+        .map_or_else(|| "-".to_string(), |s| s.to_string())
 }
 
 fn col_profile_id(row: &ListRow) -> String {
@@ -226,23 +221,6 @@ fn col_dedup(row: &ListRow) -> String {
 fn col_settle(row: &ListRow) -> String {
     row.settle_ms
         .map_or_else(|| "-".to_string(), |ms| format!("{ms}ms"))
-}
-
-/// Operator-visible label for a [`WireStateLabel`]. Mirrors the
-/// `snake_case` `serde(rename_all)` so the human view matches the
-/// JSON. A future variant added to [`WireStateLabel`] without a
-/// matching arm here is a compile error (exhaustive `match`).
-const fn state_label_str(s: WireStateLabel) -> &'static str {
-    match s {
-        WireStateLabel::Idle => "idle",
-        WireStateLabel::Pending => "pending",
-        WireStateLabel::Batching => "batching",
-        WireStateLabel::Verifying => "verifying",
-        WireStateLabel::Draining => "draining",
-        WireStateLabel::Awaiting => "awaiting",
-        WireStateLabel::Rebasing => "rebasing",
-        WireStateLabel::Settling => "settling",
-    }
 }
 
 #[cfg(test)]

@@ -13,15 +13,15 @@
 
 use std::fmt::Write as _;
 
-use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails};
-use crate::ipc::wire::{WireAbsorbMode, WireEffectScope, WireStateLabel};
+use crate::ipc::protocol::{ShowResponse, SubDetails};
+use crate::ipc::wire::{WireAbsorbMode, WireEffectScope};
 
 /// Render the response as one operator-readable block.
 pub(crate) fn render(resp: &ShowResponse) -> String {
     match resp {
         ShowResponse::Active(d) => render_active(d),
         ShowResponse::Disabled { name, source } => {
-            format!("{name}: disabled ({})\n", disabled_source_str(*source))
+            format!("{name}: disabled ({source})\n")
         }
         ShowResponse::Unknown { name } => {
             format!("{name}: unknown — not in config, not runtime-disabled\n")
@@ -65,7 +65,7 @@ fn render_active(d: &SubDetails) -> String {
     // panicking the daemon. `-` is the operator-visible "missing"
     // marker shared with `list -o human`'s `col_state`.
     let _ = match d.state {
-        Some(s) => writeln!(out, "{:LABEL_WIDTH$}{}", "state", state_label_str(s)),
+        Some(s) => writeln!(out, "{:LABEL_WIDTH$}{s}", "state"),
         None => writeln!(out, "{:LABEL_WIDTH$}-", "state"),
     };
     let _ = match d.anchor.as_ref() {
@@ -107,26 +107,10 @@ fn render_active(d: &SubDetails) -> String {
     out
 }
 
-/// Operator-visible label for a [`WireStateLabel`]. Mirrors the
-/// `snake_case` `serde(rename_all)` so the human view matches the
-/// JSON. A future variant added to [`WireStateLabel`] without a
-/// matching arm here is a compile error (exhaustive `match`).
-const fn state_label_str(s: WireStateLabel) -> &'static str {
-    match s {
-        WireStateLabel::Idle => "idle",
-        WireStateLabel::Pending => "pending",
-        WireStateLabel::Batching => "batching",
-        WireStateLabel::Verifying => "verifying",
-        WireStateLabel::Draining => "draining",
-        WireStateLabel::Awaiting => "awaiting",
-        WireStateLabel::Rebasing => "rebasing",
-        WireStateLabel::Settling => "settling",
-    }
-}
-
-/// Operator-visible label for a [`WireEffectScope`]. Mirrors the
-/// `snake_case` serde rename, with a hyphenated form already familiar
-/// from the config TOML (`scope = "subtree-root"`).
+/// View-local label for a [`WireEffectScope`] — hyphenated form
+/// already familiar from the config TOML (`scope = "subtree-root"`).
+/// The wire's own snake-case projection lives on [`WireEffectScope::as_str`];
+/// `show.rs` chooses to diverge for the detail block.
 const fn effect_scope_str(s: WireEffectScope) -> &'static str {
     match s {
         WireEffectScope::SubtreeRoot => "subtree-root",
@@ -134,19 +118,11 @@ const fn effect_scope_str(s: WireEffectScope) -> &'static str {
     }
 }
 
-/// Operator-visible label for a [`DisabledSource`].
-const fn disabled_source_str(s: DisabledSource) -> &'static str {
-    match s {
-        DisabledSource::Runtime => "runtime",
-        DisabledSource::Toml => "toml",
-    }
-}
-
-/// Operator-visible mode label for the `absorbing until …` line.
-/// Hyphenated to match this view's label table (`subtree-root`,
-/// `per-stable-file`); `persist` is the bare form since the expiry
-/// instant already sits on the same line. The `tail` renderer uses its
-/// own snake_case table.
+/// View-local mode label for the `absorbing until …` line. Hyphenated
+/// to match this view's label table (`subtree-root`, `per-stable-file`);
+/// `persist` is the bare form since the expiry instant already sits on
+/// the same line. The wire's own snake-case projection lives on
+/// [`WireAbsorbMode::as_str`]; `diag`/`tail` reach it through `Display`.
 const fn absorb_mode_str(m: WireAbsorbMode) -> &'static str {
     match m {
         WireAbsorbMode::ConsumeOnFirst => "consume-on-first",

@@ -1121,6 +1121,28 @@ impl From<BurstIntent> for WireBurstIntent {
     }
 }
 
+impl WireBurstIntent {
+    /// Wire-form token — mirrors the snake_case serde rename. Exhaustive
+    /// `match` so a new variant without a paired arm fails to compile,
+    /// keeping the textual vocabulary single-source against the per-enum
+    /// drift test. Mirrors [`super::protocol::WireErrorCode::as_str`]'s
+    /// convention; every snake-only wire enum below carries the same
+    /// pair (`as_str` + [`Display`]) so renderers reach the wire form
+    /// through the `{}` formatter with no intermediate helper.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Standard => "standard",
+            Self::Seed => "seed",
+        }
+    }
+}
+
+impl std::fmt::Display for WireBurstIntent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireFsEvent {
@@ -1142,6 +1164,25 @@ impl From<FsEvent> for WireFsEvent {
             FsEvent::Removed => Self::Removed,
             FsEvent::Revoked => Self::Revoked,
         }
+    }
+}
+
+impl WireFsEvent {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Modified => "modified",
+            Self::MetadataChanged => "metadata_changed",
+            Self::StructureChanged => "structure_changed",
+            Self::Renamed => "renamed",
+            Self::Removed => "removed",
+            Self::Revoked => "revoked",
+        }
+    }
+}
+
+impl std::fmt::Display for WireFsEvent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1258,6 +1299,21 @@ impl From<ReapTrigger> for WireReapTrigger {
     }
 }
 
+impl WireReapTrigger {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Immediate => "immediate",
+            Self::DeferredFromBurst => "deferred_from_burst",
+        }
+    }
+}
+
+impl std::fmt::Display for WireReapTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireResourceKind {
@@ -1273,6 +1329,22 @@ impl From<ResourceKind> for WireResourceKind {
             ResourceKind::Dir => Self::Dir,
             ResourceKind::Unknown => Self::Unknown,
         }
+    }
+}
+
+impl WireResourceKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Dir => "dir",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl std::fmt::Display for WireResourceKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1294,6 +1366,22 @@ impl From<ClaimKind> for WireClaimKind {
     }
 }
 
+impl WireClaimKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Anchor => "anchor",
+            Self::WatchRootParent => "watch_root_parent",
+            Self::DescentPrefix => "descent_prefix",
+        }
+    }
+}
+
+impl std::fmt::Display for WireClaimKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WirePromoterClaimKind {
@@ -1309,6 +1397,22 @@ impl From<PromoterClaimKind> for WirePromoterClaimKind {
             PromoterClaimKind::ActiveProxy => Self::ActiveProxy,
             PromoterClaimKind::PrefixParent => Self::PrefixParent,
         }
+    }
+}
+
+impl WirePromoterClaimKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::DescentPrefix => "descent_prefix",
+            Self::ActiveProxy => "active_proxy",
+            Self::PrefixParent => "prefix_parent",
+        }
+    }
+}
+
+impl std::fmt::Display for WirePromoterClaimKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1330,6 +1434,22 @@ impl From<SpliceFailureCause> for WireSpliceFailureCause {
     }
 }
 
+impl WireSpliceFailureCause {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::TargetOutsideAnchorSubtree => "target_outside_anchor_subtree",
+            Self::SlotReapedMidGraft => "slot_reaped_mid_graft",
+            Self::IntermediateUncovered => "intermediate_uncovered",
+        }
+    }
+}
+
+impl std::fmt::Display for WireSpliceFailureCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireDetachReason {
@@ -1347,6 +1467,23 @@ impl From<DetachReason> for WireDetachReason {
             DetachReason::IpcDisabled => Self::IpcDisabled,
             DetachReason::PromoterReaped => Self::PromoterReaped,
         }
+    }
+}
+
+impl WireDetachReason {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConfigDiffRemoved => "config_diff_removed",
+            Self::ConfigDiffIdentityChanged => "config_diff_identity_changed",
+            Self::IpcDisabled => "ipc_disabled",
+            Self::PromoterReaped => "promoter_reaped",
+        }
+    }
+}
+
+impl std::fmt::Display for WireDetachReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1384,6 +1521,30 @@ impl From<BurstHelper> for WireBurstHelper {
     }
 }
 
+impl WireBurstHelper {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::StartSeedBurst => "start_seed_burst",
+            Self::StartStandardBurst => "start_standard_burst",
+            Self::EventDrivesBatching => "event_drives_batching",
+            Self::RetryDrivesBatching => "retry_drives_batching",
+            Self::TransitionToVerifying => "transition_to_verifying",
+            Self::TransitionToDraining => "transition_to_draining",
+            Self::TransitionToAwaiting => "transition_to_awaiting",
+            Self::TransitionToRebasing => "transition_to_rebasing",
+            Self::TransitionToSettling => "transition_to_settling",
+            Self::AbsorbEventIntoFireTail => "absorb_event_into_fire_tail",
+            Self::RestartBurstFromFireTailResidual => "restart_burst_from_fire_tail_residual",
+        }
+    }
+}
+
+impl std::fmt::Display for WireBurstHelper {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireProfileStateDiscriminant {
@@ -1401,6 +1562,23 @@ impl From<ProfileStateDiscriminant> for WireProfileStateDiscriminant {
             ProfileStateDiscriminant::ActivePreFire => Self::ActivePreFire,
             ProfileStateDiscriminant::ActivePostFire => Self::ActivePostFire,
         }
+    }
+}
+
+impl WireProfileStateDiscriminant {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Pending => "pending",
+            Self::ActivePreFire => "active_pre_fire",
+            Self::ActivePostFire => "active_post_fire",
+        }
+    }
+}
+
+impl std::fmt::Display for WireProfileStateDiscriminant {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1436,6 +1614,27 @@ impl From<StateLabel> for WireStateLabel {
     }
 }
 
+impl WireStateLabel {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Idle => "idle",
+            Self::Pending => "pending",
+            Self::Batching => "batching",
+            Self::Verifying => "verifying",
+            Self::Draining => "draining",
+            Self::Awaiting => "awaiting",
+            Self::Rebasing => "rebasing",
+            Self::Settling => "settling",
+        }
+    }
+}
+
+impl std::fmt::Display for WireStateLabel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// Sub effect-scope projection. Mirrors `specter_core::EffectScope`
 /// verbatim; surfaces in `SubDetails.scope`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -1451,6 +1650,26 @@ impl From<EffectScope> for WireEffectScope {
             EffectScope::SubtreeRoot => Self::SubtreeRoot,
             EffectScope::PerStableFile => Self::PerStableFile,
         }
+    }
+}
+
+impl WireEffectScope {
+    /// Wire-form token — snake_case, mirroring the serde rename. The
+    /// `show -o human` renderer carries its own hyphenated label table
+    /// (`subtree-root` / `per-stable-file`) for the detail block; that
+    /// view-local divergence stays in `show.rs`. This `as_str` is the
+    /// uniform wire vocabulary for diag / JSON / future consumers.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::SubtreeRoot => "subtree_root",
+            Self::PerStableFile => "per_stable_file",
+        }
+    }
+}
+
+impl std::fmt::Display for WireEffectScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1472,6 +1691,27 @@ impl From<AbsorbMode> for WireAbsorbMode {
             AbsorbMode::ConsumeOnFirst => Self::ConsumeOnFirst,
             AbsorbMode::PersistUntil => Self::PersistUntil,
         }
+    }
+}
+
+impl WireAbsorbMode {
+    /// Wire-form token — snake_case, mirroring the serde rename. The
+    /// `show -o human` renderer carries its own table for the
+    /// `absorbing until …` line (hyphenated `consume-on-first` / bare
+    /// `persist`); that view-local divergence stays in `show.rs`. This
+    /// `as_str` is the uniform wire vocabulary for diag / JSON / future
+    /// consumers.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::ConsumeOnFirst => "consume_on_first",
+            Self::PersistUntil => "persist_until",
+        }
+    }
+}
+
+impl std::fmt::Display for WireAbsorbMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1516,13 +1756,31 @@ pub(crate) enum WireReloadTrigger {
     Startup,
 }
 
+impl WireReloadTrigger {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Sighup => "sighup",
+            Self::Auto => "auto",
+            Self::Ipc => "ipc",
+            Self::Startup => "startup",
+        }
+    }
+}
+
+impl std::fmt::Display for WireReloadTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         KNOWN_WIRE_VARIANTS, WireAbsorbMode, WireBurstHelper, WireBurstIntent, WireClaimKind,
-        WireDetachReason, WireDiagnostic, WireFsEvent, WireOverflowScope, WirePath, WireProbeOwner,
-        WireProfileStateDiscriminant, WirePromoterClaimKind, WireReapTrigger, WireResourceKind,
-        WireSpliceFailureCause, WireTime, WireWatchFailure,
+        WireDetachReason, WireDiagnostic, WireEffectScope, WireFsEvent, WireOverflowScope,
+        WirePath, WireProbeOwner, WireProfileStateDiscriminant, WirePromoterClaimKind,
+        WireReapTrigger, WireReloadTrigger, WireResourceKind, WireSpliceFailureCause,
+        WireStateLabel, WireTime, WireWatchFailure,
     };
     use crate::ipc::protocol::WireId;
     use std::collections::BTreeSet;
@@ -2000,6 +2258,218 @@ mod tests {
                 w.variant_name(),
             );
         }
+    }
+
+    /// Drift guard for the snake-rename'd wire enums — exercises the
+    /// same invariant as
+    /// [`super::super::protocol::tests::wire_error_code_round_trips_every_variant`]:
+    /// serialize → strip quotes → expect `as_str`; `Display` → expect
+    /// `as_str`; deserialize round-trips identically. The variant
+    /// slice is hand-written; compile-time exhaustiveness comes from
+    /// `as_str`'s match — a new variant lands a missing arm there
+    /// before this slice could go stale.
+    fn assert_snake_round_trip<E>(variants: &[E], as_str: fn(E) -> &'static str)
+    where
+        E: Copy
+            + std::fmt::Debug
+            + std::fmt::Display
+            + Eq
+            + serde::Serialize
+            + serde::de::DeserializeOwned,
+    {
+        for &v in variants {
+            let json = serde_json::to_string(&v).expect("serialize");
+            let stripped = json
+                .strip_prefix('"')
+                .and_then(|s| s.strip_suffix('"'))
+                .expect("JSON form is a bare quoted token");
+            assert_eq!(
+                stripped,
+                as_str(v),
+                "JSON form ({json}) must equal as_str() for {v:?}",
+            );
+            assert_eq!(
+                v.to_string(),
+                as_str(v),
+                "Display must write as_str() for {v:?}",
+            );
+            let back: E = serde_json::from_str(&json).expect("deserialize wire form");
+            assert_eq!(back, v);
+        }
+    }
+
+    #[test]
+    fn wire_burst_intent_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[WireBurstIntent::Standard, WireBurstIntent::Seed],
+            WireBurstIntent::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_fs_event_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireFsEvent::Modified,
+                WireFsEvent::MetadataChanged,
+                WireFsEvent::StructureChanged,
+                WireFsEvent::Renamed,
+                WireFsEvent::Removed,
+                WireFsEvent::Revoked,
+            ],
+            WireFsEvent::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_reap_trigger_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireReapTrigger::Immediate,
+                WireReapTrigger::DeferredFromBurst,
+            ],
+            WireReapTrigger::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_resource_kind_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireResourceKind::File,
+                WireResourceKind::Dir,
+                WireResourceKind::Unknown,
+            ],
+            WireResourceKind::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_claim_kind_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireClaimKind::Anchor,
+                WireClaimKind::WatchRootParent,
+                WireClaimKind::DescentPrefix,
+            ],
+            WireClaimKind::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_promoter_claim_kind_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WirePromoterClaimKind::DescentPrefix,
+                WirePromoterClaimKind::ActiveProxy,
+                WirePromoterClaimKind::PrefixParent,
+            ],
+            WirePromoterClaimKind::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_splice_failure_cause_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireSpliceFailureCause::TargetOutsideAnchorSubtree,
+                WireSpliceFailureCause::SlotReapedMidGraft,
+                WireSpliceFailureCause::IntermediateUncovered,
+            ],
+            WireSpliceFailureCause::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_detach_reason_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireDetachReason::ConfigDiffRemoved,
+                WireDetachReason::ConfigDiffIdentityChanged,
+                WireDetachReason::IpcDisabled,
+                WireDetachReason::PromoterReaped,
+            ],
+            WireDetachReason::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_burst_helper_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireBurstHelper::StartSeedBurst,
+                WireBurstHelper::StartStandardBurst,
+                WireBurstHelper::EventDrivesBatching,
+                WireBurstHelper::RetryDrivesBatching,
+                WireBurstHelper::TransitionToVerifying,
+                WireBurstHelper::TransitionToDraining,
+                WireBurstHelper::TransitionToAwaiting,
+                WireBurstHelper::TransitionToRebasing,
+                WireBurstHelper::TransitionToSettling,
+                WireBurstHelper::AbsorbEventIntoFireTail,
+                WireBurstHelper::RestartBurstFromFireTailResidual,
+            ],
+            WireBurstHelper::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_profile_state_discriminant_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireProfileStateDiscriminant::Idle,
+                WireProfileStateDiscriminant::Pending,
+                WireProfileStateDiscriminant::ActivePreFire,
+                WireProfileStateDiscriminant::ActivePostFire,
+            ],
+            WireProfileStateDiscriminant::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_state_label_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireStateLabel::Idle,
+                WireStateLabel::Pending,
+                WireStateLabel::Batching,
+                WireStateLabel::Verifying,
+                WireStateLabel::Draining,
+                WireStateLabel::Awaiting,
+                WireStateLabel::Rebasing,
+                WireStateLabel::Settling,
+            ],
+            WireStateLabel::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_effect_scope_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[WireEffectScope::SubtreeRoot, WireEffectScope::PerStableFile],
+            WireEffectScope::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_absorb_mode_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[WireAbsorbMode::ConsumeOnFirst, WireAbsorbMode::PersistUntil],
+            WireAbsorbMode::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_reload_trigger_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireReloadTrigger::Sighup,
+                WireReloadTrigger::Auto,
+                WireReloadTrigger::Ipc,
+                WireReloadTrigger::Startup,
+            ],
+            WireReloadTrigger::as_str,
+        );
     }
 
     /// [`KNOWN_WIRE_VARIANTS`] aligns with [`WireDiagnostic::variant_name`]

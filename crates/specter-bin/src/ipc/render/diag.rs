@@ -28,11 +28,7 @@
 
 use std::fmt::Write as _;
 
-use crate::ipc::wire::{
-    WireAbsorbMode, WireBurstHelper, WireBurstIntent, WireClaimKind, WireDetachReason,
-    WireDiagnostic, WireFsEvent, WireProfileStateDiscriminant, WirePromoterClaimKind,
-    WireReapTrigger, WireResourceKind, WireSpliceFailureCause, WireTime,
-};
+use crate::ipc::wire::{WireDiagnostic, WireTime};
 
 /// Render one event as a single newline-terminated line into the
 /// caller's buffer.
@@ -125,7 +121,9 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
 /// Field order mirrors the variant's declaration order so the human
 /// form and the JSON form present fields in the same sequence.
 ///
-/// One arm per variant — fewer would mean a less specific format.
+/// Snake-rename'd wire enum fields render through `Display` (the
+/// `{value}` formatter); see the per-enum `as_str` impls in
+/// [`super::super::wire`] and [`super::super::protocol`].
 fn write_fields(out: &mut String, d: &WireDiagnostic) {
     match d {
         WireDiagnostic::StaleProbeResponse {
@@ -153,12 +151,7 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         WireDiagnostic::ProbeVanished {
             profile, intent, ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  intent={}",
-                profile.0,
-                burst_intent_str(*intent),
-            );
+            let _ = write!(out, "  profile={}  intent={intent}", profile.0);
         }
         WireDiagnostic::ProbeFailed {
             profile,
@@ -168,9 +161,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  profile={}  intent={}  errno={errno}",
+                "  profile={}  intent={intent}  errno={errno}",
                 profile.0,
-                burst_intent_str(*intent),
             );
         }
         WireDiagnostic::EventClassDropped {
@@ -181,10 +173,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  resource={}  event={}  profile={}",
-                resource.0,
-                fs_event_str(*event),
-                profile.0,
+                "  resource={}  event={event}  profile={}",
+                resource.0, profile.0,
             );
         }
         WireDiagnostic::EventOnUnwatchedResource { resource, .. }
@@ -221,20 +211,10 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             let _ = write!(out, "  profile={}", profile.0);
         }
         WireDiagnostic::AbsorbArmed { profile, mode, .. } => {
-            let _ = write!(
-                out,
-                "  profile={}  mode={}",
-                profile.0,
-                absorb_mode_str(*mode),
-            );
+            let _ = write!(out, "  profile={}  mode={mode}", profile.0);
         }
         WireDiagnostic::ProfileReaped { profile, via, .. } => {
-            let _ = write!(
-                out,
-                "  profile={}  via={}",
-                profile.0,
-                reap_trigger_str(*via),
-            );
+            let _ = write!(out, "  profile={}  via={via}", profile.0);
         }
         WireDiagnostic::ProfileClaimPurged {
             profile,
@@ -245,10 +225,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  profile={}  claim={}  resource={}  failure={failure}",
-                profile.0,
-                claim_kind_str(*claim),
-                resource.0,
+                "  profile={}  claim={claim}  resource={}  failure={failure}",
+                profile.0, resource.0,
             );
         }
         WireDiagnostic::PromoterClaimPurged {
@@ -260,10 +238,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  promoter={}  claim={}  resource={}  failure={failure}",
-                promoter.0,
-                promoter_claim_kind_str(*claim),
-                resource.0,
+                "  promoter={}  claim={claim}  resource={}  failure={failure}",
+                promoter.0, resource.0,
             );
         }
         WireDiagnostic::AttachPathInvalid { path, hint, .. } => {
@@ -277,10 +253,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  profile={}  prior_kind={}  response_kind={}",
+                "  profile={}  prior_kind={prior_kind}  response_kind={response_kind}",
                 profile.0,
-                resource_kind_str(*prior_kind),
-                resource_kind_str(*response_kind),
             );
         }
         WireDiagnostic::SpliceCrossedUncovered {
@@ -291,10 +265,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  profile={}  target={}  cause={}",
-                profile.0,
-                target.0,
-                splice_failure_cause_str(*cause),
+                "  profile={}  target={}  cause={cause}",
+                profile.0, target.0,
             );
         }
         WireDiagnostic::EventAbsorbedByFireTail {
@@ -305,10 +277,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  profile={}  resource={}  event={}",
-                profile.0,
-                resource.0,
-                fs_event_str(*event),
+                "  profile={}  resource={}  event={event}",
+                profile.0, resource.0,
             );
         }
         WireDiagnostic::AwaitGateDeadlineForceRebasing {
@@ -337,20 +307,14 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  profile={}  first_unread={first_unread}  intent={}",
+                "  profile={}  first_unread={first_unread}  intent={intent}",
                 profile.0,
-                burst_intent_str(*intent),
             );
         }
         WireDiagnostic::QuiescenceCeilingForcedDespiteChange {
             profile, intent, ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  intent={}",
-                profile.0,
-                burst_intent_str(*intent),
-            );
+            let _ = write!(out, "  profile={}  intent={intent}", profile.0);
         }
         WireDiagnostic::RebaseCeilingForced {
             profile,
@@ -360,9 +324,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  profile={}  intent={}  observed_change={observed_change}",
+                "  profile={}  intent={intent}  observed_change={observed_change}",
                 profile.0,
-                burst_intent_str(*intent),
             );
         }
         WireDiagnostic::SensorOverflow { scope, .. } => {
@@ -399,10 +362,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  sub={}  profile={}  reason={}",
-                sub.0,
-                profile.0,
-                detach_reason_str(*reason),
+                "  sub={}  profile={}  reason={reason}",
+                sub.0, profile.0,
             );
         }
         WireDiagnostic::SubRebound { sub, .. } | WireDiagnostic::RebindUnknownSub { sub, .. } => {
@@ -434,12 +395,7 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             kind,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  promoter={}  path={path}  kind={}",
-                promoter.0,
-                resource_kind_str(*kind),
-            );
+            let _ = write!(out, "  promoter={}  path={path}  kind={kind}", promoter.0);
         }
         WireDiagnostic::PromoterFanoutThreshold {
             promoter, count, ..
@@ -484,10 +440,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         } => {
             let _ = write!(
                 out,
-                "  profile={}  helper={}  observed={}",
+                "  profile={}  helper={helper}  observed={observed}",
                 profile.0,
-                burst_helper_str(*helper),
-                profile_state_discriminant_str(*observed),
             );
         }
         WireDiagnostic::WalkerContractViolated { owner, .. } => {
@@ -496,121 +450,6 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
         WireDiagnostic::Missed { count, .. } => {
             let _ = write!(out, "  count={count}");
         }
-    }
-}
-
-/// Operator-visible label for [`WireBurstIntent`]. Mirrors the
-/// `snake_case` serde rename so the human view matches the JSON.
-const fn burst_intent_str(i: WireBurstIntent) -> &'static str {
-    match i {
-        WireBurstIntent::Standard => "standard",
-        WireBurstIntent::Seed => "seed",
-    }
-}
-
-/// Operator-visible label for [`WireFsEvent`]. Mirrors the
-/// `snake_case` serde rename.
-const fn fs_event_str(e: WireFsEvent) -> &'static str {
-    match e {
-        WireFsEvent::Modified => "modified",
-        WireFsEvent::MetadataChanged => "metadata_changed",
-        WireFsEvent::StructureChanged => "structure_changed",
-        WireFsEvent::Renamed => "renamed",
-        WireFsEvent::Removed => "removed",
-        WireFsEvent::Revoked => "revoked",
-    }
-}
-
-/// Operator-visible label for [`WireReapTrigger`].
-const fn reap_trigger_str(t: WireReapTrigger) -> &'static str {
-    match t {
-        WireReapTrigger::Immediate => "immediate",
-        WireReapTrigger::DeferredFromBurst => "deferred_from_burst",
-    }
-}
-
-/// Operator-visible label for [`WireResourceKind`].
-const fn resource_kind_str(k: WireResourceKind) -> &'static str {
-    match k {
-        WireResourceKind::File => "file",
-        WireResourceKind::Dir => "dir",
-        WireResourceKind::Unknown => "unknown",
-    }
-}
-
-/// Operator-visible label for [`WireClaimKind`].
-const fn claim_kind_str(c: WireClaimKind) -> &'static str {
-    match c {
-        WireClaimKind::Anchor => "anchor",
-        WireClaimKind::WatchRootParent => "watch_root_parent",
-        WireClaimKind::DescentPrefix => "descent_prefix",
-    }
-}
-
-/// Operator-visible label for [`WirePromoterClaimKind`].
-const fn promoter_claim_kind_str(c: WirePromoterClaimKind) -> &'static str {
-    match c {
-        WirePromoterClaimKind::DescentPrefix => "descent_prefix",
-        WirePromoterClaimKind::ActiveProxy => "active_proxy",
-        WirePromoterClaimKind::PrefixParent => "prefix_parent",
-    }
-}
-
-/// Operator-visible label for [`WireSpliceFailureCause`].
-const fn splice_failure_cause_str(c: WireSpliceFailureCause) -> &'static str {
-    match c {
-        WireSpliceFailureCause::TargetOutsideAnchorSubtree => "target_outside_anchor_subtree",
-        WireSpliceFailureCause::SlotReapedMidGraft => "slot_reaped_mid_graft",
-        WireSpliceFailureCause::IntermediateUncovered => "intermediate_uncovered",
-    }
-}
-
-/// Operator-visible label for [`WireDetachReason`].
-const fn detach_reason_str(r: WireDetachReason) -> &'static str {
-    match r {
-        WireDetachReason::ConfigDiffRemoved => "config_diff_removed",
-        WireDetachReason::ConfigDiffIdentityChanged => "config_diff_identity_changed",
-        WireDetachReason::IpcDisabled => "ipc_disabled",
-        WireDetachReason::PromoterReaped => "promoter_reaped",
-    }
-}
-
-/// Operator-visible label for [`WireBurstHelper`].
-const fn burst_helper_str(h: WireBurstHelper) -> &'static str {
-    match h {
-        WireBurstHelper::StartSeedBurst => "start_seed_burst",
-        WireBurstHelper::StartStandardBurst => "start_standard_burst",
-        WireBurstHelper::EventDrivesBatching => "event_drives_batching",
-        WireBurstHelper::RetryDrivesBatching => "retry_drives_batching",
-        WireBurstHelper::TransitionToVerifying => "transition_to_verifying",
-        WireBurstHelper::TransitionToDraining => "transition_to_draining",
-        WireBurstHelper::TransitionToAwaiting => "transition_to_awaiting",
-        WireBurstHelper::TransitionToRebasing => "transition_to_rebasing",
-        WireBurstHelper::TransitionToSettling => "transition_to_settling",
-        WireBurstHelper::AbsorbEventIntoFireTail => "absorb_event_into_fire_tail",
-        WireBurstHelper::RestartBurstFromFireTailResidual => {
-            "restart_burst_from_fire_tail_residual"
-        }
-    }
-}
-
-/// Operator-visible label for [`WireProfileStateDiscriminant`].
-const fn profile_state_discriminant_str(d: WireProfileStateDiscriminant) -> &'static str {
-    match d {
-        WireProfileStateDiscriminant::Idle => "idle",
-        WireProfileStateDiscriminant::Pending => "pending",
-        WireProfileStateDiscriminant::ActivePreFire => "active_pre_fire",
-        WireProfileStateDiscriminant::ActivePostFire => "active_post_fire",
-    }
-}
-
-/// Operator-visible label for [`WireAbsorbMode`] on the `tail` stream.
-/// Mirrors the snake_case serde rename so the human view matches the
-/// JSON (the `show` renderer uses its own hyphenated label table).
-const fn absorb_mode_str(m: WireAbsorbMode) -> &'static str {
-    match m {
-        WireAbsorbMode::ConsumeOnFirst => "consume_on_first",
-        WireAbsorbMode::PersistUntil => "persist_until",
     }
 }
 

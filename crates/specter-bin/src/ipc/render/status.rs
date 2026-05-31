@@ -25,7 +25,6 @@
 //! styling — the current `status` view stays plain text.
 
 use crate::ipc::protocol::{StatusResponse, WireLastReload};
-use crate::ipc::wire::WireReloadTrigger;
 use std::fmt::Write as _;
 
 /// Render the status response as one operator-readable block.
@@ -97,26 +96,14 @@ fn format_uptime(uptime_secs: u64) -> String {
 /// is no longer constructable, so the match shrinks to two arms.
 fn format_reloads(count: u64, last: Option<&WireLastReload>) -> String {
     match last {
-        Some(r) => format!("{count} (last {} via {})", r.at, trigger_label(r.via)),
+        Some(r) => format!("{count} (last {} via {})", r.at, r.via),
         None => count.to_string(),
-    }
-}
-
-/// Operator-visible name for each reload trigger. Mirrors the
-/// `snake_case` `serde(rename_all)` on [`WireReloadTrigger`] so the
-/// human view matches the JSON shape.
-const fn trigger_label(t: WireReloadTrigger) -> &'static str {
-    match t {
-        WireReloadTrigger::Sighup => "sighup",
-        WireReloadTrigger::Auto => "auto",
-        WireReloadTrigger::Ipc => "ipc",
-        WireReloadTrigger::Startup => "startup",
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{format_reloads, format_uptime, render, trigger_label};
+    use super::{format_reloads, format_uptime, render};
     use crate::ipc::protocol::{StatusResponse, WireLastReload};
     use crate::ipc::wire::{WirePath, WireReloadTrigger, WireTime};
     use std::path::Path;
@@ -191,16 +178,5 @@ mod tests {
             line.starts_with("3 (last ") && line.ends_with(" via sighup)"),
             "got: {line}",
         );
-    }
-
-    /// `trigger_label` mirrors the `snake_case` serde rename so the
-    /// human view's "via X" agrees with the JSON's `last_reload_via`.
-    /// A future variant added to `WireReloadTrigger` without a
-    /// matching arm here is a compile error (exhaustive `match`).
-    #[test]
-    fn trigger_label_matches_wire_form() {
-        assert_eq!(trigger_label(WireReloadTrigger::Sighup), "sighup");
-        assert_eq!(trigger_label(WireReloadTrigger::Auto), "auto");
-        assert_eq!(trigger_label(WireReloadTrigger::Ipc), "ipc");
     }
 }
