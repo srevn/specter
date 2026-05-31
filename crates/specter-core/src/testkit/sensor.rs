@@ -77,7 +77,7 @@ impl MockSensor {
     }
 
     // Typed `Input` constructors. Test code spells injections as
-    // `MockSensor::fs_event(rid, FsEvent::Modified)` without having to
+    // `MockSensor::fs_event(rid, FsEvent::ContentChanged)` without having to
     // remember the variant payload shape.
 
     #[must_use]

@@ -44,8 +44,8 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 /// horizon-flush case (an identity FsEvent — `is_recency()` is false).
 #[derive(Clone, Copy, Debug)]
 enum Ev {
-    /// `Modified` at resource index 0/1/2 ⇒ `root` / `a` / `b`.
-    Modified(u8),
+    /// `ContentChanged` at resource index 0/1/2 ⇒ `root` / `a` / `b`.
+    ContentChanged(u8),
     /// `StructureChanged` at the `root` Dir anchor.
     StructRoot,
     /// Identity FsEvent at an unwatched resource: a true barrier
@@ -56,7 +56,7 @@ enum Ev {
 
 fn arb_seq() -> impl Strategy<Value = Vec<Ev>> {
     let elem = prop_oneof![
-        (0u8..3).prop_map(Ev::Modified),
+        (0u8..3).prop_map(Ev::ContentChanged),
         Just(Ev::StructRoot),
         Just(Ev::Barrier),
     ];
@@ -66,17 +66,17 @@ fn arb_seq() -> impl Strategy<Value = Vec<Ev>> {
 /// Resolve an `Ev` to its `Input` against the fixture's resources.
 fn input_of(ev: Ev, root: ResourceId, a: ResourceId, b: ResourceId) -> Input {
     match ev {
-        Ev::Modified(0) => Input::FsEvent {
+        Ev::ContentChanged(0) => Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
-        Ev::Modified(1) => Input::FsEvent {
+        Ev::ContentChanged(1) => Input::FsEvent {
             resource: a,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
-        Ev::Modified(_) => Input::FsEvent {
+        Ev::ContentChanged(_) => Input::FsEvent {
             resource: b,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         Ev::StructRoot => Input::FsEvent {
             resource: root,

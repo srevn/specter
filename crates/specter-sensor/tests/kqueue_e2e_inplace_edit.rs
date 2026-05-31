@@ -6,11 +6,11 @@
 //! covered Leaf (driven by `walk_pair` / `create_child` in
 //! `crates/specter-engine/src/reconcile.rs`). The kernel then emits
 //! `NOTE_WRITE` plus `NOTE_EXTEND` on the file's own FD; the watcher
-//! normalizes that to `FsEvent::Modified`.
+//! normalizes that to `FsEvent::ContentChanged`.
 //!
 //! This test pins the **kernel + watcher + translator** half of the
 //! closure: when the watcher installs both a Dir watch (STRUCTURE) and a
-//! per-file watch (CONTENT), an in-place edit fires `Modified` on the
+//! per-file watch (CONTENT), an in-place edit fires `ContentChanged` on the
 //! file's FD AND `StructureChanged` on the dir's FD. The engine half is
 //! covered by `crates/specter-engine/tests/event_filtering.rs`'s
 //! `it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves`.
@@ -96,7 +96,7 @@ fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<WatcherEvent> {
 }
 
 /// In-place file edit (`>` redirect, no rename) fires
-/// `FsEvent::Modified` on the per-file FD installed by the engine's
+/// `FsEvent::ContentChanged` on the per-file FD installed by the engine's
 /// `has_per_file_fds = true` walk_pair gating.
 ///
 /// The setup mirrors what the engine produces for a `subtree-root` Sub
@@ -110,9 +110,9 @@ fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<WatcherEvent> {
 /// the parent dir's mtime — the dir's `NOTE_WRITE` does not fire.
 /// Without the per-file FD, the engine would never see this change.
 /// With the per-file FD, the kernel emits `NOTE_WRITE` on the file
-/// directly, which the watcher normalizes to `FsEvent::Modified`.
+/// directly, which the watcher normalizes to `FsEvent::ContentChanged`.
 #[test]
-fn in_place_edit_fires_modified_on_per_file_fd() {
+fn in_place_edit_fires_content_changed_on_per_file_fd() {
     let tmp = TempDir::new().unwrap();
     let file_path = tmp.path().join("file.txt");
     std::fs::write(&file_path, "v1").unwrap();
@@ -137,13 +137,13 @@ fn in_place_edit_fires_modified_on_per_file_fd() {
 
     let out = drain_until(
         &mut w,
-        |(r, e)| *r == r_file && *e == FsEvent::Modified,
+        |(r, e)| *r == r_file && *e == FsEvent::ContentChanged,
         Duration::from_secs(2),
     );
     assert!(
         out.iter()
-            .any(|(r, e)| *r == r_file && *e == FsEvent::Modified),
-        "per-file FD must fire Modified on in-place edit; got {out:?}",
+            .any(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged),
+        "per-file FD must fire ContentChanged on in-place edit; got {out:?}",
     );
 
     drop(w);

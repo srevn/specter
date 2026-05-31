@@ -6,14 +6,14 @@
 //! one [`FsEvent`] per record by priority order:
 //!
 //! ```text
-//! Revoked > Removed > Renamed > StructureChanged > Modified > MetadataChanged
+//! Revoked > Removed > Renamed > StructureChanged > ContentChanged > MetadataChanged
 //! ```
 //!
 //! The terminal flags (`IN_UNMOUNT` / `IN_DELETE_SELF` / `IN_MOVE_SELF`)
 //! are slot-final — once one fires, no further events arrive on the
 //! watch descriptor. Pairing a non-terminal flag with a terminal one
 //! reports the terminal: emitting both would be noise the engine doesn't
-//! act on. The non-terminal `Modified` / `MetadataChanged` coalescing is
+//! act on. The non-terminal `ContentChanged` / `MetadataChanged` coalescing is
 //! acceptable because the engine's `Settling` state debounces either as
 //! "something changed; reschedule."
 //!
@@ -91,7 +91,7 @@ pub(super) const fn mask_to_fs_event(mask: u32, kind: ResourceKind) -> Option<Fs
         return Some(if matches!(effective, ResourceKind::Dir) {
             FsEvent::StructureChanged
         } else {
-            FsEvent::Modified
+            FsEvent::ContentChanged
         });
     }
 
@@ -190,23 +190,23 @@ mod tests {
     // ── Content events ────────────────────────────────────────────────
 
     #[test]
-    fn modify_close_write_yield_modified_on_file() {
+    fn modify_close_write_yield_content_changed_on_file() {
         for m in [IN_MODIFY, IN_CLOSE_WRITE, IN_MODIFY | IN_CLOSE_WRITE] {
             assert_eq!(
                 mask_to_fs_event(m, ResourceKind::File),
-                Some(FsEvent::Modified),
-                "{m:#x} on File should yield Modified"
+                Some(FsEvent::ContentChanged),
+                "{m:#x} on File should yield ContentChanged"
             );
         }
     }
 
     #[test]
-    fn modify_close_write_on_unknown_yields_modified() {
-        // Unknown.effective() == File ⇒ Modified.
+    fn modify_close_write_on_unknown_yields_content_changed() {
+        // Unknown.effective() == File ⇒ ContentChanged.
         for m in [IN_MODIFY, IN_CLOSE_WRITE] {
             assert_eq!(
                 mask_to_fs_event(m, ResourceKind::Unknown),
-                Some(FsEvent::Modified),
+                Some(FsEvent::ContentChanged),
             );
         }
     }
@@ -242,7 +242,7 @@ mod tests {
         let mask = IN_MODIFY | IN_ATTRIB;
         assert_eq!(
             mask_to_fs_event(mask, ResourceKind::File),
-            Some(FsEvent::Modified),
+            Some(FsEvent::ContentChanged),
         );
     }
 

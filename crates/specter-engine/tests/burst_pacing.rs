@@ -69,7 +69,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         let _ = e.step(
             Input::FsEvent {
                 resource: r,
-                event: FsEvent::Modified,
+                event: FsEvent::ContentChanged,
             },
             t,
         );
@@ -195,7 +195,7 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
     let _ = e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t_event,
     );

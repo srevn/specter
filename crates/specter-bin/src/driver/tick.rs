@@ -374,7 +374,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// 3. `probe_responses` — already-lifted `Input::ProbeResponse(_)`
     ///    envelopes from the wake'd channel.
     ///
-    /// Recency-class [`FsEvent`]s (`Modified` / `MetadataChanged` /
+    /// Recency-class [`FsEvent`]s (`ContentChanged` / `MetadataChanged` /
     /// `StructureChanged`) are lossy hints whose sole truth is the
     /// next probe — same-tick duplicates collapse via a per-tick
     /// `BTreeSet<(ResourceId, FsEvent)>` horizon. Every other input
@@ -408,7 +408,7 @@ impl<W: FsWatcher> EngineDriver<W> {
             } else {
                 // Barrier: identity FsEvent. Drop the horizon so the
                 // next same-`(resource, event)` recency hint reaches
-                // the engine — a `Removed` between two `Modified`s
+                // the engine — a `Removed` between two `ContentChanged`s
                 // must not be hidden behind the dedup.
                 seen.clear();
             }

@@ -33,7 +33,7 @@ use crate::sub::{SubAttachRequest, SubRegistryDiff};
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum FsEvent {
     #[default]
-    Modified,
+    ContentChanged,
     MetadataChanged,
     StructureChanged,
     Renamed,
@@ -54,7 +54,7 @@ impl FsEvent {
         matches!(self, Self::Removed | Self::Renamed | Self::Revoked)
     }
 
-    /// Recency-class events — `Modified` / `MetadataChanged` /
+    /// Recency-class events — `ContentChanged` / `MetadataChanged` /
     /// `StructureChanged`. Each is a lossy "this resource changed in
     /// this class" hint whose sole truth is the next probe; the exact
     /// complement of [`Self::is_identity`].

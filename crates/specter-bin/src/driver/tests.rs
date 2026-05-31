@@ -3639,7 +3639,7 @@ fn fs_event_and_effect_complete_both_drain_in_one_tick() {
     rig.driver
         .reactor
         .watcher_mut()
-        .inject(r, specter_core::FsEvent::Modified);
+        .inject(r, specter_core::FsEvent::ContentChanged);
     // Queue an EffectComplete via the wake'd channel.
     rig.effect_complete_tx()
         .send(Input::EffectComplete(specter_core::EffectCompletion {

@@ -9,7 +9,7 @@
 //!   because `IDENTITY_FLOOR = NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE`
 //!   is OR-ed onto every registration.
 //! - `StructureChanged` on a Dir needs [`ClassSet::STRUCTURE`].
-//! - `Modified` on a File needs [`ClassSet::CONTENT`].
+//! - `ContentChanged` on a File needs [`ClassSet::CONTENT`].
 //! - `MetadataChanged` needs [`ClassSet::METADATA`].
 
 // `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a
@@ -140,7 +140,7 @@ fn watch_dir_observes_structure_changed_on_create() {
 }
 
 #[test]
-fn watch_file_observes_modified_on_write() {
+fn watch_file_observes_content_changed_on_write() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, "initial").unwrap();
@@ -155,13 +155,13 @@ fn watch_file_observes_modified_on_write() {
 
     let out = drain_until(
         &mut w,
-        |(r, e)| *r == r_file && *e == FsEvent::Modified,
+        |(r, e)| *r == r_file && *e == FsEvent::ContentChanged,
         Duration::from_secs(2),
     );
     assert!(
         out.iter()
-            .any(|(r, e)| *r == r_file && *e == FsEvent::Modified),
-        "expected Modified on file, got {out:?}"
+            .any(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged),
+        "expected ContentChanged on file, got {out:?}"
     );
 
     drop(w);

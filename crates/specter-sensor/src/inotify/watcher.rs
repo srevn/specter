@@ -104,7 +104,7 @@ pub struct InotifyWatcher {
     /// Per-drain dedup horizon. Cleared at the start of every
     /// [`FsWatcher::drain_ready`] call so the kernel's `IN_MODIFY` +
     /// `IN_CLOSE_WRITE` pair (both normalising to
-    /// [`FsEvent::Modified`] for the same resource) collapses to one
+    /// [`FsEvent::ContentChanged`] for the same resource) collapses to one
     /// emitted event — including when the kernel splits the pair
     /// across separate `read_inotify` calls within the same drain-to-
     /// empty loop (the dedup horizon spans every batch in one
@@ -717,7 +717,7 @@ impl FsWatcher for InotifyWatcher {
     /// **Dedup horizon ([`Self::seen`]).** Cleared at entry, then
     /// scanned per emitted record so the kernel's `IN_MODIFY` +
     /// `IN_CLOSE_WRITE` pair (both normalising to
-    /// [`FsEvent::Modified`] for the same resource) collapses to
+    /// [`FsEvent::ContentChanged`] for the same resource) collapses to
     /// one emitted event. The horizon spans every `read_inotify`
     /// call within this `drain_ready` invocation — kernel-split
     /// fragments of one logical burst dedup correctly. First-write

@@ -13,7 +13,7 @@
 //!
 //! This test pins the **kernel + watcher + translator** half of the
 //! closure: with both a STRUCTURE Dir watch and a CONTENT per-file
-//! watch installed, an in-place truncate-and-rewrite fires `Modified`
+//! watch installed, an in-place truncate-and-rewrite fires `ContentChanged`
 //! on the file's wd and (no event) on the dir's wd. The engine half is
 //! covered by `crates/specter-engine/tests/event_filtering.rs`.
 
@@ -94,7 +94,7 @@ fn drain_raw_for(w: &mut InotifyWatcher, dur: Duration, out: &mut Vec<WatcherEve
 }
 
 /// E2E #3 closure: an in-place file edit (`>` redirect, no rename) fires
-/// `FsEvent::Modified` on the per-file wd installed by the engine's
+/// `FsEvent::ContentChanged` on the per-file wd installed by the engine's
 /// `has_per_file_fds = true` walk_pair gating.
 ///
 /// The setup mirrors what the engine produces for a `subtree-root` Sub
@@ -104,7 +104,7 @@ fn drain_raw_for(w: &mut InotifyWatcher, dur: Duration, out: &mut Vec<WatcherEve
 /// - Per-leaf file watched with CONTENT (File-only mask:
 ///   `IN_MODIFY | IN_CLOSE_WRITE`).
 #[test]
-fn in_place_edit_fires_modified_on_per_file_wd() {
+fn in_place_edit_fires_content_changed_on_per_file_wd() {
     let tmp = TempDir::new().unwrap();
     let file_path = tmp.path().join("file.txt");
     std::fs::write(&file_path, "v1").unwrap();
@@ -123,26 +123,26 @@ fn in_place_edit_fires_modified_on_per_file_wd() {
     // and writes — same syscall pattern as `echo 'test' > file.txt`.
     // No rename, no unlink. The kernel emits `IN_MODIFY` and
     // `IN_CLOSE_WRITE` on the file's inode; the watcher's per-batch
-    // dedup collapses both to one `Modified`.
+    // dedup collapses both to one `ContentChanged`.
     std::fs::write(&file_path, "v2 with more bytes").unwrap();
 
     let out = drain_until(
         &mut w,
-        |(r, e)| *r == r_file && *e == FsEvent::Modified,
+        |(r, e)| *r == r_file && *e == FsEvent::ContentChanged,
         Duration::from_secs(2),
     );
     assert!(
         out.iter()
-            .any(|(r, e)| *r == r_file && *e == FsEvent::Modified),
-        "per-file wd must fire Modified on in-place edit (E2E #3 closure); got {out:?}",
+            .any(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged),
+        "per-file wd must fire ContentChanged on in-place edit (E2E #3 closure); got {out:?}",
     );
 
     // Bonus: per-batch dedup should collapse the kernel's `IN_MODIFY +
-    // IN_CLOSE_WRITE` pair to one `Modified` per write — count and
+    // IN_CLOSE_WRITE` pair to one `ContentChanged` per write — count and
     // assert.
     let modified_count = out
         .iter()
-        .filter(|(r, e)| *r == r_file && *e == FsEvent::Modified)
+        .filter(|(r, e)| *r == r_file && *e == FsEvent::ContentChanged)
         .count();
     assert!(
         modified_count <= 2,

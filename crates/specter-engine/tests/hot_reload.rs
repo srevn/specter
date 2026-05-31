@@ -168,7 +168,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -247,7 +247,7 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );

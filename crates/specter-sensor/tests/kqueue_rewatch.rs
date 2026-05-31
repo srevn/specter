@@ -240,7 +240,7 @@ fn rewatch_with_narrowed_mask_drops_classes() {
 /// Re-watch with the same mask is a no-op — the watcher's cache catches
 /// it and skips the syscall. Observationally: the fd's behavior is
 /// unchanged. We exercise this by checking that a normal write still
-/// fires `Modified` after a same-mask re-watch (i.e., re-watching
+/// fires `ContentChanged` after a same-mask re-watch (i.e., re-watching
 /// didn't accidentally clear the fflags).
 #[test]
 fn rewatch_with_same_mask_preserves_registration() {
@@ -261,13 +261,13 @@ fn rewatch_with_same_mask_preserves_registration() {
     std::fs::write(&path, "y").unwrap();
     let out = drain_until(
         &mut w,
-        |(rid, e)| *rid == r && *e == FsEvent::Modified,
+        |(rid, e)| *rid == r && *e == FsEvent::ContentChanged,
         Duration::from_secs(2),
     );
     assert!(
         out.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::Modified),
-        "post no-op rewatch, write should still fire Modified; got {out:?}"
+            .any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
+        "post no-op rewatch, write should still fire ContentChanged; got {out:?}"
     );
 
     drop(w);
@@ -289,20 +289,20 @@ fn unwatch_then_watch_starts_fresh() {
         .unwrap();
     w.unwatch(r);
     // Fresh watch (FD reopened, cache repopulated). Observable check:
-    // a subsequent write fires Modified normally.
+    // a subsequent write fires ContentChanged normally.
     w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
         .unwrap();
 
     std::fs::write(&path, "y").unwrap();
     let out = drain_until(
         &mut w,
-        |(rid, e)| *rid == r && *e == FsEvent::Modified,
+        |(rid, e)| *rid == r && *e == FsEvent::ContentChanged,
         Duration::from_secs(2),
     );
     assert!(
         out.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::Modified),
-        "post unwatch+watch, write should fire Modified; got {out:?}"
+            .any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
+        "post unwatch+watch, write should fire ContentChanged; got {out:?}"
     );
 
     drop(w);

@@ -161,7 +161,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     let recovery_out = e.step(
         Input::FsEvent {
             resource: anchor,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         recovery_t0,
     );
@@ -281,7 +281,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     let recovery_out = e.step(
         Input::FsEvent {
             resource: anchor,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         recovery_t0,
     );
@@ -390,7 +390,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     let recovery_out = e.step(
         Input::FsEvent {
             resource: anchor,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         recovery_t0,
     );

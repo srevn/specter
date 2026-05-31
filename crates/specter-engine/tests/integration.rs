@@ -203,7 +203,7 @@ fn golden_path_full_lifecycle() {
     let fs_out = e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -275,7 +275,7 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -302,7 +302,7 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t2,
     );
@@ -418,7 +418,7 @@ fn pending_event_race_late_probe_response_discarded() {
     let _evt_out = e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         evt_t,
     );
@@ -529,7 +529,7 @@ fn force_fire_emits_effect_with_forced_true() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );

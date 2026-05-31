@@ -852,7 +852,7 @@ fn standard_burst_stable_emits_effect_and_awaits() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now,
     );
@@ -983,7 +983,7 @@ fn b1_dedup_fresh_sub_fires_on_phantom_standard_burst() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now,
     );
@@ -1089,7 +1089,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     e.step(
         Input::FsEvent {
             resource: file_anchor,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -1194,7 +1194,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     e.step(
         Input::FsEvent {
             resource: file_anchor,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -1286,7 +1286,7 @@ fn standard_burst_force_fires_on_max_settle() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now,
     );
@@ -1339,7 +1339,7 @@ fn standard_burst_force_fires_on_max_settle() {
 }
 
 #[test]
-fn fs_event_modified_during_seed_probing_preserves_intent() {
+fn fs_event_content_changed_during_seed_probing_preserves_intent() {
     let (mut e, pid, _sid, root, _) = engine_with_attached_sub();
     // The Seed burst is Batching-first; expire the settle
     // window so it reaches Verifying with a probe in flight, then
@@ -1349,7 +1349,7 @@ fn fs_event_modified_during_seed_probing_preserves_intent() {
     let out = e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         Instant::now(),
     );
@@ -1389,7 +1389,7 @@ fn event_drives_batching_clears_pending_probe() {
     let _ = e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         Instant::now(),
     );
@@ -1439,7 +1439,7 @@ fn hash_channel_carrier_survives_pre_fire_swaps_to_stable_resample() {
     let _ = e.step(
         Input::FsEvent {
             resource: anchor,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t0,
     );
@@ -1490,7 +1490,7 @@ fn hash_channel_carrier_survives_pre_fire_swaps_to_stable_resample() {
     let _ = e.step(
         Input::FsEvent {
             resource: anchor,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t2,
     );
@@ -1827,7 +1827,7 @@ fn fs_event_for_unwatched_resource_emits_diagnostic() {
     let out = e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         Instant::now(),
     );
@@ -1889,7 +1889,7 @@ fn fs_event_removed_at_anchor_active_terminates() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now,
     );
@@ -2037,7 +2037,7 @@ fn timer_expired_settle_in_settling_transitions_to_probing() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now,
     );
@@ -2082,7 +2082,7 @@ fn pre_fire_anchor_event_rearms_settle_and_fires_once() {
     let out_a = e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t0,
     );
@@ -2103,7 +2103,7 @@ fn pre_fire_anchor_event_rearms_settle_and_fires_once() {
     let out_b = e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -2363,7 +2363,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now,
     );
@@ -2835,7 +2835,7 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now,
     );
@@ -3383,7 +3383,7 @@ fn reap_pending_burst_completion_skips_effects_and_reaps() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -4042,7 +4042,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -4165,7 +4165,7 @@ fn per_stable_file_skips_dir_entries() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -4410,7 +4410,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now,
     );
@@ -4853,7 +4853,7 @@ fn finalize_anchor_lost_was_active_pre_helper_ordering() {
 /// the loop entry, so an Awaiting-absorbed event is folded into the
 /// `WholeSubtree` read itself rather than carried as a restart seed.
 ///
-/// Sub uses `ClassSet::CONTENT` so the descendant `Modified` event
+/// Sub uses `ClassSet::CONTENT` so the descendant `ContentChanged` event
 /// passes both gates: (1) a per-file FD is wired up by the standard
 /// burst's reconcile (`has_per_file_fds = true`), bumping the leaf's
 /// `watch_demand` past `on_fs_event`'s zero-gate, and (2) the
@@ -4901,18 +4901,18 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
     assert!(
         e.tree.get(descendant).is_some_and(|r| r.watch_demand() > 0),
         "per-file FD must be wired up for the descendant — otherwise \
-         the Modified event drops at on_fs_event's watch_demand gate \
+         the ContentChanged event drops at on_fs_event's watch_demand gate \
          before reaching the absorb arm",
     );
 
-    // Inject an FsEvent during Awaiting → absorb arm. `Modified` is
+    // Inject an FsEvent during Awaiting → absorb arm. `ContentChanged` is
     // the in-place content-edit class — the same FsEvent kqueue emits
     // for a `write(2)` against a per-file FD, which is the carve-out
     // scenario this test pins (the parent dir's mtime is unchanged).
     let absorb_out = e.step(
         Input::FsEvent {
             resource: descendant,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now + SETTLE * 2,
     );
@@ -5050,7 +5050,7 @@ fn rebasing_without_absorbs_still_probes_whole_subtree() {
 /// quiet window then completes the natural Settling → Rebasing advance.
 #[test]
 fn post_fire_settling_reschedules_on_absorbed_event() {
-    // Use a CONTENT-mask Sub so a Modified event at the anchor's covered
+    // Use a CONTENT-mask Sub so a ContentChanged event at the anchor's covered
     // descendant reaches the absorb arm. The anchor itself also accepts
     // events unconditionally (anchor events bypass the class filter).
     let mut e = Engine::new();
@@ -5131,7 +5131,7 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
     let absorb_out = e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now_b,
     );
@@ -7777,7 +7777,7 @@ fn residual_restart_under_window_folds() {
     let _ = e.step(
         Input::FsEvent {
             resource: child,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         rebasing_at + Duration::from_millis(1),
     );
@@ -7952,7 +7952,7 @@ mod props {
 
     fn arb_fsevent() -> impl Strategy<Value = FsEvent> {
         prop_oneof![
-            Just(FsEvent::Modified),
+            Just(FsEvent::ContentChanged),
             Just(FsEvent::StructureChanged),
             Just(FsEvent::Removed),
             Just(FsEvent::Renamed),

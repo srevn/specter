@@ -135,7 +135,7 @@ fn delete_self_then_in_ignored_clears_per_resource_state() {
     // Recreate the file at the same path and re-watch the same
     // ResourceId. With the spontaneous-reap cleanup, this goes through
     // the fresh-watch path (no entry in `by_resource[r]`) and installs
-    // anew. A subsequent write must fire `Modified`, proving the
+    // anew. A subsequent write must fire `ContentChanged`, proving the
     // cleanup left no stale state behind.
     std::fs::write(&path, "y").unwrap();
     w.watch(r, &path, ResourceKind::File, ClassSet::CONTENT)
@@ -144,13 +144,13 @@ fn delete_self_then_in_ignored_clears_per_resource_state() {
     std::fs::write(&path, "z").unwrap();
     let post = drain_until(
         &mut w,
-        |(rid, e)| *rid == r && *e == FsEvent::Modified,
+        |(rid, e)| *rid == r && *e == FsEvent::ContentChanged,
         Duration::from_secs(2),
     );
     assert!(
         post.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::Modified),
-        "post-cleanup watch must deliver Modified; got {post:?}"
+            .any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
+        "post-cleanup watch must deliver ContentChanged; got {post:?}"
     );
 
     drop(w);
@@ -191,13 +191,13 @@ fn unwatch_then_redrain_clears_draining_flag() {
     std::fs::write(&p2, "y").unwrap();
     let out = drain_until(
         &mut w,
-        |(rid, e)| *rid == r && *e == FsEvent::Modified,
+        |(rid, e)| *rid == r && *e == FsEvent::ContentChanged,
         Duration::from_secs(2),
     );
     assert!(
         out.iter()
-            .any(|(rid, e)| *rid == r && *e == FsEvent::Modified),
-        "post-IN_IGNORED-drain re-watch must deliver Modified; got {out:?}"
+            .any(|(rid, e)| *rid == r && *e == FsEvent::ContentChanged),
+        "post-IN_IGNORED-drain re-watch must deliver ContentChanged; got {out:?}"
     );
 
     drop(w);

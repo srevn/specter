@@ -425,7 +425,7 @@ mod tests {
         let ids = fresh_resource_ids(2);
         let mut w = MockFsWatcher::new();
 
-        w.inject(ids[0], FsEvent::Modified);
+        w.inject(ids[0], FsEvent::ContentChanged);
         w.inject(ids[1], FsEvent::Renamed);
 
         let mut out: Vec<WatcherEvent> = Vec::new();
@@ -435,7 +435,7 @@ mod tests {
         assert!(w.queued_events.is_empty());
         assert!(matches!(
             &out[0],
-            WatcherEvent::Fs { resource, event } if *resource == ids[0] && *event == FsEvent::Modified
+            WatcherEvent::Fs { resource, event } if *resource == ids[0] && *event == FsEvent::ContentChanged
         ));
         assert!(matches!(
             &out[1],
@@ -459,7 +459,7 @@ mod tests {
         let ids = fresh_resource_ids(1);
         let mut w = MockFsWatcher::new();
 
-        w.inject(ids[0], FsEvent::Modified);
+        w.inject(ids[0], FsEvent::ContentChanged);
         w.inject_overflow(OverflowScope::Global);
         w.inject_overflow(OverflowScope::Resource(ids[0]));
 
@@ -468,7 +468,7 @@ mod tests {
         assert_eq!(n, 3);
         assert!(matches!(
             &out[0],
-            WatcherEvent::Fs { resource, event } if *resource == ids[0] && *event == FsEvent::Modified
+            WatcherEvent::Fs { resource, event } if *resource == ids[0] && *event == FsEvent::ContentChanged
         ));
         assert!(matches!(
             &out[1],
@@ -527,14 +527,14 @@ mod tests {
         );
 
         // After inject: read side is readable.
-        w.inject(ids[0], FsEvent::Modified);
+        w.inject(ids[0], FsEvent::ContentChanged);
         let n = nix::unistd::read(w.as_fd(), &mut sink)
             .expect("read side must be readable after inject");
         assert!(n >= 1, "inject must push at least one byte");
 
         // After drain_ready: substrate is drained even when the
         // inject re-armed the readability after the previous read.
-        w.inject(ids[0], FsEvent::Modified);
+        w.inject(ids[0], FsEvent::ContentChanged);
         let mut out = Vec::new();
         w.drain_ready(&mut out).unwrap();
         let n = nix::unistd::read(w.as_fd(), &mut sink);

@@ -5,14 +5,14 @@
 //! We emit at most one `FsEvent` per kevent by priority order:
 //!
 //! ```text
-//! Revoked > Removed > Renamed > <NOTE_LINK kind-aware> > StructureChanged > Modified > MetadataChanged
+//! Revoked > Removed > Renamed > <NOTE_LINK kind-aware> > StructureChanged > ContentChanged > MetadataChanged
 //! ```
 //!
 //! The terminal flags (`NOTE_REVOKE` / `NOTE_DELETE` / `NOTE_RENAME`) are
 //! exclusive — once one fires, no further events arrive on the fd. Pairing
 //! a non-terminal flag with a terminal one (the kernel can do this when
 //! flags coalesce) reports the terminal: emitting both would be noise the
-//! engine doesn't act on. The non-terminal `Modified` / `MetadataChanged`
+//! engine doesn't act on. The non-terminal `ContentChanged` / `MetadataChanged`
 //! coalescing is acceptable because the engine's `Settling` state debounces
 //! either as "something changed; reschedule."
 //!
@@ -21,7 +21,7 @@
 //! File it's a metadata signal (hardlink count change via `ln`/`unlink`).
 //! Placed before WRITE/EXTEND in the priority order so a coalesced
 //! `(LINK | WRITE)` kevent on a File maps to `MetadataChanged` rather
-//! than `Modified`. On a Dir both branches collapse to
+//! than `ContentChanged`. On a Dir both branches collapse to
 //! `StructureChanged` so ordering is observationally irrelevant — but
 //! placing LINK first makes the structural intent explicit.
 //!
@@ -83,13 +83,13 @@ pub(super) const fn kevent_to_fs_event(
     // Non-terminal: WRITE / EXTEND collapse based on resource kind. A
     // dir's NOTE_WRITE is "an entry in this dir changed" — the engine
     // treats that as `StructureChanged` (probe the dir, diff against
-    // current). A file's NOTE_WRITE is `Modified` (file content
+    // current). A file's NOTE_WRITE is `ContentChanged` (file content
     // changed; probe the file's kind/size/mtime).
     if fflags & (NOTE_WRITE | NOTE_EXTEND) != 0 {
         return Some(if matches!(effective, ResourceKind::Dir) {
             FsEvent::StructureChanged
         } else {
-            FsEvent::Modified
+            FsEvent::ContentChanged
         });
     }
 
@@ -159,10 +159,10 @@ mod tests {
     }
 
     #[test]
-    fn write_on_file_is_modified() {
+    fn write_on_file_is_content_changed() {
         assert_eq!(
             kevent_to_fs_event(0, NOTE_WRITE, ResourceKind::File),
-            Some(FsEvent::Modified)
+            Some(FsEvent::ContentChanged)
         );
     }
 
@@ -170,7 +170,7 @@ mod tests {
     fn extend_alone_collapses_with_write() {
         assert_eq!(
             kevent_to_fs_event(0, NOTE_EXTEND, ResourceKind::File),
-            Some(FsEvent::Modified)
+            Some(FsEvent::ContentChanged)
         );
         assert_eq!(
             kevent_to_fs_event(0, NOTE_EXTEND, ResourceKind::Dir),
@@ -179,10 +179,10 @@ mod tests {
     }
 
     #[test]
-    fn unknown_kind_defaults_to_modified() {
+    fn unknown_kind_defaults_to_content_changed() {
         assert_eq!(
             kevent_to_fs_event(0, NOTE_WRITE, ResourceKind::Unknown),
-            Some(FsEvent::Modified)
+            Some(FsEvent::ContentChanged)
         );
     }
 
@@ -203,7 +203,7 @@ mod tests {
         let fflags = NOTE_ATTRIB | NOTE_WRITE;
         assert_eq!(
             kevent_to_fs_event(0, fflags, ResourceKind::File),
-            Some(FsEvent::Modified)
+            Some(FsEvent::ContentChanged)
         );
     }
 

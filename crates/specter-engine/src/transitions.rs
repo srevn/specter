@@ -215,7 +215,7 @@ impl Engine {
             if is_identity && is_anchor {
                 self.on_anchor_terminal_event(profile_id, out);
             } else {
-                // Modified/StructureChanged/MetadataChanged anywhere that
+                // ContentChanged/StructureChanged/MetadataChanged anywhere that
                 // passes the filter, or terminal at a covered descendant
                 // whose class matches: drive the burst forward. Descendant
                 // terminal events drive the burst; the next probe response
@@ -4278,7 +4278,7 @@ enum PromoterReseedAction {
 /// [`ResourceKind`] to the [`ClassSet`] bit it represents.
 ///
 /// Non-terminal events have a fixed class regardless of kind:
-/// - [`FsEvent::Modified`] → [`ClassSet::CONTENT`]
+/// - [`FsEvent::ContentChanged`] → [`ClassSet::CONTENT`]
 /// - [`FsEvent::MetadataChanged`] → [`ClassSet::METADATA`]
 /// - [`FsEvent::StructureChanged`] → [`ClassSet::STRUCTURE`]
 ///
@@ -4294,7 +4294,7 @@ enum PromoterReseedAction {
 /// Pure / `const fn`; consulted at the entry filter in [`Engine::on_fs_event`].
 const fn fs_event_to_class(event: FsEvent, kind: ResourceKind) -> ClassSet {
     match event {
-        FsEvent::Modified => ClassSet::CONTENT,
+        FsEvent::ContentChanged => ClassSet::CONTENT,
         FsEvent::MetadataChanged => ClassSet::METADATA,
         FsEvent::StructureChanged => ClassSet::STRUCTURE,
         FsEvent::Removed | FsEvent::Renamed | FsEvent::Revoked => {

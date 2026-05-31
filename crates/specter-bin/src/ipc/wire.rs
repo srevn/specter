@@ -1146,7 +1146,7 @@ impl std::fmt::Display for WireBurstIntent {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireFsEvent {
-    Modified,
+    ContentChanged,
     MetadataChanged,
     StructureChanged,
     Renamed,
@@ -1157,7 +1157,7 @@ pub(crate) enum WireFsEvent {
 impl From<FsEvent> for WireFsEvent {
     fn from(e: FsEvent) -> Self {
         match e {
-            FsEvent::Modified => Self::Modified,
+            FsEvent::ContentChanged => Self::ContentChanged,
             FsEvent::MetadataChanged => Self::MetadataChanged,
             FsEvent::StructureChanged => Self::StructureChanged,
             FsEvent::Renamed => Self::Renamed,
@@ -1170,7 +1170,7 @@ impl From<FsEvent> for WireFsEvent {
 impl WireFsEvent {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            Self::Modified => "modified",
+            Self::ContentChanged => "content_changed",
             Self::MetadataChanged => "metadata_changed",
             Self::StructureChanged => "structure_changed",
             Self::Renamed => "renamed",
@@ -2004,7 +2004,7 @@ mod tests {
             WireDiagnostic::EventClassDropped {
                 at: at(),
                 resource: WireId(40),
-                event: WireFsEvent::Modified,
+                event: WireFsEvent::ContentChanged,
                 profile: WireId(41),
             },
             WireDiagnostic::EventOnUnwatchedResource {
@@ -2310,7 +2310,7 @@ mod tests {
     fn wire_fs_event_round_trips_every_variant() {
         assert_snake_round_trip(
             &[
-                WireFsEvent::Modified,
+                WireFsEvent::ContentChanged,
                 WireFsEvent::MetadataChanged,
                 WireFsEvent::StructureChanged,
                 WireFsEvent::Renamed,

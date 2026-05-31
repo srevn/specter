@@ -555,8 +555,8 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
 }
 
 #[test]
-fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
-    // Positive control: Modified on a descendant of a CONTENT-only Sub
+fn it_ef_6_descendant_content_changed_drives_burst_on_content_sub() {
+    // Positive control: ContentChanged on a descendant of a CONTENT-only Sub
     // DOES drive the burst (CONTENT class matches mask).
     let mut e = Engine::new();
     let root = anchor_dir(&mut e, "src");
@@ -586,7 +586,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
     let _ = e.step(
         Input::FsEvent {
             resource: child,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         Instant::now(),
     );
@@ -595,7 +595,7 @@ fn it_ef_6_descendant_modified_drives_burst_on_content_sub() {
             e.profiles().get(pid).unwrap().state(),
             ProfileState::Active(_, _),
         ),
-        "Modified on a CONTENT-class child drives a burst",
+        "ContentChanged on a CONTENT-class child drives a burst",
     );
 }
 
@@ -992,7 +992,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -1046,7 +1046,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -1096,7 +1096,7 @@ fn drive_anchor_terminal_with_reap_pending(event: FsEvent) -> (Engine, ResourceI
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -1209,7 +1209,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -1389,7 +1389,7 @@ fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -1479,7 +1479,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     // and contains the covered descendants. The rebase-failure path
     // must release them too.
     //
-    // Lifecycle: Idle → Modified at root → Active(Verifying) →
+    // Lifecycle: Idle → ContentChanged at root → Active(Verifying) →
     // ProbeResponse::Ok (stable, same snapshot) → emit_effects (one
     // Effect for the SubtreeRoot Sub) → Active(Awaiting) →
     // EffectComplete::Ok → Active(Rebasing) directly (probe-first; the
@@ -1494,7 +1494,7 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -1635,7 +1635,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -1747,7 +1747,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     e.step(
         Input::FsEvent {
             resource: root,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );

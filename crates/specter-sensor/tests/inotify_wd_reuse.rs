@@ -109,8 +109,8 @@ fn rapid_unwatch_watch_cycle_attributes_to_new_resource() {
         }
         assert!(
             evs.iter()
-                .any(|(rid, e)| *rid == r_new && *e == FsEvent::Modified),
-            "cycle {cycle}: post-rewatch write must deliver Modified to r_new; got {evs:?}"
+                .any(|(rid, e)| *rid == r_new && *e == FsEvent::ContentChanged),
+            "cycle {cycle}: post-rewatch write must deliver ContentChanged to r_new; got {evs:?}"
         );
 
         w.unwatch(r_new);
@@ -157,7 +157,7 @@ fn pre_rm_event_on_old_wd_is_dropped_not_misattributed() {
         .expect("post-rm re-watch");
 
     // Drain pending events. The pre-rm queued event must NOT surface
-    // as `r_new`'s `Modified`. The `IN_IGNORED` for r_old's wd will
+    // as `r_new`'s `ContentChanged`. The `IN_IGNORED` for r_old's wd will
     // also be in the queue — the watcher consumes it and clears the
     // draining flag.
     let evs = drain_for(&mut w, Duration::from_millis(200));
@@ -179,7 +179,7 @@ fn pre_rm_event_on_old_wd_is_dropped_not_misattributed() {
         let evs = drain_for(&mut w, Duration::from_millis(50));
         if evs
             .iter()
-            .any(|(rid, e)| *rid == r_new && *e == FsEvent::Modified)
+            .any(|(rid, e)| *rid == r_new && *e == FsEvent::ContentChanged)
         {
             saw_new = true;
         }
@@ -190,7 +190,7 @@ fn pre_rm_event_on_old_wd_is_dropped_not_misattributed() {
             );
         }
     }
-    assert!(saw_new, "fresh write on r_new must deliver Modified");
+    assert!(saw_new, "fresh write on r_new must deliver ContentChanged");
 
     drop(w);
 }

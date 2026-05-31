@@ -1525,7 +1525,7 @@ mod tests {
         let out = e.step(
             Input::FsEvent {
                 resource: ResourceId::default(),
-                event: FsEvent::Modified,
+                event: FsEvent::ContentChanged,
             },
             Instant::now(),
         );

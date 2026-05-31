@@ -753,7 +753,7 @@ mod tests {
                 json!({"diag": tag, "at": at, "profile": id, "intent": "standard", "errno": 0})
             }
             "event_class_dropped" => {
-                json!({"diag": tag, "at": at, "resource": id, "event": "modified", "profile": id})
+                json!({"diag": tag, "at": at, "resource": id, "event": "content_changed", "profile": id})
             }
             "event_on_unwatched_resource" | "event_no_consumer" | "attach_resource_stale" => {
                 json!({"diag": tag, "at": at, "resource": id})
@@ -796,7 +796,7 @@ mod tests {
             }),
             "event_absorbed_by_fire_tail" => json!({
                 "diag": tag, "at": at, "profile": id, "resource": id,
-                "event": "modified",
+                "event": "content_changed",
             }),
             "await_gate_deadline_force_rebasing" | "await_gate_deadline_reap" => {
                 json!({"diag": tag, "at": at, "profile": id, "outstanding": 1})

@@ -142,7 +142,7 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     // the child's Seed has a clean settle window.
     let parent_seed_done = seed_to_idle(&mut e, pid_parent, &dir_snap(&[]), now);
 
-    // Child: recursive @ /src/foo, CONTENT mask so a Modified at
+    // Child: recursive @ /src/foo, CONTENT mask so a ContentChanged at
     // /src/foo/bar reaches the post-fire absorb arm.
     let out_c = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
@@ -172,14 +172,14 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     e.step(
         Input::FsEvent {
             resource: foo,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
     e.step(
         Input::FsEvent {
             resource: src,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -304,7 +304,7 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     let absorb_out = e.step(
         Input::FsEvent {
             resource: bar,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t_absorb,
     );
@@ -492,14 +492,14 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     e.step(
         Input::FsEvent {
             resource: foo,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
     e.step(
         Input::FsEvent {
             resource: src,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -654,7 +654,7 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     // A directly and reconfirms it.
     //
     // Event isolation is by the anchor-bypass / class-filter rule, not
-    // by coverage tricks: a `Modified` event is CONTENT-class, and a
+    // by coverage tricks: a `ContentChanged` event is CONTENT-class, and a
     // NO_EVENTS Profile only bursts from an event at its *own anchor*
     // (descendant events of an unmatched class are dropped). So the
     // `foo` event drives only P, and the `src` event only A.
@@ -706,7 +706,7 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
 
     // B @ /src/mid (recursive): covers /src/mid/foo, so it sits on P's
     // chain (P → B → A). It never bursts — the only event under it is
-    // the `foo` Modified, a descendant CONTENT event its NO_EVENTS mask
+    // the `foo` ContentChanged, a descendant CONTENT event its NO_EVENTS mask
     // drops — so DetachSub reaps it immediately.
     let out_b = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
@@ -759,14 +759,14 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     e.step(
         Input::FsEvent {
             resource: foo,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
     e.step(
         Input::FsEvent {
             resource: src,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -966,7 +966,7 @@ fn co_located_profiles_independently_record_shared_resource_obligation() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t0,
     );
@@ -996,7 +996,7 @@ fn co_located_profiles_independently_record_shared_resource_obligation() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
@@ -1121,14 +1121,14 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
     e.step(
         Input::FsEvent {
             resource: child_dir,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );
     e.step(
         Input::FsEvent {
             resource: src,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t1,
     );

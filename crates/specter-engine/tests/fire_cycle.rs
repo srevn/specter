@@ -90,7 +90,7 @@ fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
 }
 
 /// Same as `subtree_request` but with `CONTENT` in the events mask so
-/// descendant `Modified` events pass the class filter.
+/// descendant `ContentChanged` events pass the class filter.
 fn subtree_request_with_content(name: &str, r: ResourceId) -> SubAttachRequest {
     SubAttachRequest::for_anchor(
         name.into(),
@@ -160,7 +160,7 @@ fn drive_to_awaiting(
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t,
     );
@@ -281,7 +281,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
     // assert EventAbsorbedByFireTail; assert phase still Awaiting and
     // outstanding unchanged.
     //
-    // The Sub uses a `CONTENT` events mask so the descendant Modified
+    // The Sub uses a `CONTENT` events mask so the descendant ContentChanged
     // event passes the class filter (which sits BEFORE drive_burst's
     // absorb path). With the EMPTY default mask the event would drop
     // as `EventClassDropped` and never reach the fire-tail.
@@ -327,7 +327,7 @@ fn fire_cycle_absorbs_descendant_event_during_awaiting() {
     let descendant_event_out = e.step(
         Input::FsEvent {
             resource: child,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         seed_done + Duration::from_millis(50),
     );
@@ -417,7 +417,7 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
     let absorb_out = e.step(
         Input::FsEvent {
             resource: child,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         rebasing_at + Duration::from_millis(2),
     );
@@ -1103,7 +1103,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     // into the new baseline; it does not fire its own Effect (v1
     // documented loss-of-fidelity).
     //
-    // CONTENT events mask so the Modified event passes the class filter.
+    // CONTENT events mask so the ContentChanged event passes the class filter.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let child = e
@@ -1134,7 +1134,7 @@ fn fire_cycle_concurrent_user_edit_during_awaiting_folds_into_baseline() {
     e.step(
         Input::FsEvent {
             resource: child,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         seed_done + Duration::from_millis(15),
     );

@@ -132,7 +132,7 @@ fn drive_standard_fire_once(
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t0,
     );
@@ -252,7 +252,7 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
         "fresh attach has no baseline yet",
     );
 
-    // Witness real activity: an anchor Modified during the cold-arm
+    // Witness real activity: an anchor ContentChanged during the cold-arm
     // Verifying phase. Anchor events bypass the class filter, so the
     // NO_EVENTS mask still routes it through `event_drives_batching`,
     // which Cancels the cold-arm verify slot and reschedules Batching
@@ -260,7 +260,7 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
     let act_out = e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now + Duration::from_millis(1),
     );
@@ -339,7 +339,7 @@ fn fresh_seed_with_activity_fires_exactly_one_effect() {
 /// they arrived), so settle-window silence is **not** a quiescence
 /// witness — the burst owes the hash-equality channel for fire-bearing
 /// consequences. Anchor events bypass the class filter, so a single
-/// anchor `FsEvent::Modified` Cancels the cold-arm verify slot and
+/// anchor `FsEvent::ContentChanged` Cancels the cold-arm verify slot and
 /// re-enters Batching with `dirty` non-empty — a triggered (not cold)
 /// Seed whose `owes_proof_from` is `true`.
 ///
@@ -359,7 +359,7 @@ fn fresh_seed_with_activity_growing_leaf_fires_one() {
     e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         now + Duration::from_millis(1),
     );
@@ -495,7 +495,7 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
     let trig_out = e.step(
         Input::FsEvent {
             resource: r,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         trigger_at,
     );
@@ -602,7 +602,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
     e.step(
         Input::FsEvent {
             resource: foo,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t_child_burst,
     );
@@ -624,14 +624,14 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         "child is mid-Standard-burst and gates the parent",
     );
 
-    // The parent witnesses activity (anchor Modified during its Seed
+    // The parent witnesses activity (anchor ContentChanged during its Seed
     // Batching), then its verify is driven to Stable while the child
     // gates.
     let t_parent_act = t_child_burst + SETTLE + Duration::from_millis(1);
     e.step(
         Input::FsEvent {
             resource: src,
-            event: FsEvent::Modified,
+            event: FsEvent::ContentChanged,
         },
         t_parent_act,
     );
