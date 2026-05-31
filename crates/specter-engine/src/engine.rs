@@ -325,8 +325,8 @@ impl Engine {
     ) -> Option<SubId> {
         // Phase 1 — Identity resolution. The trichotomy below is the
         // structural source of truth for "what state is this Profile
-        // entering on this attach?". Two predicates the pre-Phase-4
-        // shape derived ambiguously are now exhaustively typed:
+        // entering on this attach?". Two predicates are exhaustively
+        // typed rather than derived ambiguously:
         // - "no live Subs on the Profile" is ambiguous against
         //   `ZombieRevival` (the prior burst hasn't released its anchor
         //   claim yet) — the origin tells you whether the Sub is the
@@ -1259,13 +1259,12 @@ impl Engine {
         // Detach the Profile from the registry. No parent-edge cache
         // to clean: the `Draining → Verifying` reconfirm is a fresh
         // query (`coverage::nearest_covering_ancestor`), so a dependent
-        // that used to resolve its covering ancestor through this
-        // Profile simply re-derives against the post-detach topology on
-        // its next query — there is no stored edge to rewrite, hence no
-        // post-detach fixup pass. The returned `Option<Profile>`
-        // carries the detached payload for diagnostic use only at the
-        // inline site; `_detached` names the discard so a reader
-        // doesn't have to chase whether a field was needed.
+        // resolving its covering ancestor re-derives against the
+        // post-detach topology on its next query — there is no stored
+        // edge to rewrite, hence no post-detach fixup pass. The returned
+        // `Option<Profile>` carries the detached payload for diagnostic
+        // use only at the inline site; `_detached` names the discard so
+        // a reader doesn't have to chase whether a field was needed.
         let _detached = self.profiles.detach(&mut self.tree, profile_id);
 
         // Try to reap the anchor's slot. No-op if it still has
@@ -1779,11 +1778,11 @@ mod tests {
     }
 
     /// Counter saturation on the effect side — release-runnable. The
-    /// effect counter has no per-call-site wrapper (Phase 1 inlined the
-    /// minting at the two `emit_effects` push sites in
-    /// `transitions.rs`), so this test exercises the counter directly to
-    /// prove the field is wired up. Pairs with the `MonotonicCounter`
-    /// unit tests in `counter.rs`.
+    /// effect counter has no per-call-site wrapper — the minting is
+    /// inline at the two `emit_effects` push sites in `transitions.rs`
+    /// — so this test exercises the counter directly to prove the field
+    /// is wired up. Pairs with the `MonotonicCounter` unit tests in
+    /// `counter.rs`.
     #[test]
     #[should_panic(expected = "MonotonicCounter")]
     fn effect_correlations_panic_on_counter_saturation() {

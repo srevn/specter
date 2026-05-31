@@ -386,15 +386,14 @@ pub(crate) fn compute_config_hash(
         }
     }
 
-    // `max_depth` reproduces the legacy blanket `Option::<u32>::hash`
-    // byte stream verbatim: the derive folds the discriminant as an
-    // `isize` (→ `usize`-width) integer, then the inner `u32`. Pinned
-    // as a width-canonical `u64` discriminant (0 = None, 1 = Some) plus
-    // the `u32` payload — byte-identical on the 64-bit target, and now
-    // stable across `usize` widths where the legacy path was not.
-    // Deliberately *not* unified with `pattern`'s 1-byte presence flag
-    // above (that is the pre-existing explicit encoding, kept verbatim);
-    // collapsing the two is a digest re-encoding, out of scope here.
+    // `max_depth` is folded as a width-canonical `u64` discriminant
+    // (0 = None, 1 = Some) plus the `u32` payload. A `derive`d
+    // `Option::<u32>::hash` would fold the discriminant as an `isize`
+    // (→ `usize`-width) integer; the explicit `u64` matches that byte
+    // stream on the 64-bit target while staying stable across `usize`
+    // widths. Deliberately *not* unified with `pattern`'s 1-byte
+    // presence flag above (a distinct explicit encoding); collapsing
+    // the two is a digest re-encoding, out of scope here.
     match max_depth {
         Some(d) => {
             h.put_u64(1);

@@ -66,10 +66,8 @@ pub use spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
 // live on `specter-core` (`EffectCompletion` is the engine-facing
 // envelope; `SendError` is the workspace-shared sender vocabulary
 // shared with the sensor). Re-exported here so callers naming
-// `actuator::EffectCompletion` / `actuator::SendError` keep their path
-// stable across the consolidation — the `Reaped` struct that used to
-// live in this crate is gone; the envelope it carried is the
-// engine-facing `EffectCompletion`.
+// `actuator::EffectCompletion` / `actuator::SendError` reach them
+// through this crate's path.
 pub use specter_core::{EffectCompletion, SendError};
 
 /// Sink for effect completions produced by the actuator.

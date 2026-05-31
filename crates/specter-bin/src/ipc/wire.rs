@@ -177,8 +177,8 @@ impl std::fmt::Display for WireTime {
 /// below); the wire serialization is then a structural copy of an
 /// already-validated UTF-8 string, so the daemon's `serde_json`
 /// path cannot panic on a non-UTF-8 [`PathBuf`] / [`Arc<Path>`] —
-/// the structural floor closes the daemon-panic surface the audit's
-/// F-CRIT-1 finding identified.
+/// the structural floor closes the daemon-panic surface a non-UTF-8
+/// path would otherwise open at JSON-serialize time.
 ///
 /// `#[serde(transparent)]` makes the JSON form a bare quoted string
 /// (`"/etc/specter.toml"`), not a wrapped object. The shape is
@@ -1806,10 +1806,10 @@ mod tests {
 
     /// `Deserialize` for [`WireTime`] is the symmetric gate — a
     /// non-RFC-3339 token is rejected at the boundary, not stored as
-    /// opaque text. Pins the contract change behind the audit's
-    /// F-HIGH-3 finding: the wire layer validates *both* directions
-    /// of the round-trip. One witness covers the gate; humantime's
-    /// internal failure modes are humantime's contract, not ours.
+    /// opaque text. Pins that the wire layer validates *both*
+    /// directions of the round-trip. One witness covers the gate;
+    /// humantime's internal failure modes are humantime's contract,
+    /// not ours.
     #[test]
     fn wire_time_rejects_malformed_string() {
         let err = serde_json::from_str::<WireTime>(r#""not a date""#)
@@ -1837,8 +1837,8 @@ mod tests {
 
     /// A non-UTF-8 path projects to U+FFFD-bearing UTF-8 at construct
     /// time and round-trips cleanly through serde — `serde_json` never
-    /// sees the offending bytes, so the daemon-panic surface the
-    /// audit's F-CRIT-1 finding identified is structurally closed.
+    /// sees the offending bytes, so the daemon-panic surface a
+    /// non-UTF-8 path would open is structurally closed.
     ///
     /// The construct-time projection (`Path::to_string_lossy`) is the
     /// load-bearing barrier: a `WirePath` whose inner [`String`]

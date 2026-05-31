@@ -314,10 +314,9 @@ mod tests {
     /// Test fixture for an [`Effect`] when only `(key, target)` matter
     /// (sort tests). Other fields take their natural empty values.
     /// `anchor` doubles as the Subtree sort resource: setting it to
-    /// `target` keeps `sort_key().1 == target` for the Subtree arm,
-    /// matching the old flat `Effect.target` behaviour. The PerFile arm
-    /// keys on its own `resource`, which the test always passes equal to
-    /// `target`.
+    /// `target` keeps `sort_key().1 == target` for the Subtree arm. The
+    /// PerFile arm keys on its own `resource`, which the test always
+    /// passes equal to `target`.
     fn effect(key: DedupKey, target: ResourceId) -> Effect {
         let common = EffectCommon {
             sub: key.sub(),
@@ -399,9 +398,8 @@ mod tests {
 
     /// Last-writer-wins per owner: a second op for an owner *replaces*
     /// the first, isomorphic to the sensor's `expected` map. This is
-    /// what makes "at most one op per owner" structural — the shape
-    /// that retired the old debug witness and its `should_panic` test
-    /// (the violation is now unrepresentable, not asserted-against).
+    /// what makes "at most one op per owner" structural — the violation
+    /// is unrepresentable, not asserted-against.
     #[test]
     fn push_probe_op_replaces_prior_op_for_same_owner() {
         use crate::op::ProbeOwner;

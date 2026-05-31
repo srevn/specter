@@ -53,9 +53,9 @@ fn exec_of(e: &Effect) -> &ExecAction {
     }
 }
 
-/// `target_path` is no longer a field on [`Effect`] — the resolver
-/// derives it from `(anchor_path, relative())` at spawn time. Tests
-/// pass the anchor + relative pair; the helper does no extra dispatch.
+/// The resolver derives `target_path` from `(anchor_path, relative())`
+/// at spawn time. Tests pass the anchor + relative pair; the helper
+/// does no extra dispatch.
 ///
 /// `scope` selects the `EffectTarget` shape (Subtree ⇒ no per-file
 /// segment, PerStableFile ⇒ per-file segment); the resolver then

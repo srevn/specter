@@ -5,17 +5,17 @@ use std::time::Duration;
 #[serde(deny_unknown_fields)]
 pub(crate) struct RawConfig {
     /// Block of operator-facing engine telemetry settings — level,
-    /// destination, file path. v1 splits the schema cleanly: the top-level
-    /// `log_level` of older configs no longer parses (alpha break, no
+    /// destination, file path. The schema groups them under one table:
+    /// a top-level `log_level` is rejected as an unknown field (no
     /// migration). Use `[log]\nlevel = "debug"`.
     ///
     /// `#[serde(default)]` collapses "no `[log]` table" and "empty
     /// `[log]` table" into the same `RawLogConfig::default()` state
     /// (every field `None`). Both surface identically through
     /// `validate_log`, which unfolds the Nones to the
-    /// [`crate::LogConfig`] defaults. The previous `Option<_>` shape
-    /// duplicated that defaulting on the validator side without buying
-    /// any extra distinction.
+    /// [`crate::LogConfig`] defaults. Wrapping the field in an
+    /// `Option<_>` would only duplicate that defaulting on the
+    /// validator side without buying any extra distinction.
     #[serde(default)]
     pub log: RawLogConfig,
     #[serde(default, rename = "watch")]
@@ -36,18 +36,16 @@ pub(crate) struct RawLogConfig {
 pub(crate) struct RawWatch {
     pub name: String,
     pub path: String,
-    /// Reaction body — sequence of [`RawAction`]s. Replaces the v0
-    /// `command: Vec<String>` field. Validation requires at least one
-    /// entry; the actuator runs the steps sequentially with
-    /// stop-on-failure.
+    /// Reaction body — sequence of [`RawAction`]s. Validation requires
+    /// at least one entry; the actuator runs the steps sequentially
+    /// with stop-on-failure.
     pub actions: Vec<RawAction>,
     /// Walk descendants of the anchor recursively. Default `true` —
     /// the recursive case is the dominant operator intent (a watch on
     /// `/srv/build` almost always wants files anywhere underneath).
     /// `false` confines the watch to the anchor's immediate children.
-    /// `Option<bool>` collapsed to `bool`: the validator never cared
-    /// about "absent vs. explicit `false`", both flowed through the
-    /// same `unwrap_or(true)` path.
+    /// A plain `bool` suffices: "absent" and "explicit `false`" carry
+    /// no distinction, so the `default_true` default covers both.
     #[serde(default = "default_true")]
     pub recursive: bool,
     pub pattern: Option<String>,

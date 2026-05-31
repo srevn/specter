@@ -5,8 +5,7 @@
 //! — `inotify_fd` — must carry the flag: if leaked, the child holds an
 //! unrelated inotify instance that prevents kernel-side cleanup at
 //! watcher drop. (Wake / reactor fds live on the caller's side under
-//! the post-Phase-1 mio integration and are not the watcher's
-//! responsibility.)
+//! the mio integration and are not the watcher's responsibility.)
 //!
 //! This test forks a child via `Command::new` with the actuator's
 //! `pre_exec`-driven discipline (forces fork+exec on Linux), then reads
@@ -77,8 +76,8 @@ fn watcher_fds_are_cloexec() {
         child_fd_targets(child_pid).expect("read /proc/<child>/fd; child should still be alive");
 
     // Assert no inherited inotify fd. The watcher's `inotify_fd` is the
-    // only persistent kernel resource it owns under the post-Phase-1
-    // mio integration; if it leaks, the actuator's spawn discipline is
+    // only persistent kernel resource it owns under the mio
+    // integration; if it leaks, the actuator's spawn discipline is
     // broken at `inotify_init1`'s CLOEXEC argument.
     assert!(
         !child_targets.iter().any(|t| t == "anon_inode:inotify"),

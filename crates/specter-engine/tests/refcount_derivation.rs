@@ -1,6 +1,5 @@
 //! Sub-count derivation invariance.
 //!
-//! The denormalised `Profile.sub_refcount` mirror is gone;
 //! `SubRegistry::at(profile).len()` is the *sole* source of a Profile's
 //! live-Sub count, and the `detach_sub_inner` choreography derives its
 //! post-detach count from it directly. This pins the invariant: across

@@ -124,10 +124,10 @@ impl Engine {
         // so the post-insert work is type-enforced rather than
         // re-derived from a surviving `materialize` via `expect`.
         // `PendingDescent` carries only `prefix` (the `add_watch`
-        // target); the correlation is no longer threaded — the slot is
-        // constructed armed inside the inserted Promoter and
-        // `emit_owner_probe` reads it back off state. Declared at
-        // function top (no items-after-statements).
+        // target); the slot is constructed armed inside the inserted
+        // Promoter and `emit_owner_probe` reads the correlation back
+        // off state. Declared at function top (no
+        // items-after-statements).
         enum PostInsert {
             EnterActive { proxy_resource: ResourceId },
             PendingDescent { prefix: ResourceId },
@@ -1378,10 +1378,9 @@ impl Engine {
     /// ([`Engine::on_anchor_terminal_all_dynamic`]) resolves
     /// `promoter_id` from the still-attached Sub *before* removing it
     /// from the registry, so the notification always corresponds to a
-    /// real reap. The old `dynamic_subs`-presence gate (which could
-    /// silently swallow the notification when a concurrent
-    /// [`Self::reap_promoter_inner`] drained the map first) is gone
-    /// with the map — the operator now reliably sees the reap.
+    /// real reap. There is no presence gate that a concurrent
+    /// [`Self::reap_promoter_inner`] could race to silently swallow the
+    /// notification — the operator reliably sees the reap.
     #[allow(clippy::unused_self)]
     pub(crate) fn on_dynamic_sub_reaped(
         &self,

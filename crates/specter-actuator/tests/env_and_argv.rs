@@ -17,9 +17,9 @@ use std::time::Duration;
 
 /// Build a `setup` closure that rewrites a PerFile [`Effect`]'s segment
 /// so the resolver-derived `relative()` / `target_path()` reflect `seg`.
-/// `relative` is no longer a stored field — it is the
-/// [`EffectTarget::PerFile`] segment — so the closure rebuilds the
-/// target in place, preserving the fixture's resource and (empty) diff.
+/// `relative()` is the [`EffectTarget::PerFile`] segment, so the
+/// closure rebuilds the target in place, preserving the fixture's
+/// resource and (empty) diff.
 fn set_relative(seg: &'static str) -> impl FnOnce(&mut Effect) {
     move |e: &mut Effect| {
         let resource = e.sort_key().1;

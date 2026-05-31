@@ -1187,17 +1187,18 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
 
 #[test]
 fn global_overflow_excludes_draining_ancestor_keeps_reconfirm() {
-    // F-CRIT-1 / F-HIGH-2 regression. A Global sensor overflow lands
-    // while `A` is `Draining` and its covered child `D` is mid-burst,
-    // with `D` iterating before `A`. The overflow loop processes `D`
-    // first: `finish_burst_to_idle(D)`'s Draining sweep flips `A`
-    // `Draining→Verifying` and arms exactly one reconfirm Probe. Without
-    // the snapshot-time Draining exclusion the loop then reaches `A`
-    // (now `Verifying`, so an iteration-time phase guard never sees
-    // `Draining`), tears it down, and reseeds it — discarding `A`'s
-    // verified-stable `current` and the descendant-driven reconfirm. The
-    // snapshot-time exclusion removes `A` from the loop entirely, so the
-    // sweep's single reconfirm stands.
+    // Overflow-with-Draining-ancestor regression. A Global sensor
+    // overflow lands while `A` is `Draining` and its covered child `D`
+    // is mid-burst, with `D` iterating before `A`. The overflow loop
+    // processes `D` first: `finish_burst_to_idle(D)`'s Draining sweep
+    // flips `A` `Draining→Verifying` and arms exactly one reconfirm
+    // Probe. Without the snapshot-time Draining exclusion the loop then
+    // reaches `A` (now `Verifying`, so an iteration-time phase guard
+    // never sees `Draining`), tears it down, and reseeds it —
+    // discarding `A`'s verified-stable `current` and the
+    // descendant-driven reconfirm. The snapshot-time exclusion removes
+    // `A` from the loop entirely, so the sweep's single reconfirm
+    // stands.
     let DrainingFixture {
         mut e,
         pid_parent,

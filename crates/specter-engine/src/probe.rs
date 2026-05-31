@@ -343,10 +343,9 @@ impl Engine {
     /// `Draining` / `Awaiting` / `Settling`), or no probe in flight — ⇒
     /// the caller emits `StaleProbeResponse`. "Armed slot but no route"
     /// is unrepresentable: every state whose `probe_correlation` is
-    /// `Some` is, by the same case split, a routable carrier, so the dead
-    /// armed-but-unroutable arm the old open-coded staleness-gate +
-    /// route-snapshot pair carried as a loud regression bail folds
-    /// structurally into this single `None`.
+    /// `Some` is, by the same case split, a routable carrier, so there
+    /// is no armed-but-unroutable arm — that case folds structurally
+    /// into this single `None`.
     ///
     /// Owner-split from [`Self::promoter_probe_gate`]: the two gates feed
     /// owner-specific handlers off owner-specific route enums, so neither
@@ -720,8 +719,8 @@ impl Engine {
                 // target is structurally fixed); `forced` is pre-fire
                 // -only so `false`. No mutation here — the Rebase
                 // obligation is `WholeSubtree` (built in the render
-                // pass), so this resolution no longer needs `&mut` to
-                // drain anything.
+                // pass), so this resolution needs no `&mut` to drain
+                // anything.
                 let (target, forced) = match carrier {
                     Carrier::Descent(prefix) => (prefix, false),
                     Carrier::PreFire { target, forced, .. } => (target, forced),

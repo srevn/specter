@@ -276,9 +276,9 @@ fn rewatch_with_same_mask_preserves_registration() {
 
 /// Slow-path rewatch over a `cached_kind == Unknown` entry must derive
 /// the install mask from the *observed* inode shape, not from the
-/// stale Unknown cache. F-HIGH-1 regression guard.
+/// stale Unknown cache. Regression guard.
 ///
-/// Setup mirrors the audit's lifecycle: fresh-watch a Unix domain
+/// Setup mirrors the failing lifecycle: fresh-watch a Unix domain
 /// socket (`fstat` collapses non-Dir / non-regular kinds to `Unknown`),
 /// unlink + recreate a Dir at the same path *without* an intervening
 /// drain so `by_resource[r]` keeps its Unknown cache, then rewatch

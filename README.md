@@ -1,6 +1,4 @@
-# Specter
-
-> Prove the absence of change.
+# specter
 
 Specter watches paths and fires commands when the tree settles — not
 when "something happened," but when **nothing has happened for long
@@ -13,9 +11,10 @@ inverts that contract:
 
 - **Coarse file-tree settling** — no double-fires on `git checkout`,
   multi-file editor saves, or build outputs writing dozens of artifacts.
-- **Hierarchical content hashing** — re-running the same edit (saving
-  with no changes, touching mtime, idempotent reformatters) does not
-  re-fire the command.
+- **Hierarchical subtree hashing** — each directory caches a fingerprint
+  of everything beneath it, so unchanged subtrees are pruned in a single
+  comparison. Reaction cost scales with the size of the change, not the
+  size of the watched tree.
 - **Self-event absorption** — the reaction itself usually writes inside
   the watched tree; Specter folds those events into the post-fire rebase
   rather than treating them as a fresh burst.

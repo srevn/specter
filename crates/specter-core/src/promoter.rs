@@ -215,10 +215,10 @@ impl Promoter {
     /// The forward `PrefixPending → Active` transition (the prefix
     /// materialised, or its claim is being released). Replaces `state`
     /// with `Active { proxies: ∅, enumerating: ∅ }`; the prior state is
-    /// dropped here. No longer once-per-lifetime: terminus loss can
-    /// drive the inverse [`Self::reenter_prefix_pending`], so a Promoter
-    /// may cycle `PrefixPending → Active → PrefixPending → Active …`
-    /// across recoveries.
+    /// dropped here. The transition can recur: terminus loss can drive
+    /// the inverse [`Self::reenter_prefix_pending`], so a Promoter may
+    /// cycle `PrefixPending → Active → PrefixPending → Active …` across
+    /// recoveries.
     ///
     /// **Cancel-first contract (structural).** The discarded prior
     /// carries this Promoter's probe slot — the descent slot in
@@ -437,12 +437,11 @@ impl Promoter {
 
     /// One-shot fan-out warning latch. `count` is the caller's *live*
     /// dynamic-Sub tally for this Promoter, derived from `SubRegistry`
-    /// truth (the dedup map this latch once read was deleted — the
-    /// Promoter keeps no mirror). Returns `Some(count)` the first time
-    /// `count` exceeds `threshold` and latches so later crossings
-    /// return `None` — a pathological pattern warns once per Promoter
-    /// lifetime. The check-and-latch is atomic here, so the one-shot
-    /// property is structural rather than a caller convention;
+    /// truth — the Promoter keeps no mirror. Returns `Some(count)` the
+    /// first time `count` exceeds `threshold` and latches so later
+    /// crossings return `None` — a pathological pattern warns once per
+    /// Promoter lifetime. The check-and-latch is atomic here, so the
+    /// one-shot property is structural rather than a caller convention;
     /// [`Self::fanout_warned`] lets the caller skip computing `count`
     /// once latched.
     pub fn latch_fanout_warning(&mut self, threshold: usize, count: usize) -> Option<usize> {
@@ -887,8 +886,7 @@ mod tests {
     /// After a multi-insert/remove sequence, every key `iter()` yields
     /// re-looks-up via `get` and `find_by_name` round-trips. The
     /// slotmap key is the sole identity authority (a `Promoter` carries
-    /// no `id`) — this replaces the removed `Promoter.id == minted key`
-    /// assertion.
+    /// no `id`).
     #[test]
     fn registry_iter_keys_round_trip_through_get() {
         let mut reg = PromoterRegistry::new();
@@ -1006,9 +1004,9 @@ mod tests {
 
     /// The fan-out latch is one-shot and structural: `Some(count)` on
     /// the first crossing, `None` on every later check regardless of
-    /// further growth. `count` is now a caller-supplied parameter (the
-    /// dedup map it once read was deleted); [`Promoter::fanout_warned`]
-    /// projects the latch read-only and flips exactly at the crossing.
+    /// further growth. `count` is a caller-supplied parameter sourced
+    /// from `SubRegistry` truth; [`Promoter::fanout_warned`] projects
+    /// the latch read-only and flips exactly at the crossing.
     #[test]
     fn latch_fanout_warning_fires_once() {
         let mut p = build_promoter("logs", "/var/log/*.log");
@@ -1037,7 +1035,7 @@ mod tests {
     /// indexes a fixed position in the Promoter's `pattern`. A re-insert
     /// at a *divergent* `pattern_component_index` is a caller bug,
     /// caught by the `debug_assert_eq!` (debug builds) rather than
-    /// silently overwritten (F-MED-5).
+    /// silently overwriting the proxy's existing cursor.
     #[test]
     #[should_panic(expected = "pattern_component_index must be invariant")]
     fn insert_proxy_divergent_index_trips_debug_assert() {

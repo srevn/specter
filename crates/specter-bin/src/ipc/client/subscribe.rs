@@ -154,8 +154,8 @@ impl Subscription {
     /// The inbound line buffer is reused across calls — `clear`
     /// preserves the previously-grown heap so subsequent lines pay no
     /// allocation. A partial read on `Err` discards the bytes (the
-    /// next call clears before reading), matching the
-    /// fresh-`String`-per-call behaviour the prior shape carried.
+    /// next call clears before reading), so each call observes a clean
+    /// buffer as if freshly allocated.
     pub(crate) fn read_next(&mut self) -> io::Result<Option<WireDiagnostic>> {
         self.line_buf.clear();
         let n = self.reader.read_line(&mut self.line_buf)?;

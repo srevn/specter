@@ -725,8 +725,7 @@ impl SubRegistry {
 
     /// Whether any Sub on `profile` has fired — the fast
     /// `seed_drift_observed` short-circuit ("never fired ⇒ no prior
-    /// emission to re-fire on recovery"). Replaces the prior
-    /// per-Profile `fired_is_empty` negation.
+    /// emission to re-fire on recovery").
     #[must_use]
     pub fn any_fired(&self, profile: ProfileId) -> bool {
         self.at(profile)
@@ -1053,8 +1052,7 @@ mod tests {
     /// After a multi-insert/remove sequence, every key `iter()` yields
     /// re-looks-up via `get` to the same Sub, and `at(profile)` equals
     /// the live key set. The slotmap key is the sole identity authority
-    /// (a `Sub` carries no `id`) — this replaces the removed
-    /// `Sub.id == minted key` test.
+    /// (a `Sub` carries no `id`).
     #[test]
     fn registry_iter_keys_round_trip_through_get() {
         let mut reg = SubRegistry::new();

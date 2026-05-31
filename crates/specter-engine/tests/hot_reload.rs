@@ -212,10 +212,9 @@ fn config_diff_mid_burst_remove_defers_reap() {
 /// `ProfileId`, the anchor's `watch_demand` is unchanged (no
 /// Unwatch/re-Watch), no fresh probe is emitted (the existing settle
 /// timer still owns the burst lifecycle), and `SubRebound` narrates
-/// the edge. Pre-refactor this scenario went through detach+attach
-/// via the zombie-revival branch (`ReapPendingCancelled` was
-/// emitted); under `modified_params` the path is structurally
-/// simpler and `ReapPendingCancelled` must **not** appear.
+/// the edge. Under `modified_params` the path does not go through
+/// detach+attach via the zombie-revival branch, so
+/// `ReapPendingCancelled` must **not** appear.
 #[test]
 fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     let mut e = Engine::new();

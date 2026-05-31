@@ -291,8 +291,8 @@ pub(crate) fn one_shot_unit(
 /// fabricates one.
 ///
 /// Locking stdout once and writing through [`Write::write_all`] +
-/// [`Write::flush`] replaces the prior `print!` / `println!`: those
-/// panic on a broken pipe (Rust ignores `SIGPIPE`), whereas the explicit
+/// [`Write::flush`] is deliberate: `print!` / `println!` panic on a
+/// broken pipe (Rust ignores `SIGPIPE`), whereas the explicit
 /// write/flush surfaces it as an `io::Error` this maps to a clean exit.
 pub(crate) fn emit_human_or_json<T: Serialize>(
     client: &ClientArgs,

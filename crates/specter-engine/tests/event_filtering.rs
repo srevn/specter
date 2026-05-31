@@ -212,8 +212,8 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
 // events) share ONE Profile. The Profile's mask is fixed at
 // construction and survives both a sibling join (the join does not
 // re-derive it) and a sibling detach (the Profile lives while ≥1 Sub
-// remains). Closes F-HIGH-3's unchecked hypothesis that the
-// per-Profile mask is invariant under Sub churn.
+// remains). Pins that the per-Profile mask is invariant under Sub
+// churn.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -937,9 +937,9 @@ fn seed_failed_releases_anchor_claim() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// Regression: dispatch_standard_vanished/failed + reap_pending no longer
-// double-releases the anchor contribution (debug_assert was reachable
-// before the release-before-finish reorder).
+// Regression: dispatch_standard_vanished/failed + reap_pending must not
+// double-release the anchor contribution. The release-before-finish
+// ordering keeps the debug_assert unreachable.
 // ───────────────────────────────────────────────────────────────────────
 
 /// Set up a Profile + a covered Dir child so the anchor cannot reap
@@ -1082,9 +1082,10 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
     assert_eq!(unwatch_count, 1);
 }
 
-/// Drive the F-CRIT-1 setup: attach P + surviving child, kick off a
-/// Standard burst, advance to Probing, detach to set reap_pending, then
-/// dispatch the supplied FsEvent at the anchor. Returns the resulting
+/// Drive the anchor-terminal-with-reap-pending setup: attach P +
+/// surviving child, kick off a Standard burst, advance to Probing,
+/// detach to set reap_pending, then dispatch the supplied FsEvent at
+/// the anchor. Returns the resulting
 /// StepOutput. Surviving child fixture keeps the anchor slot alive past
 /// `reap_profile`'s `try_reap`, exposing any post-finish refcount
 /// mistake on a still-live counter.
@@ -1273,18 +1274,18 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// PR 1 — Descendant-claim release (F-CRIT-1, F-MED-4)
+// Descendant-claim release
 //
 // The four claim types differ in cardinality: anchor / watch-root parent /
 // descent prefix are 1-to-1 (one Profile contributes to one Resource);
 // covered descendants are 1-to-N (one Profile contributes to N Tree
-// slots). Pre-PR-1, the engine had release helpers for the three 1-to-1
-// claims but none for the 1-to-N descendant set — every Profile teardown
-// path cleared `Profile.current` without releasing the per-descendant
-// `watch_demand` contributions encoded in it. The descendant slots stayed
-// alive in the Tree with non-zero `watch_demand`, the kernel kept their
-// FDs registered, and a default `subtree-root × CONTENT` Sub on a 10k-file
-// tree leaked ~10k FDs per hot-reload churn cycle.
+// slots). The 1-to-N descendant set needs its own release helper:
+// clearing `Profile.current` on a teardown path without releasing the
+// per-descendant `watch_demand` contributions encoded in it would leave
+// the descendant slots alive in the Tree with non-zero `watch_demand`,
+// the kernel keeping their FDs registered — a default
+// `subtree-root × CONTENT` Sub on a 10k-file tree would leak ~10k FDs
+// per hot-reload churn cycle.
 //
 // `Engine::release_descendant_claim` closes the symmetry. Wired into
 // `reap_profile` and the seven `dispatch_*_vanished/failed` +
@@ -1302,7 +1303,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_dir() {
     // the Sub: `detach_sub_inner` runs `reap_profile` immediately
     // (Idle ⇒ ReapNow). `release_descendant_claim` walks
     // `Profile.current` and releases `subdir`'s `watch_demand`
-    // contribution; the slot reaps. Pre-PR-1 the descendant leaked.
+    // contribution; the slot reaps, so the descendant does not leak.
     let mut e = Engine::new();
     let (_root, child, sid, pid) = setup_with_surviving_child(&mut e);
 
@@ -1321,7 +1322,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_dir() {
     );
     assert!(
         e.tree().get(child).is_none(),
-        "covered Dir descendant reaped — release_descendant_claim closed F-CRIT-1",
+        "covered Dir descendant reaped — release_descendant_claim released its slot",
     );
     let unwatch_for_child = out
         .watch_ops
@@ -1377,10 +1378,10 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
 
 #[test]
 fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
-    // F-CRIT-1 in the dispatch_standard_vanished path: an anchor that
-    // disappears mid-burst must release the per-descendant contributions
-    // alongside the anchor's. Pre-PR-1 the descendants leaked even
-    // though the anchor was correctly released.
+    // dispatch_standard_vanished path: an anchor that disappears
+    // mid-burst must release the per-descendant contributions alongside
+    // the anchor's — the descendants must not leak when the anchor is
+    // released.
     let mut e = Engine::new();
     let (root, child, sid, pid) = setup_with_surviving_child(&mut e);
 
@@ -1434,10 +1435,10 @@ fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
 
 #[test]
 fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
-    // F-CRIT-1 in the finalize_anchor_lost path: anchor-terminal events
-    // (Removed / Renamed / Revoked) at the anchor must release the
-    // per-descendant contributions. Same shape as the dispatch_*_vanished
-    // path but driven through `on_anchor_terminal_event`.
+    // finalize_anchor_lost path: anchor-terminal events (Removed /
+    // Renamed / Revoked) at the anchor must release the per-descendant
+    // contributions. Same shape as the dispatch_*_vanished path but
+    // driven through `on_anchor_terminal_event`.
     let mut e = Engine::new();
     let (root, child, _sid, pid) = setup_with_surviving_child(&mut e);
 
@@ -1473,8 +1474,8 @@ fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
 
 #[test]
 fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
-    // F-CRIT-1 in dispatch_rebase_vanished: post-fire rebase probe
-    // returns Vanished. `Profile.current` was populated by the pre-fire
+    // dispatch_rebase_vanished: post-fire rebase probe returns
+    // Vanished. `Profile.current` was populated by the pre-fire
     // `dispatch_quiescence_ok` `StandardFire` graft (`apply_snapshot`)
     // and contains the covered descendants. The rebase-failure path
     // must release them too.
@@ -1574,10 +1575,9 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
 fn release_descendant_claim_multi_profile_preserves_others() {
     // Two Profiles co-anchor at root with the same recursive scan, both
     // observing the same descendant `subdir`. Profile P loses its anchor
-    // (Vanished); Profile Q stays Idle. Pre-PR-1 P's descendant claim
-    // leaked: subdir.watch_demand() stayed at 2 (P's leak + Q's
-    // contribution). Post-PR-1: P's release walks current and decrements
-    // subdir 2 → 1; Q's contribution survives at 1.
+    // (Vanished); Profile Q stays Idle. P's release walks current and
+    // decrements subdir 2 → 1 — no leak — while Q's contribution
+    // survives at 1.
     let mut e = Engine::new();
     let root = anchor_dir(&mut e, "src");
 
@@ -1679,16 +1679,14 @@ fn release_descendant_claim_multi_profile_preserves_others() {
 
 #[test]
 fn delete_child_during_graft_recompute_skips_releasing_profile() {
-    // F-MED-4 (historical): during graft's `apply_diff_to_tree` delete
-    // pass the releasing Profile's `Profile.current` is still `Some`
-    // (graft hasn't run the take yet). Under the lazy-derivation
-    // refcount shape, this risked the post-decrement union including
-    // the Profile's own descendant contribution. The contribution-map
-    // refactor dissolves the issue: removal is by explicit
-    // [`ContribKey::ProfileDescendant(profile_id)`] key, independent
-    // of `Profile.current`'s visibility during the apply. This test
-    // pins the post-decrement union to the remaining contributors'
-    // mask.
+    // During graft's `apply_diff_to_tree` delete pass the releasing
+    // Profile's `Profile.current` is still `Some` (graft hasn't run the
+    // take yet), so the post-decrement union must not pick up the
+    // Profile's own descendant contribution. Removal by explicit
+    // [`ContribKey::ProfileDescendant(profile_id)`] key keeps it
+    // independent of `Profile.current`'s visibility during the apply.
+    // This test pins the post-decrement union to the remaining
+    // contributors' mask.
     //
     // Setup: two Profiles share the anchor with DIFFERENT events masks.
     // P=CONTENT, Q=METADATA. Both seed with `subdir` as a covered Dir.
@@ -1792,8 +1790,8 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
     assert_eq!(
         e.tree().get(subdir).unwrap().events_union(),
         ClassSet::METADATA,
-        "events_union narrows to Q's mask only — F-MED-4 dissolves under \
-         the per-Resource contributions map (removal is by explicit key)",
+        "events_union narrows to Q's mask only — the per-Resource \
+         contributions map removes P's contribution by explicit key",
     );
     assert_ne!(
         e.tree().get(subdir).unwrap().events_union(),

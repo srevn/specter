@@ -1048,9 +1048,8 @@ mod tests {
             Severity::Error,
         );
         // Warn — a probe failure carries an errno but self-recovers, so
-        // it mirrors the daemon's `warn!`, NOT `error!`. The
-        // reconciliation anchor: this variant previously mis-tiered to
-        // Error here.
+        // it mirrors the daemon's `warn!`, NOT `error!`. Pinned here so
+        // the variant stays at Warn and does not drift to Error.
         assert_eq!(
             severity(&WireDiagnostic::ProbeFailed {
                 at: WireTime::from(UNIX_EPOCH),

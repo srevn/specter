@@ -2790,10 +2790,8 @@ mod tests {
         }
     }
 
-    // The old `dispatch_outcome` + `next_spawnable` pure-function tests
-    // pinned the bytecode dispatch table. Under the CFG-shaped IR these
-    // helpers are gone — dispatch is `ProgramOp::target(&outcome)` which
-    // returns a `BranchTarget` directly. Routing coverage moved to
+    // Dispatch is `ProgramOp::target(&outcome)`, which returns a
+    // `BranchTarget` directly. Routing coverage lives in
     // `specter-core::program::op::tests`; end-to-end behaviour is
     // covered by the multi-step advance/terminate tests above plus the
     // controller-level tests in `pool.rs`.

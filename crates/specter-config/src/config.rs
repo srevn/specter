@@ -1164,9 +1164,9 @@ fn validate_scope(idx: usize, raw_scope: Option<&str>) -> Result<EffectScope, Va
 /// Routes [`PathError`] → [`IssueKind`] symmetrically: structural and
 /// I/O failures each land in their own arm so operators can triage
 /// "permissions" from "typo in `..`" from "no such file" without
-/// inspecting the error detail string. The earlier `is_absolute()`
-/// prefilter is gone — `canonicalize_lenient` already enforces the
-/// rule and routes the failure through `PathError::NotAbsolute` here.
+/// inspecting the error detail string. No `is_absolute()` prefilter is
+/// needed — `canonicalize_lenient` enforces the rule itself and routes
+/// the failure through `PathError::NotAbsolute` here.
 fn validate_static_path(idx: usize, raw_path: &str) -> Result<PathBuf, ValidationIssue> {
     canonicalize_lenient(Path::new(raw_path)).map_err(|e| {
         let (kind, detail) = match &e {
@@ -1640,7 +1640,7 @@ mod tests {
 
     #[test]
     fn legacy_top_level_log_level_is_rejected_as_unknown_field() {
-        // Clean alpha break — the old top-level `log_level` field is gone.
+        // A top-level `log_level` field is not part of the schema.
         // RawConfig has `deny_unknown_fields`, so the parse fails fast
         // rather than silently dropping the value.
         let err = Config::from_str("log_level = \"debug\"").unwrap_err();
@@ -1689,9 +1689,10 @@ mod tests {
 
     #[test]
     fn log_path_ignored_for_stderr_destination() {
-        // Stderr path is dropped (set to None) — the operator may have
-        // legacy config with `path = ...`; we don't fail validation,
-        // because the field carries no meaning when destination = stderr.
+        // Stderr path is dropped (set to None) — an operator may set
+        // `path = ...` alongside a stderr destination; we drop it rather
+        // than fail validation, because the field carries no meaning
+        // when destination = stderr.
         let cfg =
             Config::from_str("[log]\ndestination = \"stderr\"\npath = \"/var/log/ignored.log\"")
                 .unwrap();
@@ -1991,9 +1992,9 @@ mod tests {
 
     #[test]
     fn default_max_settle_is_one_hour_independent_of_settle() {
-        // The 60× factor is gone — `max_settle` defaults to a flat 1h
-        // regardless of `settle`. A few representative `settle` values
-        // all observe the same default.
+        // `max_settle` defaults to a flat 1h regardless of `settle` —
+        // it is not derived from `settle` by any factor. A few
+        // representative `settle` values all observe the same default.
         for settle in ["1ms", "200ms", "5s", "30s", "1m"] {
             let toml = minimal_toml(&format!("settle = \"{settle}\"\n"));
             let cfg = Config::from_str(&toml).unwrap();
@@ -2665,10 +2666,9 @@ mod from_path_with_meta_tests {
         let (cfg_with_meta, _meta) = Config::from_path_with_meta(&p).unwrap();
 
         // The two entry points must produce identical Config values —
-        // `from_path` is the portable path; `from_path_with_meta`
+        // `from_path` is the meta-free path; `from_path_with_meta`
         // additionally returns the inode meta. Divergence here would
-        // mean reloads (which take the meta path) parse differently
-        // from initial loads (which historically took `from_path`).
+        // mean the two entry points parse the same bytes differently.
         assert_eq!(cfg_only, cfg_with_meta);
     }
 

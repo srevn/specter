@@ -157,7 +157,7 @@ impl SubprocessActuator {
     /// to assert shutdown timing or `${env.<NAME>}` resolution
     /// (strict-unset → Failed, default rendering, etc.) without
     /// depending on the ambient process env. For tests that *also*
-    /// need to override the tmp directory (F-LOW-2 regression
+    /// need to override the tmp directory (the tmp-dir-from-state
     /// fence), see [`Self::new_with_grace_and_env_and_tmp`].
     ///
     /// Gated to match the test module (`cfg(all(test, feature = "testkit"))`)
@@ -181,9 +181,8 @@ impl SubprocessActuator {
 
     /// Test-only constructor that lets callers override every piece
     /// of startup-immutable state — `temp_dir` and `actuator_pid`
-    /// alongside the env and grace. The single use is the
-    /// F-LOW-2 regression fence: assert that
-    /// `DiffTmpFile::create` reads from
+    /// alongside the env and grace. The single use is the fence that
+    /// asserts `DiffTmpFile::create` reads from
     /// `ActuatorState.temp_dir`, not `std::env::temp_dir()`.
     #[cfg(all(test, feature = "testkit"))]
     pub(crate) fn new_with_grace_and_env_and_tmp(
@@ -612,9 +611,8 @@ mod tests {
         }
 
         /// Inject a custom `temp_dir` into the actuator state — the
-        /// only call site is the F-LOW-2 regression fence, which
-        /// pins `start_plan` reading from
-        /// `ActuatorState.temp_dir` rather than calling
+        /// only call site is the fence that pins `start_plan` reading
+        /// from `ActuatorState.temp_dir` rather than calling
         /// `std::env::temp_dir()` per Effect.
         fn new_with_grace_and_env_and_tmp(
             concurrency: NonZeroUsize,
@@ -1242,7 +1240,7 @@ mod tests {
         h.shutdown();
     }
 
-    /// F-LOW-2 regression fence: `start_plan` must read from
+    /// `start_plan` must read from
     /// [`crate::pool::state::ActuatorState::temp_dir`] (captured
     /// once at actuator startup) when handing
     /// `DiffTmpFile::create` its `temp_dir` argument — not call

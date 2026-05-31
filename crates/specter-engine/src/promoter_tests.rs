@@ -136,11 +136,11 @@ fn active_proxies(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, specter_c
     }
 }
 
-/// Registry-derived stand-in for the deleted `Promoter::dynamic_subs()`:
-/// the live `(anchor_resource → SubId)` set for `pid`, reconstructed
-/// from `SubRegistry` truth (now the single source). A live dynamic
-/// Sub's `Profile.resource` *is* the anchor it was promoted at, so this
-/// round-trips exactly the map the Promoter no longer mirrors.
+/// Registry-derived view of the live `(anchor_resource → SubId)` set
+/// for `pid`, reconstructed from `SubRegistry` truth (the single
+/// source). A live dynamic Sub's `Profile.resource` *is* the anchor it
+/// was promoted at, so this round-trips exactly that set; the Promoter
+/// holds no parallel map.
 fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubId> {
     e.subs
         .iter()
@@ -505,8 +505,8 @@ fn assert_gate_matches_observable(e: &Engine, pid: PromoterId, anchor: ResourceI
 /// Derived-gate equivalence. `promoter_already_promoted` agrees with
 /// the observable "a live dynamic Sub for this Promoter is anchored
 /// here" across promote → anchor-loss-reap → re-promote orderings.
-/// This replaces the deleted `dynamic_subs`-map invariant: with no
-/// mirror, a stale gate is unrepresentable by construction.
+/// With no mirror map, a stale gate is unrepresentable by
+/// construction.
 #[test]
 fn derived_gate_equivalence_across_attach_reap_orderings() {
     let mut e = Engine::new();
@@ -874,20 +874,20 @@ fn descent_vanished_rewinds_to_parent() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-// ---- §A regression: PrefixPending events at the prefix re-trigger descent.
+// ---- PrefixPending events at the prefix re-trigger descent.
 //
-// Pre-unification, `classify_event_carriers` only walked Profiles —
-// Promoter `PrefixPending` descents were invisible to event dispatch, so
-// any FsEvent at the prefix routed to `EventNoConsumer` and the Promoter
-// could be permanently stuck waiting for a segment it never re-probed.
-// These four tests pin the post-unification dispatch — `on_descent_event`
-// is now owner-polymorphic and `EventCarriers.descents` carries
-// `ProbeOwner::Promoter(_)`s alongside Profiles.
+// `classify_event_carriers` walks Promoter `PrefixPending` descents as
+// well as Profiles, so an FsEvent at the prefix re-probes the descent
+// instead of routing to `EventNoConsumer` and stranding the Promoter
+// waiting for a segment it never re-probes. These four tests pin that
+// owner-polymorphic dispatch — `on_descent_event` is owner-polymorphic
+// and `EventCarriers.descents` carries `ProbeOwner::Promoter(_)`s
+// alongside Profiles.
 
 /// Drained-probe + StructureChanged at the prefix → fresh descent probe.
 /// Mirror of `descent_tests.rs::descent_event_at_prefix_emits_fresh_probe`
-/// for the Promoter side. The §A surface — without this dispatch the
-/// Promoter would never re-probe after the next segment first appeared.
+/// for the Promoter side. Without this dispatch the Promoter would
+/// never re-probe after the next segment first appeared.
 #[test]
 fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
     let mut e = Engine::new();
@@ -944,7 +944,7 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
         e.pending_probe_for(ProbeOwner::Promoter(pid)).is_some(),
         "probe slot re-armed",
     );
-    // No EventNoConsumer diagnostic — the §A bug surface.
+    // No EventNoConsumer diagnostic — the dispatch consumed the event.
     assert!(
         !out.diagnostics
             .iter()
@@ -996,9 +996,9 @@ fn prefix_pending_event_during_in_flight_probe_drops() {
 }
 
 /// Terminal events at the prefix (Removed / Renamed / Revoked) must
-/// also re-trigger descent — the §A bug surface is broader than the
-/// non-terminal `StructureChanged` case the original report focused
-/// on. Without dispatch, a `mv /var /var.old` mid-descent would
+/// also re-trigger descent — this covers more than the non-terminal
+/// `StructureChanged` case. Without dispatch, a `mv /var /var.old`
+/// mid-descent would
 /// strand the Promoter with a dangling watch on a non-existent path
 /// (the next probe response would clean up via `Vanished` rewind, but
 /// only if the dispatch fires).

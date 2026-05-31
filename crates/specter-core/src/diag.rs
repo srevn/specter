@@ -202,7 +202,7 @@ pub enum Diagnostic {
     ///   (or, post-rebase, to Idle); a late completion arrives.
     /// - `finalize_anchor_lost` dropped the burst mid-`Awaiting`;
     ///   already-spawned actuator commands run to completion and report
-    ///   back even though the engine no longer tracks them.
+    ///   back even though the engine holds no state tracking them.
     ///
     /// In both cases the engine drops the completion (no per-Profile
     /// state to update — the burst is already over) and emits this
@@ -216,8 +216,8 @@ pub enum Diagnostic {
     EffectCompleteForUnknownSub { sub: SubId },
     /// [`crate::Input::DetachSub`] targeted a `SubId` not in the
     /// registry — an external caller submitted a stale id. Hot reload
-    /// no longer reaches here: `Input::ConfigDiff` resolves operator
-    /// names to ids through the registry's own `by_name` index, so an
+    /// does not reach here: `Input::ConfigDiff` resolves operator names
+    /// to ids through the registry's own `by_name` index, so an
     /// unresolved `removed` name surfaces as
     /// [`Self::ConfigDiffUnknownSub`] instead. Distinct from
     /// [`Self::EffectCompleteForUnknownSub`] — that variant fires on a
@@ -357,8 +357,8 @@ pub enum Diagnostic {
     ///   `StructureChanged` (if still watched) or operator restart.
     /// - [`ClaimKind::WatchRootParent`]: the Profile loses its
     ///   parent-edge recovery channel. Anchor stays watched (different
-    ///   `resource`); auto-recovery on rename/recreation is no longer
-    ///   possible.
+    ///   `resource`); without the parent-edge channel, rename/recreation
+    ///   cannot auto-recover — operator restart is required.
     /// - [`ClaimKind::DescentPrefix`]: the descent is abandoned. The
     ///   engine cancels any in-flight descent probe and transitions the
     ///   Profile to Idle. Recovery is operator-driven (re-attach via
@@ -391,8 +391,8 @@ pub enum Diagnostic {
     /// - [`PromoterClaimKind::PrefixParent`]: the Promoter loses its
     ///   terminus-parent recovery edge (the twin of
     ///   [`ClaimKind::WatchRootParent`]). Proxies stay watched
-    ///   (different `resource`); auto-recovery on terminus recreation
-    ///   is no longer possible — operator restart is required.
+    ///   (different `resource`); terminus recreation cannot auto-recover
+    ///   — operator restart is required.
     PromoterClaimPurged {
         promoter: PromoterId,
         claim: PromoterClaimKind,

@@ -157,17 +157,16 @@ pub(crate) enum ResponsePayload {
 /// no host type behind the field, no separate adapter, no `Cow`.
 ///
 /// [`Display`](std::fmt::Display) writes the exact wire form via
-/// [`Self::as_str`], so the existing client renderer
-/// (`eprintln!("specter <verb>: {code}: {error}")`) emits the same
-/// bytes after the refactor as before.
+/// [`Self::as_str`], so the client renderer
+/// (`eprintln!("specter <verb>: {code}: {error}")`) emits the wire
+/// token verbatim.
 ///
 /// The vocabulary is intentionally closed (no `#[serde(other)]`
 /// fallback): a client that hits a daemon emitting a code it doesn't
 /// understand surfaces the failure loudly through the verb's catch-all
 /// arm (`unexpected response: ...`), rather than silently parsing a
-/// future code into an opaque sink. Per the audit's policy split,
-/// request/response carriers favor strictness; diag fan-out favors
-/// forgiveness.
+/// future code into an opaque sink. Request/response carriers favor
+/// strictness; diag fan-out favors forgiveness.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireErrorCode {
@@ -424,14 +423,15 @@ pub(crate) struct StatusResponse {
 /// [`Self::via`].
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub(crate) struct WireLastReload {
-    /// Wall-clock of the most recent successful reload. Renamed to
-    /// `last_reload_at` on the wire so the JSON form lines up with
-    /// the pre-lift shape on the `Some` side.
+    /// Wall-clock of the most recent successful reload. Serializes as
+    /// `last_reload_at` on the wire so the JSON form lines up with the
+    /// flattened [`StatusResponse`] keys on the `Some` side.
     #[serde(rename = "last_reload_at")]
     pub(crate) at: WireTime,
-    /// Trigger of the most recent successful reload. Renamed to
+    /// Trigger of the most recent successful reload. Serializes as
     /// `last_reload_via` on the wire so the JSON form lines up with
-    /// the pre-lift shape on the `Some` side. Typed enum (not
+    /// the flattened [`StatusResponse`] keys on the `Some` side.
+    /// Typed enum (not
     /// `&'static str`) so a future variant on
     /// [`super::wire::WireReloadTrigger`] is a compile error at the
     /// declaration site, in the same shape as the rest of the wire
@@ -841,8 +841,8 @@ mod tests {
     /// daemon's Display reaches, and the renderer-visible
     /// `"specter <verb>: {code}: ..."` line. A hand-edit to any
     /// variant — adding one, renaming a tag, drifting the as_str
-    /// arm — fails here loudly, replacing the per-variant copy-paste
-    /// pin the prior `ERR_*` constants used to require.
+    /// arm — fails here loudly, so the round-trip needs no
+    /// per-variant copy-paste pin.
     #[test]
     fn wire_error_code_round_trips_every_variant() {
         // Compile-time exhaustive — a new variant without an entry

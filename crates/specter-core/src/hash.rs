@@ -23,11 +23,11 @@
 //! SipHash-2-4 compression core and finalisation — pinned by the
 //! `SipHasher24` type aliases (algorithm) and by the production golden
 //! tests (`dir_hash`/`leaf_hash`/`config_hash`) against crate-upgrade
-//! drift. On a little-endian target the seam is byte-identical to the
-//! pre-seam blanket-`Hash` fold (so the goldens do not shift); on
-//! big-endian it is *correct* where the old native-endian `write_u128`
-//! was not. There is no blanket `Hash` route and no native-endian
-//! escape: the inner hasher is only ever driven by `write(&[u8])`.
+//! drift. On a little-endian target the seam is byte-identical to a
+//! blanket-`Hash` fold (so the goldens do not shift); on big-endian it
+//! stays *correct*, where a native-endian `write_u128` would diverge.
+//! There is no blanket `Hash` route and no native-endian escape: the
+//! inner hasher is only ever driven by `write(&[u8])`.
 //!
 //! These are *fingerprints*, not MACs. There are no secret keys and no
 //! adversarial-collision guarantees: every digest is computed over
@@ -128,11 +128,10 @@ impl<H: Hasher> StableHasher<H> {
 
     /// Fold a `u128` as its little-endian byte image.
     ///
-    /// This is the load-bearing fix: the byte image equals
-    /// `put_u64(v as u64); put_u64((v >> 64) as u64)` and, on a
-    /// little-endian target, the historical native-endian `write_u128`
-    /// — but it is endian-explicit, so it is also correct on
-    /// big-endian, where the old path silently diverged.
+    /// The byte image equals `put_u64(v as u64); put_u64((v >> 64) as
+    /// u64)` and, on a little-endian target, a native-endian
+    /// `write_u128` — but it is endian-explicit, so it is also correct
+    /// on big-endian, where a native-endian fold would diverge.
     pub fn put_u128(&mut self, v: u128) {
         self.0.write(&v.to_le_bytes());
     }
@@ -263,7 +262,7 @@ mod seam_tests {
         assert_ne!(ab.finish_u64(), a_b.finish_u64());
     }
 
-    /// `put_systemtime_into` is byte-identical to the legacy
+    /// `put_systemtime_into` is byte-identical to the
     /// `(sign, secs, subsec)` decomposition folded via the primitive
     /// `u8`/`u64`/`u32` writes.
     #[test]

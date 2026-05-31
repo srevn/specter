@@ -67,8 +67,9 @@ pub enum AttachPathError {
 
 impl AttachPathError {
     /// Static operator-facing message paired with each rejection variant.
-    /// Kept stable so the engine's [`crate::Diagnostic::AttachPathInvalid`]
-    /// hint matches the pre-refactor strings byte-for-byte.
+    /// A stable contract: the engine's
+    /// [`crate::Diagnostic::AttachPathInvalid`] hint quotes these
+    /// strings verbatim.
     #[must_use]
     pub const fn hint(self) -> &'static str {
         match self {
@@ -292,10 +293,9 @@ impl Tree {
         }
     }
 
-    /// Path of a freshly-created root: a single pushed segment.
-    /// Byte-identical to what the old parent-walk produced for a
-    /// root-only chain (`PathBuf::new().push(seg)`), so the absolute-
-    /// segment replace semantics of `PathBuf::push` are preserved.
+    /// Path of a freshly-created root: a single pushed segment built as
+    /// `PathBuf::new().push(seg)`, so `PathBuf::push`'s absolute-segment
+    /// replace semantics apply.
     fn build_root_path(seg: &str) -> Arc<Path> {
         let mut pb = PathBuf::new();
         pb.push(seg);
@@ -513,8 +513,9 @@ impl Tree {
             // Take ownership of the slot out of the slotmap. `parent`
             // and `segment` are then read off the owned `Resource`
             // with no clone — the segment string dies *with* the slot,
-            // which is exactly why the unbounded-store class is gone
-            // by construction. `.expect` pins the loop invariant: a
+            // which is exactly why there is no unbounded store of
+            // segment strings by construction. `.expect` pins the loop
+            // invariant: a
             // panic here would mean a non-live `current` reached the
             // body, which the gate above and the cascade re-test below
             // structurally forbid.
@@ -596,9 +597,8 @@ impl Tree {
     ///
     /// Stays honestly `Option`: `None` iff `id` is stale. The Resource
     /// owns its path, so a stale id has no Resource and therefore no
-    /// path — the same `None` the old parent-walk returned for a slot
-    /// that failed to resolve. The empty-path-as-`Vanished` wire
-    /// sentinel is an engine-boundary concern, not this accessor's.
+    /// path — hence `None`. The empty-path-as-`Vanished` wire sentinel
+    /// is an engine-boundary concern, not this accessor's.
     #[must_use]
     pub fn path_of(&self, id: ResourceId) -> Option<Arc<Path>> {
         self.nodes.get(id).map(|r| Arc::clone(&r.path))
@@ -697,7 +697,7 @@ mod tests {
     }
 
     /// The slotmap null key collides with reaped-id semantics — surface
-    /// the disjointness hazard the pre-refactor sentinel return hid.
+    /// the disjointness hazard a sentinel return would hide.
     #[test]
     fn ensure_child_returns_stale_parent_for_default_id() {
         let mut tree = Tree::new();
@@ -729,8 +729,8 @@ mod tests {
     }
 
     /// Throwaway `StepOutput` for tests that don't inspect the emitted
-    /// ops. Keeping it as a tiny helper makes the in-file tests below
-    /// read closer to their pre-refactor shape.
+    /// ops. Keeping it as a tiny helper keeps the in-file tests below
+    /// terse.
     fn discard() -> StepOutput {
         StepOutput::default()
     }

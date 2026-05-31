@@ -119,9 +119,9 @@ fn format_uptime(uptime_secs: u64) -> String {
 
 /// Render the `reloads` line: count + (optionally) the most-recent
 /// reload pair. A daemon that has never reloaded shows just the
-/// count. The lift to a single [`WireLastReload`] collapses the
-/// prior `(Some(at), None)` defensive arm — the impossible product
-/// is no longer constructable, so the match shrinks to two arms.
+/// count. The single [`WireLastReload`] makes the impossible
+/// `(Some(at), None)` product unrepresentable, so the match has two
+/// arms.
 fn format_reloads(count: u64, last: Option<&WireLastReload>) -> String {
     match last {
         Some(r) => format!("{count} (last {} via {})", r.at, r.via),

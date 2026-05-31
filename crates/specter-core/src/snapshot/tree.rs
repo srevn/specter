@@ -945,10 +945,9 @@ fn splice_dir_prior(
     let Some(chain) = ancestor_chain(target, anchor, tree) else {
         // Target outside anchor's tree subtree. The caller keeps its
         // prior view (independent Arc clone) and surfaces the contract
-        // violation. Pre-PR behaviour was to wholesale-replace with
-        // `replacement`, leaving `Profile.current` rooted at `target`
-        // (not anchor) and violating the snapshot navigation
-        // invariants.
+        // violation. Wholesale-replacing with `replacement` would leave
+        // `Profile.current` rooted at `target` (not anchor) and violate
+        // the snapshot navigation invariants.
         return SpliceResult::CrossedUncovered(SpliceFailureCause::TargetOutsideAnchorSubtree);
     };
 

@@ -200,9 +200,9 @@ mod tests {
         }
     }
 
-    /// Pins F-LOW-2 + filename pattern: `create` MUST use its
-    /// `temp_dir`, `actuator_pid`, and `correlation` arguments to
-    /// build the on-disk path. A regression that reads from
+    /// Pins the tmp-dir override and filename pattern: `create` MUST
+    /// use its `temp_dir`, `actuator_pid`, and `correlation` arguments
+    /// to build the on-disk path. A regression that reads from
     /// `std::env::temp_dir()` or `std::process::id()` would fail this
     /// test (custom temp_dir + custom pid won't appear in the
     /// resulting path).

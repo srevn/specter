@@ -14,16 +14,14 @@
 //!   edge-method on the field's owner in `specter-core` (the method
 //!   *is* the floor — total fn, no public setter). `note_effect_completion`
 //!   is the surviving member; a phase helper here would only enforce
-//!   it at a distance. The rebase-loop ceiling lifecycle (formerly
-//!   `rebase_ceiling: Option<TimerId>` + `forced: bool`, now the
+//!   it at a distance. The rebase-loop ceiling lifecycle (the
 //!   `ceiling: CeilingState` sum) lives in cat-a: its `Armed` /
 //!   `Reached` writes are each co-located with a distinct post-fire
 //!   phase decision (`arm_rebase_loop_ceiling` at the rebase loop's
 //!   start, `force_pending_post_fire` at ceiling-expiry / gate-deadline
 //!   recovery), not a single-field invariant maintained at a distance.
-//!   (The old `apply_dirty_delta` counter edge was deleted with the
-//!   `dirty_descendants` refcount — the `Draining → Verifying`
-//!   reconfirm is now a fresh query, not a maintained count.)
+//!   The `Draining → Verifying` reconfirm is a fresh query, not a
+//!   maintained count.
 //! - **(c) The sanctioned cross-crate emission reader**:
 //!   [`Engine::emit_owner_probe`] (in `probe`) reads the pre-fire
 //!   Standard burst's `dirty` to project its captured paths to the
@@ -229,11 +227,11 @@ impl Engine {
     /// routing breach. Stale ids return false silently — same policy as
     /// the Active gates above.
     ///
-    /// Replaces the prior `debug_assert!(matches!(p.state,
-    /// ProfileState::Idle))` discipline: that variant panicked in
-    /// dev/CI and silently misrouted in release. The diagnostic
-    /// emission is visible in both build modes and survives via the
-    /// usual `StepOutput.diagnostics` plumbing.
+    /// A non-Idle Profile here emits a diagnostic rather than asserting:
+    /// the diagnostic is visible in both dev/CI and release builds and
+    /// survives via the usual `StepOutput.diagnostics` plumbing, where a
+    /// `debug_assert!` would panic in dev/CI and silently misroute in
+    /// release.
     fn require_idle(
         &self,
         profile_id: ProfileId,
@@ -565,11 +563,10 @@ impl Engine {
     /// just `last_event_time = Some(now)`. The on-expiry handler
     /// (`Engine::on_settle_expired`) reschedules a fresh entry at
     /// `last_event_time + settle` if events arrived since, otherwise
-    /// transitions to Verifying. This collapses the per-event
-    /// `BinaryHeap::push` that previously orphaned the prior entry to
-    /// at most one push per `last_event_time + settle` boundary —
-    /// roughly `ceil(burst_duration / settle)` settle-timer entries
-    /// per burst, instead of one per `FsEvent`.
+    /// transitions to Verifying. So the heap takes at most one push per
+    /// `last_event_time + settle` boundary — roughly
+    /// `ceil(burst_duration / settle)` settle-timer entries per burst,
+    /// not one per `FsEvent`.
     ///
     /// Re-entries from `Verifying` or `Draining` have no live settle
     /// timer to reuse and therefore schedule a fresh entry. `Batching`
@@ -1205,9 +1202,9 @@ impl Engine {
     /// **Fire-tail residual reset, every entry.**
     /// `final_window_residual` (the events
     /// `absorb_event_into_fire_tail` captured) is cleared at *every*
-    /// entry. Under `WholeSubtree` it is no longer an obligation
-    /// source — the walk observes the tree regardless — only the
-    /// final-window restart seed: clearing per entry means an
+    /// entry. Under `WholeSubtree` it is not an obligation source — the
+    /// walk observes the tree regardless — only the final-window
+    /// restart seed: clearing per entry means an
     /// `Authoritative` terminal sees only events from the *final*
     /// probe round-trip and restarts solely for that genuine race,
     /// not for every tree-touching command. Earlier-round absorbs
@@ -2212,7 +2209,7 @@ mod tests {
 
         // ── Invariant 2: only one settle timer for this profile in the
         // heap. The initial timer from `start_standard_burst` carries
-        // through the storm; per-event reschedules are gone.
+        // through the storm, with no per-event reschedule.
         let settle_timers: usize = e
             .timers
             .iter()
@@ -2417,10 +2414,8 @@ mod tests {
         // `start_seed_burst` requires `Idle`. Calling it on an
         // already-Active Profile triggers the precondition: the helper
         // bails before re-scheduling timers or re-minting a probe, and
-        // surfaces `InvalidBurstTransition` with `observed: ActivePreFire`.
-        // Replaces the prior `debug_assert!(matches!(p.state,
-        // Idle))` discipline that panicked in dev/CI and silently
-        // misrouted in release.
+        // surfaces `InvalidBurstTransition` with `observed: ActivePreFire`
+        // in both dev/CI and release builds.
         let (mut e, pid) = engine_with_profile();
         let mut out = StepOutput::default();
         e.start_seed_burst(pid, None, Instant::now(), &mut out);

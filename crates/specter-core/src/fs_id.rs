@@ -149,13 +149,12 @@ mod tests {
         assert!(c < d, "device breaks ties when inodes are equal");
     }
 
-    /// `encode_into` reproduces the historical `inode` then `device`
-    /// `u64` byte stream — each as a little-endian `u64`, in declaration
-    /// order, with no discriminator or length prefix. Production folds
-    /// `FsIdentity` exclusively through this seam encoder; pinning it
-    /// against the legacy `inode.hash(h); device.hash(h)` reference
-    /// proves every persisted 128-bit snapshot golden survives the
-    /// migration off `derive(Hash)`.
+    /// `encode_into` emits the `inode` then `device` `u64` byte stream —
+    /// each as a little-endian `u64`, in declaration order, with no
+    /// discriminator or length prefix. Production folds `FsIdentity`
+    /// exclusively through this seam encoder; pinning it against the
+    /// `inode.hash(h); device.hash(h)` reference proves every persisted
+    /// 128-bit snapshot golden stays stable.
     #[test]
     fn encode_into_matches_inode_then_device() {
         use siphasher::sip128::{Hasher128, SipHasher24 as RawSip128};

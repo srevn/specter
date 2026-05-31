@@ -323,14 +323,14 @@ fn ipc_round_trip(
 
 /// First SIGTERM dispatched directly via [`EngineDriver::dispatch_signal`]
 /// returns [`ControlFlow::Continue`] (NOT `Break`) and arms
-/// [`EngineDriver::first_term`]. The driver no longer exits the loop
-/// on the first termination signal — the actuator's grace pipeline
-/// runs to completion, and the loop only closes via the
-/// actuator-gone signal ([`super::reactor::DrainedTick::actuator_gone`]),
+/// [`EngineDriver::first_term`]. The first termination signal keeps
+/// the loop running — the actuator's grace pipeline runs to
+/// completion, and the loop only closes via the actuator-gone signal
+/// ([`super::reactor::DrainedTick::actuator_gone`]),
 /// surfaced when the actuator-thread's `WakingSink::Drop` closes the
 /// effect-completion channel and `try_recv` observes Disconnected.
 /// The pure dispatch-classification path is also pinned by
-/// `dispatch_signal_inner_tests` in `driver.rs`; this test covers the
+/// `dispatch_signal_inner_tests` below; this test covers the
 /// method-level wrapper from the rig's surface.
 #[test]
 fn dispatch_signal_first_sigterm_continues_loop_and_arms_first_term() {
@@ -358,7 +358,7 @@ fn dispatch_signal_first_sigterm_continues_loop_and_arms_first_term() {
 // Shutdown lifecycle — driver-owns-grace
 // ============================================================
 
-/// First SIGINT no longer exits the loop. After [`EngineDriver::dispatch_signal`]
+/// The first SIGINT keeps the loop running. After [`EngineDriver::dispatch_signal`]
 /// arms `first_term` and pulses `shutdown_actuator_tx`, a subsequent
 /// [`EngineDriver::tick`] returns [`TickOutcome::Continue`] (NOT
 /// `Shutdown`) — the driver stays alive through the actuator's grace
@@ -533,7 +533,7 @@ fn effect_complete_disconnect_with_wake_surfaces_tick_outcome_shutdown() {
 }
 
 // ============================================================
-// Bounded accept loop — F-MED-1 (cap-hit re-arm under EPOLLET)
+// Bounded accept loop — cap-hit re-arm under EPOLLET
 // ============================================================
 
 #[test]
@@ -592,7 +592,7 @@ fn drain_accept_bound_and_rearm_drains_burst_across_ticks() {
 }
 
 // ============================================================
-// arm_writable_interests per-conn failure isolation — F-MED-2
+// arm_writable_interests per-conn failure isolation
 // ============================================================
 
 #[test]
@@ -2571,10 +2571,10 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
 /// flushes-then-terminates on the next WRITABLE drain — the cap-class
 /// signal lands on the wire ahead of the close.
 ///
-/// The Phase 4 convergence: with the Err line in the queue,
-/// `try_terminate_if_idle`'s queue-empty precondition no longer
-/// holds even when the prior queue was empty, so the empty-queue
-/// refusal case takes the same flush-then-terminate path as the
+/// The convergence: with the Err line in the queue,
+/// `try_terminate_if_idle`'s queue-empty precondition does not hold
+/// even when the prior queue was empty, so the empty-queue refusal
+/// case takes the same flush-then-terminate path as the
 /// non-empty-queue case ([`oversize_response_arms_close_then_flushes_then_terminates`]).
 ///
 /// Synthesises the oversize payload via a `ResponsePayload::Err`
@@ -2621,7 +2621,7 @@ fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
         "oversize response is refused by the capacity gate",
     );
 
-    // Phase 4 convergence: conn lives, queue holds the structured
+    // Convergence: conn lives, queue holds the structured
     // ResponseTooBig Err line, close_after_flush is armed.
     assert_eq!(
         rig.driver.ipc.conn_count(),
@@ -2692,8 +2692,7 @@ fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
 /// [`oversize_response_emits_response_too_big_then_flushes_then_terminates`]
 /// the two tests cover both starting-queue shapes
 /// (queue-empty-at-arm and queue-non-empty-at-arm); both shapes
-/// converge on the same flush-then-terminate teardown after
-/// Phase 4.
+/// converge on the same flush-then-terminate teardown.
 #[test]
 fn oversize_response_arms_close_then_flushes_then_terminates() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3660,4 +3659,224 @@ fn fs_event_and_effect_complete_both_drain_in_one_tick() {
     arm_zero_timeout(&mut rig);
     let outcome = rig.driver.tick();
     assert_eq!(outcome, TickOutcome::Continue);
+}
+
+// ============================================================
+// dispatch_signal_inner: signum → SignalAction + actuator pulses
+// ============================================================
+
+mod dispatch_signal_inner_tests {
+    use super::super::*;
+    use crossbeam::channel::{Receiver, Sender, bounded};
+    use signal_hook::consts::{SIGHUP, SIGINT, SIGTERM, SIGUSR1};
+    use specter_core::EffectOp;
+    use std::sync::Mutex;
+    use std::time::Duration;
+
+    /// Fixture: fresh [`ActuatorIO`] paired with the receiver halves
+    /// the test asserts against. The actuator-thread side is held by
+    /// the test rather than a real actuator so each pulse the inner
+    /// function fires is locally observable.
+    struct ActuatorFixture {
+        io: ActuatorIO,
+        // Held so the sender side stays connected; tests don't read
+        // it (no test sends an effect), but its receiver lifetime
+        // anchors the channel.
+        _effects_rx: Receiver<EffectOp>,
+        shutdown_actuator_rx: Receiver<()>,
+        hard_shutdown_actuator_rx: Receiver<()>,
+        // Held so the receiver clone on the ActuatorIO can observe
+        // `Ok(())` when the test plants a pulse. The actuator-side
+        // sender lives here so the test stays in control of pulse
+        // delivery.
+        hard_shutdown_done_tx: Sender<()>,
+    }
+
+    fn fixture() -> ActuatorFixture {
+        let (effects_tx, effects_rx) = bounded::<EffectOp>(1024);
+        let (shutdown_actuator_tx, shutdown_actuator_rx) = bounded::<()>(1);
+        let (hard_shutdown_actuator_tx, hard_shutdown_actuator_rx) = bounded::<()>(1);
+        let (hard_shutdown_done_tx, hard_shutdown_done_rx) = bounded::<()>(1);
+        ActuatorFixture {
+            io: ActuatorIO {
+                effects_tx,
+                shutdown_actuator_tx,
+                hard_shutdown_actuator_tx,
+                hard_shutdown_done_rx,
+            },
+            _effects_rx: effects_rx,
+            shutdown_actuator_rx,
+            hard_shutdown_actuator_rx,
+            hard_shutdown_done_tx,
+        }
+    }
+
+    /// Recording closure for the injectable `exit_fn` — the test
+    /// asserts the code recorded here matches `HARD_EXIT_CODE`. The
+    /// `Mutex` guards against multi-threaded tests; the
+    /// inner function runs synchronously so there is no contention.
+    struct ExitRecorder {
+        code: Mutex<Option<i32>>,
+    }
+
+    impl ExitRecorder {
+        fn new() -> Self {
+            Self {
+                code: Mutex::new(None),
+            }
+        }
+        fn record(&self, code: i32) {
+            *self.code.lock().expect("ExitRecorder mutex poisoned") = Some(code);
+        }
+        fn taken(&self) -> Option<i32> {
+            *self.code.lock().expect("ExitRecorder mutex poisoned")
+        }
+    }
+
+    /// SIGHUP returns `Reload` without touching the actuator-coord
+    /// channels — the inner function defers the apply effect to the
+    /// caller; the only side effect inside the inner function is the
+    /// `tracing::info!` log.
+    #[test]
+    fn sighup_returns_reload_without_pulsing_actuator() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        let mut first_term: Option<Instant> = None;
+        let action =
+            dispatch_signal_inner(SIGHUP, Instant::now(), &mut first_term, &fixture.io, |c| {
+                recorder.record(c);
+            });
+        assert_eq!(action, SignalAction::Reload);
+        assert!(first_term.is_none(), "SIGHUP must not arm first_term");
+        assert!(fixture.shutdown_actuator_rx.is_empty());
+        assert!(fixture.hard_shutdown_actuator_rx.is_empty());
+        assert_eq!(recorder.taken(), None, "exit_fn not invoked on SIGHUP");
+    }
+
+    /// First SIGTERM: arms `first_term`, pulses
+    /// `shutdown_actuator_tx`, returns `Shutdown`. Does NOT pulse
+    /// `hard_shutdown_actuator_tx` or invoke `exit_fn`.
+    #[test]
+    fn first_sigterm_arms_first_term_and_pulses_shutdown() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        let mut first_term: Option<Instant> = None;
+        let now = Instant::now();
+        let action = dispatch_signal_inner(SIGTERM, now, &mut first_term, &fixture.io, |c| {
+            recorder.record(c);
+        });
+        assert_eq!(action, SignalAction::Shutdown);
+        assert_eq!(first_term, Some(now));
+        assert!(
+            !fixture.shutdown_actuator_rx.is_empty(),
+            "shutdown pulse queued",
+        );
+        assert!(
+            fixture.hard_shutdown_actuator_rx.is_empty(),
+            "hard-shutdown must NOT fire on first observation",
+        );
+        assert_eq!(recorder.taken(), None);
+    }
+
+    /// First SIGINT mirrors first SIGTERM — pinned separately because
+    /// the dispatch branches on both signums identically; a future
+    /// refactor that accidentally limited the arm to SIGTERM would
+    /// fail this test.
+    #[test]
+    fn first_sigint_arms_first_term_and_pulses_shutdown() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        let mut first_term: Option<Instant> = None;
+        let action =
+            dispatch_signal_inner(SIGINT, Instant::now(), &mut first_term, &fixture.io, |c| {
+                recorder.record(c);
+            });
+        assert_eq!(action, SignalAction::Shutdown);
+        assert!(first_term.is_some());
+        assert!(!fixture.shutdown_actuator_rx.is_empty());
+    }
+
+    /// Second SIGINT within the hard-exit window: pulses
+    /// `hard_shutdown_actuator_tx`, waits for the planted confirm
+    /// pulse, and invokes `exit_fn(HARD_EXIT_CODE)`. Returns
+    /// `HardExit`.
+    #[test]
+    fn second_sigint_within_window_triggers_hard_exit() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        // Plant the actuator's "phase 3 done" pulse so the inner
+        // function's `recv_timeout` returns `Ok(())` immediately
+        // rather than waiting the full HARD_SHUTDOWN_CONFIRM_TIMEOUT.
+        fixture
+            .hard_shutdown_done_tx
+            .try_send(())
+            .expect("plant confirm pulse");
+        let mut first_term: Option<Instant> = None;
+
+        let t0 = Instant::now();
+        let _ = dispatch_signal_inner(SIGINT, t0, &mut first_term, &fixture.io, |c| {
+            recorder.record(c);
+        });
+        assert_eq!(recorder.taken(), None, "first SIGINT does not escalate");
+
+        let t1 = t0 + Duration::from_millis(100);
+        let action = dispatch_signal_inner(SIGINT, t1, &mut first_term, &fixture.io, |c| {
+            recorder.record(c);
+        });
+        assert_eq!(action, SignalAction::HardExit);
+        assert_eq!(recorder.taken(), Some(crate::signals::HARD_EXIT_CODE),);
+        assert!(
+            !fixture.hard_shutdown_actuator_rx.is_empty(),
+            "second SIGINT must fire hard-shutdown pulse",
+        );
+    }
+
+    /// Second SIGTERM *outside* the hard-exit window does NOT
+    /// escalate — it re-arms `first_term` as if it were the first
+    /// observation, and pulses `shutdown_actuator_tx` again.
+    #[test]
+    fn second_sigterm_outside_window_does_not_escalate() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        let mut first_term: Option<Instant> = None;
+
+        let t0 = Instant::now();
+        let _ = dispatch_signal_inner(SIGTERM, t0, &mut first_term, &fixture.io, |c| {
+            recorder.record(c);
+        });
+        // Drain the first shutdown pulse so the channel has room for
+        // the second (bounded(1)).
+        let _ = fixture.shutdown_actuator_rx.try_recv();
+
+        // 3s later — outside the 2s HARD_EXIT_WINDOW.
+        let t1 = t0 + Duration::from_secs(3);
+        let action = dispatch_signal_inner(SIGTERM, t1, &mut first_term, &fixture.io, |c| {
+            recorder.record(c);
+        });
+        assert_eq!(action, SignalAction::Shutdown);
+        assert_eq!(first_term, Some(t1), "first_term re-armed to t1");
+        assert!(!fixture.shutdown_actuator_rx.is_empty());
+        assert!(fixture.hard_shutdown_actuator_rx.is_empty());
+        assert_eq!(recorder.taken(), None);
+    }
+
+    /// An unknown signal value returns `None` without side effects —
+    /// the production signal-hook handler only registers
+    /// `HANDLED_SIGNALS`, but the inner function defends against a
+    /// future addition that wires through an unexpected signum.
+    #[test]
+    fn unknown_signum_returns_none() {
+        let fixture = fixture();
+        let recorder = ExitRecorder::new();
+        let mut first_term: Option<Instant> = None;
+        let action =
+            dispatch_signal_inner(SIGUSR1, Instant::now(), &mut first_term, &fixture.io, |c| {
+                recorder.record(c);
+            });
+        assert_eq!(action, SignalAction::None);
+        assert!(first_term.is_none());
+        assert!(fixture.shutdown_actuator_rx.is_empty());
+        assert!(fixture.hard_shutdown_actuator_rx.is_empty());
+        assert_eq!(recorder.taken(), None);
+    }
 }

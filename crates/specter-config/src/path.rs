@@ -334,9 +334,10 @@ mod tests {
     fn non_directory_traversal_rejected_as_inaccessible() {
         // `/regular-file/missing` triggers ENOTDIR — a non-`NotFound`
         // `io::Error` — which collapses to `Inaccessible`. Exercises the
-        // operator-facing F-HIGH-1 arm without root-skip gymnastics.
-        // EACCES via `chmod 0` follows the same code path; verified
-        // manually (we can't drop privileges inside a test process).
+        // arm that maps any non-`NotFound` I/O error to `Inaccessible`,
+        // without root-skip gymnastics. EACCES via `chmod 0` follows the
+        // same code path; verified manually (we can't drop privileges
+        // inside a test process).
         let td = tempfile::tempdir().unwrap();
         let canon = canon_tempdir(&td);
         let file = canon.join("regular-file");

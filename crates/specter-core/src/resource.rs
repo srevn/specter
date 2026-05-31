@@ -10,13 +10,12 @@
 //! [`crate::Tree::name`] (no standalone `segment()` accessor — the
 //! key type is a Tree-internal detail).
 //!
-//! `kind` is `pub(crate)` — three external read sites historically
-//! disagreed on what `Unknown` means (pattern bypass vs File-shape vs
-//! not-Dir). Forcing reads through [`Resource::kind`] (returns
-//! `Option<ResourceKind>`) and [`Resource::kind_or_file`] (collapses
-//! Unknown to File-shape, the backend-mask convention) makes that
-//! choice explicit at every call site. Writes go through
-//! [`crate::Tree::set_kind`].
+//! `kind` is `pub(crate)` — external read sites disagree on what
+//! `Unknown` means (pattern bypass vs File-shape vs not-Dir). Forcing
+//! reads through [`Resource::kind`] (returns `Option<ResourceKind>`)
+//! and [`Resource::kind_or_file`] (collapses Unknown to File-shape, the
+//! backend-mask convention) makes that choice explicit at every call
+//! site. Writes go through [`crate::Tree::set_kind`].
 //!
 //! `contributions` is `pub(crate)` — every engine-side mutation flows
 //! through the typed methods on `Resource`
@@ -367,10 +366,9 @@ impl Resource {
     /// Resource. Derived from [`Self::contributions`]; `0` ⇔ the
     /// Resource is not watched.
     ///
-    /// Replaces the old `watch_demand: u32` field. Callers comparing
-    /// `> 0` should prefer [`Self::is_watched`] for clarity; the
-    /// numeric accessor exists for tests and diagnostic logs that
-    /// quote the count.
+    /// Callers comparing `> 0` should prefer [`Self::is_watched`] for
+    /// clarity; the numeric accessor exists for tests and diagnostic
+    /// logs that quote the count.
     #[must_use]
     pub fn watch_demand(&self) -> u32 {
         // Typical fan-out is single-digit; cast is safe well below
@@ -389,8 +387,7 @@ impl Resource {
     /// per-Resource events mask the sensor sees on `WatchOp::Watch`.
     /// `ClassSet::EMPTY` when the Resource has no contributors.
     ///
-    /// Replaces the old `events_union: ClassSet` cached field. The
-    /// fold is O(k) over the contributions map; k is bounded by
+    /// The fold is O(k) over the contributions map; k is bounded by
     /// typical multi-Profile fan-out (single-digit).
     #[must_use]
     pub fn events_union(&self) -> ClassSet {
@@ -442,8 +439,8 @@ impl Resource {
     /// `proxy_promoters` in lockstep with `Promoter.proxies`.
     /// Idempotent: an `id` already present (cross-Promoter sharing on
     /// one slot, or a re-registration of the same Promoter) is left
-    /// untouched and reports no edge — this absorbs the dedup the
-    /// engine's `register_proxy` previously open-coded.
+    /// untouched and reports no edge — this mutator owns the dedup the
+    /// engine's `register_proxy` relies on.
     ///
     /// Returns `true` iff this call traversed the empty → non-empty
     /// retention edge (the slot just gained its first proxy back-ref),
@@ -823,7 +820,7 @@ mod tests {
     /// edge exactly once. A second *distinct* id is an intermediate
     /// (vector already non-empty: no edge); a *duplicate* id is an
     /// idempotent no-op (no edge, no growth) — the dedup the engine's
-    /// `register_proxy` previously open-coded now lives in the mutator.
+    /// `register_proxy` relies on lives in the mutator.
     #[test]
     fn insert_proxy_promoter_reports_edge_dedups_and_is_intermediate_for_second_id() {
         use crate::ids::PromoterId;

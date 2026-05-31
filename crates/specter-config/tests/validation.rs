@@ -65,8 +65,8 @@ fn issue_kind_path_contains_parent_dir() {
 /// non-`NotFound` `io::Error` — which routes through
 /// [`PathError::Inaccessible`] to [`IssueKind::PathInaccessible`].
 /// Exercises the same arm `chmod 0` (EACCES) hits, without the
-/// root-skip gymnastics; the EACCES surface is verified manually per
-/// the audit's §12 operator gate.
+/// root-skip gymnastics; the EACCES surface is verified manually
+/// (we can't drop privileges inside a test process).
 #[cfg(unix)]
 #[test]
 fn issue_kind_path_inaccessible() {

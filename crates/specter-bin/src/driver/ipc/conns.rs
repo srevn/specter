@@ -184,13 +184,11 @@ pub(in crate::driver) enum ConnRole {
 /// been dropped since `since`, the wall-clock the `0 → 1` transition
 /// captured ([`MissedWindow::Open`]).
 ///
-/// Replaces the prior convention-enforced
-/// `(missed: u32, first_dropped_at: Option<SystemTime>)` pair where
-/// the rule `missed > 0 ⇒ first_dropped_at.is_some()` lived in a
-/// rustdoc paragraph. With the sum type, the impossible state
-/// (`count > 0 ∧ since.is_none()`) is structurally unrepresentable —
-/// the defensive `unwrap_or(at)` in [`ConnState::try_dispatch_diag`]'s
-/// marker construction is no longer needed.
+/// The sum type makes the impossible state (`count > 0 ∧
+/// since.is_none()`) structurally unrepresentable — the
+/// `count > 0 ⇒ since.is_some()` invariant is enforced by the type,
+/// not a rustdoc rule, so [`ConnState::try_dispatch_diag`] needs no
+/// defensive `unwrap_or(at)` at marker construction.
 ///
 /// Operators reading a `_missed` marker see start-of-window time
 /// (when the drops began), not flush time (when the daemon got

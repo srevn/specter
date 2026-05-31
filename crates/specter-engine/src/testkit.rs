@@ -3,8 +3,9 @@
 //! Gated behind the `testkit` feature (and `cfg(test)` for inline unit
 //! tests). Written against the **public** `Engine` surface only, so one
 //! body serves both the integration suite (`tests/*.rs`) and the inline
-//! unit tests (`src/*_tests.rs`) — the access wall that previously
-//! forced two divergent copies of every driver is dissolved here.
+//! unit tests (`src/*_tests.rs`) — touching no `pub(crate)` internals,
+//! it crosses no access wall that would force two divergent copies of
+//! every driver.
 //!
 //! Discipline: every fn drives the engine and returns *all* the
 //! `StepOutput`s it produced. Assertions, topology, and the scenario
@@ -600,8 +601,7 @@ pub fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
 ///
 /// The single-root sibling of [`pre_place_dir`] (an FS-root chain): the
 /// anchor a subtree-root Sub attaches at. A File-anchor test overrides
-/// the kind at the call site (`set_kind(.., File)`) — exactly the shape
-/// the hand-rolled copies carried.
+/// the kind at the call site (`set_kind(.., File)`).
 pub fn anchor_dir(e: &mut Engine, name: &str) -> ResourceId {
     let r = e.tree_mut().ensure_root(name, ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);

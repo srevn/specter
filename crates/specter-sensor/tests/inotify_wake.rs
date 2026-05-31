@@ -1,4 +1,4 @@
-//! Non-blocking-drain semantics on the post-Phase-1 inotify watcher.
+//! Non-blocking-drain semantics on the inotify watcher.
 //!
 //! The trait contract: [`FsWatcher::drain_ready`] is non-blocking,
 //! [`AsFd::as_fd`] is the readiness substrate, and the caller blocks

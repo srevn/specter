@@ -685,13 +685,9 @@ mod tests {
     }
 
     /// Last stage Failed ⇒ cascade fires *backward* to alive earlier
-    /// stages. The sequential design's `idx+1..n` skip was sound only
-    /// because earlier stages had already been drained by the time
-    /// cascade fired; under parallel drain, earlier stages may still
-    /// be alive, so cascade must visit them.
-    ///
-    /// This case is impossible to express under the old sequential
-    /// PipeWaiter — the test pins the parallel-only invariant.
+    /// stages. Under parallel drain, earlier stages may still be alive
+    /// when the cascade fires, so it must visit them rather than skip
+    /// `idx+1..n`. The test pins this parallel-drain invariant.
     #[test]
     fn last_failed_cascades_backward_to_alive_earlier_stages() {
         let (p0, p0_waiter) = BlockingProbe::new(EffectOutcome::Failed(Termination::Signal(15)));

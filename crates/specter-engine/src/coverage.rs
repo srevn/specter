@@ -144,11 +144,11 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut 
 /// continues to the next Resource ancestor.
 ///
 /// **Pure, never cached.** The result is a total function of `(tree,
-/// profiles, child)` — no peer state, no stored edge. It used to feed
-/// a per-Profile `parent_profile` cache; that cache was deleted
-/// because a refcount keyed on a recomputable derivation could not be
-/// kept balanced across mid-burst topology moves. The derivation now
-/// stands alone: [`chain_reaches`] climbs it hop-by-hop and
+/// profiles, child)` — no peer state, no stored edge. It is not
+/// cached into a per-Profile `parent_profile` edge: a refcount keyed
+/// on a recomputable derivation cannot be kept balanced across
+/// mid-burst topology moves. The derivation stands alone:
+/// [`chain_reaches`] climbs it hop-by-hop and
 /// [`has_active_standard_descendant`] evaluates the reconfirm
 /// predicate fresh from it. `pub(crate)` — engine-internal; no
 /// cross-crate consumer.
@@ -240,9 +240,8 @@ pub(crate) fn covering_profiles(
 /// **and** has `ancestor` on its transitive
 /// [`nearest_covering_ancestor`] chain.
 ///
-/// The derived, never-cached replacement for the old
-/// `Profile.dirty_descendants > 0` refcount. Same chain semantics —
-/// the *transitive nearest-covering-ancestor chain*, **not** the raw
+/// A derived, never-cached predicate over the
+/// *transitive nearest-covering-ancestor chain* — **not** the raw
 /// Tree subtree and **not** a single direct [`covers`] test (`covers`
 /// is not transitive: an intermediate broader Profile keeps a deeper
 /// one on `ancestor`'s chain even where `ancestor`'s own
@@ -1087,8 +1086,7 @@ mod tests {
 
     // ===== has_active_standard_descendant =====
     //
-    // The derived, never-cached replacement for the old
-    // `dirty_descendants > 0` refcount: "is some Active-Standard
+    // A derived, never-cached predicate: "is some Active-Standard
     // strict-descendant Profile still on this ancestor's transitive
     // nearest-covering-ancestor chain?" Units pin the load-bearing
     // distinctions: transitive chain ≠ subtree+direct-`covers`, strict

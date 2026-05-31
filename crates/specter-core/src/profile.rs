@@ -58,11 +58,11 @@ use std::time::{Duration, Instant};
 /// ([`PostFireBurst::timer_token`] folds it to `None` for post-fire
 /// phases, so the engine's stale-drain lazily collects the heap
 /// entry). Its one fresh accumulator is the post-fire
-/// `dirty`, which `absorb_event_into_fire_tail` feeds; it is
-/// no longer a proof-obligation source (the `WholeSubtree` walk
-/// observes everything regardless), only the fire-tail residual restart
-/// seed, reset at every `Rebasing` re-entry so a `Stable` terminal
-/// restarts only on the genuine final-window race.
+/// `dirty`, which `absorb_event_into_fire_tail` feeds; it is not a
+/// proof-obligation source (the `WholeSubtree` walk observes everything
+/// regardless), only the fire-tail residual restart seed, reset at
+/// every `Rebasing` re-entry so a `Stable` terminal restarts only on
+/// the genuine final-window race.
 #[derive(Debug)]
 pub enum ActiveBurst {
     PreFire(PreFireBurst),
@@ -143,8 +143,8 @@ impl DirtyProvenance {
     /// Every captured path is at-or-under the burst's probe target by
     /// construction (the target is the live id at [`Self::lca_path`], or
     /// the anchor fallback — both ancestors-or-equal of every value), so
-    /// the prior "intersect with the target subtree" filter is a
-    /// tautology and is gone. Never empty for a Standard pre-fire burst.
+    /// no "intersect with the target subtree" filter is needed: it would
+    /// be a tautology. Never empty for a Standard pre-fire burst.
     #[must_use]
     pub fn chains(&self) -> BTreeSet<Arc<Path>> {
         self.0.values().map(Arc::clone).collect()
@@ -521,10 +521,10 @@ pub enum PreFirePhase {
 /// diagnostic distinguishes them). It is also the field
 /// [`ProfileState::in_active_standard_burst`] reads — the reconfirm
 /// query treats a post-fire Standard burst as still covering its
-/// ancestors, exactly the lifetime the old refcount bracketed. The
-/// fire-tail residual restart is **not** gated on it: the reconfirm is
-/// a fresh query, not a per-origin refcount, so a Seed origin restarts
-/// just as a Standard one does.
+/// ancestors for the burst's full lifetime. The fire-tail residual
+/// restart is **not** gated on it: the reconfirm is a fresh query, not
+/// a per-origin refcount, so a Seed origin restarts just as a Standard
+/// one does.
 ///
 /// **Single construction seam.** Every `PostFireBurst` is born fresh
 /// — `ceiling: CeilingState::NotStarted`, `last_certified_hash:
@@ -643,13 +643,13 @@ pub struct PostFireBurst {
 /// rebase samples — the `Rebasing ⇄ Settling` retry loop, entered only
 /// on a [`QuiescenceVerdict::Retry`]. The post-fire mirror of
 /// [`PreFirePhase::Batching`] in its retry-spacing role (the natural
-/// rebase entry is probe-first, so `Settling` no longer debounces the
-/// command's own event tail). No [`ProbeSlot`]: no probe is in flight
-/// during the spacing window (the slot lives on `Rebasing`), only the
-/// settle timer. `absorb_event_into_fire_tail` updates
-/// [`PostFireBurst::last_event_time`] on every absorbed `FsEvent`;
-/// `handle_post_fire_settle_expired` reads the same field on expiry
-/// and either reschedules (events arrived since the timer was
+/// rebase entry is probe-first, so `Settling` debounces only the retry
+/// loop, not the command's own event tail). No [`ProbeSlot`]: no probe
+/// is in flight during the spacing window (the slot lives on
+/// `Rebasing`), only the settle timer. `absorb_event_into_fire_tail`
+/// updates [`PostFireBurst::last_event_time`] on every absorbed
+/// `FsEvent`; `handle_post_fire_settle_expired` reads the same field on
+/// expiry and either reschedules (events arrived since the timer was
 /// scheduled) or transitions to `Rebasing`. `settle_timer` is the
 /// phase's correlation token, exactly as `Batching`'s is.
 #[derive(Debug)]
@@ -846,11 +846,11 @@ pub enum StableReason {
 /// **Over-discrimination axiom.** Every variant must have a dispatch
 /// consumer that distinguishes it from every other variant. A field
 /// with no consumer is over-discrimination — collapse to the
-/// next-coarser variant. Today: the prior `Unstable` collapsed into
-/// `Retry`; the prior transient `Undischarged`'s `first_unread`
-/// dropped at the fold (the dispatch never read it). Auditable in one
-/// grep: every variant tag must appear in a dispatch arm whose body
-/// diverges from at least one sibling.
+/// next-coarser variant. So `Retry` subsumes the unstable case rather
+/// than a separate `Unstable` variant, and transient `Undischarged`
+/// carries no `first_unread` (the dispatch never reads it). Auditable
+/// in one grep: every variant tag must appear in a dispatch arm whose
+/// body diverges from at least one sibling.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum QuiescenceVerdict {
     /// Walker certified + quiescence proven. Fire / pin / rebase
@@ -1541,10 +1541,9 @@ pub enum ReapTrigger {
 ///   reader / two-site writer surface that drives it. Default
 ///   ([`BurstFinish::ReturnToIdle`]) returns the Profile to Idle at
 ///   burst-end; [`BurstFinish::Reap`] dispatches `reap_profile`
-///   instead. The pre-Phase-4 shape carried [`BurstFinish::Reap`] as a
-///   `pub` boolean on [`Profile`] (the now-deleted `reap_pending`
-///   field); the variant payload structurally bans the illegal
-///   `(Idle, reap_pending = true)` combination.
+///   instead. Carrying the reap directive on the `Active` payload
+///   (rather than a Profile-level boolean) structurally bans the
+///   illegal "reap-pending while Idle" combination.
 ///
 /// I5 (at most one outstanding probe per Profile) is a
 /// **representability** property: the in-flight probe's liveness *and*
@@ -1643,8 +1642,8 @@ impl ProfileState {
     ///
     /// Read by `emit_effects` (suppress emission on zombie),
     /// `on_effect_complete` (route last completion), `handle_gate_deadline`
-    /// (zombie-skip), and indirectly by every test that previously
-    /// inspected `Profile.reap_pending`.
+    /// (zombie-skip), and indirectly by every test that inspects the
+    /// reap directive.
     #[must_use]
     pub const fn burst_finish(&self) -> Option<BurstFinish> {
         match self {
@@ -1806,19 +1805,17 @@ impl ProfileState {
     /// (`Awaiting | Rebasing | Settling`). Wildcard-free, mirroring
     /// [`Self::is_draining`].
     ///
-    /// This is the per-Profile half of the derived replacement for the
-    /// old `dirty_descendants` refcount. The refcount's `+1`
-    /// (`start_standard_burst`) / `-1` (`finish_burst_to_idle`) bracketed
-    /// a Standard burst's *entire* lifetime — pre-fire through post-fire,
-    /// across a fire-tail residual restart (the `+1` was held, never
-    /// re-taken). Spanning both pre- and post-fire here is exactly that
-    /// lifetime evaluated fresh: a Standard descendant counts as covering
-    /// its ancestor from burst start until `finish_burst_to_idle`,
-    /// whatever phase it is in. A restarted residual burst is
-    /// `intent: Standard` by construction
+    /// This is the per-Profile half of the Standard-descendant coverage
+    /// query. A Standard descendant covers its ancestor for the burst's
+    /// *entire* lifetime — pre-fire through post-fire, across a
+    /// fire-tail residual restart — so spanning both pre- and post-fire
+    /// here evaluates that lifetime fresh: the descendant counts as
+    /// covering its ancestor from burst start until
+    /// `finish_burst_to_idle`, whatever phase it is in. A restarted
+    /// residual burst is `intent: Standard` by construction
     /// ([`PostFireBurst::into_pre_fire_residual`]), so it stays counted
     /// with no special accounting. Seed bursts return `false` — they
-    /// never contributed to the old refcount.
+    /// never contribute coverage.
     ///
     /// Read through [`crate::ProfileState::in_active_standard_burst`] →
     /// `.state()` exactly as [`Self::is_draining`] is (no `Profile`
@@ -2149,9 +2146,9 @@ impl DescentState {
 ///   on this edge and never calls [`advance`](Self::advance).
 /// - [`advance`](Self::advance) consumes the head and is debug-asserted
 ///   non-terminal at call time. The terminal arm has already routed
-///   through anchor materialization in production, which replaces the
-///   `Pending` lifecycle entirely; advance is structurally never
-///   reachable there.
+///   through anchor materialization in production, which ends the
+///   `Pending` lifecycle; advance is structurally never reachable
+///   there.
 /// - [`prepend`](Self::prepend) is the rewind path's mutator: a
 ///   `Vanished` response on `current_prefix` re-injects the prefix's own
 ///   segment as the new head while the prefix shifts up one level.
@@ -5339,8 +5336,8 @@ mod tests {
         );
     }
 
-    /// Rebasing carries no counter — a late completion the post-fire
-    /// counter no longer tracks.
+    /// Rebasing carries no outstanding-effect counter, so a late
+    /// completion in Rebasing folds to `NotAwaiting`.
     #[test]
     fn note_effect_completion_on_rebasing_is_not_awaiting() {
         let mut post = PostFireBurst::new(
@@ -5851,8 +5848,7 @@ mod tests {
     /// closure by value, installs the [`ProfileState`] the closure
     /// computes from it, threads the auxiliary `R` back out, and
     /// reconciles [`ProfileMap::nonsteady`] across the one resulting
-    /// edge — the single reconcile that replaced the retired
-    /// swap-to-Idle dance's two. A stale id short-circuits to `None`
+    /// edge in a single reconcile. A stale id short-circuits to `None`
     /// without running the closure: the `?` the fire-boundary callers
     /// (`finish_burst_to_idle`'s `.flatten()`) branch on.
     #[test]

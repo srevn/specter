@@ -387,11 +387,9 @@ mod tests {
     /// with per-iteration remaining-budget recompute.
     ///
     /// This is the test-side substitute for the watcher's old
-    /// `wait(Some(deadline))` block: post-Phase-1 the watcher is
-    /// non-blocking and exposes [`AsFd`], so a test that needs to
-    /// "wait for readability under a watchdog" polls the fd directly.
-    /// A reactor-driven binary (Phase 2) will own the equivalent at
-    /// the `DriverHub` boundary.
+    /// `wait(Some(deadline))` block: the watcher is non-blocking and
+    /// exposes [`AsFd`], so a test that needs to "wait for readability
+    /// under a watchdog" polls the fd directly.
     #[allow(unsafe_code)]
     fn wait_fd_readable_until(fd: BorrowedFd<'_>, deadline: Instant) -> io::Result<bool> {
         loop {

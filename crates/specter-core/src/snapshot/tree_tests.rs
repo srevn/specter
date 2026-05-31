@@ -1006,12 +1006,12 @@ fn splice_replacement_changes_dir_hash_uncached_recompute_correct() {
 
 #[test]
 fn splice_target_outside_observed_returns_crossed_uncovered() {
-    // Target is in the Tree but outside the prior anchor's subtree.
-    // Pre-PR behavior: wholesale-replace with `replacement` (corrupted
-    // root). New behavior: SpliceResult::CrossedUncovered — the caller
-    // keeps its own Arc handle to the prior view (this test cloned it
-    // before passing to splice), preserving Profile.current's anchor-
-    // rooted invariant. Caller (graft) emits
+    // Target is in the Tree but outside the prior anchor's subtree, so
+    // splice returns SpliceResult::CrossedUncovered rather than
+    // wholesale-replacing with `replacement` (which would corrupt the
+    // root). The caller keeps its own Arc handle to the prior view
+    // (this test cloned it before passing to splice), preserving
+    // Profile.current's anchor-rooted invariant. Caller (graft) emits
     // Diagnostic::SpliceCrossedUncovered.
     let mut tree = Tree::new();
     let ids = ensure_chain(&mut tree, &["anchor"]);

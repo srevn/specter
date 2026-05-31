@@ -287,8 +287,8 @@ fn conditional_when_then_lowers_to_predicate_plus_then() {
 }
 
 /// Conditional with `when` + `then` + `else` lowers to a three-op
-/// program (the explicit Jump opcode is gone — the CFG-shaped IR encodes
-/// the skip via edges instead). Layout:
+/// program whose skip past the else-branch is encoded by branch edges,
+/// with no explicit jump opcode. Layout:
 ///
 /// - op 0: predicate Exec — `on_ok = Continue(1)` (enter then),
 ///   `on_failed = Continue(2)` (enter else).

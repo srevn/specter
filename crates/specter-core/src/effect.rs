@@ -82,8 +82,8 @@ pub enum EffectTarget {
     /// baseline existed.
     Subtree { diff: Option<Arc<Diff>> },
     /// Per-stable-file fire. `target_path == anchor_path.join(segment)`.
-    /// `diff` is mandatory: the type guarantees what
-    /// `PerStableFile ⇒ needs_diff` previously enforced by convention.
+    /// `diff` is mandatory: the type guarantees the
+    /// `PerStableFile ⇒ needs_diff` invariant.
     PerFile {
         resource: ResourceId,
         segment: CompactString,

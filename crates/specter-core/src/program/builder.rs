@@ -595,12 +595,12 @@ mod tests {
 
     /// A handle minted by one builder used against a smaller one is
     /// *guaranteed* detected — the origin range-check is total and runs
-    /// before the target is examined, so detection no longer depends on
+    /// before the target is examined, so detection does not depend on
     /// the target accidentally tripping a bounds check. Here the target
-    /// is a forward `Continue` that, under the old target-first order,
-    /// would have surfaced `OutOfBoundsEdge`; now the stale origin is
-    /// caught first. The `Terminate` / `Escape` targets (where the
-    /// target check is a no-op) are pinned by
+    /// is a forward `Continue`; the stale origin is caught by the origin
+    /// check before the target (which would also surface
+    /// `OutOfBoundsEdge`) is examined. The `Terminate` / `Escape`
+    /// targets (where the target check is a no-op) are pinned by
     /// `stale_handle_on_terminate_or_escape_is_reported_not_panicked` —
     /// together they cover every `BranchTarget`.
     #[test]

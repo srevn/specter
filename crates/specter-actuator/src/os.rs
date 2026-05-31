@@ -742,7 +742,7 @@ mod tests {
     fn spawn_succeeds_above_macos_posix_spawn_open_max() {
         // The kernel's `OPEN_MAX` is 10240 on every supported macOS version.
         // Open `OPEN_MAX + headroom` fds so we are unambiguously past the
-        // failure threshold for the legacy posix_spawn path; even if a
+        // failure threshold for the posix_spawn path; even if a
         // future macOS update raises the limit, this test still exercises
         // the fork+exec route at scale.
         const FDS_TO_OPEN: usize = 10_500;

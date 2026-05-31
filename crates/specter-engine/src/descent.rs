@@ -409,11 +409,11 @@ impl crate::Engine {
         // surface as `StaleProbeResponse`, not reach this point. The
         // snapshot itself carries pure content; engine identity stays
         // engine-side (here, `descent.current_prefix()`).
-        // `DescentRemaining` is non-empty by type invariant — the prior
-        // defensive empty-arm + `descent_invariant_diagnostic` /
-        // `release_owner_descent_prefix` recovery is no longer
-        // reachable (and the corresponding `Diagnostic` variants have
-        // been retired).
+        // `DescentRemaining` is non-empty by type invariant, so there
+        // is no defensive empty-arm recovery path (no
+        // `descent_invariant_diagnostic` /
+        // `release_owner_descent_prefix` arm, and no corresponding
+        // `Diagnostic` variants).
         let next_segment = descent.remaining_components().head().clone();
         let is_terminal = descent.remaining_components().is_terminal();
 
@@ -820,8 +820,8 @@ impl crate::Engine {
         }
         // Liveness gate: an `FsEvent` for an owner no longer descending
         // is a benign post-transition race — nothing to re-probe. The
-        // target is no longer extracted here; the choke reads
-        // `current_prefix` back off the descent slot at emit time.
+        // choke reads `current_prefix` back off the descent slot at
+        // emit time.
         if self.descent_state(owner).is_none() {
             return;
         }

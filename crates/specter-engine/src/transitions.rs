@@ -473,8 +473,8 @@ impl Engine {
     /// descent prefix — each emitting one honest `WalkerContractViolated`
     /// and self-healing on the next `FsEvent`. The match is total over
     /// `ProfileProbeRoute`'s three variants: the Promoter-only
-    /// `Enumerating` class is unrepresentable here, so the owner-split
-    /// removed the last defensive cross-owner arm at the type level.
+    /// `Enumerating` class is unrepresentable here, so there is no
+    /// defensive cross-owner arm at the type level.
     fn on_profile_probe_response(
         &mut self,
         profile_id: ProfileId,
@@ -615,9 +615,8 @@ impl Engine {
     /// proof/descent split is parsed once at
     /// the demux seam, so the structural `DirEnumerated` shape — a
     /// walker-contract violation on a quiescence/rebase probe — is
-    /// unrepresentable here and the old defensive arm is gone. The
-    /// certifier sees only the four shapes a proof probe can legally
-    /// resolve to.
+    /// unrepresentable here, with no defensive arm. The certifier sees
+    /// only the four shapes a proof probe can legally resolve to.
     ///
     /// **Lowering.** `AnchorOk` → `(File, Authoritative)` — a single
     /// `lstat` has no mtime-skip concept, so an anchor read is
@@ -703,7 +702,7 @@ impl Engine {
         // Lower the typed proof outcome to (snapshot, authority).
         // `Vanished` / `Failed` return as-is for the caller's per-route
         // cleanup; `DirEnumerated` is unrepresentable here — parsed out
-        // at the demux seam, so the old defensive arm is gone.
+        // at the demux seam, so no defensive arm is needed.
         let (snap, authority) = match proof {
             ProofOutcome::AnchorOk(leaf) => {
                 (TreeSnapshot::File(leaf), ProofAuthority::Authoritative)
@@ -1323,7 +1322,7 @@ impl Engine {
     /// freshly-applied static Subs. Within each side, the buckets are
     /// name-disjoint by diff construction, and each `find_by_name`
     /// reads the live registry *after* prior mutations in the same
-    /// step — exactly the id the bin mirror used to supply.
+    /// step, resolving the current id.
     ///
     /// All resulting ops (across every attach / detach / rebind in the
     /// diff) merge into a single sorted `StepOutput`.
@@ -1523,9 +1522,9 @@ impl Engine {
         }
 
         // Watch-root parent claimers: clear the flag. The Profile's
-        // anchor stays watched (different `resource`), but auto-recovery
-        // on rename / recreation is no longer possible — operator
-        // restart is required to re-establish the parent watch.
+        // anchor stays watched (different `resource`), but
+        // re-establishing the parent watch after a rename / recreation
+        // requires an operator restart; there is no auto-recovery.
         for pid in parent_claimers {
             self.release_watch_root_parent_claim(pid, out);
             out.diagnostics.push(Diagnostic::ProfileClaimPurged {
@@ -1614,8 +1613,8 @@ impl Engine {
         // drops a `ProbeSlot`, so no probe can be orphaned (exactly as
         // the Profile `parent_claimers` loop carries no
         // `cancel_owner_probe`). The Promoter's proxies stay watched
-        // (different `resource`); auto-recovery on terminus recreation
-        // is no longer possible — operator restart required.
+        // (different `resource`); recovery after a terminus recreation
+        // requires an operator restart; there is no auto-recovery.
         for qid in promoter_prefix_parent_claimers {
             self.release_promoter_prefix_parent_claim(qid, out);
             out.diagnostics.push(Diagnostic::PromoterClaimPurged {
@@ -1821,8 +1820,8 @@ impl Engine {
             let action = match self.promoters.get(qid) {
                 None => continue,
                 Some(q) => match q.state() {
-                    // Target is no longer carried — `emit_owner_probe`
-                    // reads `current_prefix` back off the descent slot.
+                    // `emit_owner_probe` reads `current_prefix` back off
+                    // the descent slot; the target is not carried here.
                     PromoterState::PrefixPending(_) if !probe_in_flight => {
                         PromoterReseedAction::DescentProbe
                     }
@@ -4105,8 +4104,8 @@ impl Consequence {
 }
 
 /// One Sub's fire verdict in an [`Engine::emit_effects`] pass — the
-/// total fold of the three gates that used to sit inline in the loop.
-/// Distinguishing `SuppressDedup` from `SkipScope` keeps the *reason*
+/// total fold of the three fire gates. Distinguishing `SuppressDedup`
+/// from `SkipScope` keeps the *reason*
 /// inspectable (unit table, future per-cause metrics) even though the
 /// loop currently treats both as "don't emit".
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
@@ -4125,7 +4124,7 @@ enum FireVerdict {
 
 /// Total, pure fire decision over `(scope, mode)` for one Sub. No
 /// engine state, no `Effect` sink — exhaustively unit-testable.
-/// Folds the three formerly-scattered `continue` gates:
+/// Folds three fire gates:
 ///
 /// - **SeedDrift Subtree narrowing.** A `SubtreeRoot` Sub fires under
 ///   SeedDrift only if it is in the pre-filtered `drifted` set.

@@ -448,14 +448,11 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
 
 /// Anchor-loss mid-burst with a dirty descendant: the abnormal-end
 /// path through `Tree::vacate` cleanly reaps the descendant slot with
-/// the kernel-watch protocol balanced. With suppress deleted, `vacate`
-/// is a single-protocol (`Unwatch`-only) terminus: the failure mode
-/// that once tripped a suppress-precondition `debug_assert!`
-/// (dev-panic / silent release-orphan) is no longer constructable.
-/// This pins the *positive* invariant that replaces the old
-/// Suppress/Unsuppress balance — exactly one `Unwatch(b)` closes the
-/// descendant's watch via the terminus, the slot reaps, and the
-/// Profile reverts to anchor-loss state.
+/// the kernel-watch protocol balanced. `vacate` is a single-protocol
+/// (`Unwatch`-only) terminus, so no suppress-precondition can be
+/// violated. This pins the *positive* invariant — exactly one
+/// `Unwatch(b)` closes the descendant's watch via the terminus, the
+/// slot reaps, and the Profile reverts to anchor-loss state.
 ///
 /// Lifecycle reproduced:
 /// 1. Profile P at `/a` (Dir), STRUCTURE-only, with materialised

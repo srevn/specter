@@ -168,10 +168,10 @@ pub(in crate::driver) enum ReadOutcome {
 /// mid-tick" (the read drain may have terminated it earlier this tick,
 /// in which case the WRITABLE pass's reach is a benign no-op).
 ///
-/// Replaces the prior `io::Result<bool>` where:
-/// - `Ok(false)` ⇒ keep going (now `Continue`),
-/// - `Ok(true)` ⇒ caller terminates (now `Terminate`),
-/// - `Err(NotFound)` ⇒ conn already gone (now `ConnGone`).
+/// The three discriminants are:
+/// - `Continue` ⇒ keep going,
+/// - `Terminate` ⇒ caller terminates,
+/// - `ConnGone` ⇒ conn already gone.
 ///
 /// Lifting the three states into one enum makes the tick-side match
 /// total without an `io::ErrorKind::NotFound` arm masquerading as a
@@ -675,10 +675,9 @@ impl Hub {
                     )
                     .push_err_in_reserve(&err_bytes);
                 // No-op once the Err line populated the queue (queue
-                // is no longer empty). Kept for parity with the
-                // pre-Phase-4 close path — a defensive call against
-                // the unreachable queue-empty post-condition costs
-                // one map lookup and a flag read.
+                // is no longer empty) — a defensive call against the
+                // unreachable queue-empty post-condition costs one map
+                // lookup and a flag read.
                 self.try_terminate_if_idle(token);
                 EnqueueOutcome::Refused
             }
@@ -700,8 +699,8 @@ impl Hub {
     /// than waiting for a WRITABLE edge that will never come.
     ///
     /// Also called defensively at the tail of [`Self::enqueue_response`]'s
-    /// Refused arm. After Phase 4 the structured ResponseTooBig Err
-    /// line populates the queue ahead of this call, so the
+    /// Refused arm. There the structured ResponseTooBig Err line
+    /// populates the queue ahead of this call, so the
     /// `write_queue.is_empty()` precondition does not hold and the
     /// call is a structural no-op; the flush-then-terminate path on
     /// the next WRITABLE drain handles teardown uniformly with the

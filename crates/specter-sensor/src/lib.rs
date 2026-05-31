@@ -32,8 +32,8 @@ use std::path::Path;
 // the payload [`ProberResponseSender::send`] carries — re-exported so
 // implementors don't have to reach across the `specter_core` crate
 // boundary to name the type. [`SendError`] is the workspace-shared
-// sender-error vocabulary — re-exported so callers naming
-// `sensor::SendError` keep their path stable across the consolidation.
+// sender-error vocabulary — re-exported so `sensor::SendError` is a
+// stable path for callers.
 pub use specter_core::{OverflowScope, ProbeFailure, ProbeResponse, SendError, WatchFailure};
 
 /// Sensor-side extension on [`WatchFailure`] that classifies an

@@ -99,11 +99,10 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     // exactly once by the lifecycle below (`config` moves into the
     // driver constructor; `log_path` moves into `CliLogOverrides`;
     // `log_level`, `log_destination`, `concurrency`, `probe_concurrency`,
-    // and `no_config_watch` are `Copy`). The bare bindings retire the
-    // `args.<field>.clone()` chains the pre-Phase-3.3 shape carried at
-    // the driver-constructor and merge_cli sites — the driver consumes
-    // `config` directly and the boot-time TOCTOU lstat reads back
-    // through [`EngineDriver::config_path`].
+    // and `no_config_watch` are `Copy`). The bare bindings avoid any
+    // `args.<field>.clone()` at the driver-constructor and merge_cli
+    // sites — the driver consumes `config` directly and the boot-time
+    // TOCTOU lstat reads back through [`EngineDriver::config_path`].
     let DaemonArgs {
         config,
         log_level,
@@ -458,11 +457,11 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //     `dispatch_signal_inner`'s HardExit arm (production's
     //     `exit_fn` is `std::process::exit`, which does not return
     //     — the join below is unreachable in that arm). The first
-    //     SIGINT no longer breaks the loop; the driver keeps ticking
+    //     SIGINT does not break the loop; the driver keeps ticking
     //     through the actuator's SIGTERM → grace → SIGKILL →
     //     reap-drain pipeline so `SignalPipe` stays installed for
-    //     the entire window (closing the orphan defect the old
-    //     "first signal exits loop" shape opened).
+    //     the entire window — no second-tap handshake is orphaned
+    //     mid-grace.
     if initial_attach_break || drift_break {
         tracing::info!("shutdown observed during boot; engine drained");
     } else {

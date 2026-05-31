@@ -31,9 +31,8 @@
 //! [`LastReload`] pair move together as one observable transition;
 //! the edge method captures the wall-clock internally rather than
 //! taking it as a parameter. The [`LastReload`] sum type makes the
-//! "both attribution fields present together" invariant structural —
-//! the prior `(Option<SystemTime>, Option<ReloadTrigger>)` carried it
-//! as convention.
+//! "both attribution fields present together" invariant structural
+//! rather than a convention enforced across two `Option` fields.
 //!
 //! # Visibility
 //!
@@ -67,10 +66,10 @@ pub(crate) struct DriverState {
     /// the record call).
     pub(crate) reload_count: u64,
     /// Most recent successful reload — wall-clock + trigger as one
-    /// observable. `None` before the first reload fires. Lifted from
-    /// the prior `(Option<SystemTime>, Option<ReloadTrigger>)` pair
-    /// so the impossible product `(Some, None)` / `(None, Some)` is
-    /// unconstructable at the type level — see [`LastReload`].
+    /// observable. `None` before the first reload fires. Packing both
+    /// into one struct makes the impossible product `(Some, None)` /
+    /// `(None, Some)` unconstructable at the type level — see
+    /// [`LastReload`].
     pub(crate) last_reload: Option<LastReload>,
     /// UNIX-socket path the IPC server bound to. Set once in
     /// [`Self::new`] from `App::run`'s resolved path (which it also
@@ -123,12 +122,11 @@ impl DriverState {
 }
 
 /// Most-recent successful reload — wall-clock + attribution as one
-/// observable. The pair carries the invariant "both fields present
-/// iff at least one reload has fired"; lifting the prior pair of
-/// `Option<SystemTime>` / `Option<ReloadTrigger>` into this struct
-/// makes the invariant structural (the impossible
-/// `(Some(at), None)` / `(None, Some(via))` products are no longer
-/// constructable). [`DriverState::record_reload`] is the sole
+/// observable. The struct carries the invariant "both fields present
+/// iff at least one reload has fired"; packing both fields into one
+/// struct makes the invariant structural (the impossible
+/// `(Some(at), None)` / `(None, Some(via))` products are
+/// unconstructable). [`DriverState::record_reload`] is the sole
 /// constructor; the wire-side mirror [`WireLastReload`] keeps the
 /// JSON shape flat via `#[serde(flatten)]`.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

@@ -282,7 +282,7 @@ pub(crate) fn apply_diff_to_tree(
         let Some(resource) = lookup_descendant(tree, base, entry.segment.as_str()) else {
             continue;
         };
-        // Side-effecting; the `bool` (did-reap) is no longer consumed
+        // Side-effecting; the `bool` (did-reap) return is unused
         // (neither `try_reap` nor `sub_watch_then_try_reap` is
         // `#[must_use]`, so no `let _` ceremony).
         if releases_watch(profile, resource, entry.kind, tree, scratch) {
@@ -415,8 +415,9 @@ pub(crate) fn graft(
     // circuits before any `apply_diff_to_tree` work, so
     // `Profile.current` and `Tree` stay coherent across the breach.
     // Even when (a future regression makes) `CrossedUncovered`
-    // reachable, the engine cannot diverge. This is the splice-then-
-    // apply ordering that closed the pre-refactor F-MED-3 hazard.
+    // reachable, the engine cannot diverge: the splice-then-apply
+    // ordering keeps `Profile.current` and `Tree` from drifting apart
+    // on the breach.
     //
     // Consumes `prior` and `response_arc`. The caller (apply_snapshot)
     // held an independent Arc handle in `Profile.current`, so dropping
@@ -915,12 +916,12 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // graft — kind-flip + inode-reuse (F-HIGH-1 regression)
+    // graft — kind-flip + inode-reuse regression
     // ---------------------------------------------------------------------------
 
     #[test]
     fn graft_kind_flip_inode_reuse_retypes_slot_and_installs_watch() {
-        // F-HIGH-1 regression. Failing lifecycle:
+        // Kind-flip + inode-reuse regression. Failing lifecycle:
         // 1. Prior: `/root/foo` is a covered Leaf (File, inode=42, has
         //    per-file watch contribution under a per-file Profile).
         // 2. Probe response: `/root/foo` is now a covered Dir at the
@@ -935,14 +936,13 @@ mod tests {
         //      Profile's events.
         //    - `out.watch_ops` contains a Watch op at the new slot.
         //
-        // The pre-refactor `walk_pair` keyed entity identity on
-        // `(inode, device)` alone, ignoring `kind`. Under inode reuse
-        // it concluded "same identity ⇒ no Tree-side delta" and
-        // silently skipped both the reap of the old File slot and the
-        // creation of the new Dir slot. `diff_tree::diff_same_name`
-        // routes kind flips through its `_ =>` arm (pair_eligible:
-        // false), which `apply_diff_to_tree` Phase 1 / Phase 2 then
-        // applies symmetrically.
+        // Keying entity identity on `(inode, device)` alone would, under
+        // inode reuse across a kind flip, conclude "same identity ⇒ no
+        // Tree-side delta" and skip both the reap of the old File slot
+        // and the creation of the new Dir slot. Instead,
+        // `diff_tree::diff_same_name` routes kind flips through its
+        // `_ =>` arm (pair_eligible: false), which `apply_diff_to_tree`
+        // Phase 1 / Phase 2 then applies symmetrically.
         let (mut tree, mut profiles, root, pid) = anchor(true);
 
         // Pre-materialise the prior File slot at `(root, "foo")` with
@@ -1041,7 +1041,7 @@ mod tests {
         assert!(
             has_contribution,
             "new Dir slot must carry the Profile's descendant contribution \
-             (kind-flip didn't install Watch — F-HIGH-1 regression)",
+             (kind-flip didn't install Watch — regression)",
         );
 
         // 4. `out.watch_ops` contains a Watch op at the new slot.

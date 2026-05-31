@@ -16,12 +16,11 @@
 //! per `StepOutput` so every subscriber sees byte-identical `at` for
 //! the same emission).
 //!
-//! **No `shutdown_engine_rx` arm.** The bridge-thread shape is gone:
-//! signals dispatch inline on the reactor thread via
-//! [`super::EngineDriver::dispatch_signal`], and a wedged effects
-//! channel surfaces through `try_send` rather than blocking the
-//! reactor mid-tick. Per-channel disconnect policy is explicit at the
-//! call site; the rationale lives on the method.
+//! **No `shutdown_engine_rx` arm.** Signals dispatch inline on the
+//! reactor thread via [`super::EngineDriver::dispatch_signal`], and a
+//! wedged effects channel surfaces through `try_send` rather than
+//! blocking the reactor mid-tick. Per-channel disconnect policy is
+//! explicit at the call site; the rationale lives on the method.
 //!
 //! `log_diagnostic` is the per-variant hand-mapping of a [`Diagnostic`]
 //! to a tracing event; its severities are the operator-facing catalogue.

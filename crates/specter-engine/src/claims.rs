@@ -254,9 +254,8 @@ impl Engine {
     ///   emitted-once Effects would silently fail to re-fire on every
     ///   recovery.
     /// - All other fields (`events`, `has_per_file_fds`, `config*`,
-    ///   `resource`, `settle*`). The
-    ///   prior `reap_pending: bool` field is gone; the deferred-reap
-    ///   directive now rides on `ProfileState::Active`'s payload via
+    ///   `resource`, `settle*`). The deferred-reap directive rides on
+    ///   `ProfileState::Active`'s payload via
     ///   [`specter_core::BurstFinish`], so its preservation across
     ///   recovery is part of `state`'s preservation (the helper does
     ///   not write `state`).

@@ -1401,11 +1401,11 @@ fn event_drives_batching_clears_pending_probe() {
 }
 
 /// Hash-channel carrier survival across the pre-fire phase swaps, pinned
-/// through the **verdict** — the seal moved `last_certified_hash` to
-/// `pub(crate)` on core, so this crate can no longer read the field
-/// directly (the white-box read this test replaces). The Layer-C channel
-/// needs the prior sample to ride through every pre-fire swap for a
-/// *second, equal* Authoritative sample to fold `Stable(Natural)` and
+/// through the **verdict** — `last_certified_hash` is `pub(crate)` on
+/// core, so this crate cannot read the field directly and pins survival
+/// black-box. The Layer-C channel needs the prior sample to ride
+/// through every pre-fire swap for a *second, equal* Authoritative
+/// sample to fold `Stable(Natural)` and
 /// fire; if any phase helper reset the carrier the second sample's
 /// `prior` reverts to `None`, folding `Unstable` forever (never fires).
 /// The fire is therefore the executable witness that the carrier survived
@@ -1539,7 +1539,7 @@ fn hash_channel_carrier_survives_pre_fire_swaps_to_stable_resample() {
 
 /// Field-discipline pin for `finalize_anchor_lost`: an anchor terminal
 /// event during Verifying cancels the in-flight probe and clears the
-/// channel. Replaces the pre-refactor `was_verifying` snapshot's role.
+/// channel.
 #[test]
 fn finalize_anchor_lost_during_verifying_clears_pending_probe() {
     let (mut e, pid, _sid, root, _) = engine_with_attached_sub();
@@ -1576,11 +1576,11 @@ fn finalize_anchor_lost_during_verifying_clears_pending_probe() {
     );
 }
 
-/// Single-diagnostic guarantee for stale `ProbeResponse`. Pre-refactor
-/// the dispatch had two stale-detection layers (state-shape mismatch and
-/// inner-correlation mismatch) that could both fire on degenerate inputs.
-/// Post-refactor the top-level `pending_probe == Some(received)` check is
-/// the sole gate — exactly one diagnostic per stale response.
+/// Single-diagnostic guarantee for stale `ProbeResponse`. The top-level
+/// `pending_probe == Some(received)` check is the sole stale gate —
+/// exactly one diagnostic per stale response, with no second
+/// state-shape or inner-correlation layer to double-fire on degenerate
+/// inputs.
 #[test]
 fn stale_probe_response_emits_exactly_one_diagnostic() {
     let (mut e, pid, _sid, _root, _) = engine_with_attached_sub();
@@ -2096,9 +2096,9 @@ fn pre_fire_anchor_event_rearms_settle_and_fires_once() {
     );
     assert!(out_a.effects().is_empty(), "no fire at burst open");
 
-    // Second anchor event, still inside the settle window. This is the
-    // event the watcher used to silence; assert it is recorded — it
-    // enters the burst accumulator and advances `last_event_time`.
+    // Second anchor event, still inside the settle window. Assert it
+    // is recorded — it enters the burst accumulator and advances
+    // `last_event_time`.
     let t1 = t0 + SETTLE / 2;
     let out_b = e.step(
         Input::FsEvent {
@@ -2878,11 +2878,11 @@ fn sensor_overflow_active_standard_transitions_to_active_seed() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// β★ regression (F-CRIT-1): overflow on a *genuinely armed*
-/// `Active(PreFire(Verifying))` — the verify slot is in flight and was
-/// NOT pre-consumed — must NOT panic. Pre-β★ the `Active(_, finish)`
-/// arm unconditionally dropped the armed slot through
-/// `finish_burst_to_idle` and tripped `ProbeSlot`'s Drop tripwire.
+/// Overflow over an armed verify slot disarms rather than drops it:
+/// overflow on a *genuinely armed* `Active(PreFire(Verifying))` — the
+/// verify slot is in flight and was NOT pre-consumed — must NOT panic.
+/// Dropping the armed slot through `finish_burst_to_idle` would trip
+/// `ProbeSlot`'s Drop tripwire, so the reseed must disarm it first.
 /// Under the cold-arm Verifying-first contract, the genuinely-armed
 /// Verifying reproduction state is reached at attach (the probe is
 /// armed at burst construction, never pre-consumed). Reseed (no Reap):
@@ -2896,7 +2896,7 @@ fn sensor_overflow_armed_verifying_reseeds_no_cancel() {
     let (mut e, pid, _sid, _root, _) = engine_with_attached_sub();
     // Cold-arm Seed: the verify probe is in flight directly after
     // attach. Asserting it here is the whole point — a pre-consumed
-    // slot would not reproduce F-CRIT-1.
+    // slot would not reproduce the armed-slot drop hazard.
     assert_seed_verifying(&e);
     let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
@@ -2940,7 +2940,7 @@ fn sensor_overflow_armed_verifying_reseeds_no_cancel() {
 
     // (c) Profile back in Active(PreFire(Verifying)) with Seed intent —
     // a fresh cold-arm quiescence sequence. Reaching here without
-    // tripping ProbeSlot's Drop tripwire is the F-CRIT-1 guard.
+    // tripping ProbeSlot's Drop tripwire is the armed-slot-drop guard.
     let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
@@ -2954,12 +2954,12 @@ fn sensor_overflow_armed_verifying_reseeds_no_cancel() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// β★ regression: same as above but on a *genuinely armed*
-/// `Active(PostFire(Rebasing))`. The Rebasing slot is the post-effect
-/// rebase probe minted by `transition_to_rebasing` — armed, never
-/// pre-consumed. Overflow must reseed without panicking, disarming the
-/// slot only; the superseding Seed burst is Batching-first.
-/// Owner-scoped: zero `Probe`, zero `Cancel`.
+/// Armed-slot overflow, Rebasing variant: same as above but on a
+/// *genuinely armed* `Active(PostFire(Rebasing))`. The Rebasing slot is
+/// the post-effect rebase probe minted by `transition_to_rebasing` —
+/// armed, never pre-consumed. Overflow must reseed without panicking,
+/// disarming the slot only; the superseding Seed burst is
+/// Batching-first. Owner-scoped: zero `Probe`, zero `Cancel`.
 #[test]
 fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
     let (mut e, pid, sid, root, _now0) = engine_with_attached_sub();
@@ -3016,7 +3016,8 @@ fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
     // Reseed re-enters Active(PreFire(Verifying)) with Seed intent —
     // the prior PostFire(Rebasing) burst was abandoned, a fresh
     // quiescence sequence opened (cold-arm Verifying-first). Reaching
-    // here without tripping ProbeSlot's Drop tripwire is the β★ guard.
+    // here without tripping ProbeSlot's Drop tripwire is the
+    // armed-slot-drop guard.
     let burst = match e.profiles.get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre,
         s => panic!("expected Active(Seed) after overflow; got {s:?}"),
@@ -3030,7 +3031,7 @@ fn sensor_overflow_armed_rebasing_reseeds_no_cancel() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// β★ reap arm: overflow on a *genuinely armed*
+/// Armed-slot overflow, reap arm: overflow on a *genuinely armed*
 /// `Active(PreFire(Verifying))` whose `BurstFinish` is `Reap` (the
 /// last Sub was detached mid-burst). Here `will_reap == true`, so the
 /// arm emits the wire `Cancel` via `cancel_owner_probe` (no
@@ -4848,9 +4849,9 @@ fn finalize_anchor_lost_was_active_pre_helper_ordering() {
 /// mutated the tree, so there is no trustworthy prior to scope a
 /// `Chains` walk against — an in-place descendant edit need not bump
 /// an ancestor mtime, so a chains/mtime skip would re-clone a stale
-/// subtree and certify a false quiet. `dirty` is no longer a
-/// post-fire obligation source; `transition_to_rebasing` clears it at
-/// the loop entry, so an Awaiting-absorbed event is folded into the
+/// subtree and certify a false quiet. `dirty` is not a post-fire
+/// obligation source; `transition_to_rebasing` clears it at the loop
+/// entry, so an Awaiting-absorbed event is folded into the
 /// `WholeSubtree` read itself rather than carried as a restart seed.
 ///
 /// Sub uses `ClassSet::CONTENT` so the descendant `ContentChanged` event
@@ -8275,11 +8276,11 @@ mod props {
         }
 
         /// `prop_single_profile_never_has_active_standard_descendant` —
-        /// the derived replacement for the deleted `dirty_descendants`
-        /// I4 floor. A single-Profile engine has no covered descendant,
-        /// so the fresh reconfirm query that now gates `gated_fire`'s
-        /// fire (`coverage::has_active_standard_descendant`) must stay
-        /// false after *any* input sequence. This also pins the query's
+        /// the derived I4 floor. A single-Profile engine has no covered
+        /// descendant, so the fresh reconfirm query that gates
+        /// `gated_fire`'s fire
+        /// (`coverage::has_active_standard_descendant`) must stay false
+        /// after *any* input sequence. This also pins the query's
         /// self-exclusion: the lone Profile is the ancestor under test
         /// and must never count itself, through every burst phase the
         /// random actions drive it into.

@@ -2,8 +2,8 @@
 //! test suites.
 //!
 //! These build `core` values only — no `Engine`, no I/O. They are the
-//! single canonical shape for fixtures that were previously copy-pasted
-//! (and silently drifted) into a dozen test files.
+//! single canonical shape for fixtures across the test suites, so a
+//! fixture's layout cannot silently drift between files.
 
 use crate::testkit::single_exec_program;
 use crate::{
@@ -99,8 +99,8 @@ pub fn dirty_provenance(entries: &[(ResourceId, &str)]) -> DirtyProvenance {
 /// A `Subtree` outcome whose walk discharged its obligation.
 ///
 /// The overwhelmingly common engine-test shape (a fully-read, settled
-/// subtree) — replaces the four-line `SubtreeProven { snapshot,
-/// authority: ProofAuthority::Authoritative }` literal.
+/// subtree): shorthand for the `SubtreeProven { snapshot, authority:
+/// ProofAuthority::Authoritative }` literal.
 #[must_use]
 pub const fn proven(snapshot: Arc<DirSnapshot>) -> ProbeOutcome {
     ProbeOutcome::SubtreeProven {
