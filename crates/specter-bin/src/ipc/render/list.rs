@@ -16,14 +16,16 @@ use std::fmt::Write as _;
 
 use crate::ipc::protocol::{ListResponse, ListRow};
 
-/// Render the response as one operator-readable block.
+/// Render the response as one operator-readable block into the
+/// caller's buffer.
 ///
-/// `wide = true` includes the four extra columns. Returns
-/// `"no watches declared\n"` for an empty response so the operator
-/// sees a definite signal, not blank output.
-pub(crate) fn render(resp: &ListResponse, wide: bool) -> String {
+/// `wide = true` includes the four extra columns. Writes
+/// `no watches declared\n` for an empty response so the operator sees
+/// a definite signal, not blank output.
+pub(crate) fn render(out: &mut String, resp: &ListResponse, wide: bool) {
     if resp.rows.is_empty() {
-        return "no watches declared\n".to_string();
+        out.push_str("no watches declared\n");
+        return;
     }
     let columns = if wide { ALL_COLUMNS } else { DEFAULT_COLUMNS };
 
@@ -48,13 +50,12 @@ pub(crate) fn render(resp: &ListResponse, wide: bool) -> String {
         })
         .collect();
 
-    let mut out = String::with_capacity(256 + 64 * resp.rows.len());
-    write_header(&mut out, columns, &widths);
-    write_separator(&mut out, &widths);
+    out.reserve(256 + 64 * resp.rows.len());
+    write_header(out, columns, &widths);
+    write_separator(out, &widths);
     for row_idx in 0..resp.rows.len() {
-        write_row(&mut out, &grid, &widths, row_idx);
+        write_row(out, &grid, &widths, row_idx);
     }
-    out
 }
 
 /// One column's header label and per-row cell renderer. `fn` pointer
@@ -268,10 +269,13 @@ mod tests {
     #[test]
     fn list_table_renders_empty_rows_as_no_watches() {
         let resp = ListResponse { rows: vec![] };
-        assert_eq!(render(&resp, false), "no watches declared\n");
+        let mut buf = String::new();
+        render(&mut buf, &resp, false);
+        assert_eq!(buf, "no watches declared\n");
+        let mut buf = String::new();
+        render(&mut buf, &resp, true);
         assert_eq!(
-            render(&resp, true),
-            "no watches declared\n",
+            buf, "no watches declared\n",
             "wide mode also surfaces the no-watches signal",
         );
     }
@@ -284,7 +288,8 @@ mod tests {
         let resp = ListResponse {
             rows: vec![attached_row("foo")],
         };
-        let out = render(&resp, false);
+        let mut out = String::new();
+        render(&mut out, &resp, false);
         for label in ["NAME", "STATE", "ANCHOR", "LAST_FIRED", "FIRES", "DISABLED"] {
             assert!(out.contains(label), "missing column {label}: {out}");
         }
@@ -303,7 +308,8 @@ mod tests {
         let resp = ListResponse {
             rows: vec![attached_row("foo")],
         };
-        let out = render(&resp, true);
+        let mut out = String::new();
+        render(&mut out, &resp, true);
         for label in [
             "NAME",
             "STATE",
@@ -329,7 +335,8 @@ mod tests {
         let resp = ListResponse {
             rows: vec![attached_row("foo")],
         };
-        let out = render(&resp, false);
+        let mut out = String::new();
+        render(&mut out, &resp, false);
         let mut lines = out.lines();
         let header = lines.next().expect("header line");
         let separator = lines.next().expect("separator line");
@@ -361,7 +368,8 @@ mod tests {
                 disabled_row("on_toml", DisabledSource::Toml),
             ],
         };
-        let out = render(&resp, false);
+        let mut out = String::new();
+        render(&mut out, &resp, false);
         assert!(out.contains("runtime"), "missing 'runtime' label: {out}");
         assert!(out.contains("toml"), "missing 'toml' label: {out}");
     }

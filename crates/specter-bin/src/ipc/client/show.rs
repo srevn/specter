@@ -42,7 +42,11 @@ pub(crate) fn run(args: &ShowArgs) -> ExitCode {
 /// rule single-source across `-o human` and `-o json`.
 fn render_show(output: OutputFormat, show: &ShowResponse) -> ExitCode {
     match output {
-        OutputFormat::Human => print!("{}", show::render(show)),
+        OutputFormat::Human => {
+            let mut buf = String::new();
+            show::render(&mut buf, show);
+            print!("{buf}");
+        }
         OutputFormat::Json => {
             let s = serde_json::to_string(show).expect("ShowResponse always serializes");
             println!("{s}");

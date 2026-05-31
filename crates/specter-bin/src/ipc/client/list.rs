@@ -34,7 +34,9 @@ pub(crate) fn run(args: &ListArgs) -> ExitCode {
 
     match args.output {
         OutputFormat::Human => {
-            print!("{}", list::render(&list, args.wide));
+            let mut buf = String::new();
+            list::render(&mut buf, &list, args.wide);
+            print!("{buf}");
             ExitCode::SUCCESS
         }
         OutputFormat::Json => {

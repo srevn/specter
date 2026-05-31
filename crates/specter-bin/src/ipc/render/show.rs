@@ -16,15 +16,16 @@ use std::fmt::Write as _;
 use crate::ipc::protocol::{ShowResponse, SubDetails};
 use crate::ipc::wire::{WireAbsorbMode, WireEffectScope};
 
-/// Render the response as one operator-readable block.
-pub(crate) fn render(resp: &ShowResponse) -> String {
+/// Render the response as one operator-readable block into the
+/// caller's buffer.
+pub(crate) fn render(out: &mut String, resp: &ShowResponse) {
     match resp {
-        ShowResponse::Active(d) => render_active(d),
+        ShowResponse::Active(d) => render_active(out, d),
         ShowResponse::Disabled { name, source } => {
-            format!("{name}: disabled ({source})\n")
+            let _ = writeln!(out, "{name}: disabled ({source})");
         }
         ShowResponse::Unknown { name } => {
-            format!("{name}: unknown — not in config, not runtime-disabled\n")
+            let _ = writeln!(out, "{name}: unknown — not in config, not runtime-disabled");
         }
     }
 }
@@ -52,8 +53,8 @@ const LABEL_WIDTH: usize = 16;
 ///   [0] exec /bin/build  ok→#1 fail→terminate
 ///   [1] exec /bin/notify  ok→escape fail→terminate
 /// ```
-fn render_active(d: &SubDetails) -> String {
-    let mut out = String::with_capacity(512);
+fn render_active(out: &mut String, d: &SubDetails) {
+    out.reserve(512);
     let _ = writeln!(out, "{}", d.name);
     let underline_len = d.name.len().max(40);
     for _ in 0..underline_len {
@@ -104,7 +105,6 @@ fn render_active(d: &SubDetails) -> String {
     for line in &d.program {
         let _ = writeln!(out, "  {line}");
     }
-    out
 }
 
 /// View-local label for a [`WireEffectScope`] — hyphenated form
@@ -183,7 +183,8 @@ mod tests {
                 "[1] exec /bin/notify  ok→escape fail→terminate".to_string(),
             ],
         );
-        let out = render(&ShowResponse::Active(d));
+        let mut out = String::new();
+        render(&mut out, &ShowResponse::Active(d));
         assert!(
             out.contains("program (2 ops):"),
             "program header missing: {out}"
@@ -204,7 +205,8 @@ mod tests {
     #[test]
     fn show_human_active_anchor_none_renders_dash() {
         let d = details("foo", None, vec![]);
-        let out = render(&ShowResponse::Active(d));
+        let mut out = String::new();
+        render(&mut out, &ShowResponse::Active(d));
         let anchor_line = out
             .lines()
             .find(|l| l.starts_with("anchor"))
@@ -224,7 +226,8 @@ mod tests {
     fn show_human_active_state_none_renders_dash() {
         let mut d = details("foo", None, vec![]);
         d.state = None;
-        let out = render(&ShowResponse::Active(d));
+        let mut out = String::new();
+        render(&mut out, &ShowResponse::Active(d));
         let state_line = out
             .lines()
             .find(|l| l.starts_with("state"))
@@ -252,7 +255,8 @@ mod tests {
             }),
             4,
         );
-        let out = render(&ShowResponse::Active(d));
+        let mut out = String::new();
+        render(&mut out, &ShowResponse::Active(d));
         let absorbing = out
             .lines()
             .find(|l| l.starts_with("absorbing"))
@@ -290,7 +294,8 @@ mod tests {
             }),
             0,
         );
-        let out = render(&ShowResponse::Active(with));
+        let mut out = String::new();
+        render(&mut out, &ShowResponse::Active(with));
         assert!(
             out.lines()
                 .any(|l| l.starts_with("absorbing") && l.contains("(persist)")),
@@ -298,7 +303,8 @@ mod tests {
         );
 
         let without = details("foo", None, vec![]);
-        let out = render(&ShowResponse::Active(without));
+        let mut out = String::new();
+        render(&mut out, &ShowResponse::Active(without));
         assert!(
             !out.lines().any(|l| l.starts_with("absorbing")),
             "None window omits the absorbing line entirely: {out}",
@@ -312,14 +318,17 @@ mod tests {
             name: "paused".into(),
             source: DisabledSource::Runtime,
         };
-        let out = render(&r);
+        let mut out = String::new();
+        render(&mut out, &r);
         assert_eq!(out, "paused: disabled (runtime)\n");
 
         let r2 = ShowResponse::Disabled {
             name: "off".into(),
             source: DisabledSource::Toml,
         };
-        assert_eq!(render(&r2), "off: disabled (toml)\n");
+        let mut buf = String::new();
+        render(&mut buf, &r2);
+        assert_eq!(buf, "off: disabled (toml)\n");
     }
 
     /// `Unknown` arm renders a helpful hint that locates the resolution
@@ -329,7 +338,8 @@ mod tests {
         let r = ShowResponse::Unknown {
             name: "ghost".into(),
         };
-        let out = render(&r);
+        let mut out = String::new();
+        render(&mut out, &r);
         assert!(out.contains("ghost"));
         assert!(
             out.contains("unknown"),

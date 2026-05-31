@@ -21,7 +21,7 @@
 //! signature so the client need not branch on per-verb argument
 //! shapes.
 //!
-//! Pure function: `(&StatusResponse, bool) -> String`. No I/O, no
+//! Pure writer: `(&mut String, &StatusResponse, bool)`. No I/O, no
 //! styling — the current `status` view stays plain text.
 
 use crate::ipc::protocol::{StatusResponse, WireLastReload};
@@ -32,8 +32,8 @@ use std::fmt::Write as _;
 /// `_wide` is reserved for future extensions (currently unused; the
 /// `status` view fits on one screen of the default columns) — keeps
 /// the signature aligned with the other renderers.
-pub(crate) fn render(resp: &StatusResponse, _wide: bool) -> String {
-    let mut out = String::with_capacity(512);
+pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool) {
+    out.reserve(512);
     let _ = writeln!(out, "specter status");
     let _ = writeln!(out, "{}", "─".repeat(61));
     let _ = writeln!(
@@ -68,7 +68,6 @@ pub(crate) fn render(resp: &StatusResponse, _wide: bool) -> String {
     // string verbatim — zero-alloc into `out`, no intermediate.
     let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "config", resp.config_path);
     let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "socket", resp.socket_path);
-    out
 }
 
 /// Width of the label column. Padded to align all values vertically.
@@ -130,7 +129,8 @@ mod tests {
     /// canonical socket-path + config-path footer.
     #[test]
     fn render_minimal_status_includes_every_label() {
-        let s = render(&fresh_status(), false);
+        let mut s = String::new();
+        render(&mut s, &fresh_status(), false);
         assert!(s.starts_with("specter status\n"), "header present");
         for label in [
             "uptime",

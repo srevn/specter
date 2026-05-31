@@ -45,7 +45,9 @@ pub(crate) fn run(args: &StatusArgs) -> ExitCode {
 
     match args.output {
         OutputFormat::Human => {
-            print!("{}", status::render(&status, args.wide));
+            let mut buf = String::new();
+            status::render(&mut buf, &status, args.wide);
+            print!("{buf}");
             ExitCode::SUCCESS
         }
         OutputFormat::Json => {
