@@ -11,9 +11,9 @@
 //!    (15 visible bytes + null) at every legal `--probe-concurrency`
 //!    value — preserving the index in `/proc/<pid>/task/<tid>/comm`.
 //!    Each worker holds clones of the queue receiver, the response
-//!    sender, and the expectation map, and runs on an 8 MiB stack
+//!    sender, and the expectation map, and runs on a 32 MiB stack
 //!    ([`PROBER_WORKER_STACK`]) sized for the subtree walker's
-//!    `PATH_MAX`-deep recursion.
+//!    `PATH_MAX`-deep recursion in an unoptimized (debug) build.
 //! 2. The bin maps each `ProbeOp::Probe` from the engine to
 //!    [`Prober::submit`]; each `ProbeOp::Cancel` to
 //!    [`Prober::cancel`].
@@ -177,24 +177,22 @@ impl std::fmt::Debug for WorkerProber {
 /// every node by absolute path, so a tree one level too deep fails its
 /// `read_dir` / `lstat` with `ENAMETOOLONG` and that level degrades — the
 /// recursion can never outrun `PATH_MAX` (~4096 bytes, ~2048 two-byte
-/// levels on Linux). Each level holds a `std::fs::Metadata` (an inline
-/// `stat`, ~hundreds of bytes) live across its child's descent; the
-/// accumulating `entries` map is heaped, so the per-frame *stack* cost
-/// stays in the hundreds of bytes — ~1–2 MiB at the deepest legal tree.
-/// That is uncomfortably close to the 2 MiB default thread stack, and a
-/// stack overflow *aborts* the process: it raises `SIGSEGV` on the guard
-/// page, not an unwinding panic, so the [`run_worker`] `catch_unwind`
-/// cannot intercept it. 8 MiB buys 4–6× headroom and makes `ENAMETOOLONG`
-/// — not the stack — the binding terminator, so no depth-cap constant to
-/// tune and no never-fire degrade mode on a legitimately deep tree are
-/// needed. The reservation is lazily committed (only touched pages back
-/// physical memory), so the unused headroom costs address space, not RSS.
+/// levels on Linux). The frame-triple is ~hundreds of bytes optimized
+/// (~1–2 MiB at that depth) but ~4 KiB unoptimized — ~8–9 MiB in the
+/// `test` profile, where nothing inlines. A stack overflow *aborts* the
+/// process (`SIGSEGV` on the guard page, which [`run_worker`]'s
+/// `catch_unwind` cannot intercept), so the reservation must clear the
+/// *debug* peak, not just the optimized one. 32 MiB clears the ~9 MiB
+/// debug peak with headroom, making `ENAMETOOLONG` — not the stack — the
+/// binding terminator, so no depth cap or degrade mode is needed. The
+/// reservation is lazily committed, so the headroom costs address space,
+/// not RSS.
 ///
 /// Assumes the absolute-path walker. A future `openat`-relative walker
 /// (no `PATH_MAX` ceiling) reintroduces unbounded recursion and must
 /// revisit this — with an explicit depth cap or an iterative heap-stack
 /// DFS, not a larger stack.
-const PROBER_WORKER_STACK: usize = 8 << 20;
+const PROBER_WORKER_STACK: usize = 32 << 20;
 
 impl WorkerProber {
     /// Spawn the worker pool. `concurrency: NonZeroUsize` retires the

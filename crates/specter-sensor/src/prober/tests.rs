@@ -2232,20 +2232,21 @@ fn worker_prober_concurrent_submit_is_safe() {
 // ---------------------------------------------------------------- pool: deep-tree worker stack
 //
 // The subtree walker recurses one frame-triple per directory level,
-// bounded by PATH_MAX. `PROBER_WORKER_STACK` (8 MiB) sizes each worker so
-// the deepest legal tree walks without a stack-overflow abort.
+// bounded by PATH_MAX. `PROBER_WORKER_STACK` (32 MiB) sizes each worker so
+// the deepest legal tree walks without a stack-overflow abort — including
+// in an unoptimized (debug) build, where the frame-triple is ~4 KiB/level.
 
 #[test]
 fn deep_tree_walks_on_worker_without_stack_overflow() {
     // Build the deepest absolute-path tree the filesystem allows (to the
     // ENAMETOOLONG wall), then walk it on a real `WorkerProber` worker
-    // (8 MiB stack). A PATH_MAX-deep recursive walk on the old 2 MiB
-    // default thread stack could overflow and abort the process; this pins
-    // that the production worker stack absorbs the deepest tree the
-    // absolute-path walker can encounter. The walk MUST run on the worker
-    // (not this test thread) for the stack under test to be exercised.
-    // Meaningful on Linux (PATH_MAX ~4096 ⇒ ~2000 levels, ~2 MiB of
-    // stack); a shallower smoke test on macOS (PATH_MAX 1024).
+    // (32 MiB stack). A PATH_MAX-deep recursive walk would overflow the
+    // default 2 MiB thread stack and abort the process; this pins that the
+    // production worker stack absorbs the deepest tree the absolute-path
+    // walker can encounter. The walk MUST run on the worker (not this test
+    // thread) for the stack under test to be exercised. Meaningful on Linux
+    // (PATH_MAX ~4096 ⇒ ~2000 levels, ~8–9 MiB of stack unoptimized); a
+    // shallower smoke test on macOS (PATH_MAX 1024, ~500 levels).
     let tmp = TempDir::new().unwrap();
     let mut path = tmp.path().to_path_buf();
     let mut depth = 0u32;
@@ -2306,7 +2307,7 @@ fn deep_tree_walks_on_worker_without_stack_overflow() {
     };
     assert!(
         matches!(resp.outcome, ProbeOutcome::SubtreeProven { .. }),
-        "deep recursive walk completes on the 8 MiB worker stack; got {:?}",
+        "deep recursive walk completes on the 32 MiB worker stack; got {:?}",
         resp.outcome,
     );
 }
