@@ -31,17 +31,10 @@ pub(crate) fn run(args: &ShowArgs) -> ExitCode {
         Err(code) => return code,
     };
 
-    match resp {
-        ResponsePayload::Show(show) => render_show(args.output, &show),
-        ResponsePayload::Err { code, error } => {
-            eprintln!("specter show: {code}: {error}");
-            ExitCode::from(1)
-        }
-        other => {
-            eprintln!("specter show: unexpected response: {other:?}");
-            ExitCode::from(1)
-        }
-    }
+    let ResponsePayload::Show(show) = resp else {
+        return connect::fail_response(&args.client, "show", resp);
+    };
+    render_show(args.output, &show)
 }
 
 /// Render the [`ShowResponse`] and derive the exit code from its

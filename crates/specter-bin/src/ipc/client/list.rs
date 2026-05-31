@@ -28,25 +28,19 @@ pub(crate) fn run(args: &ListArgs) -> ExitCode {
         Err(code) => return code,
     };
 
-    match resp {
-        ResponsePayload::List(list) => match args.output {
-            OutputFormat::Human => {
-                print!("{}", list::render(&list, args.wide));
-                ExitCode::SUCCESS
-            }
-            OutputFormat::Json => {
-                let s = serde_json::to_string(&list).expect("ListResponse always serializes");
-                println!("{s}");
-                ExitCode::SUCCESS
-            }
-        },
-        ResponsePayload::Err { code, error } => {
-            eprintln!("specter list: {code}: {error}");
-            ExitCode::from(1)
+    let ResponsePayload::List(list) = resp else {
+        return connect::fail_response(&args.client, "list", resp);
+    };
+
+    match args.output {
+        OutputFormat::Human => {
+            print!("{}", list::render(&list, args.wide));
+            ExitCode::SUCCESS
         }
-        other => {
-            eprintln!("specter list: unexpected response: {other:?}");
-            ExitCode::from(1)
+        OutputFormat::Json => {
+            let s = serde_json::to_string(&list).expect("ListResponse always serializes");
+            println!("{s}");
+            ExitCode::SUCCESS
         }
     }
 }

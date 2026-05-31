@@ -16,6 +16,7 @@
 //! then strict-parses via [`crate::ipc::framing::parse_strict`].
 
 use specter_config::ClientArgs;
+use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -109,6 +110,58 @@ pub(crate) fn resolve_socket(client: &ClientArgs) -> PathBuf {
         .map_or_else(sockpath::default_socket_path, Path::to_path_buf)
 }
 
+/// The single sink for client-side stderr diagnostics.
+///
+/// Stays content-agnostic: the caller forms the whole line with
+/// `format_args!` — including any `specter <verb>:` prefix — so
+/// bespoke transport-stage messages, verb-specific operational
+/// failures, and the prefix-less continuation line (`tail`'s
+/// `Known filters: …`) all flow through one place without
+/// special-casing. [`fmt::Arguments`] keeps the call zero-allocation.
+/// The caller still owns the exit code; this only emits.
+///
+/// `client` is the seam through which stderr styling will resolve;
+/// unused today, present so the signature is stable across that later
+/// change.
+pub(crate) fn emit_error(_client: &ClientArgs, msg: fmt::Arguments<'_>) {
+    eprintln!("{msg}");
+}
+
+/// Render a [`ResponsePayload`] a verb cannot use — the daemon's
+/// structured [`ResponsePayload::Err`], or any variant other than the
+/// one expected — and yield the failure exit code (`1`). Callers
+/// `return fail_response(…)` directly.
+///
+/// The single source of the response-tail shape that `status`,
+/// `list`, `show`, [`one_shot_unit`], and `subscribe`'s ack
+/// validation would otherwise each restate:
+///
+/// - [`ResponsePayload::Err`] → `specter <verb>: <code>: <error>`.
+///   The closed-set `code` renders its stable wire token (scripts
+///   branch on it); `error` is the human amplification.
+/// - any other variant → `specter <verb>: unexpected response:
+///   <debug>` — a daemon-bug signal surfaced loudly, not coerced.
+///
+/// `verb` is `&'static str` so a borrowed runtime string cannot leak
+/// into the prefix. `client` is the styling seam (see [`emit_error`]),
+/// unused today.
+#[must_use]
+pub(crate) fn fail_response(
+    _client: &ClientArgs,
+    verb: &'static str,
+    resp: ResponsePayload,
+) -> ExitCode {
+    match resp {
+        ResponsePayload::Err { code, error } => {
+            eprintln!("specter {verb}: {code}: {error}");
+        }
+        other => {
+            eprintln!("specter {verb}: unexpected response: {other:?}");
+        }
+    }
+    ExitCode::from(1)
+}
+
 /// Stereotyped one-shot round trip — resolve socket, open, write
 /// request, read response.
 ///
@@ -124,8 +177,8 @@ pub(crate) fn resolve_socket(client: &ClientArgs) -> PathBuf {
 /// accidentally pass a borrowed runtime string.
 ///
 /// Returns `Ok(response)` on a successful round trip; `Err(code)`
-/// after eprinting the structured cause — callers `return code`
-/// directly.
+/// after reporting the cause through [`emit_error`] — callers
+/// `return code` directly.
 pub(crate) fn round_trip(
     client: &ClientArgs,
     verb: &'static str,
@@ -133,39 +186,38 @@ pub(crate) fn round_trip(
 ) -> Result<ResponsePayload, ExitCode> {
     let socket = resolve_socket(client);
     let mut stream = open(&socket).map_err(|e| {
-        eprintln!(
-            "specter {verb}: cannot connect to {}: {e}",
-            socket.display(),
+        emit_error(
+            client,
+            format_args!(
+                "specter {verb}: cannot connect to {}: {e}",
+                socket.display()
+            ),
         );
         ExitCode::from(1)
     })?;
     write_request(&mut stream, request).map_err(|e| {
-        eprintln!("specter {verb}: send failed: {e}");
+        emit_error(client, format_args!("specter {verb}: send failed: {e}"));
         ExitCode::from(1)
     })?;
     read_response(&mut stream).map_err(|e| {
-        eprintln!("specter {verb}: receive failed: {e}");
+        emit_error(client, format_args!("specter {verb}: receive failed: {e}"));
         ExitCode::from(1)
     })
 }
 
 /// One-shot round-trip for a verb whose successful response is the
 /// unit-shaped [`ResponsePayload::Ok`] — `disable`, `enable`,
-/// `reload`, and any future verb whose ack carries no payload.
+/// `reload`, `absorb`, and any future verb whose ack carries no
+/// payload.
 ///
-/// Maps each response arm to the operator-visible outcome:
-/// - [`ResponsePayload::Ok`] → exit `0`.
-/// - [`ResponsePayload::Err`] → render `specter <verb>: <code>:
-///   <error>` on stderr and exit `1`. The structured `code` lets
-///   operators branch in shell scripts; the human-readable `error`
-///   carries the amplification.
-/// - Any other variant → render `specter <verb>: unexpected
-///   response: <debug>` on stderr and exit `1`. This is a daemon-
-///   bug signal an operator wants to see, not silently coerce.
+/// [`ResponsePayload::Ok`] is exit `0`; every other variant — the
+/// structured [`ResponsePayload::Err`] or an unexpected shape —
+/// routes through [`fail_response`], which renders the tail and
+/// yields exit `1`.
 ///
-/// Centralises the Ok/Err/other dispatch the unit-ack verbs would
+/// Centralises the Ok/non-Ok dispatch the unit-ack verbs would
 /// otherwise duplicate, so the operator-visible error surface stays
-/// uniform across `disable` / `enable` / `reload`.
+/// uniform across `disable` / `enable` / `reload` / `absorb`.
 pub(crate) fn one_shot_unit(
     client: &ClientArgs,
     verb: &'static str,
@@ -177,13 +229,6 @@ pub(crate) fn one_shot_unit(
     };
     match resp {
         ResponsePayload::Ok => ExitCode::SUCCESS,
-        ResponsePayload::Err { code, error } => {
-            eprintln!("specter {verb}: {code}: {error}");
-            ExitCode::from(1)
-        }
-        other => {
-            eprintln!("specter {verb}: unexpected response: {other:?}");
-            ExitCode::from(1)
-        }
+        other => fail_response(client, verb, other),
     }
 }

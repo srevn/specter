@@ -25,9 +25,9 @@
 //! every variant. Filter validation lives in the handler, not in
 //! clap's `value_parser`, because the vocabulary is owned by the
 //! wire crate ([`KNOWN_WIRE_VARIANTS`]) and `specter-config` should
-//! not depend on `specter-bin`'s wire shape. The handler's
-//! `eprintln!` shape ("specter tail: unknown filter …") matches the
-//! other verbs' inline error messages.
+//! not depend on `specter-bin`'s wire shape. `run` reports an unknown
+//! tag through [`connect::emit_error`] ("specter tail: unknown filter
+//! …"), matching the other verbs' diagnostics.
 //!
 //! # Output buffering
 //!
@@ -41,15 +41,23 @@ use specter_config::{OutputFormat, TailArgs};
 use std::io::{self, Write};
 use std::process::ExitCode;
 
-use crate::ipc::client::subscribe;
+use crate::ipc::client::{connect, subscribe};
 use crate::ipc::framing::encode_line;
 use crate::ipc::render::diag;
 use crate::ipc::wire::{KNOWN_WIRE_VARIANTS, WireDiagnostic};
 
 /// Run the `specter tail` stream loop.
 pub(crate) fn run(args: &TailArgs) -> ExitCode {
-    if let Err(code) = validate_filter(&args.filter) {
-        return code;
+    if let Err(tag) = validate_filter(&args.filter) {
+        connect::emit_error(
+            &args.client,
+            format_args!("specter tail: unknown filter '{tag}'"),
+        );
+        connect::emit_error(
+            &args.client,
+            format_args!("Known filters: {}", KNOWN_WIRE_VARIANTS.join(", ")),
+        );
+        return ExitCode::from(2);
     }
 
     let mut sub = match subscribe::open(&args.client, "tail", None) {
@@ -61,7 +69,10 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
     // read blocks until the next event arrives (or EOF when the
     // daemon closes the conn on shutdown).
     if let Err(e) = sub.set_read_timeout(None) {
-        eprintln!("specter tail: clear read deadline failed: {e}");
+        connect::emit_error(
+            &args.client,
+            format_args!("specter tail: clear read deadline failed: {e}"),
+        );
         return ExitCode::from(1);
     }
 
@@ -87,16 +98,22 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
                     if e.kind() == io::ErrorKind::BrokenPipe {
                         return ExitCode::SUCCESS;
                     }
-                    eprintln!("specter tail: write failed: {e}");
+                    connect::emit_error(
+                        &args.client,
+                        format_args!("specter tail: write failed: {e}"),
+                    );
                     return ExitCode::from(1);
                 }
             }
             Ok(None) => return ExitCode::SUCCESS,
             Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                eprintln!("specter tail: malformed diagnostic line: {e}");
+                connect::emit_error(
+                    &args.client,
+                    format_args!("specter tail: malformed diagnostic line: {e}"),
+                );
             }
             Err(e) => {
-                eprintln!("specter tail: read failed: {e}");
+                connect::emit_error(&args.client, format_args!("specter tail: read failed: {e}"));
                 return ExitCode::from(1);
             }
         }
@@ -104,19 +121,19 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
 }
 
 /// Validate every `--filter <tag>` against [`KNOWN_WIRE_VARIANTS`].
-/// On the first unknown tag, prints the operator-visible suggestion
-/// list and returns exit code `2` (matches clap's argument-error
-/// shape). Returns `Ok(())` on an empty or fully-valid filter list.
-fn validate_filter(filter: &[String]) -> Result<(), ExitCode> {
-    if let Some(bad) = filter
+/// Pure — returns the first tag outside the vocabulary as `Err`, or
+/// `Ok(())` when every tag is valid (or the list is empty). The
+/// caller reports the rejection and owns the exit code (`2`, matching
+/// clap's argument-error shape), so the rule pins as a unit test
+/// independent of the surrounding I/O.
+fn validate_filter(filter: &[String]) -> Result<(), &str> {
+    match filter
         .iter()
         .find(|f| !KNOWN_WIRE_VARIANTS.contains(&f.as_str()))
     {
-        eprintln!("specter tail: unknown filter '{bad}'");
-        eprintln!("Known filters: {}", KNOWN_WIRE_VARIANTS.join(", "));
-        return Err(ExitCode::from(2));
+        Some(tag) => Err(tag.as_str()),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Filter predicate — `true` iff `wire` should reach stdout.
@@ -250,17 +267,17 @@ mod tests {
         );
     }
 
-    /// `validate_filter` rejects on the first unknown tag — exit
-    /// code `2`, matches clap's argument-error shape.
+    /// `validate_filter` rejects on the first unknown tag, surfacing
+    /// it for the caller to report. The exit-code policy (`2`, clap's
+    /// argument-error shape) lives in `run` and is pinned end-to-end
+    /// by the `tail_unknown_filter_exits_two` integration test.
     #[test]
     fn validate_filter_rejects_unknown_tag() {
-        let bad = vec!["NotAVariant".to_string()];
-        let err = validate_filter(&bad).expect_err("must reject unknown tag");
-        // ExitCode does not derive PartialEq; compare its Debug shape
-        // (the only operator-visible discriminator).
+        let filter = vec!["NotAVariant".to_string()];
         assert_eq!(
-            format!("{err:?}"),
-            format!("{:?}", std::process::ExitCode::from(2))
+            validate_filter(&filter),
+            Err("NotAVariant"),
+            "validation surfaces the offending tag",
         );
     }
 }

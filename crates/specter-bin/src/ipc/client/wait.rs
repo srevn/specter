@@ -58,12 +58,12 @@
 //! approximation is the right shape for the operator's typical use.
 
 use compact_str::CompactString;
-use specter_config::{WaitArgs, WaitKind};
+use specter_config::{ClientArgs, WaitArgs, WaitKind};
 use std::io::{self, Write};
 use std::process::ExitCode;
 use std::time::Instant;
 
-use crate::ipc::client::subscribe;
+use crate::ipc::client::{connect, subscribe};
 use crate::ipc::render::diag;
 use crate::ipc::wire::WireDiagnostic;
 
@@ -83,7 +83,10 @@ pub(crate) fn run(args: &WaitArgs) -> ExitCode {
     if deadline.is_none()
         && let Err(e) = sub.set_read_timeout(None)
     {
-        eprintln!("specter wait: clear read deadline failed: {e}");
+        connect::emit_error(
+            &args.client,
+            format_args!("specter wait: clear read deadline failed: {e}"),
+        );
         return ExitCode::FAILURE;
     }
 
@@ -100,22 +103,31 @@ pub(crate) fn run(args: &WaitArgs) -> ExitCode {
                 return ExitCode::from(124);
             }
             if let Err(e) = sub.set_read_timeout(Some(remaining)) {
-                eprintln!("specter wait: set deadline failed: {e}");
+                connect::emit_error(
+                    &args.client,
+                    format_args!("specter wait: set deadline failed: {e}"),
+                );
                 return ExitCode::FAILURE;
             }
         }
 
         match sub.read_next() {
             Ok(Some(wire)) => match classify(args.kind, &wire) {
-                Match::Matched => return emit_matched(&wire),
+                Match::Matched => return emit_matched(&args.client, &wire),
                 Match::DetachBeforeFire => {
-                    eprintln!("specter wait: target detached before fire");
+                    connect::emit_error(
+                        &args.client,
+                        format_args!("specter wait: target detached before fire"),
+                    );
                     return ExitCode::from(2);
                 }
                 Match::Skip => {}
             },
             Ok(None) => {
-                eprintln!("specter wait: daemon disconnected before match");
+                connect::emit_error(
+                    &args.client,
+                    format_args!("specter wait: daemon disconnected before match"),
+                );
                 return ExitCode::FAILURE;
             }
             Err(e)
@@ -124,10 +136,13 @@ pub(crate) fn run(args: &WaitArgs) -> ExitCode {
                 return ExitCode::from(124);
             }
             Err(e) if e.kind() == io::ErrorKind::InvalidData => {
-                eprintln!("specter wait: malformed diagnostic line: {e}");
+                connect::emit_error(
+                    &args.client,
+                    format_args!("specter wait: malformed diagnostic line: {e}"),
+                );
             }
             Err(e) => {
-                eprintln!("specter wait: read failed: {e}");
+                connect::emit_error(&args.client, format_args!("specter wait: read failed: {e}"));
                 return ExitCode::FAILURE;
             }
         }
@@ -179,7 +194,7 @@ const fn classify(kind: WaitKind, wire: &WireDiagnostic) -> Match {
 /// 256-byte initial capacity mirrors `tail`'s reused buffer so a
 /// long-field event (e.g. [`WireDiagnostic::DynamicSubReaped`] with a
 /// deep path) does not grow on the first hit.
-fn emit_matched(wire: &WireDiagnostic) -> ExitCode {
+fn emit_matched(client: &ClientArgs, wire: &WireDiagnostic) -> ExitCode {
     let mut stdout = io::stdout().lock();
     let mut rendered = String::with_capacity(256);
     diag::render(&mut rendered, wire);
@@ -194,7 +209,7 @@ fn emit_matched(wire: &WireDiagnostic) -> ExitCode {
         if e.kind() == io::ErrorKind::BrokenPipe {
             return ExitCode::SUCCESS;
         }
-        eprintln!("specter wait: write failed: {e}");
+        connect::emit_error(client, format_args!("specter wait: write failed: {e}"));
         return ExitCode::FAILURE;
     }
     ExitCode::SUCCESS

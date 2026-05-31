@@ -39,29 +39,23 @@ pub(crate) fn run(args: &StatusArgs) -> ExitCode {
         Err(code) => return code,
     };
 
-    match resp {
-        ResponsePayload::Status(status) => match args.output {
-            OutputFormat::Human => {
-                print!("{}", status::render(&status, args.wide));
-                ExitCode::SUCCESS
-            }
-            OutputFormat::Json => {
-                // Re-serialise through the wire-side carrier so the
-                // JSON shape matches the daemon's emission byte-for-
-                // byte. `expect` is safe: every field on
-                // `StatusResponse` is Serialize.
-                let s = serde_json::to_string(&status).expect("StatusResponse always serializes");
-                println!("{s}");
-                ExitCode::SUCCESS
-            }
-        },
-        ResponsePayload::Err { code, error } => {
-            eprintln!("specter status: {code}: {error}");
-            ExitCode::from(1)
+    let ResponsePayload::Status(status) = resp else {
+        return connect::fail_response(&args.client, "status", resp);
+    };
+
+    match args.output {
+        OutputFormat::Human => {
+            print!("{}", status::render(&status, args.wide));
+            ExitCode::SUCCESS
         }
-        other => {
-            eprintln!("specter status: unexpected response: {other:?}");
-            ExitCode::from(1)
+        OutputFormat::Json => {
+            // Re-serialise through the wire-side carrier so the JSON
+            // shape matches the daemon's emission byte-for-byte.
+            // `expect` is safe: every field on `StatusResponse` is
+            // Serialize.
+            let s = serde_json::to_string(&status).expect("StatusResponse always serializes");
+            println!("{s}");
+            ExitCode::SUCCESS
         }
     }
 }

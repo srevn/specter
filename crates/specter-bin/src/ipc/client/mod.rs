@@ -8,9 +8,11 @@
 //!
 //! - [`connect`] — socket open + line framing helpers (`open`,
 //!   `write_request`, `read_response`, `resolve_socket`,
-//!   `round_trip`, `one_shot_unit`). Single source of timeout,
-//!   connect-prefix policy, and the Ok/Err/other dispatch the
-//!   unit-ack verbs share.
+//!   `round_trip`, `one_shot_unit`) plus the client stderr
+//!   vocabulary (`emit_error`, `fail_response`). Single source of
+//!   timeout, the `specter <verb>:` prefix, the Ok/non-Ok dispatch
+//!   the unit-ack verbs share, and the response-tail rendering every
+//!   data verb reuses.
 //! - [`status`] — `specter status` round-trip.
 //! - [`list`] — `specter list` round-trip.
 //! - [`show`] — `specter show <name>` round-trip.
