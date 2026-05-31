@@ -20,6 +20,8 @@ specter-sensor   = { path = "../specter-sensor" }
 specter-actuator = { path = "../specter-actuator" }
 specter-config   = { path = "../specter-config" }
 clap.workspace               = true
+anstyle.workspace            = true
+anstyle-query.workspace      = true
 crossbeam.workspace          = true
 compact_str.workspace        = true
 humantime.workspace          = true

@@ -10,7 +10,7 @@
 //! connect/protocol failure, `2` reserved for the stub (unreachable
 //! once this verb is dispatched here).
 
-use specter_config::{OutputFormat, StatusArgs};
+use specter_config::StatusArgs;
 use std::process::ExitCode;
 
 use crate::ipc::client::connect;
@@ -43,21 +43,13 @@ pub(crate) fn run(args: &StatusArgs) -> ExitCode {
         return connect::fail_response(&args.client, "status", resp);
     };
 
-    match args.output {
-        OutputFormat::Human => {
-            let mut buf = String::new();
-            status::render(&mut buf, &status, args.wide);
-            print!("{buf}");
-            ExitCode::SUCCESS
-        }
-        OutputFormat::Json => {
-            // Re-serialise through the wire-side carrier so the JSON
-            // shape matches the daemon's emission byte-for-byte.
-            // `expect` is safe: every field on `StatusResponse` is
-            // Serialize.
-            let s = serde_json::to_string(&status).expect("StatusResponse always serializes");
-            println!("{s}");
-            ExitCode::SUCCESS
-        }
-    }
+    connect::render_response(
+        &args.client,
+        "status",
+        args.output,
+        &status,
+        |buf, resp, sty| {
+            status::render(buf, resp, args.wide, sty);
+        },
+    )
 }

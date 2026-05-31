@@ -8,7 +8,7 @@
 //! Exit codes match the rest of the client surface: `0` success,
 //! `1` connect / protocol / unexpected-response failure.
 
-use specter_config::{ListArgs, OutputFormat};
+use specter_config::ListArgs;
 use std::process::ExitCode;
 
 use crate::ipc::client::connect;
@@ -32,17 +32,13 @@ pub(crate) fn run(args: &ListArgs) -> ExitCode {
         return connect::fail_response(&args.client, "list", resp);
     };
 
-    match args.output {
-        OutputFormat::Human => {
-            let mut buf = String::new();
-            list::render(&mut buf, &list, args.wide);
-            print!("{buf}");
-            ExitCode::SUCCESS
-        }
-        OutputFormat::Json => {
-            let s = serde_json::to_string(&list).expect("ListResponse always serializes");
-            println!("{s}");
-            ExitCode::SUCCESS
-        }
-    }
+    connect::render_response(
+        &args.client,
+        "list",
+        args.output,
+        &list,
+        |buf, resp, sty| {
+            list::render(buf, resp, args.wide, sty);
+        },
+    )
 }

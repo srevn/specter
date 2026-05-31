@@ -148,12 +148,22 @@ pub struct DaemonArgs {
 #[derive(Debug, Args)]
 #[must_use]
 pub struct ClientArgs {
-    /// UNIX socket path. Defaults to the daemon's per-platform default
-    /// (Linux: `$XDG_RUNTIME_DIR/specter.sock`, fallback
-    /// `/tmp/specter.sock`; macOS/BSD: `$TMPDIR/specter.sock`, fallback
-    /// `/tmp/specter.sock`).
+    /// Daemon IPC socket path.
+    ///
+    /// Omitted ⇒ the daemon's per-platform default: Linux
+    /// `$XDG_RUNTIME_DIR/specter.sock` (fallback `/tmp/specter.sock`),
+    /// macOS/BSD `$TMPDIR/specter.sock` (fallback `/tmp/specter.sock`).
     #[arg(long)]
     pub socket: Option<PathBuf>,
+
+    /// ANSI color policy for client output.
+    ///
+    /// `auto` styles only when the target stream is a terminal and the
+    /// environment allows it (`NO_COLOR` / `CLICOLOR` / `CLICOLOR_FORCE`);
+    /// `always` / `never` override that gate. Stdout and stderr resolve
+    /// independently; `-o json` is never styled.
+    #[arg(long, value_enum, default_value_t = ColorWhen::Auto)]
+    pub color: ColorWhen,
 }
 
 /// `specter status` arguments.
@@ -284,6 +294,23 @@ pub enum OutputFormat {
     Human,
     /// Lossless JSON, one object per response.
     Json,
+}
+
+/// When to colorize client output — shared by every verb via
+/// [`ClientArgs`].
+///
+/// The renderer-side resolution (env precedence, TTY detection, the
+/// `Styler` it produces) lives in `specter-bin`'s `ipc::render::style`;
+/// this enum is only the operator's stated preference.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
+pub enum ColorWhen {
+    /// Style only when the target stream is a terminal and the
+    /// environment permits it.
+    Auto,
+    /// Always style, regardless of stream or environment.
+    Always,
+    /// Never style.
+    Never,
 }
 
 /// Event class for `specter wait`.
@@ -560,5 +587,30 @@ mod tests {
     fn version_flag_recognised_at_top_level() {
         let err = parse(&["specter", "--version"]).unwrap_err();
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
+    }
+
+    /// `--color` rides on every client verb via the flattened
+    /// [`ClientArgs`], defaults to [`ColorWhen::Auto`], and parses the
+    /// `always` / `never` overrides. Pins the flatten + field wiring the
+    /// renderer-side `style::resolve` reads.
+    #[test]
+    fn color_flag_defaults_auto_and_parses_overrides() {
+        let cli = parse(&["specter", "status"]).unwrap();
+        match cli.command {
+            Command::Status(args) => assert_eq!(args.client.color, ColorWhen::Auto),
+            other => panic!("expected Status, got {other:?}"),
+        }
+
+        let cli = parse(&["specter", "list", "--color", "always"]).unwrap();
+        match cli.command {
+            Command::List(args) => assert_eq!(args.client.color, ColorWhen::Always),
+            other => panic!("expected List, got {other:?}"),
+        }
+
+        let cli = parse(&["specter", "tail", "--color", "never"]).unwrap();
+        match cli.command {
+            Command::Tail(args) => assert_eq!(args.client.color, ColorWhen::Never),
+            other => panic!("expected Tail, got {other:?}"),
+        }
     }
 }

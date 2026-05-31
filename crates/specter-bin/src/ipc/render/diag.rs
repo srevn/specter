@@ -20,14 +20,19 @@
 //! Same row shape on every line so a column-aligning eye can scan
 //! quickly without `column -t`.
 //!
-//! Pure writer: `(&mut String, &WireDiagnostic)`. No I/O, no styling.
-//! The caller owns the buffer's lifetime so the per-event allocation
-//! amortizes across stream-loop iterations
+//! Pure writer: `(&mut String, &WireDiagnostic, Styler)`. No I/O. The
+//! leading timestamp paints [`style::SECONDARY`], the variant tag its
+//! [`severity`] hue, and each field's key/`=` paint [`style::LABEL`] /
+//! [`style::DELIM`] (values stay unstyled). Under `Styler::Plain` the
+//! line is byte-identical to the pre-color form, and the painted path
+//! stays allocation-free — the caller owns the buffer's lifetime so the
+//! per-event work amortizes across stream-loop iterations
 //! ([`crate::ipc::client::tail::run`] reuses one buffer for the
 //! lifetime of the subscription).
 
-use std::fmt::Write as _;
+use std::fmt::{Display, Write as _};
 
+use crate::ipc::render::style::{self, Severity, Styler};
 use crate::ipc::wire::{WireDiagnostic, WireTime};
 
 /// Render one event as a single newline-terminated line into the
@@ -43,9 +48,14 @@ use crate::ipc::wire::{WireDiagnostic, WireTime};
 /// [`crate::ipc::wire::WireOverflowScope`] /
 /// [`crate::ipc::wire::WireWatchFailure`]) write through the same
 /// formatter so the compound fields likewise carry no allocation.
-pub(crate) fn render(out: &mut String, d: &WireDiagnostic) {
-    let _ = write!(out, "{}  {}", at_field(d), d.variant_name());
-    write_fields(out, d);
+pub(crate) fn render(out: &mut String, d: &WireDiagnostic, sty: Styler) {
+    let _ = write!(
+        out,
+        "{}  {}",
+        sty.paint(style::SECONDARY, at_field(d)),
+        sty.paint(style::severity_style(severity(d)), d.variant_name()),
+    );
+    write_fields(out, d, sty);
     out.push('\n');
 }
 
@@ -113,45 +123,164 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
     }
 }
 
-/// Append every non-`at` field as ` key=value` pairs. Exhaustive
-/// match — a new variant lands a compile error here, paired with the
-/// matching arm in [`WireDiagnostic::variant_name`] and the
+/// Severity tier of a diagnostic — the hue [`render`] paints its
+/// variant tag with. Exhaustive or-pattern match (a new variant
+/// without a tier is a compile error here).
+///
+/// The tiers mirror the daemon's own per-variant tracing levels in
+/// [`crate::driver::forward::log_diagnostic`] — the established
+/// operator-facing severity catalogue — so a `tail` line's tail colour
+/// matches the level the same event carries in the daemon log:
+///
+/// - `error!` → [`Severity::Error`] — a violated engine invariant the
+///   daemon flags loudly (a malformed attach request, an anchor-kind
+///   mismatch, a walker-contract breach). Exactly three variants.
+/// - `warn!` → [`Severity::Warn`] — a degraded-but-recovered edge: a
+///   failed / vanished probe (the errno self-recovers), a purged claim,
+///   a forced ceiling, an overflow reseed, a gate deadline, a routing
+///   breach the helper bailed on.
+/// - `info!` / `debug!` / `trace!` → [`Severity::Info`] — routine
+///   lifecycle, benign races, and class / consumer drops.
+///
+/// Two deliberate departures from a literal level mirror:
+///
+/// - `SubFired` is `info!` in the daemon log but elevated to
+///   [`Severity::Ok`] here — a fire is the headline positive event and
+///   reads green on a `tail`.
+/// - `Missed` is wire-only (the slow-subscriber back-pressure marker
+///   has no `log_diagnostic` arm); it is [`Severity::Warn`], the
+///   data-loss signal it shares with `SensorOverflow`.
+///
+/// Re-judging a variant means moving it here AND in `log_diagnostic`
+/// (its rustdoc carries the reciprocal note). Tiers are an
+/// operator-triage projection, not a wire contract: re-tiering changes
+/// only a line's colour, never its bytes.
+const fn severity(d: &WireDiagnostic) -> Severity {
+    use WireDiagnostic as W;
+    match d {
+        // `info!` in the log, elevated: the headline positive event.
+        W::SubFired { .. } => Severity::Ok,
+
+        // `error!` in the log — a violated engine invariant.
+        W::AttachPathInvalid { .. }
+        | W::AnchorKindMismatch { .. }
+        | W::WalkerContractViolated { .. } => Severity::Error,
+
+        // `warn!` in the log — a degraded-but-recovered edge — plus the
+        // wire-only `Missed` data-loss marker.
+        W::StaleProbeResponse { .. }
+        | W::StaleTimer { .. }
+        | W::EffectCompleteOutsideAwaiting { .. }
+        | W::EffectCompleteForUnknownSub { .. }
+        | W::DetachUnknownSub { .. }
+        | W::ProbeVanished { .. }
+        | W::ProbeFailed { .. }
+        | W::EventOnUnwatchedResource { .. }
+        | W::WatchOpRejected { .. }
+        | W::PendingPathProbeVanished { .. }
+        | W::PendingPathProbeFailed { .. }
+        | W::ProfileClaimPurged { .. }
+        | W::PromoterClaimPurged { .. }
+        | W::AttachResourceStale { .. }
+        | W::SpliceCrossedUncovered { .. }
+        | W::AwaitGateDeadlineForceRebasing { .. }
+        | W::AwaitGateDeadlineReap { .. }
+        | W::QuiescenceCeilingUnreadable { .. }
+        | W::QuiescenceCeilingForcedDespiteChange { .. }
+        | W::RebaseCeilingForced { .. }
+        | W::RebaseCeilingUnreadable { .. }
+        | W::SensorOverflow { .. }
+        | W::PerFileDriftDroppedOnRecovery { .. }
+        | W::RebindUnknownSub { .. }
+        | W::PromoterDescentFailed { .. }
+        | W::PromoterFanoutThreshold { .. }
+        | W::PromoterEnumerationFailed { .. }
+        | W::InvalidBurstTransition { .. }
+        | W::Missed { .. } => Severity::Warn,
+
+        // `info!` / `debug!` / `trace!` — routine lifecycle, benign
+        // races, class / consumer drops.
+        W::ConfigDiffUnknownSub { .. }
+        | W::ConfigDiffUnknownPromoter { .. }
+        | W::ConfigDiffRebindFallbackAttach { .. }
+        | W::EventClassDropped { .. }
+        | W::EventNoConsumer { .. }
+        | W::ReapPendingCancelled { .. }
+        | W::ProfileReaped { .. }
+        | W::EventAbsorbedByFireTail { .. }
+        | W::PromoterReseededForOverflow { .. }
+        | W::PerFileFireSkippedOnFreshSeed { .. }
+        | W::SubAttached { .. }
+        | W::QuiescenceAbsorbed { .. }
+        | W::AbsorbArmed { .. }
+        | W::SubDetached { .. }
+        | W::SubRebound { .. }
+        | W::PromoterAttached { .. }
+        | W::PromoterReaped { .. }
+        | W::PromoterDescentVanished { .. }
+        | W::PromotionKindObserved { .. }
+        | W::PromoterProxyStaleEvent { .. }
+        | W::PromoterEnumerationVanished { .. }
+        | W::DynamicSubReaped { .. } => Severity::Info,
+    }
+}
+
+/// Append one ` key=value` field — `key` painted [`style::LABEL`], the
+/// `=` painted [`style::DELIM`], the value unstyled. The two leading
+/// spaces are the inter-field separator every line uses, so a run of
+/// `field` calls reproduces the pre-color `  k=v  k2=v2` shape
+/// byte-for-byte under `Styler::Plain`.
+fn field(out: &mut String, sty: Styler, key: &str, value: impl Display) {
+    let _ = write!(
+        out,
+        "  {}{}{value}",
+        sty.paint(style::LABEL, key),
+        sty.paint(style::DELIM, "="),
+    );
+}
+
+/// Append every non-`at` field as ` key=value` pairs via [`field`].
+/// Exhaustive match — a new variant lands a compile error here, paired
+/// with the matching arm in [`WireDiagnostic::variant_name`] and the
 /// `KNOWN_WIRE_VARIANTS` tag list.
 ///
 /// Field order mirrors the variant's declaration order so the human
 /// form and the JSON form present fields in the same sequence.
 ///
-/// Snake-rename'd wire enum fields render through `Display` (the
-/// `{value}` formatter); see the per-enum `as_str` impls in
-/// [`super::super::wire`] and [`super::super::protocol`].
-fn write_fields(out: &mut String, d: &WireDiagnostic) {
+/// Snake-rename'd wire enum fields render through `Display`; see the
+/// per-enum `as_str` impls in [`super::super::wire`] and
+/// [`super::super::protocol`].
+fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
     match d {
         WireDiagnostic::StaleProbeResponse {
             owner, correlation, ..
         } => {
-            let _ = write!(out, "  owner={owner}  correlation={correlation}");
+            field(out, sty, "owner", owner);
+            field(out, sty, "correlation", correlation);
         }
         WireDiagnostic::StaleTimer { id, .. } => {
-            let _ = write!(out, "  id={id}");
+            field(out, sty, "id", id);
         }
         WireDiagnostic::EffectCompleteOutsideAwaiting { sub, profile, .. } => {
-            let _ = write!(out, "  sub={}  profile={}", sub.0, profile.0);
+            field(out, sty, "sub", sub.0);
+            field(out, sty, "profile", profile.0);
         }
         WireDiagnostic::EffectCompleteForUnknownSub { sub, .. } => {
-            let _ = write!(out, "  sub={}", sub.0);
+            field(out, sty, "sub", sub.0);
         }
         WireDiagnostic::DetachUnknownSub { sub, .. } => {
-            let _ = write!(out, "  sub={}", sub.0);
+            field(out, sty, "sub", sub.0);
         }
         WireDiagnostic::ConfigDiffUnknownSub { name, .. }
         | WireDiagnostic::ConfigDiffUnknownPromoter { name, .. }
         | WireDiagnostic::ConfigDiffRebindFallbackAttach { name, .. } => {
-            let _ = write!(out, "  name={name}");
+            field(out, sty, "name", name);
         }
         WireDiagnostic::ProbeVanished {
             profile, intent, ..
         } => {
-            let _ = write!(out, "  profile={}  intent={intent}", profile.0);
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "intent", intent);
         }
         WireDiagnostic::ProbeFailed {
             profile,
@@ -159,11 +288,9 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             errno,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  intent={intent}  errno={errno}",
-                profile.0,
-            );
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "intent", intent);
+            field(out, sty, "errno", errno);
         }
         WireDiagnostic::EventClassDropped {
             resource,
@@ -171,26 +298,26 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             profile,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  resource={}  event={event}  profile={}",
-                resource.0, profile.0,
-            );
+            field(out, sty, "resource", resource.0);
+            field(out, sty, "event", event);
+            field(out, sty, "profile", profile.0);
         }
         WireDiagnostic::EventOnUnwatchedResource { resource, .. }
         | WireDiagnostic::EventNoConsumer { resource, .. }
         | WireDiagnostic::AttachResourceStale { resource, .. } => {
-            let _ = write!(out, "  resource={}", resource.0);
+            field(out, sty, "resource", resource.0);
         }
         WireDiagnostic::WatchOpRejected {
             resource, failure, ..
         } => {
-            let _ = write!(out, "  resource={}  failure={failure}", resource.0);
+            field(out, sty, "resource", resource.0);
+            field(out, sty, "failure", failure);
         }
         WireDiagnostic::PendingPathProbeVanished {
             profile, prefix, ..
         } => {
-            let _ = write!(out, "  profile={}  prefix={}", profile.0, prefix.0);
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "prefix", prefix.0);
         }
         WireDiagnostic::PendingPathProbeFailed {
             profile,
@@ -198,23 +325,23 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             errno,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  prefix={}  errno={errno}",
-                profile.0, prefix.0,
-            );
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "prefix", prefix.0);
+            field(out, sty, "errno", errno);
         }
         WireDiagnostic::ReapPendingCancelled { profile, .. }
         | WireDiagnostic::PerFileDriftDroppedOnRecovery { profile, .. }
         | WireDiagnostic::PerFileFireSkippedOnFreshSeed { profile, .. }
         | WireDiagnostic::QuiescenceAbsorbed { profile, .. } => {
-            let _ = write!(out, "  profile={}", profile.0);
+            field(out, sty, "profile", profile.0);
         }
         WireDiagnostic::AbsorbArmed { profile, mode, .. } => {
-            let _ = write!(out, "  profile={}  mode={mode}", profile.0);
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "mode", mode);
         }
         WireDiagnostic::ProfileReaped { profile, via, .. } => {
-            let _ = write!(out, "  profile={}  via={via}", profile.0);
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "via", via);
         }
         WireDiagnostic::ProfileClaimPurged {
             profile,
@@ -223,11 +350,10 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             failure,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  claim={claim}  resource={}  failure={failure}",
-                profile.0, resource.0,
-            );
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "claim", claim);
+            field(out, sty, "resource", resource.0);
+            field(out, sty, "failure", failure);
         }
         WireDiagnostic::PromoterClaimPurged {
             promoter,
@@ -236,14 +362,14 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             failure,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  promoter={}  claim={claim}  resource={}  failure={failure}",
-                promoter.0, resource.0,
-            );
+            field(out, sty, "promoter", promoter.0);
+            field(out, sty, "claim", claim);
+            field(out, sty, "resource", resource.0);
+            field(out, sty, "failure", failure);
         }
         WireDiagnostic::AttachPathInvalid { path, hint, .. } => {
-            let _ = write!(out, "  path={path}  hint={hint}");
+            field(out, sty, "path", path);
+            field(out, sty, "hint", hint);
         }
         WireDiagnostic::AnchorKindMismatch {
             profile,
@@ -251,11 +377,9 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             response_kind,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  prior_kind={prior_kind}  response_kind={response_kind}",
-                profile.0,
-            );
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "prior_kind", prior_kind);
+            field(out, sty, "response_kind", response_kind);
         }
         WireDiagnostic::SpliceCrossedUncovered {
             profile,
@@ -263,11 +387,9 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             cause,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  target={}  cause={cause}",
-                profile.0, target.0,
-            );
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "target", target.0);
+            field(out, sty, "cause", cause);
         }
         WireDiagnostic::EventAbsorbedByFireTail {
             profile,
@@ -275,11 +397,9 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             event,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  resource={}  event={event}",
-                profile.0, resource.0,
-            );
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "resource", resource.0);
+            field(out, sty, "event", event);
         }
         WireDiagnostic::AwaitGateDeadlineForceRebasing {
             profile,
@@ -291,7 +411,8 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             outstanding,
             ..
         } => {
-            let _ = write!(out, "  profile={}  outstanding={outstanding}", profile.0);
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "outstanding", outstanding);
         }
         WireDiagnostic::QuiescenceCeilingUnreadable {
             profile,
@@ -305,16 +426,15 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             intent,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  first_unread={first_unread}  intent={intent}",
-                profile.0,
-            );
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "first_unread", first_unread);
+            field(out, sty, "intent", intent);
         }
         WireDiagnostic::QuiescenceCeilingForcedDespiteChange {
             profile, intent, ..
         } => {
-            let _ = write!(out, "  profile={}  intent={intent}", profile.0);
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "intent", intent);
         }
         WireDiagnostic::RebaseCeilingForced {
             profile,
@@ -322,18 +442,16 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             observed_change,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  intent={intent}  observed_change={observed_change}",
-                profile.0,
-            );
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "intent", intent);
+            field(out, sty, "observed_change", observed_change);
         }
         WireDiagnostic::SensorOverflow { scope, .. } => {
-            let _ = write!(out, "  scope={scope}");
+            field(out, sty, "scope", scope);
         }
         WireDiagnostic::PromoterReseededForOverflow { promoter, .. }
         | WireDiagnostic::PromoterReaped { promoter, .. } => {
-            let _ = write!(out, "  promoter={}", promoter.0);
+            field(out, sty, "promoter", promoter.0);
         }
         WireDiagnostic::SubAttached {
             sub,
@@ -341,9 +459,10 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             source_promoter,
             ..
         } => {
-            let _ = write!(out, "  sub={}  name={name}", sub.0);
+            field(out, sty, "sub", sub.0);
+            field(out, sty, "name", name);
             if let Some(p) = source_promoter {
-                let _ = write!(out, "  source_promoter={}", p.0);
+                field(out, sty, "source_promoter", p.0);
             }
         }
         WireDiagnostic::SubFired {
@@ -352,7 +471,9 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             count,
             ..
         } => {
-            let _ = write!(out, "  sub={}  profile={}  count={count}", sub.0, profile.0);
+            field(out, sty, "sub", sub.0);
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "count", count);
         }
         WireDiagnostic::SubDetached {
             sub,
@@ -360,22 +481,22 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             reason,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  sub={}  profile={}  reason={reason}",
-                sub.0, profile.0,
-            );
+            field(out, sty, "sub", sub.0);
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "reason", reason);
         }
         WireDiagnostic::SubRebound { sub, .. } | WireDiagnostic::RebindUnknownSub { sub, .. } => {
-            let _ = write!(out, "  sub={}", sub.0);
+            field(out, sty, "sub", sub.0);
         }
         WireDiagnostic::PromoterAttached { promoter, name, .. } => {
-            let _ = write!(out, "  promoter={}  name={name}", promoter.0);
+            field(out, sty, "promoter", promoter.0);
+            field(out, sty, "name", name);
         }
         WireDiagnostic::PromoterDescentVanished {
             promoter, prefix, ..
         } => {
-            let _ = write!(out, "  promoter={}  prefix={}", promoter.0, prefix.0);
+            field(out, sty, "promoter", promoter.0);
+            field(out, sty, "prefix", prefix.0);
         }
         WireDiagnostic::PromoterDescentFailed {
             promoter,
@@ -383,11 +504,9 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             errno,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  promoter={}  prefix={}  errno={errno}",
-                promoter.0, prefix.0,
-            );
+            field(out, sty, "promoter", promoter.0);
+            field(out, sty, "prefix", prefix.0);
+            field(out, sty, "errno", errno);
         }
         WireDiagnostic::PromotionKindObserved {
             promoter,
@@ -395,22 +514,27 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             kind,
             ..
         } => {
-            let _ = write!(out, "  promoter={}  path={path}  kind={kind}", promoter.0);
+            field(out, sty, "promoter", promoter.0);
+            field(out, sty, "path", path);
+            field(out, sty, "kind", kind);
         }
         WireDiagnostic::PromoterFanoutThreshold {
             promoter, count, ..
         } => {
-            let _ = write!(out, "  promoter={}  count={count}", promoter.0);
+            field(out, sty, "promoter", promoter.0);
+            field(out, sty, "count", count);
         }
         WireDiagnostic::PromoterProxyStaleEvent {
             promoter, resource, ..
         } => {
-            let _ = write!(out, "  promoter={}  resource={}", promoter.0, resource.0);
+            field(out, sty, "promoter", promoter.0);
+            field(out, sty, "resource", resource.0);
         }
         WireDiagnostic::PromoterEnumerationVanished {
             promoter, proxy, ..
         } => {
-            let _ = write!(out, "  promoter={}  proxy={}", promoter.0, proxy.0);
+            field(out, sty, "promoter", promoter.0);
+            field(out, sty, "proxy", proxy.0);
         }
         WireDiagnostic::PromoterEnumerationFailed {
             promoter,
@@ -418,11 +542,9 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             errno,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  promoter={}  proxy={}  errno={errno}",
-                promoter.0, proxy.0,
-            );
+            field(out, sty, "promoter", promoter.0);
+            field(out, sty, "proxy", proxy.0);
+            field(out, sty, "errno", errno);
         }
         WireDiagnostic::DynamicSubReaped {
             promoter,
@@ -430,7 +552,9 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             path,
             ..
         } => {
-            let _ = write!(out, "  promoter={}  sub={}  path={path}", promoter.0, sub.0);
+            field(out, sty, "promoter", promoter.0);
+            field(out, sty, "sub", sub.0);
+            field(out, sty, "path", path);
         }
         WireDiagnostic::InvalidBurstTransition {
             profile,
@@ -438,17 +562,15 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
             observed,
             ..
         } => {
-            let _ = write!(
-                out,
-                "  profile={}  helper={helper}  observed={observed}",
-                profile.0,
-            );
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "helper", helper);
+            field(out, sty, "observed", observed);
         }
         WireDiagnostic::WalkerContractViolated { owner, .. } => {
-            let _ = write!(out, "  owner={owner}");
+            field(out, sty, "owner", owner);
         }
         WireDiagnostic::Missed { count, .. } => {
-            let _ = write!(out, "  count={count}");
+            field(out, sty, "count", count);
         }
     }
 }
@@ -457,6 +579,7 @@ fn write_fields(out: &mut String, d: &WireDiagnostic) {
 mod tests {
     use super::render;
     use crate::ipc::protocol::WireId;
+    use crate::ipc::render::style::Styler;
     use crate::ipc::wire::{
         WireBurstIntent, WireDetachReason, WireDiagnostic, WireFsEvent, WireOverflowScope,
         WireProbeOwner, WireTime,
@@ -477,6 +600,7 @@ mod tests {
                 profile: WireId(22),
                 count: 3,
             },
+            Styler::Plain,
         );
         assert!(
             s.starts_with("1970-01-01T00:00:00Z  sub_fired"),
@@ -501,6 +625,7 @@ mod tests {
                 at: WireTime::from(UNIX_EPOCH),
                 count: 5,
             },
+            Styler::Plain,
         );
         assert!(
             s.starts_with("1970-01-01T00:00:00Z  _missed"),
@@ -525,6 +650,7 @@ mod tests {
                 name: "static_watch".into(),
                 source_promoter: None,
             },
+            Styler::Plain,
         );
         assert!(static_attach.contains("name=static_watch"));
         assert!(
@@ -541,6 +667,7 @@ mod tests {
                 name: "p@/tmp/x".into(),
                 source_promoter: Some(WireId(99)),
             },
+            Styler::Plain,
         );
         assert!(dynamic_attach.contains("source_promoter=99"));
     }
@@ -560,6 +687,7 @@ mod tests {
                 profile: WireId(2),
                 reason: WireDetachReason::IpcDisabled,
             },
+            Styler::Plain,
         );
         assert!(s.contains("  reason=ipc_disabled"), "got: {s:?}");
     }
@@ -578,6 +706,7 @@ mod tests {
                 profile: WireId(7),
                 via: crate::ipc::wire::WireReapTrigger::DeferredFromBurst,
             },
+            Styler::Plain,
         );
         assert!(s.contains("  profile=7"));
         assert!(s.contains("  via=deferred_from_burst"));
@@ -599,6 +728,7 @@ mod tests {
                 promoter: WireId(42),
                 name: "watch_glob".into(),
             },
+            Styler::Plain,
         );
         assert!(s.contains("  promoter=42"));
         assert!(s.contains("  name=watch_glob"));
@@ -617,6 +747,7 @@ mod tests {
                 owner: WireProbeOwner::Profile { profile: WireId(1) },
                 correlation: 9,
             },
+            Styler::Plain,
         );
         assert!(profile_owner.contains("  owner=profile/1"));
         assert!(profile_owner.contains("  correlation=9"));
@@ -631,6 +762,7 @@ mod tests {
                 },
                 correlation: 11,
             },
+            Styler::Plain,
         );
         assert!(promoter_owner.contains("  owner=promoter/2"));
     }
@@ -649,6 +781,7 @@ mod tests {
                 event: WireFsEvent::MetadataChanged,
                 profile: WireId(200),
             },
+            Styler::Plain,
         );
         // Field order matches declaration order.
         let idx_resource = s.find("resource=").expect("resource present");
@@ -672,6 +805,7 @@ mod tests {
                 at: WireTime::from(UNIX_EPOCH),
                 scope: WireOverflowScope::Global,
             },
+            Styler::Plain,
         );
         assert!(s.contains("  scope=global"), "got: {s:?}");
         assert!(
@@ -706,7 +840,7 @@ mod tests {
                 panic!("failed to deserialize witness for tag {tag}: {e}");
             });
             let mut line = String::new();
-            render(&mut line, &wire);
+            render(&mut line, &wire, Styler::Plain);
             assert!(
                 line.contains(tag),
                 "render line missing tag {tag}: {line:?}"
@@ -881,8 +1015,115 @@ mod tests {
                 intent: WireBurstIntent::Seed,
                 errno: 13,
             },
+            Styler::Plain,
         );
         assert!(s.contains("  intent=seed"), "got: {s:?}");
         assert!(s.contains("  errno=13"), "got: {s:?}");
+    }
+
+    /// `severity` classifies one representative per tier. Exhaustiveness
+    /// is the compiler's (the or-pattern match owns every variant); this
+    /// pins the four anchors so a mis-tiered representative is caught.
+    #[test]
+    fn severity_classifies_one_representative_per_tier() {
+        use super::severity;
+        use crate::ipc::render::style::Severity;
+
+        // Ok — the headline positive event.
+        assert_eq!(
+            severity(&WireDiagnostic::SubFired {
+                at: WireTime::from(UNIX_EPOCH),
+                sub: WireId(1),
+                profile: WireId(2),
+                count: 1,
+            }),
+            Severity::Ok,
+        );
+        // Error — a violated engine invariant (the daemon's `error!`).
+        assert_eq!(
+            severity(&WireDiagnostic::WalkerContractViolated {
+                at: WireTime::from(UNIX_EPOCH),
+                owner: WireProbeOwner::Profile { profile: WireId(1) },
+            }),
+            Severity::Error,
+        );
+        // Warn — a probe failure carries an errno but self-recovers, so
+        // it mirrors the daemon's `warn!`, NOT `error!`. The
+        // reconciliation anchor: this variant previously mis-tiered to
+        // Error here.
+        assert_eq!(
+            severity(&WireDiagnostic::ProbeFailed {
+                at: WireTime::from(UNIX_EPOCH),
+                profile: WireId(1),
+                intent: WireBurstIntent::Seed,
+                errno: 13,
+            }),
+            Severity::Warn,
+        );
+        // Info — routine lifecycle narration.
+        assert_eq!(
+            severity(&WireDiagnostic::SubAttached {
+                at: WireTime::from(UNIX_EPOCH),
+                sub: WireId(1),
+                name: "w".into(),
+                source_promoter: None,
+            }),
+            Severity::Info,
+        );
+    }
+
+    /// Under `Styler::Active` the variant tag wears its severity hue
+    /// (`Ok`→green for `sub_fired`, `Error`→red for `probe_failed`) and
+    /// the field keys gain SGR; stripping every escape reproduces the
+    /// `Plain` line byte-for-byte (color is purely additive).
+    #[test]
+    fn active_colors_tag_by_severity_and_strips_to_plain() {
+        use crate::ipc::render::style::{Severity, severity_style, strip_ansi};
+
+        let fired = WireDiagnostic::SubFired {
+            at: WireTime::from(UNIX_EPOCH),
+            sub: WireId(11),
+            profile: WireId(22),
+            count: 3,
+        };
+        let mut active = String::new();
+        render(&mut active, &fired, Styler::Active);
+        let green = severity_style(Severity::Ok).render().to_string();
+        assert!(
+            active.contains(&format!("{green}sub_fired")),
+            "Ok tag wears the green severity hue: {active:?}",
+        );
+        let mut plain = String::new();
+        render(&mut plain, &fired, Styler::Plain);
+        assert_eq!(strip_ansi(&active), plain, "stripping Active yields Plain");
+
+        // A probe failure is the daemon's `warn!` — yellow, not red —
+        // even though an errno rides the line (the cause self-recovers).
+        let failed = WireDiagnostic::ProbeFailed {
+            at: WireTime::from(UNIX_EPOCH),
+            profile: WireId(1),
+            intent: WireBurstIntent::Seed,
+            errno: 13,
+        };
+        let mut active = String::new();
+        render(&mut active, &failed, Styler::Active);
+        let yellow = severity_style(Severity::Warn).render().to_string();
+        assert!(
+            active.contains(&format!("{yellow}probe_failed")),
+            "Warn tag wears the yellow severity hue: {active:?}",
+        );
+
+        // Red is reserved for a violated invariant.
+        let breach = WireDiagnostic::WalkerContractViolated {
+            at: WireTime::from(UNIX_EPOCH),
+            owner: WireProbeOwner::Profile { profile: WireId(1) },
+        };
+        let mut active = String::new();
+        render(&mut active, &breach, Styler::Active);
+        let red = severity_style(Severity::Error).render().to_string();
+        assert!(
+            active.contains(&format!("{red}walker_contract_violated")),
+            "Error tag wears the red severity hue: {active:?}",
+        );
     }
 }

@@ -64,7 +64,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use crate::ipc::client::{connect, subscribe};
-use crate::ipc::render::diag;
+use crate::ipc::render::{diag, style};
 use crate::ipc::wire::WireDiagnostic;
 
 /// Run the `specter wait` stream loop.
@@ -195,9 +195,10 @@ const fn classify(kind: WaitKind, wire: &WireDiagnostic) -> Match {
 /// long-field event (e.g. [`WireDiagnostic::DynamicSubReaped`] with a
 /// deep path) does not grow on the first hit.
 fn emit_matched(client: &ClientArgs, wire: &WireDiagnostic) -> ExitCode {
+    let sty = style::resolve(client.color, style::Stream::Stdout);
     let mut stdout = io::stdout().lock();
     let mut rendered = String::with_capacity(256);
-    diag::render(&mut rendered, wire);
+    diag::render(&mut rendered, wire, sty);
     if let Err(e) = stdout
         .write_all(rendered.as_bytes())
         .and_then(|()| stdout.flush())

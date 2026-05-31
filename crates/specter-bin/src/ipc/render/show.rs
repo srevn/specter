@@ -7,31 +7,47 @@
 //! - [`ShowResponse::Disabled`] — one line, `<name>: disabled (source)`.
 //! - [`ShowResponse::Unknown`] — one line; operator hint.
 //!
-//! Mirror of [`super::status_human`]'s label alignment via the
-//! [`LABEL_WIDTH`] constant — operators reading both views see the
-//! same vertical anchor for the value column.
+//! Labels align to [`LABEL_WIDTH`] via the shared [`super::label_cell`]
+//! primitive, so operators reading `status` and `show` see the same
+//! vertical anchor for the value column. Labels paint [`style::LABEL`];
+//! the `state` value carries its phase hue; the `Disabled` keyword is
+//! [`style::OFF`] and the `Unknown` arm is [`style::ERR`]. Under
+//! `Styler::Plain` the output is byte-identical to the pre-color view.
 
 use std::fmt::Write as _;
 
 use crate::ipc::protocol::{ShowResponse, SubDetails};
+use crate::ipc::render::label_cell;
+use crate::ipc::render::style::{self, Rule, Styler};
 use crate::ipc::wire::{WireAbsorbMode, WireEffectScope};
 
 /// Render the response as one operator-readable block into the
-/// caller's buffer.
-pub(crate) fn render(out: &mut String, resp: &ShowResponse) {
+/// caller's buffer. `sty` gates ANSI styling on the resolved stdout
+/// stream.
+pub(crate) fn render(out: &mut String, resp: &ShowResponse, sty: Styler) {
     match resp {
-        ShowResponse::Active(d) => render_active(out, d),
+        ShowResponse::Active(d) => render_active(out, d, sty),
         ShowResponse::Disabled { name, source } => {
-            let _ = writeln!(out, "{name}: disabled ({source})");
+            let _ = writeln!(
+                out,
+                "{name}: {} ({source})",
+                sty.paint(style::OFF, "disabled")
+            );
         }
         ShowResponse::Unknown { name } => {
-            let _ = writeln!(out, "{name}: unknown — not in config, not runtime-disabled");
+            let _ = writeln!(
+                out,
+                "{}: {} {}",
+                sty.paint(style::ERR, name),
+                sty.paint(style::ERR, "unknown"),
+                sty.paint(style::SECONDARY, "— not in config, not runtime-disabled"),
+            );
         }
     }
 }
 
 /// Width of the label column. Padded so values align vertically;
-/// mirrors [`super::status_human`]'s convention.
+/// mirrors [`super::status`]'s convention.
 const LABEL_WIDTH: usize = 16;
 
 /// Layout for `Active`:
@@ -53,58 +69,115 @@ const LABEL_WIDTH: usize = 16;
 ///   [0] exec /bin/build  ok→#1 fail→terminate
 ///   [1] exec /bin/notify  ok→escape fail→terminate
 /// ```
-fn render_active(out: &mut String, d: &SubDetails) {
+fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
     out.reserve(512);
-    let _ = writeln!(out, "{}", d.name);
-    let underline_len = d.name.len().max(40);
-    for _ in 0..underline_len {
-        out.push('─');
-    }
-    out.push('\n');
-    // `state: None` mirrors `anchor: None` / `last_fired_at: None`:
-    // the projection surfaces a missing Profile lookup rather than
-    // panicking the daemon. `-` is the operator-visible "missing"
-    // marker shared with `list -o human`'s `col_state`.
-    let _ = match d.state {
-        Some(s) => writeln!(out, "{:LABEL_WIDTH$}{s}", "state"),
-        None => writeln!(out, "{:LABEL_WIDTH$}-", "state"),
-    };
-    let _ = match d.anchor.as_ref() {
-        Some(p) => writeln!(out, "{:LABEL_WIDTH$}{}", "anchor", p),
-        None => writeln!(out, "{:LABEL_WIDTH$}-", "anchor"),
-    };
-    let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "scope", effect_scope_str(d.scope));
-    let _ = writeln!(out, "{:LABEL_WIDTH$}{}ms", "settle", d.settle_ms);
+    let _ = writeln!(out, "{}", sty.paint(style::LABEL, d.name.as_str()));
     let _ = writeln!(
         out,
-        "{:LABEL_WIDTH$}{} (suppressed: {}, absorbed: {})",
-        "fires", d.fire_count, d.dedup_suppressed_count, d.absorb_count,
+        "{}",
+        sty.paint(style::DELIM, Rule(d.name.len().max(40)))
     );
-    let _ = match d.last_fired_at.as_ref() {
-        Some(t) => writeln!(out, "{:LABEL_WIDTH$}{}", "last fired", t),
-        None => writeln!(out, "{:LABEL_WIDTH$}-", "last fired"),
-    };
+    // `state: None` mirrors `anchor: None` / `last_fired_at: None`:
+    // the projection surfaces a missing Profile lookup rather than
+    // panicking the daemon. `-` (painted [`style::MISSING`]) is the
+    // operator-visible "missing" marker shared with `list`'s `col_state`.
+    match d.state {
+        Some(s) => {
+            let _ = writeln!(
+                out,
+                "{}{}",
+                label_cell(sty, "state", LABEL_WIDTH),
+                sty.paint(style::state(s), s),
+            );
+        }
+        None => missing_line(out, sty, "state"),
+    }
+    match d.anchor.as_ref() {
+        Some(p) => {
+            let _ = writeln!(out, "{}{}", label_cell(sty, "anchor", LABEL_WIDTH), p);
+        }
+        None => missing_line(out, sty, "anchor"),
+    }
+    let _ = writeln!(
+        out,
+        "{}{}",
+        label_cell(sty, "scope", LABEL_WIDTH),
+        effect_scope_str(d.scope),
+    );
+    let _ = writeln!(
+        out,
+        "{}{}ms",
+        label_cell(sty, "settle", LABEL_WIDTH),
+        d.settle_ms,
+    );
+    let _ = writeln!(
+        out,
+        "{}{} (suppressed: {}, absorbed: {})",
+        label_cell(sty, "fires", LABEL_WIDTH),
+        d.fire_count,
+        d.dedup_suppressed_count,
+        d.absorb_count,
+    );
+    match d.last_fired_at.as_ref() {
+        Some(t) => {
+            let _ = writeln!(out, "{}{}", label_cell(sty, "last fired", LABEL_WIDTH), t);
+        }
+        None => missing_line(out, sty, "last fired"),
+    }
     // Only an armed, live window renders — the projection drops an
     // inert one, so a present `absorb` is always operator-meaningful.
     if let Some(w) = d.absorb.as_ref() {
         let _ = writeln!(
             out,
-            "{:LABEL_WIDTH$}until {} ({})",
-            "absorbing",
+            "{}until {} ({})",
+            label_cell(sty, "absorbing", LABEL_WIDTH),
             w.expiry,
             absorb_mode_str(w.mode),
         );
     }
     if let Some(pid) = d.source_promoter {
-        let _ = writeln!(out, "{:LABEL_WIDTH$}promoter {}", "source", pid.0);
+        let _ = writeln!(
+            out,
+            "{}promoter {}",
+            label_cell(sty, "source", LABEL_WIDTH),
+            pid.0,
+        );
     }
-    let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "sub_id", d.sub.0);
-    let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "profile_id", d.profile.0);
+    let _ = writeln!(out, "{}{}", label_cell(sty, "sub_id", LABEL_WIDTH), d.sub.0);
+    let _ = writeln!(
+        out,
+        "{}{}",
+        label_cell(sty, "profile_id", LABEL_WIDTH),
+        d.profile.0,
+    );
     out.push('\n');
-    let _ = writeln!(out, "program ({} ops):", d.program.len());
+    // The `program (N ops):` header is a section label, painted `LABEL`
+    // like the others; the lines below it stay plain — the daemon
+    // pre-renders each as an opaque string the renderer does not
+    // re-tokenize.
+    let _ = writeln!(
+        out,
+        "{}",
+        sty.paint(
+            style::LABEL,
+            format_args!("program ({} ops):", d.program.len())
+        ),
+    );
     for line in &d.program {
         let _ = writeln!(out, "  {line}");
     }
+}
+
+/// Write a `label   -` line for a value the projection surfaced as
+/// `None` — the `-` painted [`style::MISSING`]. Shared by the three
+/// optional `Active` fields (`state` / `anchor` / `last fired`).
+fn missing_line(out: &mut String, sty: Styler, label: &str) {
+    let _ = writeln!(
+        out,
+        "{}{}",
+        label_cell(sty, label, LABEL_WIDTH),
+        sty.paint(style::MISSING, "-"),
+    );
 }
 
 /// View-local label for a [`WireEffectScope`] — hyphenated form
@@ -134,6 +207,7 @@ const fn absorb_mode_str(m: WireAbsorbMode) -> &'static str {
 mod tests {
     use super::render;
     use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId};
+    use crate::ipc::render::style::Styler;
     use crate::ipc::wire::{
         WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WirePath, WireStateLabel, WireTime,
     };
@@ -184,7 +258,7 @@ mod tests {
             ],
         );
         let mut out = String::new();
-        render(&mut out, &ShowResponse::Active(d));
+        render(&mut out, &ShowResponse::Active(d), Styler::Plain);
         assert!(
             out.contains("program (2 ops):"),
             "program header missing: {out}"
@@ -206,7 +280,7 @@ mod tests {
     fn show_human_active_anchor_none_renders_dash() {
         let d = details("foo", None, vec![]);
         let mut out = String::new();
-        render(&mut out, &ShowResponse::Active(d));
+        render(&mut out, &ShowResponse::Active(d), Styler::Plain);
         let anchor_line = out
             .lines()
             .find(|l| l.starts_with("anchor"))
@@ -227,7 +301,7 @@ mod tests {
         let mut d = details("foo", None, vec![]);
         d.state = None;
         let mut out = String::new();
-        render(&mut out, &ShowResponse::Active(d));
+        render(&mut out, &ShowResponse::Active(d), Styler::Plain);
         let state_line = out
             .lines()
             .find(|l| l.starts_with("state"))
@@ -256,7 +330,7 @@ mod tests {
             4,
         );
         let mut out = String::new();
-        render(&mut out, &ShowResponse::Active(d));
+        render(&mut out, &ShowResponse::Active(d), Styler::Plain);
         let absorbing = out
             .lines()
             .find(|l| l.starts_with("absorbing"))
@@ -295,7 +369,7 @@ mod tests {
             0,
         );
         let mut out = String::new();
-        render(&mut out, &ShowResponse::Active(with));
+        render(&mut out, &ShowResponse::Active(with), Styler::Plain);
         assert!(
             out.lines()
                 .any(|l| l.starts_with("absorbing") && l.contains("(persist)")),
@@ -304,7 +378,7 @@ mod tests {
 
         let without = details("foo", None, vec![]);
         let mut out = String::new();
-        render(&mut out, &ShowResponse::Active(without));
+        render(&mut out, &ShowResponse::Active(without), Styler::Plain);
         assert!(
             !out.lines().any(|l| l.starts_with("absorbing")),
             "None window omits the absorbing line entirely: {out}",
@@ -319,7 +393,7 @@ mod tests {
             source: DisabledSource::Runtime,
         };
         let mut out = String::new();
-        render(&mut out, &r);
+        render(&mut out, &r, Styler::Plain);
         assert_eq!(out, "paused: disabled (runtime)\n");
 
         let r2 = ShowResponse::Disabled {
@@ -327,7 +401,7 @@ mod tests {
             source: DisabledSource::Toml,
         };
         let mut buf = String::new();
-        render(&mut buf, &r2);
+        render(&mut buf, &r2, Styler::Plain);
         assert_eq!(buf, "off: disabled (toml)\n");
     }
 
@@ -339,7 +413,7 @@ mod tests {
             name: "ghost".into(),
         };
         let mut out = String::new();
-        render(&mut out, &r);
+        render(&mut out, &r, Styler::Plain);
         assert!(out.contains("ghost"));
         assert!(
             out.contains("unknown"),
@@ -349,5 +423,35 @@ mod tests {
             out.contains("not in config"),
             "Unknown arm tells the operator where to look: {out}",
         );
+    }
+
+    /// Color is purely additive across all three `show` arms: an
+    /// `Active` render stripped of every SGR escape equals the `Plain`
+    /// render byte-for-byte, and each arm does carry escapes (the
+    /// Active table, the `disabled` keyword, the `unknown` report).
+    #[test]
+    fn show_active_strips_to_plain_across_arms() {
+        use crate::ipc::render::style::strip_ansi;
+
+        let active_arm = ShowResponse::Active(details(
+            "foo",
+            Some(WirePath::from(std::path::Path::new("/etc/specter"))),
+            vec!["[0] exec /bin/build  ok→#1 fail→terminate".to_string()],
+        ));
+        let disabled_arm = ShowResponse::Disabled {
+            name: "paused".into(),
+            source: DisabledSource::Runtime,
+        };
+        let unknown_arm = ShowResponse::Unknown {
+            name: "ghost".into(),
+        };
+        for resp in [&active_arm, &disabled_arm, &unknown_arm] {
+            let mut active = String::new();
+            render(&mut active, resp, Styler::Active);
+            let mut plain = String::new();
+            render(&mut plain, resp, Styler::Plain);
+            assert!(active.contains('\x1b'), "Active emits SGR: {active:?}");
+            assert_eq!(strip_ansi(&active), plain, "stripping Active yields Plain");
+        }
     }
 }

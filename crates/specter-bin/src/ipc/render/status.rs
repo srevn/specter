@@ -21,53 +21,82 @@
 //! signature so the client need not branch on per-verb argument
 //! shapes.
 //!
-//! Pure writer: `(&mut String, &StatusResponse, bool)`. No I/O, no
-//! styling — the current `status` view stays plain text.
+//! Pure writer: `(&mut String, &StatusResponse, bool, Styler)`. No
+//! I/O. The title and labels paint [`style::LABEL`], the rule and the
+//! `·` separators [`style::DELIM`]; values stay unstyled. Under
+//! `Styler::Plain` the output is byte-identical to the pre-color view.
 
 use crate::ipc::protocol::{StatusResponse, WireLastReload};
+use crate::ipc::render::label_cell;
+use crate::ipc::render::style::{self, Rule, Styler};
 use std::fmt::Write as _;
 
 /// Render the status response as one operator-readable block.
 ///
 /// `_wide` is reserved for future extensions (currently unused; the
 /// `status` view fits on one screen of the default columns) — keeps
-/// the signature aligned with the other renderers.
-pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool) {
+/// the signature aligned with the other renderers. `sty` gates ANSI
+/// styling on the resolved stdout stream.
+pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: Styler) {
     out.reserve(512);
-    let _ = writeln!(out, "specter status");
-    let _ = writeln!(out, "{}", "─".repeat(61));
+    let _ = writeln!(out, "{}", sty.paint(style::LABEL, "specter status"));
+    let _ = writeln!(out, "{}", sty.paint(style::DELIM, Rule(61)));
     let _ = writeln!(
         out,
-        "{:LABEL_WIDTH$}{}",
-        "uptime",
+        "{}{}",
+        label_cell(sty, "uptime", LABEL_WIDTH),
         format_uptime(resp.uptime_secs),
     );
-    let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "started", resp.start_wall);
     let _ = writeln!(
         out,
-        "{:LABEL_WIDTH$}{}",
-        "reloads",
+        "{}{}",
+        label_cell(sty, "started", LABEL_WIDTH),
+        resp.start_wall,
+    );
+    let _ = writeln!(
+        out,
+        "{}{}",
+        label_cell(sty, "reloads", LABEL_WIDTH),
         format_reloads(resp.reload_count, resp.last_reload.as_ref()),
     );
+    // The `·` separators paint as siblings — counts and trailing text
+    // stay unstyled, so the line reads identically when plain.
     let _ = writeln!(
         out,
-        "{:LABEL_WIDTH$}{} attached · {} disabled (toml) · {} disabled (runtime)",
-        "subs", resp.sub_total, resp.sub_disabled_toml, resp.sub_disabled_runtime,
+        "{}{} attached {} {} disabled (toml) {} {} disabled (runtime)",
+        label_cell(sty, "subs", LABEL_WIDTH),
+        resp.sub_total,
+        sty.paint(style::DELIM, "·"),
+        resp.sub_disabled_toml,
+        sty.paint(style::DELIM, "·"),
+        resp.sub_disabled_runtime,
     );
     let _ = writeln!(
         out,
-        "{:LABEL_WIDTH$}{} active",
-        "profiles", resp.profile_active,
+        "{}{} active",
+        label_cell(sty, "profiles", LABEL_WIDTH),
+        resp.profile_active,
     );
     let _ = writeln!(
         out,
-        "{:LABEL_WIDTH$}{} attached",
-        "promoters", resp.promoter_active,
+        "{}{} attached",
+        label_cell(sty, "promoters", LABEL_WIDTH),
+        resp.promoter_active,
     );
     // `WirePath: Display` writes its inner UTF-8 / lossy-projected
     // string verbatim — zero-alloc into `out`, no intermediate.
-    let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "config", resp.config_path);
-    let _ = writeln!(out, "{:LABEL_WIDTH$}{}", "socket", resp.socket_path);
+    let _ = writeln!(
+        out,
+        "{}{}",
+        label_cell(sty, "config", LABEL_WIDTH),
+        resp.config_path,
+    );
+    let _ = writeln!(
+        out,
+        "{}{}",
+        label_cell(sty, "socket", LABEL_WIDTH),
+        resp.socket_path,
+    );
 }
 
 /// Width of the label column. Padded to align all values vertically.
@@ -104,6 +133,7 @@ fn format_reloads(count: u64, last: Option<&WireLastReload>) -> String {
 mod tests {
     use super::{format_reloads, format_uptime, render};
     use crate::ipc::protocol::{StatusResponse, WireLastReload};
+    use crate::ipc::render::style::Styler;
     use crate::ipc::wire::{WirePath, WireReloadTrigger, WireTime};
     use std::path::Path;
     use std::time::{Duration, UNIX_EPOCH};
@@ -130,7 +160,7 @@ mod tests {
     #[test]
     fn render_minimal_status_includes_every_label() {
         let mut s = String::new();
-        render(&mut s, &fresh_status(), false);
+        render(&mut s, &fresh_status(), false, Styler::Plain);
         assert!(s.starts_with("specter status\n"), "header present");
         for label in [
             "uptime",
@@ -178,5 +208,25 @@ mod tests {
             line.starts_with("3 (last ") && line.ends_with(" via sighup)"),
             "got: {line}",
         );
+    }
+
+    /// Color is purely additive: an `Active` render stripped of every
+    /// SGR escape reproduces the `Plain` render byte-for-byte, and the
+    /// `Active` render does carry escapes (title / labels / rule are
+    /// painted).
+    #[test]
+    fn status_active_strips_to_plain() {
+        use crate::ipc::render::style::strip_ansi;
+
+        let resp = fresh_status();
+        let mut active = String::new();
+        render(&mut active, &resp, false, Styler::Active);
+        let mut plain = String::new();
+        render(&mut plain, &resp, false, Styler::Plain);
+        assert!(
+            active.contains('\x1b'),
+            "Active emits SGR escapes: {active:?}",
+        );
+        assert_eq!(strip_ansi(&active), plain, "stripping Active yields Plain");
     }
 }

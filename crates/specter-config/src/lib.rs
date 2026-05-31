@@ -21,8 +21,8 @@ mod raw;
 mod template;
 
 pub use cli::{
-    AbsorbArgs, Cli, ClientArgs, Command, DaemonArgs, ListArgs, NameTargetArgs, OutputFormat,
-    ShowArgs, StatusArgs, TailArgs, WaitArgs, WaitKind,
+    AbsorbArgs, Cli, ClientArgs, ColorWhen, Command, DaemonArgs, ListArgs, NameTargetArgs,
+    OutputFormat, ShowArgs, StatusArgs, TailArgs, WaitArgs, WaitKind,
 };
 pub use config::{Config, LogConfig, LogDestination, LogLevel, PromoterSpec, SubSpec};
 pub use diff::diff;

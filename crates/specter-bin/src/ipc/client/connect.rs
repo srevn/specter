@@ -15,7 +15,9 @@
 //! [`read_response`] reads through a [`BufReader`] until a newline,
 //! then strict-parses via [`crate::ipc::framing::parse_strict`].
 
-use specter_config::ClientArgs;
+use anstyle::Style;
+use serde::Serialize;
+use specter_config::{ClientArgs, OutputFormat};
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
@@ -25,6 +27,7 @@ use std::time::Duration;
 
 use crate::ipc::framing::{encode_line, parse_strict};
 use crate::ipc::protocol::{ResponsePayload, WireRequest};
+use crate::ipc::render::style::{self, Stream, Styler};
 use crate::ipc::sockpath;
 
 /// Read deadline — the daemon's mio-reactor tick runs in sub-ms to
@@ -110,21 +113,39 @@ pub(crate) fn resolve_socket(client: &ClientArgs) -> PathBuf {
         .map_or_else(sockpath::default_socket_path, Path::to_path_buf)
 }
 
-/// The single sink for client-side stderr diagnostics.
+/// The single resolve-and-paint site for client-side stderr.
 ///
 /// Stays content-agnostic: the caller forms the whole line with
-/// `format_args!` — including any `specter <verb>:` prefix — so
-/// bespoke transport-stage messages, verb-specific operational
-/// failures, and the prefix-less continuation line (`tail`'s
-/// `Known filters: …`) all flow through one place without
-/// special-casing. [`fmt::Arguments`] keeps the call zero-allocation.
-/// The caller still owns the exit code; this only emits.
+/// `format_args!` — including any `specter <verb>:` prefix — so every
+/// stderr diagnostic flows through one place without special-casing.
+/// [`fmt::Arguments`] keeps the call zero-allocation. Resolves the
+/// stderr [`Styler`] from the operator's `--color` choice + the stderr
+/// TTY / environment gate, then paints the semantic `role` over the
+/// whole line; under a plain Styler the painted adapter is a
+/// byte-identical passthrough. The caller still owns the exit code.
 ///
-/// `client` is the seam through which stderr styling will resolve;
-/// unused today, present so the signature is stable across that later
-/// change.
-pub(crate) fn emit_error(_client: &ClientArgs, msg: fmt::Arguments<'_>) {
-    eprintln!("{msg}");
+/// Two roles ride this core — [`emit_error`] ([`style::ERR`]) for
+/// operator-error text and [`emit_hint`] ([`style::SECONDARY`]) for a
+/// help continuation that is not itself an error.
+fn emit_stderr(client: &ClientArgs, role: Style, msg: fmt::Arguments<'_>) {
+    let sty = style::resolve(client.color, Stream::Stderr);
+    eprintln!("{}", sty.paint(role, msg));
+}
+
+/// Operator-error text on stderr — the `specter <verb>:` line, a
+/// transport-stage failure, an unknown-name report. Painted
+/// [`style::ERR`] (red).
+pub(crate) fn emit_error(client: &ClientArgs, msg: fmt::Arguments<'_>) {
+    emit_stderr(client, style::ERR, msg);
+}
+
+/// A stderr *hint* — a help continuation that follows an error line
+/// but is not itself one (e.g. `tail`'s `Known filters: …` listing the
+/// wire vocabulary). Painted [`style::SECONDARY`] (dimmed) so it reads
+/// as guidance, not alarm, and stays visually distinct from the
+/// [`style::ERR`] line it trails.
+pub(crate) fn emit_hint(client: &ClientArgs, msg: fmt::Arguments<'_>) {
+    emit_stderr(client, style::SECONDARY, msg);
 }
 
 /// Render a [`ResponsePayload`] a verb cannot use — the daemon's
@@ -143,20 +164,35 @@ pub(crate) fn emit_error(_client: &ClientArgs, msg: fmt::Arguments<'_>) {
 ///   <debug>` — a daemon-bug signal surfaced loudly, not coerced.
 ///
 /// `verb` is `&'static str` so a borrowed runtime string cannot leak
-/// into the prefix. `client` is the styling seam (see [`emit_error`]),
-/// unused today.
+/// into the prefix. `client` resolves the stderr [`Styler`](style::Styler):
+/// the `code` paints [`style::ERR_CODE`] (bold) so it stands out from
+/// the surrounding [`style::ERR`] amplification the operator scripts
+/// against; the three painted spans are siblings, never nested. Under a
+/// plain Styler the line is byte-identical to the pre-color form.
 #[must_use]
 pub(crate) fn fail_response(
-    _client: &ClientArgs,
+    client: &ClientArgs,
     verb: &'static str,
     resp: ResponsePayload,
 ) -> ExitCode {
+    let sty = style::resolve(client.color, Stream::Stderr);
     match resp {
         ResponsePayload::Err { code, error } => {
-            eprintln!("specter {verb}: {code}: {error}");
+            eprintln!(
+                "{}{}{}",
+                sty.paint(style::ERR, format_args!("specter {verb}: ")),
+                sty.paint(style::ERR_CODE, code),
+                sty.paint(style::ERR, format_args!(": {error}")),
+            );
         }
         other => {
-            eprintln!("specter {verb}: unexpected response: {other:?}");
+            eprintln!(
+                "{}",
+                sty.paint(
+                    style::ERR,
+                    format_args!("specter {verb}: unexpected response: {other:?}"),
+                ),
+            );
         }
     }
     ExitCode::from(1)
@@ -230,5 +266,85 @@ pub(crate) fn one_shot_unit(
     match resp {
         ResponsePayload::Ok => ExitCode::SUCCESS,
         other => fail_response(client, verb, other),
+    }
+}
+
+/// Render `value` to stdout in the operator's chosen format — the
+/// single source of the Human/Json + Styler-resolution + buffered-write
+/// triad every data verb (`status` / `list` / `show`) shares.
+///
+/// `Human` resolves the stdout [`Styler`] once (the `--color` choice +
+/// the stdout TTY / environment gate) and threads it into `render` — a
+/// pure writer that appends into a fresh buffer — then writes the
+/// buffer to a locked stdout in one pass. `Json` re-serialises `value`
+/// through its wire carrier so the bytes match the daemon's own
+/// emission, and never consults the Styler.
+///
+/// Returns `Ok(())` once the response is delivered — *or* once a
+/// downstream consumer closes the pipe (`head -1`, `grep -q`, …): a
+/// broken pipe is the operator's reader stopping, not a daemon fault,
+/// so it is the same graceful success the streaming verbs (`tail` /
+/// `wait`) already grant. Any other write failure reports through
+/// [`emit_error`] (`specter <verb>: write failed: …`) and yields
+/// `Err(exit 1)`. The caller owns the *success* exit code (`show`
+/// derives `Unknown → 1` from the response arm), so this never
+/// fabricates one.
+///
+/// Locking stdout once and writing through [`Write::write_all`] +
+/// [`Write::flush`] replaces the prior `print!` / `println!`: those
+/// panic on a broken pipe (Rust ignores `SIGPIPE`), whereas the explicit
+/// write/flush surfaces it as an `io::Error` this maps to a clean exit.
+pub(crate) fn emit_human_or_json<T: Serialize>(
+    client: &ClientArgs,
+    verb: &'static str,
+    output: OutputFormat,
+    value: &T,
+    render: impl FnOnce(&mut String, &T, Styler),
+) -> Result<(), ExitCode> {
+    let mut out = io::stdout().lock();
+    let written = match output {
+        OutputFormat::Human => {
+            let sty = style::resolve(client.color, Stream::Stdout);
+            let mut buf = String::new();
+            render(&mut buf, value, sty);
+            out.write_all(buf.as_bytes())
+        }
+        OutputFormat::Json => {
+            let json = serde_json::to_string(value).expect("response always serializes");
+            out.write_all(json.as_bytes())
+                .and_then(|()| out.write_all(b"\n"))
+        }
+    };
+    match written.and_then(|()| out.flush()) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => {
+            emit_error(client, format_args!("specter {verb}: write failed: {e}"));
+            Err(ExitCode::from(1))
+        }
+    }
+}
+
+/// [`emit_human_or_json`] for a verb whose successful render is always
+/// exit `0` — `status` and `list`. Collapses the `Ok → SUCCESS,
+/// Err → code` tail those two would otherwise restate; the broken-pipe
+/// and write-failure policy already lives in the core.
+///
+/// `show` does not use this wrapper: its exit code derives from the
+/// response arm (`Unknown → 1`), so it calls [`emit_human_or_json`]
+/// directly and falls through to the arm match after a delivered (or
+/// pipe-closed) render. Mirrors [`one_shot_unit`]'s relationship to
+/// [`round_trip`].
+#[must_use]
+pub(crate) fn render_response<T: Serialize>(
+    client: &ClientArgs,
+    verb: &'static str,
+    output: OutputFormat,
+    value: &T,
+    render: impl FnOnce(&mut String, &T, Styler),
+) -> ExitCode {
+    match emit_human_or_json(client, verb, output, value, render) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(code) => code,
     }
 }

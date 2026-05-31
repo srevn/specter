@@ -44,6 +44,7 @@ use std::process::ExitCode;
 use crate::ipc::client::{connect, subscribe};
 use crate::ipc::framing::encode_line;
 use crate::ipc::render::diag;
+use crate::ipc::render::style::{self, Styler};
 use crate::ipc::wire::{KNOWN_WIRE_VARIANTS, WireDiagnostic};
 
 /// Run the `specter tail` stream loop.
@@ -53,7 +54,7 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
             &args.client,
             format_args!("specter tail: unknown filter '{tag}'"),
         );
-        connect::emit_error(
+        connect::emit_hint(
             &args.client,
             format_args!("Known filters: {}", KNOWN_WIRE_VARIANTS.join(", ")),
         );
@@ -76,6 +77,11 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
         return ExitCode::from(1);
     }
 
+    // Resolve the stdout Styler once for the loop's lifetime. The
+    // `-o json` path ignores it (it re-emits the wire bytes verbatim);
+    // the `-o human` path threads it into every `diag::render`.
+    let sty = style::resolve(args.client.color, style::Stream::Stdout);
+
     let mut stdout = io::stdout().lock();
     // One render buffer reused for the lifetime of the stream loop —
     // amortizes the per-event allocation the previous owned-String
@@ -90,7 +96,7 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
                 if !should_emit(&wire, &args.filter) {
                     continue;
                 }
-                if let Err(e) = emit(&mut stdout, &wire, args.output, &mut buf) {
+                if let Err(e) = emit(&mut stdout, &wire, args.output, &mut buf, sty) {
                     // Downstream pipe consumer closed (`BrokenPipe`)
                     // or any other stdout failure: graceful exit.
                     // The daemon's stream is healthy; the operator's
@@ -152,10 +158,11 @@ fn should_emit(wire: &WireDiagnostic, filter: &[String]) -> bool {
 ///
 /// `buf` is the caller's reused render buffer — the Human branch
 /// clears and refills it through [`diag::render`]'s writer-shape
-/// surface; the Json branch is untouched and goes through
-/// [`encode_line`]'s owned [`Vec<u8>`] path. Threading the buffer
-/// keeps the per-event amortization legible at the call site without
-/// inlining the I/O error matching into the stream loop.
+/// surface (painting via `sty`); the Json branch is untouched and goes
+/// through [`encode_line`]'s owned [`Vec<u8>`] path, ignoring `sty`.
+/// Threading the buffer keeps the per-event amortization legible at
+/// the call site without inlining the I/O error matching into the
+/// stream loop.
 ///
 /// JSON output re-serializes the parsed [`WireDiagnostic`] rather
 /// than passing through the daemon's original bytes. Serde derive is
@@ -172,11 +179,12 @@ fn emit<W: Write>(
     wire: &WireDiagnostic,
     output: OutputFormat,
     buf: &mut String,
+    sty: Styler,
 ) -> io::Result<()> {
     match output {
         OutputFormat::Human => {
             buf.clear();
-            diag::render(buf, wire);
+            diag::render(buf, wire, sty);
             out.write_all(buf.as_bytes())?;
         }
         OutputFormat::Json => {

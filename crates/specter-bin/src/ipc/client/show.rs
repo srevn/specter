@@ -10,7 +10,7 @@
 //! single-source across `-o human` and `-o json`.
 
 use compact_str::CompactString;
-use specter_config::{OutputFormat, ShowArgs};
+use specter_config::{ClientArgs, OutputFormat, ShowArgs};
 use std::process::ExitCode;
 
 use crate::ipc::client::connect;
@@ -34,24 +34,22 @@ pub(crate) fn run(args: &ShowArgs) -> ExitCode {
     let ResponsePayload::Show(show) = resp else {
         return connect::fail_response(&args.client, "show", resp);
     };
-    render_show(args.output, &show)
+    render_show(args.output, &show, &args.client)
 }
 
 /// Render the [`ShowResponse`] and derive the exit code from its
 /// arm. Lifting the derivation above the format match keeps the
-/// rule single-source across `-o human` and `-o json`.
-fn render_show(output: OutputFormat, show: &ShowResponse) -> ExitCode {
-    match output {
-        OutputFormat::Human => {
-            let mut buf = String::new();
-            show::render(&mut buf, show);
-            print!("{buf}");
-        }
-        OutputFormat::Json => {
-            let s = serde_json::to_string(show).expect("ShowResponse always serializes");
-            println!("{s}");
-        }
+/// rule single-source across `-o human` and `-o json`. The stdout
+/// [`Styler`](style::Styler) resolves only on the `-o human` path —
+/// `-o json` bypasses color entirely.
+fn render_show(output: OutputFormat, show: &ShowResponse, client: &ClientArgs) -> ExitCode {
+    if let Err(code) = connect::emit_human_or_json(client, "show", output, show, show::render) {
+        return code;
     }
+    // Exit code derives from the response arm, not the output format —
+    // a delivered (or pipe-closed) render falls through here — so the
+    // `Unknown → 1` rule stays single-source across `-o human` and
+    // `-o json`.
     match show {
         ShowResponse::Unknown { .. } => ExitCode::from(1),
         ShowResponse::Active(_) | ShowResponse::Disabled { .. } => ExitCode::SUCCESS,
