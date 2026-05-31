@@ -17,41 +17,22 @@
 //!
 //! # Visibility
 //!
-//! Every export is `pub(crate)`. `App::run` wires every one (default
-//! path resolution, stale-or-remove check, atomic bind, disarm at
-//! graceful shutdown).
+//! Every export is `pub(crate)`. `App::run` wires every one (parent
+//! pre-check, stale-or-remove check, atomic bind, disarm at graceful
+//! shutdown). The committed path itself comes from [`super::resolve`].
 
-use std::env;
+use std::fmt;
 use std::fs;
 use std::io::{self, ErrorKind};
 use std::os::unix::fs::{FileTypeExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 
+use super::resolve::{SocketCandidate, SocketSource};
+
 /// File-mode bits applied to the bound socket. `0o600` is owner
 /// read/write only — defense-in-depth on every supported deployment.
 const SOCKET_MODE: u32 = 0o600;
-
-/// Resolve the default IPC socket path.
-///
-/// Per-platform directory selection:
-///
-/// - **Linux** — `$XDG_RUNTIME_DIR` (systemd-managed: per-user
-///   `0700`), falling back to `/tmp` on systems without
-///   `systemd-logind`.
-/// - **macOS / BSD** — `$TMPDIR` (per-user `/var/folders/.../T/`
-///   on macOS at `0700`), falling back to `/tmp`.
-///
-/// The directory itself is **not created** here — every supported
-/// deployment is expected to provide it.
-pub(crate) fn default_socket_path() -> PathBuf {
-    #[cfg(target_os = "linux")]
-    let dir = env::var_os("XDG_RUNTIME_DIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-    #[cfg(not(target_os = "linux"))]
-    let dir = env::var_os("TMPDIR").map_or_else(|| PathBuf::from("/tmp"), PathBuf::from);
-
-    dir.join("specter.sock")
-}
 
 /// Bind a [`UnixListener`] at `path` with `0o600` permissions using
 /// atomic-rename: bind to a private staging name, chmod, then
@@ -114,6 +95,21 @@ fn finalize_atomic_rename(
     Ok((listener, UnlinkGuard::new(path.to_owned())))
 }
 
+/// Fixed prefix of the staging suffix [`temp_sibling`] appends, ahead
+/// of the PID. Single-sourced here so [`STAGING_SUFFIX_MAX`] and the
+/// live format share one literal and cannot drift apart.
+const STAGING_PREFIX: &str = ".tmp.";
+
+/// Worst-case byte width of the staging suffix [`temp_sibling`] appends
+/// ([`STAGING_PREFIX`] then the PID): the prefix's bytes + a `u32` PID's
+/// 10 decimal digits. The single source of truth for the staging
+/// format's width — the socket-path length budget in `crate::ipc::resolve`
+/// subtracts it (plus the `sun_path` NUL) so a resolved operator override
+/// still fits once [`bind_socket_atomic`] stages it. The `temp_sibling`
+/// guard test pins the live suffix to this bound, turning any drift into
+/// a test failure rather than a silently shrunk usable path length.
+pub(crate) const STAGING_SUFFIX_MAX: usize = STAGING_PREFIX.len() + 10;
+
 /// Construct the staging sibling name for `path`, suffixed with the
 /// current PID. Built by appending to the path's `OsString` (not
 /// `Path::with_extension`, which would strip the `.sock` segment
@@ -126,8 +122,108 @@ fn finalize_atomic_rename(
 fn temp_sibling(path: &Path) -> PathBuf {
     let pid = std::process::id();
     let mut staging = path.as_os_str().to_owned();
-    staging.push(format!(".tmp.{pid}"));
+    staging.push(format!("{STAGING_PREFIX}{pid}"));
     PathBuf::from(staging)
+}
+
+/// Why the daemon refused to bind because the socket's parent
+/// directory is unusable. Carries the resolved [`SocketSource`] so the
+/// `Display` can render the source-specific provisioning advice — this
+/// is the one bind-failure mode where that advice is actionable (a
+/// missing runtime dir tells the operator which deployment mechanism
+/// should have created it). Stale-occupant (`AddrInUse`) and raw-`bind`
+/// errors stay plain [`io::Error`]s: "create the parent directory" does
+/// not apply to them, and [`crate::app::run`] source-tags those logs
+/// directly instead.
+#[derive(Debug)]
+pub(crate) struct BindFailure {
+    source: SocketSource,
+    path: PathBuf,
+    parent: PathBuf,
+    kind: ParentKind,
+}
+
+/// How the socket's parent directory is unusable.
+#[derive(Debug, Clone, Copy)]
+enum ParentKind {
+    /// The parent directory does not exist.
+    Missing,
+    /// The parent path exists but is not a directory.
+    NotDir,
+}
+
+impl BindFailure {
+    /// Capture the resolved candidate plus the offending parent. `parent`
+    /// is passed in (not re-derived) because [`precheck_bind_parent`]
+    /// already holds it from the `path.parent()` it stat'd.
+    fn new(candidate: &SocketCandidate, parent: &Path, kind: ParentKind) -> Self {
+        Self {
+            source: candidate.source,
+            path: candidate.path.clone(),
+            parent: parent.to_owned(),
+            kind,
+        }
+    }
+}
+
+impl fmt::Display for BindFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let reason = match self.kind {
+            ParentKind::Missing => "does not exist",
+            ParentKind::NotDir => "is not a directory",
+        };
+        // Layout line (which path failed, tagged by source) + the
+        // parent-directory reason + the source's escape advice, each on
+        // its own indented line so the operator reads cause then cure.
+        write!(
+            f,
+            "cannot bind IPC socket at {} ({}):\n  parent directory {} {}.\n  {}",
+            self.path.display(),
+            self.source.label(),
+            self.parent.display(),
+            reason,
+            self.source.daemon_hint(),
+        )
+    }
+}
+
+impl std::error::Error for BindFailure {}
+
+/// Pre-bind check that the socket's parent directory exists and is a
+/// directory, yielding a source-attributed [`BindFailure`] (carrying
+/// actionable provisioning advice) when it is not.
+///
+/// Runs BEFORE [`check_stale_or_remove`] so the dominant deployment
+/// failure — a system unit without its `RuntimeDirectory`, a bare
+/// container with no `/run/specter` — surfaces as actionable advice
+/// rather than the raw `ENOENT` [`bind_socket_atomic`] would otherwise
+/// emit: a missing parent makes `check_stale_or_remove`'s
+/// `symlink_metadata` return `NotFound`, which it reads as "absent,
+/// proceed", so the failure would reach `bind` unannotated.
+///
+/// `fs::metadata` (not `symlink_metadata`) so a symlinked runtime dir
+/// resolves to its target — a dangling symlink reads as `Missing`, a
+/// symlink to a non-directory as `NotDir`.
+///
+/// TOCTOU is **error-quality only**: a parent that vanishes between this
+/// check and the bind still fails safely at `bind`, only without the
+/// tailored advice. Any stat error other than `NotFound` (e.g. `EACCES`
+/// on an ancestor) is left for the real `bind` to surface — pre-
+/// classifying every errno here would duplicate the kernel's reporting.
+/// A path with no parent component (the filesystem root) has nothing to
+/// pre-check and passes through.
+pub(crate) fn precheck_bind_parent(candidate: &SocketCandidate) -> Result<(), BindFailure> {
+    let Some(parent) = candidate.path.parent() else {
+        return Ok(());
+    };
+    match fs::metadata(parent) {
+        Ok(meta) if meta.is_dir() => Ok(()),
+        Ok(_) => Err(BindFailure::new(candidate, parent, ParentKind::NotDir)),
+        Err(e) if e.kind() == ErrorKind::NotFound => {
+            Err(BindFailure::new(candidate, parent, ParentKind::Missing))
+        }
+        Err(_) => Ok(()),
+    }
 }
 
 /// Probe `path` to decide whether it is a live socket (refuse to
@@ -158,7 +254,11 @@ fn temp_sibling(path: &Path) -> PathBuf {
 /// `SO_SNDTIMEO` before a single-shot probe over-engineers a path
 /// whose kernel-side behavior is already effectively synchronous on
 /// AF_UNIX (Linux/BSD/macOS all return immediately for success,
-/// refusal, missing path, or permission failures).
+/// refusal, missing path, or permission failures). A consequence:
+/// "live" includes "hung" — a foreign occupant that accepted the
+/// connection but never services it still `connect`s OK, reads as
+/// live (`AddrInUse`), and the new daemon correctly refuses rather
+/// than stealing a path another process holds.
 pub(crate) fn check_stale_or_remove(path: &Path) -> io::Result<()> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(m) => m,
@@ -265,10 +365,24 @@ impl Drop for UnlinkGuard {
 
 #[cfg(test)]
 mod tests {
-    use super::{SOCKET_MODE, bind_socket_atomic, check_stale_or_remove, temp_sibling};
+    use super::{
+        SOCKET_MODE, STAGING_SUFFIX_MAX, bind_socket_atomic, check_stale_or_remove,
+        precheck_bind_parent, temp_sibling,
+    };
+    use crate::ipc::resolve::{SocketCandidate, SocketSource};
     use std::fs;
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
+
+    /// A `--socket`-sourced candidate at `path`. `SocketSource::Cli`
+    /// exists on every platform (the convention sources are cfg-gated),
+    /// so the parent-classification tests stay platform-agnostic.
+    fn cli_candidate(path: PathBuf) -> SocketCandidate {
+        SocketCandidate {
+            source: SocketSource::Cli,
+            path,
+        }
+    }
 
     /// `bind_socket_atomic` sets exactly `0o600` on the bound file
     /// (atomic-rename + chmod ordering preserved end-to-end), and
@@ -349,6 +463,60 @@ mod tests {
         assert!(
             basename.starts_with("specter.sock.tmp."),
             "got {basename:?}",
+        );
+    }
+
+    /// `precheck_bind_parent` accepts an existing-directory parent,
+    /// rejects a missing parent with a source-attributed `BindFailure`
+    /// carrying the actionable hint, and rejects a non-directory parent.
+    /// The three arms exercise the one new code path, so they bundle
+    /// into one fixture to keep the test surface narrow.
+    #[test]
+    fn precheck_bind_parent_classifies_parent_directory() {
+        let tmp = tempfile::TempDir::new().unwrap();
+
+        // Existing directory parent ⇒ Ok.
+        let ok = cli_candidate(tmp.path().join("specter.sock"));
+        assert!(
+            precheck_bind_parent(&ok).is_ok(),
+            "an extant directory parent must pass the pre-check",
+        );
+
+        // Missing parent ⇒ BindFailure whose Display names the source,
+        // the missing-parent reason, and the (Cli-source) creation hint.
+        let missing = cli_candidate(tmp.path().join("absent").join("specter.sock"));
+        let err = precheck_bind_parent(&missing).expect_err("missing parent must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("from --socket")
+                && msg.contains("does not exist")
+                && msg.contains("create the parent directory"),
+            "missing-parent failure must be source-tagged and actionable: {msg}",
+        );
+
+        // Parent path that is a file, not a directory ⇒ BindFailure.
+        let file = tmp.path().join("not-a-dir");
+        fs::write(&file, b"").unwrap();
+        let not_dir = cli_candidate(file.join("specter.sock"));
+        let err = precheck_bind_parent(&not_dir).expect_err("file parent must fail");
+        assert!(
+            err.to_string().contains("is not a directory"),
+            "a non-directory parent must report its kind: {err}",
+        );
+    }
+
+    /// The live `.tmp.<pid>` suffix `temp_sibling` appends stays within
+    /// the `STAGING_SUFFIX_MAX` budget that `resolve`'s length check
+    /// reserves. Pins the format to the const: widening the suffix
+    /// without widening the reserve fails here rather than silently
+    /// shrinking the usable socket-path length.
+    #[test]
+    fn temp_sibling_suffix_within_reserved_budget() {
+        let base = PathBuf::from("/run/specter/specter.sock");
+        let suffix = temp_sibling(&base).as_os_str().len() - base.as_os_str().len();
+        assert!(
+            suffix <= STAGING_SUFFIX_MAX,
+            "staging suffix {suffix} exceeds reserved {STAGING_SUFFIX_MAX}",
         );
     }
 }

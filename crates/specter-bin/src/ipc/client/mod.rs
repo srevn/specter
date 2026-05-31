@@ -6,9 +6,9 @@
 //!
 //! # Submodules
 //!
-//! - [`connect`] — socket open + line framing helpers (`open`,
-//!   `write_request`, `read_response`, `resolve_socket`,
-//!   `round_trip`, `one_shot_unit`), the stdout render dispatch
+//! - [`connect`] — the socket connect seam (`dial`) + line framing
+//!   helpers (`write_request`, `read_response`, `round_trip`,
+//!   `one_shot_unit`), the stdout render dispatch
 //!   (`render_response` / `emit_human_or_json` — the Human/Json +
 //!   Styler-resolve + buffered-write triad the data verbs share), and
 //!   the client stderr vocabulary (`emit_error` / `emit_hint` /

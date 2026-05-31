@@ -33,9 +33,10 @@ else
 endif
 
 SYSCONFDIR    ?= $(PREFIX)/etc
+SYSTEMD_DIR   ?= $(PREFIX)/lib/systemd/system
 SPECTER_LOG   ?= $(SPECTER_LOG_DIR)/specter.log
-SPECTER_USER  ?= $(shell id -un)
-SPECTER_GROUP ?= $(shell id -gn)
+SPECTER_USER  ?= $(shell id -un "$${SUDO_USER:-$$(id -u)}")
+SPECTER_GROUP ?= $(shell id -gn $(SPECTER_USER))
 
 INSTALL          ?= install
 INSTALL_PROGRAM  ?= $(INSTALL) -m 0755
@@ -68,7 +69,7 @@ help:
 	@echo "  install            install binary to \$$(BINDIR)"
 	@echo "  install-config     install specter.toml to \$$(SYSCONFDIR)"
 	@echo "                     (preserves any existing file)"
-	@echo "  install-systemd    install systemd unit to /etc/systemd/system/"
+	@echo "  install-systemd    install systemd unit to \$$(SYSTEMD_DIR)"
 	@echo "  install-launchd    install plist to \$$(LAUNCHD_DIR)"
 	@echo "  install-freebsd    install rc.d script to \$$(PREFIX)/etc/rc.d/"
 	@echo "  install-all        install binary, config, and host-OS service"
@@ -78,7 +79,8 @@ help:
 	@echo "                     (active config files are preserved)"
 	@echo
 	@echo "Variables: PREFIX=$(PREFIX) DESTDIR=$(DESTDIR) BINDIR=$(BINDIR)"
-	@echo "           SYSCONFDIR=$(SYSCONFDIR) LAUNCHD_DIR=$(LAUNCHD_DIR)"
+	@echo "           SYSCONFDIR=$(SYSCONFDIR) SYSTEMD_DIR=$(SYSTEMD_DIR)"
+	@echo "           LAUNCHD_DIR=$(LAUNCHD_DIR)"
 
 build:
 	@$(CARGO) build --release
@@ -122,11 +124,11 @@ uninstall-config:
 	@rm -f $(DESTDIR)$(SYSCONFDIR)/specter.toml
 
 install-systemd:
-	@echo "Installing systemd unit to $(DESTDIR)/etc/systemd/system/specter.service"
-	@$(INSTALL) -d $(DESTDIR)/etc/systemd/system
+	@echo "Installing systemd unit to $(DESTDIR)$(SYSTEMD_DIR)/specter.service"
+	@$(INSTALL) -d $(DESTDIR)$(SYSTEMD_DIR)
 	@$(SUBST) etc/systemd/specter.service \
-	    > $(DESTDIR)/etc/systemd/system/specter.service
-	@chmod 0644 $(DESTDIR)/etc/systemd/system/specter.service
+	    > $(DESTDIR)$(SYSTEMD_DIR)/specter.service
+	@chmod 0644 $(DESTDIR)$(SYSTEMD_DIR)/specter.service
 	@echo "Next: systemctl daemon-reload && systemctl enable --now specter"
 
 uninstall-systemd:
@@ -134,8 +136,8 @@ uninstall-systemd:
 	    echo "Stopping and disabling specter"; \
 	    systemctl disable --now specter 2>/dev/null || true; \
 	fi
-	@echo "Removing $(DESTDIR)/etc/systemd/system/specter.service"
-	@rm -f $(DESTDIR)/etc/systemd/system/specter.service
+	@echo "Removing $(DESTDIR)$(SYSTEMD_DIR)/specter.service"
+	@rm -f $(DESTDIR)$(SYSTEMD_DIR)/specter.service
 	@if [ -z "$(DESTDIR)" ]; then \
 	    systemctl daemon-reload 2>/dev/null || true; \
 	fi

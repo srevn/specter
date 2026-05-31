@@ -17,12 +17,22 @@ load_rc_config "${name}"
 : ${specter_user:="@SPECTER_USER@"}
 : ${specter_config:="@SPECTER_CONF@"}
 : ${specter_logfile:="/var/log/specter.log"}
+: ${specter_socket:="/var/run/specter/specter.sock"}
 
 procname="@SPECTER_BIN@"
 pidfile="/var/run/${name}.pid"
 
+specter_cmd="@SPECTER_BIN@ run --config ${specter_config} --socket ${specter_socket}"
+
 command="/usr/sbin/daemon"
-command_args="-f -p ${pidfile} -o ${specter_logfile} -u ${specter_user} @SPECTER_BIN@ run --config ${specter_config}"
+command_args="-f -p ${pidfile} -o ${specter_logfile} -u ${specter_user} ${specter_cmd}"
 extra_commands="reload"
+
+start_precmd="specter_precmd"
+
+specter_precmd()
+{
+	install -d -o "${specter_user}" -m 0700 "${specter_socket%/*}"
+}
 
 run_rc_command "$1"

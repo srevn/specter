@@ -78,12 +78,13 @@ specter tail [--filter <tag> …]     # stream diagnostics
 specter wait <name> [--timeout …]   # block until the watch fires (or detaches)
 ```
 
-`specter --help` prints the full surface; `--socket <path>` overrides
-the default UNIX socket on every client verb.
+`specter --help` prints the full surface. Clients reach the daemon by
+resolving the same per-platform socket convention it binds, so no flag
+is needed in the common case; `--socket <path>` or `$SPECTER_SOCK`
+overrides it.
 
 See [docs/control.md](docs/control.md) for the IPC reference — socket
-path defaults, wire format, error codes, subscribe semantics, exit
-codes.
+resolution, wire format, error codes, subscribe semantics, exit codes.
 
 ## Subprocess output
 

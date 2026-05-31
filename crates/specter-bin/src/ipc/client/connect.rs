@@ -1,10 +1,13 @@
 //! Client-side connect + framing helpers.
 //!
-//! Single source of socket-timeout policy: every verb handler
-//! reaches the daemon through [`open`], which applies a 5s read
-//! deadline and a 2s write deadline. A daemon that takes longer than
-//! either to respond is operator-visibly hung; surfacing the deadline
-//! is better than a silent indefinite park.
+//! Single source of socket-timeout policy: every verb handler reaches
+//! the daemon through [`dial`], which resolves the socket-path policy
+//! ([`crate::ipc::resolve`]) and connects — pinning the one explicit
+//! override, or probing the per-platform convention cascade and taking
+//! the first path that answers. The chosen connection is armed with a
+//! 5s read deadline and a 2s write deadline. A daemon that takes longer
+//! than either to respond is operator-visibly hung; surfacing the
+//! deadline is better than a silent indefinite park.
 //!
 //! # Framing
 //!
@@ -21,14 +24,14 @@ use specter_config::{ClientArgs, OutputFormat};
 use std::fmt;
 use std::io::{self, BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::ExitCode;
 use std::time::Duration;
 
 use crate::ipc::framing::{encode_line, parse_strict};
 use crate::ipc::protocol::{ResponsePayload, WireRequest};
 use crate::ipc::render::style::{self, Stream, Styler};
-use crate::ipc::sockpath;
+use crate::ipc::resolve::{self, Resolution, SocketCandidate};
 
 /// Read deadline — the daemon's mio-reactor tick runs in sub-ms to
 /// ms under healthy load; 5s covers mio-tick contention under a
@@ -50,7 +53,7 @@ const WRITE_TIMEOUT: Duration = Duration::from_secs(2);
 /// client-to-daemon direction (request shipping). Errors propagate
 /// the underlying `io::ErrorKind` so the verb handler can render the
 /// operator-visible cause precisely.
-pub(crate) fn open(socket: &Path) -> io::Result<UnixStream> {
+fn open(socket: &Path) -> io::Result<UnixStream> {
     let stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(READ_TIMEOUT))?;
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
@@ -98,19 +101,93 @@ pub(crate) fn read_response(stream: &mut UnixStream) -> io::Result<ResponsePaylo
         .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
 }
 
-/// Resolve the operator-facing socket path. CLI override wins; the
-/// per-platform default backs it. Shared across every client verb so
-/// the resolution stays single-source.
+/// Why the client could not reach the daemon. Mirrors the two
+/// [`Resolution`] shapes so the operator message matches what they
+/// asked for: an explicit override that didn't answer, versus a
+/// convention cascade where no candidate did. Renders through the
+/// shared [`crate::ipc::resolve::SocketSource`] vocab — the same
+/// labels the daemon's `BindFailure` uses, so both sides name a path
+/// the same way. Never escapes [`dial`], which folds it to an
+/// [`ExitCode`] after rendering; module-private accordingly.
+#[derive(Debug)]
+enum ConnectFailure {
+    /// An explicit `--socket` / `$SPECTER_SOCK` path that refused or was
+    /// absent. There is no fall-through — a stale override is the
+    /// operator's to fix, never silently retargeted.
+    Pinned {
+        candidate: SocketCandidate,
+        error: io::Error,
+    },
+    /// Every convention candidate was probed and none answered. `tried`
+    /// is non-empty (a [`Resolution::Cascade`] always carries a head),
+    /// in probe order.
+    Exhausted {
+        tried: Vec<(SocketCandidate, io::Error)>,
+    },
+}
+
+impl fmt::Display for ConnectFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Pinned { candidate, error } => write!(
+                f,
+                "cannot connect to {} ({}): {error}",
+                candidate.path.display(),
+                candidate.source.label(),
+            ),
+            // One indented `<path> (<label>): <errno>` line per probed
+            // candidate, so the operator sees every path that was tried
+            // and why each refused.
+            Self::Exhausted { tried } => {
+                f.write_str("cannot reach the daemon; tried:")?;
+                for (candidate, error) in tried {
+                    write!(
+                        f,
+                        "\n    {} ({}): {error}",
+                        candidate.path.display(),
+                        candidate.source.label(),
+                    )?;
+                }
+                Ok(())
+            }
+        }
+    }
+}
+
+impl std::error::Error for ConnectFailure {}
+
+/// Turn a resolved [`Resolution`] into a live daemon connection.
 ///
-/// `client.socket: Option<PathBuf>` carries `--socket`;
-/// [`sockpath::default_socket_path`] mirrors the daemon's bind-time
-/// resolution. The override is taken by `Path` reference + `to_owned`
-/// so the default branch never pays the allocation it isn't using.
-pub(crate) fn resolve_socket(client: &ClientArgs) -> PathBuf {
-    client
-        .socket
-        .as_deref()
-        .map_or_else(sockpath::default_socket_path, Path::to_path_buf)
+/// The winning candidate *moves* into the returned stream's lifetime and
+/// the losers move into the [`ConnectFailure::Exhausted`] `tried` list —
+/// no path is cloned. Variant-directed:
+///
+/// - [`Resolution::Pinned`] — one [`open`] attempt; its failure is the
+///   operator's own path not answering, never a fall-through.
+/// - [`Resolution::Cascade`] — probe head-then-tail, returning the first
+///   candidate whose [`open`] succeeds. Falls through on a connect
+///   failure of *any* kind (refused, absent, `EACCES`) but never on
+///   success: a live-but-hung session daemon wins the probe and later
+///   trips the read deadline rather than being silently bypassed for a
+///   different daemon. Connecting *is* the liveness test — a stale
+///   socket whose daemon crashed refuses and the probe transparently
+///   reaches the next candidate, with no probe-then-reconnect TOCTOU.
+fn connect_daemon(resolution: Resolution) -> Result<UnixStream, ConnectFailure> {
+    match resolution {
+        Resolution::Pinned(candidate) => {
+            open(&candidate.path).map_err(|error| ConnectFailure::Pinned { candidate, error })
+        }
+        Resolution::Cascade(candidates) => {
+            let mut tried = Vec::new();
+            for candidate in candidates {
+                match open(&candidate.path) {
+                    Ok(stream) => return Ok(stream),
+                    Err(error) => tried.push((candidate, error)),
+                }
+            }
+            Err(ConnectFailure::Exhausted { tried })
+        }
+    }
 }
 
 /// The single resolve-and-paint site for client-side stderr.
@@ -198,15 +275,47 @@ pub(crate) fn fail_response(
     ExitCode::from(1)
 }
 
-/// Stereotyped one-shot round trip — resolve socket, open, write
-/// request, read response.
+/// The single resolve-and-connect seam both client verb families
+/// route through — the one-shot family ([`round_trip`]) and the
+/// streaming family ([`crate::ipc::client::subscribe::open`]).
 ///
-/// Every verb's network-side work has the same four-step shape;
-/// centralising it keeps the operator-visible error surface uniform
+/// Resolve the socket-path policy ([`resolve::resolve`], reading
+/// `--socket` then `$SPECTER_SOCK` then the per-platform convention
+/// through the one [`resolve::env_os`] touchpoint the daemon shares),
+/// then [`connect_daemon`] it (pinning the override or probing the
+/// cascade, applying the read/write deadlines). Both stages render
+/// their own diagnostic through [`emit_error`] under one
+/// `specter <verb>: ` prefix — a [`resolve::ResolveError`] (a relative
+/// or over-long override) or a [`ConnectFailure`] (the override / every
+/// cascade candidate refusing) — before yielding the failure exit code
+/// (`1`). The error types own their messages, so no per-stage render
+/// helper is needed.
+///
+/// Centralising the connect keeps that surface single-source, so
+/// neither verb family can grow a divergent connect path. `verb` is
+/// `&'static str` so a borrowed runtime string cannot leak into the
+/// prefix. Callers `return code` directly on `Err`.
+pub(crate) fn dial(client: &ClientArgs, verb: &'static str) -> Result<UnixStream, ExitCode> {
+    let resolution = resolve::resolve(client.socket.as_deref(), resolve::env_os).map_err(|e| {
+        emit_error(client, format_args!("specter {verb}: {e}"));
+        ExitCode::from(1)
+    })?;
+    connect_daemon(resolution).map_err(|fail| {
+        emit_error(client, format_args!("specter {verb}: {fail}"));
+        ExitCode::from(1)
+    })
+}
+
+/// Stereotyped one-shot round trip — [`dial`] the daemon, write the
+/// request, read the response.
+///
+/// Every one-shot verb's network-side work has this shape; centralising
+/// it keeps the operator-visible error surface uniform
 /// (`specter <verb>: <stage>: <io::Error>`) and the per-stage prefixes
-/// single-source. The mapping from io::Error stage to operator
-/// vocabulary is hand-rolled per stage because each error path needs a
-/// distinct prefix — a single template doesn't fit.
+/// single-source. The connect stage rides the shared [`dial`] seam; the
+/// send/receive stages hand-roll their `io::Error`→operator-prefix
+/// mapping because each path needs a distinct prefix — a single
+/// template doesn't fit.
 ///
 /// `verb` is the operator-facing command name (`"status"`, `"list"`,
 /// …) and is constrained to `&'static str` so callers cannot
@@ -220,17 +329,7 @@ pub(crate) fn round_trip(
     verb: &'static str,
     request: &WireRequest,
 ) -> Result<ResponsePayload, ExitCode> {
-    let socket = resolve_socket(client);
-    let mut stream = open(&socket).map_err(|e| {
-        emit_error(
-            client,
-            format_args!(
-                "specter {verb}: cannot connect to {}: {e}",
-                socket.display()
-            ),
-        );
-        ExitCode::from(1)
-    })?;
+    let mut stream = dial(client, verb)?;
     write_request(&mut stream, request).map_err(|e| {
         emit_error(client, format_args!("specter {verb}: send failed: {e}"));
         ExitCode::from(1)

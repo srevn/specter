@@ -7,10 +7,12 @@ make install-config      # seeds $(SYSCONFDIR)/specter.toml from etc/specter.tom
 make install-all         # binary + config + host-OS service template (auto-detect)
 ```
 
+> FreeBSD: use `gmake` (base `make` is BSD make). macOS and Linux: `make` is GNU make.
+
 Individual service templates:
 
 ```sh
-make install-systemd     # /etc/systemd/system/specter.service
+make install-systemd     # $(SYSTEMD_DIR)/specter.service
 make install-launchd     # $(LAUNCHD_DIR)/io.specter.plist
 make install-freebsd     # $(PREFIX)/etc/rc.d/specter
 ```
@@ -27,11 +29,12 @@ Standard GNU-style overrides honored throughout:
 | `PREFIX`          | `/usr/local`                                         |
 | `BINDIR`          | `$(PREFIX)/bin`                                      |
 | `SYSCONFDIR`      | `$(PREFIX)/etc` (Linux/BSD) · `~/.config/specter` (macOS) |
+| `SYSTEMD_DIR`     | `$(PREFIX)/lib/systemd/system` (Linux) · set `/etc/systemd/system` for admin-owned |
 | `LAUNCHD_DIR`     | `~/Library/LaunchAgents` (macOS user) · `/Library/LaunchDaemons` (macOS system) |
 | `LAUNCHD_DOMAIN`  | `gui/$(id -u)` (macOS user) · `system` (macOS system) |
 | `DESTDIR`         | empty (staging-prefix for packaging)                 |
-| `SPECTER_USER`    | invoking user                                        |
-| `SPECTER_GROUP`   | invoking group                                       |
+| `SPECTER_USER`    | invoking user (`$SUDO_USER` under sudo)              |
+| `SPECTER_GROUP`   | invoking user's primary group                        |
 | `SPECTER_LOG_DIR` | `~/Library/Logs` (macOS) · `/var/log` (others)       |
 
 `make help` prints the resolved values for the current invocation.
@@ -66,6 +69,12 @@ they share a common reload contract:
 - **Logs** — go to the supervisor's journal (systemd), the configured
   `StandardOutPath` (launchd), or the file in `command_args -o ...`
   (FreeBSD). Specter's own log destination is set in `[log]`.
+- **IPC socket** — the daemon binds `/run/specter/specter.sock`
+  (systemd provisions the dir via `RuntimeDirectory=specter`),
+  `/var/run/specter/specter.sock` (the FreeBSD rc script provisions it
+  in `start_precmd` and passes `--socket`), or the fixed
+  `/tmp/specter.sock` (launchd, macOS). Clients resolve the same path
+  and need no flag; override with `--socket <path>` or `$SPECTER_SOCK`.
 
 ## Uninstall
 

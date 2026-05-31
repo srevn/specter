@@ -53,8 +53,10 @@ pub(crate) struct Subscription {
 /// the ack, return a [`Subscription`] ready for the stream loop.
 ///
 /// `verb` is the operator-facing command name (`"tail"` / `"wait"`),
-/// the `specter <verb>:` prefix on every failure path: transport
-/// stages route through [`connect::emit_error`], the ack tail through
+/// the `specter <verb>:` prefix on every failure path: the connect
+/// stage routes through [`connect::dial`] (the seam shared with the
+/// one-shot verbs), the remaining transport stages through
+/// [`connect::emit_error`], the ack tail through
 /// [`connect::fail_response`]. Call sites `return code` directly.
 ///
 /// `name = None` ⇒ unfiltered subscription (the `tail` shape).
@@ -68,17 +70,7 @@ pub(crate) fn open(
     verb: &'static str,
     name: Option<CompactString>,
 ) -> Result<Subscription, ExitCode> {
-    let socket = connect::resolve_socket(client);
-    let mut stream = connect::open(&socket).map_err(|e| {
-        connect::emit_error(
-            client,
-            format_args!(
-                "specter {verb}: cannot connect to {}: {e}",
-                socket.display()
-            ),
-        );
-        ExitCode::from(1)
-    })?;
+    let mut stream = connect::dial(client, verb)?;
 
     // Ship the Subscribe through the same write helper status/list/show
     // use — JSON line + LF in one `write_all`. Symmetric with the

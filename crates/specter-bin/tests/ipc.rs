@@ -2,10 +2,10 @@
 //!
 //! Each test spawns the `specter` binary as a subprocess against a
 //! per-test sandbox tempdir, then drives client behaviour over real
-//! `UnixStream` pairs. Concurrent nextest runs are isolated by
-//! pointing `TMPDIR` / `XDG_RUNTIME_DIR` at the sandbox dir, so the
-//! daemon's default socket path lands inside the per-test scratch
-//! space.
+//! `UnixStream` pairs. Concurrent nextest runs are isolated by binding
+//! each daemon at `--socket <sandbox>/specter.sock`, so its socket
+//! lands inside that test's own scratch space rather than the shared
+//! per-platform convention path.
 //!
 //! Tests mirror the discipline established in
 //! `config_auto_reload.rs`: one process per test, log-file polling
@@ -39,8 +39,8 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(8);
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 /// Tempdir-bound sandbox for one IPC integration test. Holds the
-/// config + log paths and exposes the synthesised socket path the
-/// daemon resolves (`$TMPDIR/specter.sock`).
+/// config + log paths and the socket path the daemon binds via
+/// `--socket` — the same path the client raw-connects to.
 struct Sandbox {
     _tmp: TempDir,
     dir: PathBuf,
@@ -69,10 +69,10 @@ impl Sandbox {
     }
 }
 
-/// Spawn the workspace's `specter` binary against `sb`. `TMPDIR` and
-/// `XDG_RUNTIME_DIR` point at the sandbox so the daemon's default
-/// socket lands at `sb.socket` — no `--socket` CLI flag yet, so the
-/// per-platform default path resolution is what these tests drive.
+/// Spawn the workspace's `specter` binary against `sb`. `--socket
+/// sb.socket` pins the daemon's bind path inside the per-test sandbox,
+/// so concurrent nextest runs never collide on the shared per-platform
+/// convention path.
 fn spawn_specter<I, S>(sb: &Sandbox, extra: I) -> Child
 where
     I: IntoIterator<Item = S>,
@@ -83,14 +83,14 @@ where
         .arg("run")
         .arg("--config")
         .arg(&sb.cfg)
+        .arg("--socket")
+        .arg(&sb.socket)
         .args(["--log-destination", "file"])
         .arg("--log-path")
         .arg(&sb.log)
         .args(["--log-level", "info"])
         .args(extra)
         .env_remove("SPECTER_NO_CONFIG_WATCH")
-        .env("TMPDIR", &sb.dir)
-        .env("XDG_RUNTIME_DIR", &sb.dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -388,7 +388,7 @@ fn live_socket_conflict() {
         "first daemon failed to come up",
     );
 
-    // Spawn a second daemon on the same sandbox (same TMPDIR ⇒ same
+    // Spawn a second daemon on the same sandbox (same --socket ⇒ same
     // socket path). It must exit non-zero.
     let mut second = spawn_specter(&sb, std::iter::empty::<&str>());
     let second_exit = await_exit(&mut second).expect("second daemon exited");
@@ -918,6 +918,71 @@ fn tail_unknown_filter_exits_two() {
     assert!(
         stderr.contains("Known filters:"),
         "stderr must list the wire vocabulary: {stderr}",
+    );
+}
+
+// ---------- subscribe arm shares the dial connect seam --------------
+
+/// The streaming verbs (`tail` / `wait` → `subscribe::open`) reach the
+/// daemon through the same `connect::dial` seam as the one-shot verbs
+/// (`status` → `round_trip`), so `subscribe::open` cannot grow a
+/// private connect path. Against an absent socket every verb family
+/// emits the single `dial`-owned `specter <verb>: cannot connect to
+/// <path>` diagnostic and exits `1`.
+///
+/// Regression anchor: the `cannot connect to` string lives only in
+/// `dial`, so a streaming verb emitting it proves it routed through
+/// `dial` rather than re-inlining its own resolve+open. The assertions
+/// pin only the stable `cannot connect to <path>` substring (not the
+/// trailing errno), so the test survives a later enrichment of the
+/// diagnostic.
+#[test]
+fn subscribe_arm_shares_dial_connect_seam() {
+    // No daemon spawned — sb.socket is never bound, so every connect
+    // attempt fails at the dial seam with the same shape.
+    let sb = Sandbox::new();
+    let bin = env!("CARGO_BIN_EXE_specter");
+    let socket = sb.socket.display().to_string();
+
+    let run = |verb: &str| {
+        Command::new(bin)
+            .arg(verb)
+            .args(["--socket"])
+            .arg(&sb.socket)
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .output()
+            .unwrap_or_else(|e| panic!("spawn specter {verb}: {e}"))
+    };
+
+    // Streaming family: `tail` flows through `subscribe::open` → `dial`.
+    let tail = run("tail");
+    assert_eq!(
+        tail.status.code(),
+        Some(1),
+        "tail connect failure must exit 1; got {:?}",
+        tail.status,
+    );
+    let tail_err = String::from_utf8_lossy(&tail.stderr);
+    assert!(
+        tail_err.contains("specter tail: cannot connect to") && tail_err.contains(&socket),
+        "tail must emit the dial connect-failure diagnostic naming the socket: {tail_err}",
+    );
+
+    // One-shot family: `status` flows through `round_trip` → `dial`.
+    // The byte-identical shape (modulo verb token) witnesses the shared
+    // seam.
+    let status = run("status");
+    assert_eq!(
+        status.status.code(),
+        Some(1),
+        "status connect failure must exit 1; got {:?}",
+        status.status,
+    );
+    let status_err = String::from_utf8_lossy(&status.stderr);
+    assert!(
+        status_err.contains("specter status: cannot connect to") && status_err.contains(&socket),
+        "status must emit the dial connect-failure diagnostic naming the socket: {status_err}",
     );
 }
 

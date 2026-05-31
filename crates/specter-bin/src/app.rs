@@ -25,8 +25,10 @@
 //! 3. **Sensor watcher + config watcher** — kernel fd handles that
 //!    will register against the reactor's [`mio::Poll`]; constructed
 //!    before the [`Reactor`] takes ownership.
-//! 4. **IPC socket bind** — `sockpath::bind_socket_atomic` writes the
-//!    socket file with the correct permissions; the returned
+//! 4. **IPC socket bind** — `resolve::resolve` commits the bind path
+//!    and `sockpath::precheck_bind_parent` checks its parent dir before
+//!    `sockpath::bind_socket_atomic` writes the socket file with the
+//!    correct permissions; the returned
 //!    [`UnlinkGuard`](sockpath::UnlinkGuard) cleans up on graceful
 //!    shutdown or panic.
 //! 5. **Channels** — [`ActuatorIO::pair`] for the actuator seam, plus
@@ -68,7 +70,7 @@
 
 use crate::actuator::ActuatorIO;
 use crate::driver::{EngineDriver, Hub, Reactor, ReloadTrigger, WakingSink};
-use crate::ipc::sockpath;
+use crate::ipc::{resolve, sockpath};
 use crate::loader::Loader;
 use crate::observability;
 use crate::signals;
@@ -95,16 +97,18 @@ use std::time::Instant;
 /// startup failure (config / watcher / prober / thread spawn /
 /// reactor / IPC server / listener bind).
 pub fn run(args: DaemonArgs) -> ExitCode {
-    // Destructure at the function head — every field is consumed
-    // exactly once by the lifecycle below (`config` moves into the
-    // driver constructor; `log_path` moves into `CliLogOverrides`;
-    // `log_level`, `log_destination`, `concurrency`, `probe_concurrency`,
-    // and `no_config_watch` are `Copy`). The bare bindings avoid any
+    // Destructure at the function head — every field is consumed by the
+    // lifecycle below: `config` moves into the driver constructor;
+    // `log_path` moves into `CliLogOverrides`; `socket` is borrowed by
+    // `resolve::resolve` (`as_deref`) at step 7; `log_level`,
+    // `log_destination`, `concurrency`, `probe_concurrency`, and
+    // `no_config_watch` are `Copy`. The bare bindings avoid any
     // `args.<field>.clone()` at the driver-constructor and merge_cli
     // sites — the driver consumes `config` directly and the boot-time
     // TOCTOU lstat reads back through [`EngineDriver::config_path`].
     let DaemonArgs {
         config,
+        socket,
         log_level,
         log_destination,
         log_path,
@@ -227,33 +231,57 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         }
     };
 
-    // 7. Operator IPC socket — resolve, recover from stale, bind via
-    //    atomic-rename + chmod 0600 BEFORE Hub construction
-    //    (the Hub takes ownership of the listener fd). The
-    //    `unlink_guard` armed here unlinks the socket on graceful
-    //    shutdown (via explicit `unlink_now` after the driver drops)
-    //    and on panic (Drop runs unconditionally), so the next boot
-    //    never trips over our own residue.
-    let socket_path = sockpath::default_socket_path();
-    if let Err(e) = sockpath::check_stale_or_remove(&socket_path) {
+    // 7. Operator IPC socket — resolve the path policy into the single
+    //    committed bind path, pre-check its parent directory, recover
+    //    from a stale prior socket, then bind via atomic-rename + chmod
+    //    0600 BEFORE Hub construction (the Hub takes ownership of the
+    //    listener fd). `resolve` reads `--socket`, then `$SPECTER_SOCK`,
+    //    then the per-platform convention through one env touchpoint
+    //    (`resolve::env_os`); its committed path is exactly the head of
+    //    a client's probe cascade, so daemon and client rendezvous by
+    //    construction. `precheck_bind_parent` runs first so a missing
+    //    runtime dir (a system unit without its `RuntimeDirectory`, a
+    //    bare container) fails with source-tagged, actionable advice
+    //    rather than a raw bind `ENOENT`. The `unlink_guard` armed here
+    //    unlinks the socket on graceful shutdown (via explicit
+    //    `unlink_now` after the driver drops) and on panic (Drop runs
+    //    unconditionally), so the next boot never trips over our residue.
+    let bind = match resolve::resolve(socket.as_deref(), resolve::env_os) {
+        Ok(resolution) => resolution.into_commit(),
+        Err(e) => {
+            tracing::error!(%e, "ipc socket path unresolvable; daemon refusing to start");
+            return ExitCode::from(1);
+        }
+    };
+    if let Err(e) = sockpath::precheck_bind_parent(&bind) {
+        tracing::error!(%e, "ipc socket parent unusable; daemon refusing to start");
+        return ExitCode::from(1);
+    }
+    if let Err(e) = sockpath::check_stale_or_remove(&bind.path) {
         tracing::error!(
             ?e,
-            path = %socket_path.display(),
+            source = bind.source.label(),
+            path = %bind.path.display(),
             "ipc socket path unusable; daemon refusing to start",
         );
         return ExitCode::from(1);
     }
-    let (listener, unlink_guard) = match sockpath::bind_socket_atomic(&socket_path) {
+    let (listener, unlink_guard) = match sockpath::bind_socket_atomic(&bind.path) {
         Ok(pair) => pair,
         Err(e) => {
             tracing::error!(
                 ?e,
-                path = %socket_path.display(),
+                source = bind.source.label(),
+                path = %bind.path.display(),
                 "ipc bind_socket_atomic failed",
             );
             return ExitCode::from(1);
         }
     };
+    // The committed path threads on to `DriverState` (status, unlink)
+    // exactly as bound — the resolved `SocketSource` is a startup-log
+    // detail, not state the running daemon carries.
+    let socket_path = bind.path;
 
     // 8. Channel allocation. Two wake'd channels for the prober pool
     //    and the actuator's completion stream; one bundle-pair for

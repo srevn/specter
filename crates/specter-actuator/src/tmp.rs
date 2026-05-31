@@ -55,7 +55,15 @@
 
 use specter_core::{CorrelationId, Diff, EntryRef, Rename};
 use std::io::{self, Write};
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+
+/// Creation mode for the diff tmp file. `0o600` is owner read/write
+/// only: the tab-separated body discloses watched-path segments and
+/// inode numbers, and `temp_dir` is a shared location (real `/tmp` on
+/// Linux) that other local users can list. Applied at `open` time, so
+/// the file is never observable at a wider mode.
+const DIFF_FILE_MODE: u32 = 0o600;
 
 /// Owned handle to an actuator-materialised diff tmp file.
 ///
@@ -120,11 +128,16 @@ fn build_path(temp_dir: &Path, actuator_pid: u32, correlation: CorrelationId) ->
 }
 
 /// Write the [`Diff`] to `path` in the tab-separated format
-/// documented in this module's header. The `BufWriter` coalesces
-/// the per-entry `writeln!` calls into one `write` syscall at flush
-/// time.
+/// documented in this module's header, creating `path` at
+/// [`DIFF_FILE_MODE`] (owner-only). The `BufWriter` coalesces the
+/// per-entry `writeln!` calls into one `write` syscall at flush time.
 fn write_inner(path: &Path, diff: &Diff) -> io::Result<()> {
-    let f = std::fs::File::create(path)?;
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(DIFF_FILE_MODE)
+        .open(path)?;
     let mut buf = std::io::BufWriter::new(f);
     for e in &diff.created {
         write_entry(&mut buf, "created", e)?;
@@ -288,12 +301,31 @@ mod tests {
         assert!(!body.contains("/abs"));
     }
 
+    /// The diff body discloses watched-path segments and inodes, and
+    /// `temp_dir` is a shared location other local users can list.
+    /// Pins the `0o600` creation mode — a regression to
+    /// `File::create` (mode `0o644`) would leave the file
+    /// world-readable and fail here.
+    #[test]
+    fn create_sets_owner_only_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let handle = DiffTmpFile::create(dir.path(), 1, CorrelationId::from(0), &Diff::default())
+            .expect("create");
+        let mode = std::fs::metadata(handle.path())
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "diff tmp file must be owner read/write only");
+    }
+
     /// On any I/O failure during write, the `Err` arm must roll back
     /// the partial file before returning. Without rollback, a
     /// caller treating `Err` as "no file to track" would leak the
     /// partial. Forcing the failure: pass a `temp_dir` whose
-    /// "directory" is a regular file — `File::create` returns
-    /// ENOTDIR on the child path.
+    /// "directory" is a regular file — the `open` returns ENOTDIR
+    /// on the child path.
     #[test]
     fn create_returns_err_and_leaves_no_file_on_write_failure() {
         let dir = tempfile::tempdir().expect("tempdir");

@@ -19,21 +19,27 @@ specter wait <name>         # block until the named watch fires (or detaches)
 
 ## The socket
 
-The daemon binds a UNIX domain socket at:
+Daemon and client resolve the socket path from one policy, so a client
+needs no flag to reach a daemon started with none. Precedence:
+`--socket <path>` > `$SPECTER_SOCK` > the per-platform convention:
 
-| Platform   | Default                                                          |
-|------------|------------------------------------------------------------------|
-| Linux      | `$XDG_RUNTIME_DIR/specter.sock` (fallback `/tmp/specter.sock`)   |
-| macOS, BSD | `$TMPDIR/specter.sock` (fallback `/tmp/specter.sock`)            |
+| Platform | Convention                                                                          |
+|----------|-------------------------------------------------------------------------------------|
+| Linux    | `$XDG_RUNTIME_DIR/specter.sock` (session) if set, else `/run/specter/specter.sock` (system) |
+| macOS    | `/tmp/specter.sock`                                                                  |
+| BSD      | `/var/run/specter/specter.sock`                                                     |
+
+The daemon binds one path; the client probes the convention in order —
+on Linux the session socket first, then the system socket — and connects
+to the first that answers. An explicit `--socket` / `$SPECTER_SOCK` is
+pinned with no fall-through: a stale override is reported, never silently
+retargeted to a different daemon.
 
 Permissions are `0600` — owner-only by construction via an atomic-rename
 bind (`bind(temp)` → `chmod 0600` → `rename(temp, path)`), so the
 operator-facing path never appears at a more permissive mode. The
 daemon detects and recovers from stale socket files left behind by a
 crashed predecessor.
-
-Every client verb accepts `--socket <path>` to override the default —
-useful for multi-daemon setups or non-default supervisor environments.
 
 ## Wire format
 

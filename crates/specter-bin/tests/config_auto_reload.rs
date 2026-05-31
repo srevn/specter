@@ -73,32 +73,34 @@ const NO_RELOAD_WINDOW: Duration = Duration::from_millis(600);
 /// the auto-reload state via its `extra` argv slice, not via inherited
 /// env.
 ///
-/// `TMPDIR` and `XDG_RUNTIME_DIR` are pointed at the sandbox's
-/// parent dir so the daemon's IPC socket lands inside the per-test
-/// tempdir — concurrent integration tests in `cargo nextest` would
-/// otherwise collide on the shared `/tmp/specter.sock` default path
-/// (second binder hits `AddrInUse` and exits 1).
+/// `--socket <sandbox>/specter.sock` binds the daemon's IPC socket
+/// inside the per-test tempdir — concurrent integration tests in
+/// `cargo nextest` would otherwise collide on the shared per-platform
+/// convention path (the second binder hits `AddrInUse` and exits 1).
+/// These tests observe only the log file, so nothing connects to the
+/// socket; pinning it merely keeps each daemon's bind unique.
 fn spawn_specter<I, S>(cfg: &Path, log: &Path, extra: I) -> Child
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
     let bin = env!("CARGO_BIN_EXE_specter");
-    let socket_dir = cfg
+    let socket = cfg
         .parent()
-        .expect("config path lives in a sandbox tempdir");
+        .expect("config path lives in a sandbox tempdir")
+        .join("specter.sock");
     Command::new(bin)
         .arg("run")
         .arg("--config")
         .arg(cfg)
+        .arg("--socket")
+        .arg(&socket)
         .args(["--log-destination", "file"])
         .arg("--log-path")
         .arg(log)
         .args(["--log-level", "info"])
         .args(extra)
         .env_remove("SPECTER_NO_CONFIG_WATCH")
-        .env("TMPDIR", socket_dir)
-        .env("XDG_RUNTIME_DIR", socket_dir)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

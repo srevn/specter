@@ -86,6 +86,13 @@ pub struct DaemonArgs {
     #[arg(long, short = 'c')]
     pub config: PathBuf,
 
+    /// IPC socket path to bind.
+    ///
+    /// Omitted ⇒ the per-platform convention; `$SPECTER_SOCK` overrides
+    /// that and `--socket` overrides both. Must be absolute.
+    #[arg(long)]
+    pub socket: Option<PathBuf>,
+
     /// Override log level from config.
     #[arg(long, value_enum)]
     pub log_level: Option<LogLevel>,
@@ -148,11 +155,10 @@ pub struct DaemonArgs {
 #[derive(Debug, Args)]
 #[must_use]
 pub struct ClientArgs {
-    /// Daemon IPC socket path.
+    /// Daemon IPC socket path to connect to.
     ///
-    /// Omitted ⇒ the daemon's per-platform default: Linux
-    /// `$XDG_RUNTIME_DIR/specter.sock` (fallback `/tmp/specter.sock`),
-    /// macOS/BSD `$TMPDIR/specter.sock` (fallback `/tmp/specter.sock`).
+    /// Omitted ⇒ probe the per-platform convention; `$SPECTER_SOCK`
+    /// overrides that and `--socket` overrides both. Must be absolute.
     #[arg(long)]
     pub socket: Option<PathBuf>,
 
@@ -353,6 +359,8 @@ mod tests {
             "run",
             "--config",
             "/etc/specter.toml",
+            "--socket",
+            "/run/specter/specter.sock",
             "--log-level",
             "debug",
             "--log-destination",
@@ -368,6 +376,10 @@ mod tests {
         .unwrap();
         let args = run_args(cli);
         assert_eq!(args.config, std::path::Path::new("/etc/specter.toml"));
+        assert_eq!(
+            args.socket.as_deref(),
+            Some(std::path::Path::new("/run/specter/specter.sock"))
+        );
         assert_eq!(args.log_level, Some(LogLevel::Debug));
         assert_eq!(args.log_destination, Some(LogDestination::Stderr));
         assert_eq!(

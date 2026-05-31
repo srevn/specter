@@ -27,10 +27,14 @@
 //!   (the round-trip unknown-field gate every incoming request /
 //!   response is admitted through). Owns the LF-delimited framing
 //!   contract single-source.
-//! - [`sockpath`] — UNIX-socket path resolution, atomic-rename bind
-//!   with 0600 permissions, stale-socket recovery, and the
-//!   drop-guard that unlinks the socket on graceful shutdown or
-//!   panic.
+//! - [`resolve`] — socket-path resolution policy: one `resolve` →
+//!   `Resolution` consumed two ways (daemon commits a path, client
+//!   probes a cascade), the per-platform convention, explicit-override
+//!   validation, and the `SocketSource` diagnostic vocabulary. Pure,
+//!   env-injected.
+//! - [`sockpath`] — UNIX-socket atomic-rename bind with 0600
+//!   permissions, stale-socket recovery, and the drop-guard that
+//!   unlinks the socket on graceful shutdown or panic.
 //! - [`client`] — operator-facing client verbs.
 //! - [`render`] — human-readable rendering for `-o human` output.
 //!
@@ -45,5 +49,6 @@ pub(crate) mod client;
 pub(crate) mod framing;
 pub(crate) mod protocol;
 pub(crate) mod render;
+pub(crate) mod resolve;
 pub(crate) mod sockpath;
 pub(crate) mod wire;

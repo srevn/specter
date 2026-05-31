@@ -1,6 +1,9 @@
 [Unit]
-Description=Specter — prove the absence of change
+Description=specter
 After=network.target
+
+StartLimitIntervalSec=60
+StartLimitBurst=5
 
 [Service]
 Type=exec
@@ -12,13 +15,14 @@ RestartSec=5
 User=@SPECTER_USER@
 Group=@SPECTER_GROUP@
 
+RuntimeDirectory=specter
+RuntimeDirectoryMode=0700
+
 StandardOutput=journal
 StandardError=journal
 
 NoNewPrivileges=true
-ProtectSystem=strict
-ProtectHome=true
-PrivateTmp=true
+ProtectSystem=full
 PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
@@ -27,9 +31,6 @@ RestrictNamespaces=true
 RestrictRealtime=true
 LockPersonality=true
 MemoryDenyWriteExecute=true
-
-ReadOnlyPaths=/srv
-ReadWritePaths=/var/log/specter.log
 
 [Install]
 WantedBy=multi-user.target
