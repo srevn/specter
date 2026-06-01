@@ -84,7 +84,7 @@ pub(crate) fn show(
 /// Project a registry-attached `(SubId, &Sub)` into a [`SubDetails`].
 ///
 /// Profile-lookup verdict: graceful, mirroring
-/// [`super::list::project_attached`]. Every attached Sub has a
+/// `super::list::project_attached`. Every attached Sub has a
 /// Profile by engine construction (`SubRegistry::insert` runs in
 /// the same engine step as `ProfileMap::attach`), but the IPC
 /// projection layer never panics on engine-invariant breach — it

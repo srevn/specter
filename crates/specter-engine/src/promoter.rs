@@ -82,11 +82,10 @@ impl Engine {
     /// Attach a Promoter to the engine. Materialises the literal-prefix
     /// path on the Tree (creating scaffolds where the prefix doesn't
     /// yet exist on disk), arms the Promoter's state-resident probe
-    /// slot, and emits a
-    /// [`Diagnostic::PromoterAttached`] carrying the minted
-    /// [`PromoterId`].
+    /// slot, and emits a [`Diagnostic::PromoterAttached`] carrying
+    /// the minted [`PromoterId`].
     ///
-    /// Sole public entry is [`crate::Input::AttachPromoter`] via
+    /// Sole public entry is [`specter_core::Input::AttachPromoter`] via
     /// [`Engine::step`]; the `pub(crate)` inner survives because
     /// [`Engine::on_config_diff`] composes multiple detach/attach
     /// operations into one [`StepOutput`] on hot reload.

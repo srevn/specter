@@ -131,11 +131,10 @@ impl Engine {
     ///
     /// Sole reader API for the descent-state payload outside the routing
     /// match sites in `on_*_probe_response`. The exhaustive `ProbeOwner`
-    /// match enforces that adding a new owner kind requires extending
-    /// this accessor; the per-state-type projection
-    /// ([`ProfileState::descent_state`] /
-    /// [`PromoterState::descent_state`]) owns the in-variant payload
-    /// match, so the dispatcher here stays a thin two-line route.
+    /// match enforces that adding a new owner kind requires extending this
+    /// accessor; the per-state-type projection ([`ProfileState::descent_state`] /
+    /// [`specter_core::PromoterState::descent_state`]) owns the in-variant
+    /// payload match, so the dispatcher here stays a thin two-line route.
     #[must_use]
     pub(crate) fn descent_state(&self, owner: ProbeOwner) -> Option<&DescentState> {
         match owner {
@@ -265,19 +264,18 @@ impl Engine {
     /// # Production invariants (`Path` anchor)
     ///
     /// 1. **Absolute paths only.** A [`SubAttachAnchor::Path`] must be
-    ///    absolute and UTF-8. [`Tree::parse_attach_path`] is the canonical gate; it
-    ///    rejects non-absolute paths, non-UTF-8 segments, `.` / `..`
+    ///    absolute and UTF-8. [`Tree::parse_attach_path`] is the canonical
+    ///    gate; it rejects non-absolute paths, non-UTF-8 segments, `.` / `..`
     ///    components, Windows path prefixes, and empty segments. The
     ///    config layer's `canonicalize_lenient` already enforces absolute
-    ///    paths for TOML-loaded configs, but hot-reload
-    ///    `ConfigDiff::added` constructs `SubAttachRequest` from a
-    ///    different path; the gate keeps the engine's contract
-    ///    independent of every caller.
-    /// 2. **Single FS-root.** Every validated [`TreePath`] starts with
-    ///    [`FS_ROOT_SEGMENT`]; `materialize_path_or_pending` lazily
-    ///    bootstraps a synthetic `/` slot (role
-    ///    `ResourceRole::DescentScaffold`) before the pre-existence
-    ///    walk so every Profile's rewind chain terminates at this
+    ///    paths for TOML-loaded configs, but hot-reload `ConfigDiff::added`
+    ///    constructs `SubAttachRequest` from a different path; the gate keeps
+    ///    the engine's contract independent of every caller.
+    /// 2. **Single FS-root.** Every validated [`specter_core::TreePath`]
+    ///    starts with [`specter_core::FS_ROOT_SEGMENT`];
+    ///    `materialize_path_or_pending` lazily bootstraps a synthetic `/`
+    ///    slot (role `ResourceRole::DescentScaffold`) before the
+    ///    pre-existence walk so every Profile's rewind chain terminates at this
     ///    shared slot. The FS-root invariant is documented here rather
     ///    than enforced at the Tree type level — unit tests for
     ///    lower-level Tree functions (`coverage`, `refcounts`) still
@@ -813,8 +811,8 @@ impl Engine {
     /// re-deriving.
     ///
     /// **Terminus sourced from owner state.** The terminus is read back
-    /// via [`Promoter::terminus`] rather than taken as a parameter: the
-    /// proxy registered at `pattern_component_index ==
+    /// via [`specter_core::Promoter::terminus`] rather than taken as
+    /// a parameter: the proxy registered at `pattern_component_index ==
     /// literal_prefix_len` is the terminus's own structural address,
     /// uniquely identified inside the `Active` proxies map for the
     /// Promoter's lifetime. A caller-passes-wrong-terminus breach class

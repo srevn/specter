@@ -140,7 +140,7 @@ pub(crate) trait InfallibleSerialize: serde::Serialize {}
 /// Production wire path: diag fan-out
 /// ([`crate::driver::Hub::dispatch_to_subscribers`]),
 /// back-pressure `_missed` marker
-/// ([`crate::driver::ipc::conns::ConnState::try_dispatch_diag`]), response
+/// (`crate::driver::ipc::conns::ConnState::try_dispatch_diag`), response
 /// enqueue ([`crate::driver::Hub::enqueue_response`] and
 /// [`crate::driver::Hub::drain_accept`]'s cap-arm
 /// best-effort Busy write), client request shipping
@@ -205,7 +205,7 @@ pub(crate) fn encode_line<T: InfallibleSerialize>(value: &T) -> Vec<u8> {
 ///   [`serde::de::Error::custom`] message naming the unknown field
 ///   and its path within the value (e.g.
 ///   `unknown field \`names\` at \`\``,
-///   `unknown field \`extra\` at \`.rows[0]\``).
+///   `unknown field \`extra\` at \`.rows\[0\]\``).
 pub(crate) fn parse_strict<T>(bytes: &[u8]) -> Result<T, serde_json::Error>
 where
     T: serde::de::DeserializeOwned + serde::Serialize,

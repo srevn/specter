@@ -2,8 +2,8 @@
 //!
 //! `EnvSnapshot::capture` walks `std::env::vars_os` once at actuator
 //! startup and freezes the result into a sorted map. The snapshot lives
-//! on [`crate::pool::state::ActuatorState`] as `Arc<EnvSnapshot>` and is
-//! handed to the resolver alongside every per-step resolve call.
+//! on `ActuatorState` as `Arc<EnvSnapshot>` and is handed to the
+//! resolver alongside every per-step resolve call.
 //!
 //! # Why a snapshot, not live reads
 //!
@@ -72,9 +72,9 @@ impl EnvSnapshot {
     /// this directly when they need to exercise the UTF-8 filter
     /// deterministically (without touching the ambient process env,
     /// which would require `unsafe std::env::set_var` and is racy
-    /// across single-process test runners). [`Self::from_map`] is
-    /// the lighter test fixture for the common case where the test
-    /// doesn't care about the filter and only needs ASCII keys.
+    /// across single-process test runners). `from_map` is the lighter
+    /// test fixture for the common case where the test doesn't care
+    /// about the filter and only needs ASCII keys.
     #[must_use]
     fn from_vars_os<I>(vars: I) -> Self
     where

@@ -1,11 +1,12 @@
 //! Per-input dispatch handlers.
 //!
-//! Each `on_*` method handles one [`Input`] variant for one Profile. They
-//! call the burst-lifecycle helpers (`burst.rs`), the refcount edges
-//! (`refcounts.rs`), and the reconciliation (`reconcile.rs`). Logic that
-//! fits in one row of the transition table stays inline; logic shared across
-//! rows (e.g., emit Effects on Standard stable verdict) is factored into
-//! private helpers within this module.
+//! Each `on_*` method handles one [`specter_core::Input`] variant for
+//! one Profile. They call the burst-lifecycle helpers (`burst.rs`),
+//! the refcount edges (`refcounts.rs`), and the reconciliation
+//! (`reconcile.rs`). Logic that fits in one row of the transition
+//! table stays inline; logic shared across rows (e.g., emit Effects
+//! on Standard stable verdict) is factored into private helpers within
+//! this module.
 //!
 //! `on_probe_response` routes every response by *state*: the gated
 //! correlation lives on a state-resident [`specter_core::ProbeSlot`],
@@ -978,7 +979,7 @@ impl Engine {
         }
     }
 
-    /// Dispatch a [`Input::TimerExpired`].
+    /// Dispatch a [`specter_core::Input::TimerExpired`].
     ///
     /// `kind` tells us which transition this timer drives — settle
     /// expiry (Batching → Verifying, with possible reschedule),
@@ -1100,7 +1101,7 @@ impl Engine {
         }
     }
 
-    /// Dispatch a [`Input::EffectComplete`].
+    /// Dispatch a [`specter_core::Input::EffectComplete`].
     ///
     /// The Profile is resolved from `key` ([`DedupKey::profile`] is O(1));
     /// the Sub registry is consulted only for the unknown-Sub diagnostic.
@@ -1247,7 +1248,7 @@ impl Engine {
         }
     }
 
-    /// Dispatch a [`Input::ConfigDiff`].
+    /// Dispatch a [`specter_core::Input::ConfigDiff`].
     ///
     /// Atomic, name-keyed apply of *both* halves of the
     /// [`WatchRegistryDiff`] in the canonical order. The diff carries
@@ -1270,7 +1271,7 @@ impl Engine {
     /// 2. **Sub `modified_params`** — anchor + identity unchanged;
     ///    only per-Sub fields differ. Resolve the name; on `Some`,
     ///    [`Self::rebind_sub_inner`] rebinds the Sub in place via the
-    ///    [`SubRegistry::rebind`] edge — no Profile churn, no
+    ///    [`specter_core::SubRegistry::rebind`] edge — no Profile churn, no
     ///    kernel-watch flap, no baseline loss. On `None`, the prior
     ///    attach failed and the Sub never entered the registry;
     ///    the engine degrades the entry to a fresh attach
@@ -1404,7 +1405,7 @@ impl Engine {
         // The single-StepOutput sort happens at `step`'s caller.
     }
 
-    /// Dispatch a [`Input::WatchOpRejected`].
+    /// Dispatch a [`specter_core::Input::WatchOpRejected`].
     ///
     /// The Sensor failed to install a kernel watch (typically `EMFILE` /
     /// `ENFILE` on FD exhaustion). Three things must happen:
@@ -2016,9 +2017,9 @@ impl Engine {
     }
 
     /// Arm (or re-arm) the operator `absorb` window on a Profile — the
-    /// [`Input::ArmAbsorb`] handler. Deriving the window's `(expiry,
-    /// mode)` from the operator's `duration` is the one place this
-    /// policy lives: `None` ⇒ a one-shot window one `settle` interval
+    /// [`specter_core::Input::ArmAbsorb`] handler. Deriving the window's
+    /// `(expiry, mode)` from the operator's `duration` is the one place
+    /// this policy lives: `None` ⇒ a one-shot window one `settle` interval
     /// wide ([`AbsorbMode::ConsumeOnFirst`], to cover a single expected
     /// replication); `Some(d)` ⇒ a `d`-wide window
     /// ([`AbsorbMode::PersistUntil`], to cover a run of them). A
@@ -2552,7 +2553,7 @@ impl Engine {
     ///   bounded `BurstDeadline` fallback fired. `fire_or_seal` runs
     ///   the same fire path with `forced = true`, which propagates
     ///   onto [`specter_core::Effect::forced`] via
-    ///   [`crate::effect::EmitMode::Standard`] and crosses the
+    ///   [`EmitMode::Standard`] and crosses the
     ///   Draining gate via the `forced` disjunct in
     ///   [`Engine::gated_fire`]. On `hash_channel_disagreed = true`
     ///   (strong signal — the hash channel observed
@@ -2678,8 +2679,9 @@ impl Engine {
     /// and never reaches this predicate.
     ///
     /// The boolean answer is per-Profile; the caller
-    /// ([`Engine::classify_consequence`]) builds the SeedDrift fire
-    /// filter from the Profile's fired Subs ([`SubRegistry::fired_in`]).
+    /// ([`Engine::classify_consequence`]) builds the SeedDrift fire filter
+    /// from the Profile's fired Subs
+    /// ([`specter_core::SubRegistry::fired_in`]).
     fn seed_drift_observed(&self, profile_id: ProfileId) -> bool {
         // Never fired ⇒ no prior emission to re-fire on recovery. The
         // per-Sub flags live on the registry (disjoint field from
@@ -2737,7 +2739,7 @@ impl Engine {
     /// shared up-front read for [`Engine::dispatch_quiescence_ok`].
     ///
     /// This is the **read-back twin** of the standalone target rule
-    /// [`crate::pre_fire_target`], not a second computation of it: that
+    /// [`crate::burst::pre_fire_target`], not a second computation of it: that
     /// function *computes* the dirty-LCA target at
     /// [`Engine::transition_to_verifying`] and writes it onto
     /// [`specter_core::PreFirePhase::Verifying`]'s payload (immutable for
@@ -3514,13 +3516,13 @@ impl Engine {
     /// matched, or the burst is flagged [`BurstFinish::Reap`]).
     ///
     /// **Per-Sub observational bookkeeping.** Each emission triggers
-    /// [`SubRegistry::record_fired`] (bumps `fire_count`, stamps
-    /// `last_fired_at = now`) and pushes one [`Diagnostic::SubFired`]
+    /// [`specter_core::SubRegistry::record_fired`] (bumps `fire_count`,
+    /// stamps `last_fired_at = now`) and pushes one [`Diagnostic::SubFired`]
     /// carrying the aggregated per-pass count (1 for SubtreeRoot, the
     /// per-leaf count for PerStableFile). A `FireVerdict::SuppressDedup`
-    /// verdict instead bumps `dedup_suppressed_count` and emits
-    /// nothing. The B1-dedup-load-bearing [`SubRegistry::mark_fired`]
-    /// stays the SubtreeRoot edge — separate signal, separate writer.
+    /// verdict instead bumps `dedup_suppressed_count` and emits nothing. The
+    /// B1-dedup-load-bearing [`specter_core::SubRegistry::mark_fired`] stays
+    /// the SubtreeRoot edge — separate signal, separate writer.
     fn emit_effects(
         &mut self,
         profile_id: ProfileId,
@@ -3699,7 +3701,8 @@ impl Engine {
     /// contribution.
     ///
     /// Returns the number of Effects appended to `out`. The caller
-    /// (`emit_effects`) sums this into the [`EmitOutcome.count`] it returns.
+    /// (`emit_effects`) sums this into the [`EmitOutcome`]'s `count` it
+    /// returns.
     #[must_use]
     fn emit_effects_per_stable_file(
         &mut self,
@@ -3787,8 +3790,8 @@ impl Engine {
     }
 
     /// Single-pass classification of owners that carry a dispatch
-    /// responsibility for an [`crate::Input::FsEvent`] at `resource`.
-    /// Sole consumer is [`Engine::on_fs_event`].
+    /// responsibility for an [`specter_core::Input::FsEvent`] at
+    /// `resource`. Sole consumer is [`Engine::on_fs_event`].
     ///
     /// Two carrier classes:
     ///
@@ -3820,20 +3823,20 @@ impl Engine {
     /// ≠∅ }`, so it iterates the full registries only to return empty.
     /// Both registries maintain a `nonsteady` count of the
     /// carrier-*eligible* owners ([`Profile::is_nonsteady`] /
-    /// [`Promoter::is_nonsteady`]); when both are zero no carrier of any
-    /// class can exist, so the scan is provably empty and skipped in
-    /// O(1) — the keeps-up-storm win an operator feels as the daemon no
-    /// longer pegging a core during a build.
+    /// [`specter_core::Promoter::is_nonsteady`]); when both are zero
+    /// no carrier of any class can exist, so the scan is provably empty
+    /// and skipped in O(1) — the keeps-up-storm win an operator feels
+    /// as the daemon no longer pegging a core during a build.
     ///
     /// The count is over a pure state(+anchor) bucket, deliberately
     /// *not* the per-resource index a naïve reading invites. The
     /// recovery predicates couple multiple fields (Profile `state` +
     /// `watch_root_parent` + anchor presence; Promoter `state` +
     /// `proxies`), and [`Profile::materialize_anchor`] writes `state`
-    /// outside the [`ProfileMap::transition_state`] chokepoint — a
-    /// state-keyed index silently desyncs at that bypass. The bucket
-    /// instead over-approximates to a single-field-ish predicate that
-    /// is invariant under the bypass by construction (`Pending` and
+    /// outside the [`specter_core::ProfileMap::transition_state`]
+    /// chokepoint — a state-keyed index silently desyncs at that bypass.
+    /// The bucket instead over-approximates to a single-field-ish predicate
+    /// that is invariant under the bypass by construction (`Pending` and
     /// anchorless `Idle` are the same counted bucket) and sound (every
     /// true carrier is counted), so a zero gate is never a false skip;
     /// it is also *tight* — a healthy anchored `Idle` Profile is

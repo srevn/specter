@@ -125,7 +125,7 @@ impl LogConfig {
 ///
 /// `empty_hint` is appended to the [`IssueKind::EmptyLogPath`] detail
 /// when File is paired with no path. The CLI flow passes
-/// `" (provide --log-path or `[log] path` in the config)"` so the
+/// `" (provide --log-path or `\[log\] path` in the config)"` so the
 /// operator sees both override sites; the config-load flow passes the
 /// empty string for the bare structural rule.
 fn validate_log_path(
@@ -364,7 +364,7 @@ impl Config {
     /// Iterator over enabled static watches in source order.
     ///
     /// Sole authority for "what's effective right now": every runtime
-    /// consumer ([`crate::diff`], the bin's initial-attach pass,
+    /// consumer ([`crate::diff()`], the bin's initial-attach pass,
     /// [`crate::Config`] drain-window derivation, the startup /
     /// reload load logs) goes through this helper. Iterating the raw
     /// [`Self::watches`] field directly bypasses the per-entry
@@ -389,8 +389,7 @@ impl Config {
     /// two cases inspect [`Self::watches`] directly.
     ///
     /// O(N) linear scan over [`Self::watches`]; static-name uniqueness
-    /// (enforced upstream by [`validate`]) guarantees at most one
-    /// match.
+    /// (enforced upstream by `validate`) guarantees at most one match.
     #[must_use]
     pub fn find_active_watch(&self, name: &str) -> Option<&SubSpec> {
         self.active_watches().find(|s| s.name == name)

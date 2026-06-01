@@ -11,7 +11,7 @@
 //! and are accounted in the [`ProofLedger`] (`exclude` is the
 //! user-facing surface for declaring expected-EACCES paths).
 //!
-//! Three controls live on [`ProbeRequest::Subtree`]:
+//! Three controls live on [`specter_core::ProbeRequest::Subtree`]:
 //! - `baseline_subtree`: the engine's last-known view. Equal
 //!   `root_meta` against the freshly `lstat`-ed directory ⇒ return
 //!   `Arc::clone(prior)` (mtime-skip), cascading into recursion via
@@ -26,11 +26,12 @@
 //! - `forced`: defensive bypass for max-settle force-fire — every
 //!   frame enumerates regardless of `baseline_subtree` or `obligation`.
 //!
-//! [`ProbeRequest::AnchorFile`] runs a single `lstat` (no controls — a
-//! leaf has no descendants to skip). [`ProbeRequest::Descent`] hardcodes
-//! a minimal override config (`recursive=false`, `hidden=true`, no
-//! exclude/pattern, no `max_depth`) — the Profile's user-facing filters
-//! would mask the very segment descent is searching for.
+//! [`specter_core::ProbeRequest::AnchorFile`] runs a single `lstat` (no
+//! controls — a leaf has no descendants to skip).
+//! [`specter_core::ProbeRequest::Descent`] hardcodes a minimal override
+//! config (`recursive=false`, `hidden=true`, no exclude/pattern, no
+//! `max_depth`) — the Profile's user-facing filters would mask the very
+//! segment descent is searching for.
 //!
 //! Symlinks are never traversed (`symlink_metadata` ≡ `lstat`); they
 //! appear as `EntryKind::Symlink` leaves when encountered as direct

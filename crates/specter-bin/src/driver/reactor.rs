@@ -5,8 +5,8 @@
 //! Constructed once by `App::run`; owned by [`super::EngineDriver`]
 //! for the rest of the daemon's lifetime. Holds the Poll, every static
 //! fd source (watcher, config-watcher, signal pipe), the cross-thread
-//! channel receivers, and the canonical [`Arc<mio::Waker>`] (held as
-//! the [`waker`](Self::wake_handle) field) the prober + actuator
+//! channel receivers, and the canonical `Arc<mio::Waker>` (held as
+//! the `waker` field) the prober + actuator
 //! wake-bearing senders clone via [`Reactor::wake_handle`]. The IPC
 //! listener and per-conn map live on [`super::Hub`], which registers
 //! against a [`Registry::try_clone()`] handle minted through
@@ -36,8 +36,9 @@
 //! 4. **`watcher`** drops — closes the kqueue / inotify fd.
 //! 5. **`events`** drops — a plain `Vec<event::Event>`; no resource
 //!    implications.
-//! 6. **`waker`** drops — releases the Reactor's [`Arc<mio::Waker>`]
-//!    reference. Any external clones still held in [`WakingSink`]s
+//! 6. **`waker`** drops — releases the Reactor's `Arc<mio::Waker>`
+//!    reference. Any external clones still held in
+//!    [`WakingSink`](crate::driver::WakingSink)s
 //!    contribute the remaining refcount; the underlying
 //!    [`mio::Waker`] closes when the last clone drops. Placed BEFORE
 //!    `poll` in field order so the refcount decrement happens while
@@ -56,7 +57,7 @@
 //!    threads exit their loops on the next observed `Disconnected`,
 //!    so Reactor drop is the structural shutdown signal for both.
 //!
-//! The Reactor anchors the canonical [`Arc<mio::Waker>`] via its
+//! The Reactor anchors the canonical `Arc<mio::Waker>` via its
 //! `waker` field; [`Reactor::wake_handle`] emits clones for external
 //! senders. Late `wake()` calls against a torn-down Poll are silent
 //! no-ops (mio's documented contract).
@@ -82,7 +83,8 @@
 //! `NOTE_TRIGGER` event is queued on the kqueue's own state, so the
 //! Waker's selector-clone close does not lose the pending trigger.
 //! The Reactor's anchor closes the platform divergence — no
-//! permutation of external [`WakingSink`] drop orderings can take the
+//! permutation of external [`WakingSink`](crate::driver::WakingSink) drop
+//! orderings can take the
 //! Arc refcount to 0 while `Poll` is alive, so a Drop-fired wake
 //! always reaches the next `poll.poll()` call.
 //!
@@ -131,7 +133,7 @@ pub(super) const TOKEN_LISTENER: Token = Token(4);
 /// explicit [`Drop`] impl encode.
 ///
 /// Generic over `W: FsWatcher` so tests can substitute the sensor
-/// crate's [`specter_sensor::testkit::MockFsWatcher`] (whose
+/// crate's `specter_sensor::testkit::MockFsWatcher` (whose
 /// `UnixStream::pair()` readiness substrate lets reactor-integration
 /// tests run against a real `mio::Poll` for free). Production uses
 /// the platform [`DefaultWatcher`] — the type parameter's default
@@ -166,7 +168,7 @@ pub(crate) struct Reactor<W: FsWatcher = DefaultWatcher> {
     events: Events,
     /// Anchored [`WakeHandle`] — the Reactor IS the canonical owner;
     /// external wake-bearing sinks receive clones via
-    /// [`Self::wake_handle`]. Carries one live [`Arc<mio::Waker>`]
+    /// [`Self::wake_handle`]. Carries one live `Arc<mio::Waker>`
     /// reference for the Reactor's lifetime, so no permutation of
     /// external [`super::WakingSink`] drops can take the refcount to
     /// 0 while [`Poll`] is alive. See the module rustdoc's "Lifetime
@@ -234,7 +236,7 @@ pub(super) struct DrainedTick {
     /// making the accept step explicit in `tick.rs` rather than
     /// implicit inside the dispatch loop here.
     pub(super) listener_ready: bool,
-    /// `true` iff [`Self::drain_effect_completions`] observed
+    /// `true` iff `Reactor::drain_effect_completions` observed
     /// [`crossbeam::channel::TryRecvError::Disconnected`] this tick.
     ///
     /// The actuator thread's `Box<dyn EffectCompleteSender>` adapter

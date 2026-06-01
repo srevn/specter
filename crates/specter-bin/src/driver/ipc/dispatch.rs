@@ -3,8 +3,9 @@
 //! routes through the projection helpers, the reload pipeline, or the
 //! per-conn role flip.
 //!
-//! Lives between [`super::tick`] (which collects per-conn readiness
-//! into the [`super::reactor::DrainedTick`]) and the downstream sinks
+//! Lives between [`EngineDriver::tick`](crate::driver::EngineDriver::tick)
+//! (which collects per-conn readiness into the
+//! [`crate::driver::reactor::DrainedTick`]) and the downstream sinks
 //! ([`super::Hub::dispatch_to_subscribers`] for fan-out,
 //! [`crate::driver::EngineDriver::dispatch_reload`] for the reload pipeline,
 //! and the [`super::project`] free functions for status / list /
@@ -16,9 +17,10 @@
 //!
 //! # Visibility
 //!
-//! `pub(in crate::driver)` — the only caller is [`super::tick`]. The per-verb
-//! handlers are private to this module; `drain_ipc_lines` is the
-//! single seam.
+//! `pub(in crate::driver)` — the only caller is
+//! [`EngineDriver::tick`](crate::driver::EngineDriver::tick). The
+//! per-verb handlers are private to this module; `drain_ipc_lines`
+//! is the single seam.
 //!
 //! # No envelope, no reply channel, no worker thread
 //!

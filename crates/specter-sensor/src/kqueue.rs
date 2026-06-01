@@ -1,6 +1,6 @@
 //! kqueue-backed `FsWatcher` + `ConfigWatcher` — macOS / FreeBSD only.
 //!
-//! Layered (mirror of [`crate::inotify`]):
+//! Layered (mirror of `crate::inotify`):
 //! - [`ffi`]: thin libc wrappers (the only `unsafe` surface). Holds
 //!   both the `kevent`-side primitives and the path → `OwnedFd` /
 //!   `fstat`-kind helpers.

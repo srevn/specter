@@ -592,9 +592,10 @@ impl crate::Engine {
     ///
     /// Sequence (load-bearing):
     /// 1. Promote the slot's role to `User` via
-    ///    [`crate::Tree::promote_scaffold`] — a no-op if a co-resident
-    ///    peer already gave the slot a real role (`WatchRootParent` /
-    ///    `User`), so materialization never clobbers a peer's claim.
+    ///    [`specter_core::Tree::promote_scaffold`] — a no-op if a
+    ///    co-resident peer already gave the slot a real role
+    ///    (`WatchRootParent` / `User`), so materialization never
+    ///    clobbers a peer's claim.
     /// 2. Capture `Profile.events` for the anchor's contribution.
     /// 3. Transition the Profile **before** any refcount op via
     ///    [`specter_core::Profile::materialize_anchor`] — atomic
@@ -859,7 +860,7 @@ const fn descent_key(owner: ProbeOwner) -> ContribKey {
 /// Per-owner diagnostic emitted when a descent probe returns
 /// `Vanished`. Profile ships [`Diagnostic::PendingPathProbeVanished`];
 /// Promoter ships [`Diagnostic::PromoterDescentVanished`]. Sole caller
-/// is [`Engine::dispatch_descent_vanished`].
+/// is [`crate::Engine::dispatch_descent_vanished`].
 const fn descent_vanished_diagnostic(owner: ProbeOwner, prefix: ResourceId) -> Diagnostic {
     match owner {
         ProbeOwner::Profile(profile) => Diagnostic::PendingPathProbeVanished { profile, prefix },
@@ -868,10 +869,10 @@ const fn descent_vanished_diagnostic(owner: ProbeOwner, prefix: ResourceId) -> D
 }
 
 /// Per-owner diagnostic emitted when a descent probe returns
-/// [`ProbeOutcome::Failed`](specter_core::ProbeOutcome::Failed). Profile
-/// ships [`Diagnostic::PendingPathProbeFailed`]; Promoter ships
-/// [`Diagnostic::PromoterDescentFailed`]. Sole caller is
-/// [`Engine::dispatch_descent_failed`].
+/// [`ProbeOutcome::Failed`](specter_core::ProbeOutcome::Failed).
+/// Profile ships [`Diagnostic::PendingPathProbeFailed`]; Promoter
+/// ships [`Diagnostic::PromoterDescentFailed`]. Sole caller is
+/// [`crate::Engine::dispatch_descent_failed`].
 const fn descent_failed_diagnostic(
     owner: ProbeOwner,
     prefix: ResourceId,

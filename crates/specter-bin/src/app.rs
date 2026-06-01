@@ -33,11 +33,12 @@
 //!    shutdown or panic.
 //! 5. **Channels** — [`ActuatorIO::pair`] for the actuator seam, plus
 //!    two `unbounded::<Input>()` channels paired with the Reactor's
-//!    [`WakeHandle`] for the prober + actuator wake'd-channels.
-//! 6. **Reactor construction** —
-//!    [`Reactor::new`] consumes the watcher, config watcher,
-//!    [`signals::SignalPipe`], and the two channel receivers; the
-//!    Reactor anchors the canonical [`WakeHandle`] internally and
+//!    [`WakeHandle`](crate::driver::WakeHandle) for the prober +
+//!    actuator wake'd-channels.
+//! 6. **Reactor construction** — [`Reactor::new`] consumes the watcher,
+//!    config watcher, [`signals::SignalPipe`], and the two channel
+//!    receivers; the Reactor anchors the canonical
+//!    [`WakeHandle`](crate::driver::WakeHandle) internally and
 //!    emits clones via [`Reactor::wake_handle`]. The Hub's
 //!    [`mio::Registry::try_clone()`] handle is minted by a follow-up
 //!    [`Reactor::registry_clone`] call against the same selector.
@@ -47,8 +48,9 @@
 //!    every accepted client.
 //! 8. **Waking senders + worker spawns** —
 //!    [`WakingProberResponseSender`] and [`WakingEffectCompleteSender`]
-//!    are constructed with [`WakingSink`]s holding [`WakeHandle`]
-//!    clones minted via [`Reactor::wake_handle`]; the prober pool +
+//!    are constructed with [`WakingSink`]s holding
+//!    [`WakeHandle`](crate::driver::WakeHandle) clones minted via
+//!    [`Reactor::wake_handle`]; the prober pool +
 //!    actuator thread spawn after the Reactor is built so they hold
 //!    a clone of the one Waker the Reactor anchors.
 //! 9. **Engine driver** — [`EngineDriver::new`] takes ownership of
@@ -641,12 +643,12 @@ impl EffectCompleteSender for WakingEffectCompleteSender {
 /// `engine_in` is the wake-bearing [`EffectCompleteSender`] —
 /// production passes a boxed [`WakingEffectCompleteSender`]
 /// constructed at `App::run` wiring time with a clone of the
-/// Reactor's [`WakeHandle`] minted via [`Reactor::wake_handle`]. The
-/// actuator's controller borrows the sink via `&dyn` so it never
-/// names the engine's `Input` vocabulary on its own thread. The
-/// closure here owns the `Box<dyn>` for the actuator-thread lifetime
-/// and passes `&*engine_in` into `run`; on closure exit the Box
-/// drops cleanly.
+/// Reactor's [`WakeHandle`](crate::driver::WakeHandle) minted via
+/// [`Reactor::wake_handle`]. The actuator's controller borrows
+/// the sink via `&dyn` so it never names the engine's `Input`
+/// vocabulary on its own thread. The closure here owns the
+/// `Box<dyn>` for the actuator-thread lifetime and passes
+/// `&*engine_in` into `run`; on closure exit the Box drops cleanly.
 ///
 /// `wiring.hard_shutdown_done_tx` is the back-channel the actuator
 /// pulses after phase 3 SIGKILL fanout; the driver's hard-exit path

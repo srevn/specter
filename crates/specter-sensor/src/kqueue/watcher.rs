@@ -287,7 +287,7 @@ impl FsWatcher for KqueueWatcher {
     }
 
     /// Non-blocking drain-to-empty of the kqueue queue. Loops on
-    /// [`ffi::kevent_drain`] (zero `timespec`) until the kernel
+    /// `ffi::kevent_drain` (zero `timespec`) until the kernel
     /// returns `0`, normalising each event to [`WatcherEvent::Fs`]
     /// in the process. kqueue never emits
     /// [`WatcherEvent::Overflow`] — `EV_CLEAR` coalesces but never
@@ -297,11 +297,11 @@ impl FsWatcher for KqueueWatcher {
     /// edge-triggered contract: with the kqueue fd registered in
     /// the reactor's edge-triggered mode, residual records would
     /// strand future events until the next edge transition.
-    /// Excess events past [`EVENT_BATCH`] sit in the kernel queue
+    /// Excess events past `EVENT_BATCH` sit in the kernel queue
     /// across loop iterations; the loop terminates only when the
     /// kernel returns `0`, guaranteeing the queue is empty.
     ///
-    /// `EINTR` retry lives inside [`ffi::kevent_drain`]. Any other
+    /// `EINTR` retry lives inside `ffi::kevent_drain`. Any other
     /// syscall error classifies through [`WatchFailureExt::from_io`]
     /// and terminates the drain mid-stream; `out` may be partially
     /// populated on `Err`.

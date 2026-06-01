@@ -615,8 +615,8 @@ pub struct PromoterRegistry {
     /// the promoter half of the engine's O(1) carrier gate. The
     /// Promoter has no single state chokepoint (state and proxy
     /// emptiness are distinct mutators), so unlike
-    /// [`ProfileMap::transition_state`] every membership-changing edge
-    /// routes through one generic reconcile point,
+    /// [`crate::ProfileMap::transition_state`] every membership-changing
+    /// edge routes through one generic reconcile point,
     /// [`Self::mutate`], plus [`Self::insert`] / [`Self::remove`].
     nonsteady: usize,
 }

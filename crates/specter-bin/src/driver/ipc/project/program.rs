@@ -2,13 +2,11 @@
 //! [`crate::ipc::protocol::SubDetails::program`].
 //!
 //! One line per [`ProgramOp`]. The argv parts use the same
-//! `${specter.<name>}` / `${env.<NAME>}` vocabulary the source TOML
-//! uses, but the rendered form is **operator-readable, not
+//! `${specter.<name>}` / `${env.<NAME>}` vocabulary the source
+//! TOML uses, but the rendered form is **operator-readable, not
 //! round-trippable**: adjacent literals in one `ArgTemplate`
-//! concatenate without a separator (see
-//! [`tests::render_pipe_joins_stages_with_pipe_separator`] for
-//! `/bin/grepfoo`), so the config lexer remains the authoritative
-//! parse boundary.
+//! concatenate without a separator, so the config lexer remains
+//! the authoritative parse boundary.
 //!
 //! The reverse-direction placeholder table mirrors the forward table
 //! consumed by the TOML lexer; both are exhaustive matches against

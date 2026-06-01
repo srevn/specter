@@ -532,7 +532,7 @@ pub enum PreFirePhase {
 /// (the typed fire move) is its only production caller. The
 /// post-command tree is a *different tree* than the one the pre-fire
 /// burst observed, so neither the pre-fire N=2 sample carrier
-/// ([`PreFireBurst::last_certified_hash`]) nor any other pre-fire
+/// (`PreFireBurst::last_certified_hash`) nor any other pre-fire
 /// fold input carries across the fire: the rebase loop opens its own
 /// independent sample sequence over the post-command tree.
 #[derive(Debug)]
@@ -825,8 +825,8 @@ pub enum StableReason {
 ///   walker refused on some chain (transient non-observation —
 ///   `EACCES`, a chmod-000 chain) and the bounded ceiling has not yet
 ///   fired. Both origins route the same way at both dispatch sites
-///   (pre-fire re-Batch via [`crate::Engine::retry_drives_batching`],
-///   post-fire re-Settle via [`crate::Engine::transition_to_settling`]);
+///   (pre-fire re-Batch via `Engine::retry_drives_batching`,
+///   post-fire re-Settle via `Engine::transition_to_settling`);
 ///   neither commits. Carries no payload: the transient `first_unread`
 ///   is consumed only on the [`Self::Abandon`] terminal, and the
 ///   channel-disagreement provenance persists through the burst's
@@ -990,7 +990,7 @@ impl PreFireBurst {
     /// Born fresh, always: `forced` is `false` (the force-fire flag
     /// flips in-life only on `BurstDeadline` expiry, via the engine's
     /// cat-a `force_pending`) and `last_certified_hash` opens
-    /// [`CertifiedSample::fresh`] (sole in-life writer: the cat-(b)
+    /// `CertifiedSample::fresh` (sole in-life writer: the cat-(b)
     /// [`Self::advance_certified_sample`]). Those
     /// invariant-bearing fields take no parameter precisely because *no*
     /// construction path may seed them — the no-bypass discipline
@@ -1027,14 +1027,14 @@ impl PreFireBurst {
     }
 
     /// Advance the pre-fire N=2 sample carrier — the sole in-life
-    /// mutator of [`Self::last_certified_hash`]. Records `hash` as
+    /// mutator of `Self::last_certified_hash`. Records `hash` as
     /// the current Authoritative sample and returns the prior value
     /// (`None` on first sample). The returned prior threads through
     /// the cat-(b) cascade to the verdict choke as the
     /// [`QuiescenceWitness::HashChannel`] `prior` input.
     ///
     /// **Authoritative-only contract.** Callers gate on
-    /// [`crate::probe::ProofAuthority`] before reaching this writer
+    /// [`crate::ProofAuthority`] before reaching this writer
     /// — an Undischarged observation must not advance the carrier
     /// (its hash would not reflect a faithful read of every
     /// obligation chain). The gate sits at the caller (the verdict
@@ -1058,7 +1058,7 @@ impl PreFireBurst {
     /// [`ActiveBurst::latch_fold`] cascade. Set-only (monotone) and
     /// idempotent: an operator arming a window over an already-running
     /// pre-fire burst flips it once and a re-arm is a no-op. The sole
-    /// in-life writer of [`Self::fold_latched`]; construction sets the
+    /// in-life writer of `Self::fold_latched`; construction sets the
     /// field directly from the birth consult. Total `&mut self`, no
     /// phase gate — the carrier's lifetime is the burst's lifetime,
     /// mirroring [`Self::advance_certified_sample`].
@@ -1075,7 +1075,7 @@ impl PreFireBurst {
     ///   post-fire; the post-fire loop has its own ceiling.
     /// - `forced` — the pre-fire `forced` bit decided the pre-burst
     ///   fire. The post-fire side opens its own `forced: false`; the
-    ///   rebase-loop ceiling latch ([`PostFireBurst::forced`]) is a
+    ///   rebase-loop ceiling latch ([`PostFireBurst::ceiling`]) is a
     ///   disjoint decision over the post-command tree.
     /// - Pre-fire probe target — homed on
     ///   [`PreFirePhase::Verifying`]'s payload, so it dies with the
@@ -1088,7 +1088,7 @@ impl PreFireBurst {
     ///   tail reckons from its own first absorbed event, not the fire
     ///   instant.
     /// - `last_certified_hash` — the pre-fire N=2 sample carrier.
-    ///   Post-fire opens its own [`PostFireBurst::last_certified_hash`]
+    ///   Post-fire opens its own `PostFireBurst::last_certified_hash`
     ///   `= None` for an independent rebase-loop sample sequence over
     ///   the post-command tree (a different tree than the one the
     ///   pre-fire carrier sampled, so cross-carrying a hash would be
@@ -1179,7 +1179,7 @@ impl PostFireBurst {
     /// (no ceiling timer armed yet, no terminal latched),
     /// `last_event_time` is `None` (the absorb tail reckons from its
     /// own first absorbed event, not from the fire instant), and
-    /// `last_certified_hash` opens [`CertifiedSample::fresh`] — no
+    /// `last_certified_hash` opens `CertifiedSample::fresh` — no
     /// pre-fire sample carries across the fire. Those
     /// invariant-bearing fields take no parameter
     /// precisely because *no* construction path may seed them — the
@@ -1210,7 +1210,7 @@ impl PostFireBurst {
 
     /// Reset the fire-tail residual — the typed edge-method on the
     /// owner for the sole asymmetric clear of
-    /// [`DirtyProvenance::clear`]. Cross-crate callers reach the
+    /// `DirtyProvenance::clear`. Cross-crate callers reach the
     /// operation only through this method; the underlying `clear` is
     /// `pub(crate)`, and [`PreFireBurst`] exposes no analogue, so the
     /// "drop a fire-bearing burst's captured paths" footgun is
@@ -1265,7 +1265,7 @@ impl PostFireBurst {
     /// caller contract; same no-phase-gate writer shape; same
     /// no-public-setter-floor discipline shared with
     /// [`Self::note_effect_completion`]. Sole in-life mutator of
-    /// [`Self::last_certified_hash`].
+    /// `Self::last_certified_hash`.
     #[must_use]
     pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
         self.last_certified_hash.advance(hash)
@@ -1830,7 +1830,7 @@ impl ProfileState {
 
     /// True iff the live pre-fire burst carries the fold latch — the
     /// read side of the cascade, the engine's verdict-time override
-    /// consult ([`PreFireBurst::fold_latched`]). Read via `.state()`,
+    /// consult (`PreFireBurst::fold_latched`). Read via `.state()`,
     /// exactly as [`Self::is_draining`] / [`Self::in_active_standard_burst`]
     /// (no `Profile` delegate — the accessor convention is
     /// `.state().<pred>()`).
@@ -2303,7 +2303,7 @@ pub enum BurstIntent {
 /// disk reality.
 /// `PostFireSettle` — the post-fire mirror of `Settle`: the re-sample
 /// spacing wait armed during [`PostFirePhase::Settling`]. On
-/// expiry, [`crate::Engine::handle_post_fire_settle_expired`] decides
+/// expiry, `Engine::handle_post_fire_settle_expired` decides
 /// whether to reschedule (events arrived since the timer was
 /// scheduled) or drive `Settling → Rebasing` for the next sample —
 /// the post-fire analogue of pre-fire's `on_settle_expired`. Carried
@@ -2631,13 +2631,13 @@ pub enum AbsorbMode {
 /// many settle windows).
 ///
 /// Distinct from the per-burst fold decision
-/// ([`PreFireBurst::fold_latched`]), which is frozen at burst birth and
+/// (`PreFireBurst::fold_latched`), which is frozen at burst birth and
 /// dies with the burst: the window is the *intent*, the latch is one
 /// burst's *frozen verdict* of that intent.
 ///
 /// **Plain data.** The lazy-expiry invariant — "a window past its
 /// `expiry` is absent" — is enforced by [`Profile`] keeping its
-/// [`Profile::absorb`] field private and live-gating every projection
+/// `Profile::absorb` field private and live-gating every projection
 /// through [`Profile::absorb_window_if_live`] (the lone owner of the
 /// `now < expiry` rule, behind both the boolean
 /// [`Profile::absorb_window_live`] consult and the `show` surface).
@@ -2676,7 +2676,7 @@ pub struct AbsorbWindow {
 /// tree), not a cached counter. (Effect fire history is per-Sub —
 /// [`crate::Sub::has_fired`] — not a Profile substructure; *fold*
 /// history is the mirror image — per-Profile, since folding is
-/// per-Profile — and lives here as [`Self::absorb`] / its count.)
+/// per-Profile — and lives here as `Self::absorb` / its count.)
 #[derive(Debug)]
 pub struct Profile {
     /// The Tree slot this Profile's stability machine anchors at — the
@@ -3662,7 +3662,7 @@ impl Profile {
 
     /// The burst-birth consult: `true` iff a window is live at `now` —
     /// the boolean projection of [`Self::absorb_window_if_live`]. The
-    /// single read that freezes [`PreFireBurst::fold_latched`] at
+    /// single read that freezes `PreFireBurst::fold_latched` at
     /// construction.
     #[must_use]
     pub fn absorb_window_live(&self, now: Instant) -> bool {
@@ -3861,7 +3861,7 @@ impl ProfileMap {
     /// rather than [`Profile::transition_state`] (install a given
     /// `new`). Reconciles [`Self::nonsteady`] across the edge
     /// identically: read [`Profile::is_nonsteady`] before and after the
-    /// swap, apply the one edge via [`Self::apply_nonsteady_edge`]. The
+    /// swap, apply the one edge via `Self::apply_nonsteady_edge`. The
     /// auxiliary `R` that `f` computed from the prior is threaded back
     /// out.
     ///

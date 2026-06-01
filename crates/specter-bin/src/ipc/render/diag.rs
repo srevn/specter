@@ -128,7 +128,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
 /// without a tier is a compile error here).
 ///
 /// The tiers mirror the daemon's own per-variant tracing levels in
-/// [`crate::driver::forward::log_diagnostic`] — the established
+/// `crate::driver::forward::log_diagnostic` — the established
 /// operator-facing severity catalogue — so a `tail` line's tail colour
 /// matches the level the same event carries in the daemon log:
 ///

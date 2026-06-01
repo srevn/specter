@@ -85,12 +85,12 @@ impl TimerHeap {
     /// and which transition to dispatch — without it, the engine would
     /// re-derive from state on every fire.
     ///
-    /// The minted id is unique within this heap's lifetime.
-    /// [`TimerId`] is a plain `u64` wrapper minted by
-    /// [`MonotonicCounter`] (see [`specter_core::ids`]); the heap
-    /// stores it directly without a backing slotmap allocation, and
-    /// lazy invalidation makes the per-id state cheap (one heap entry
-    /// per schedule; no per-mint slot to free on cancel).
+    /// The minted id is unique within this heap's lifetime. [`TimerId`]
+    /// is a plain `u64` wrapper minted by [`MonotonicCounter`] (the id
+    /// space lives in `specter_core`'s `ids` module); the heap stores it
+    /// directly without a backing slotmap allocation, and lazy
+    /// invalidation makes the per-id state cheap (one heap entry per
+    /// schedule; no per-mint slot to free on cancel).
     #[must_use]
     pub fn schedule(&mut self, deadline: Instant, profile: ProfileId, kind: TimerKind) -> TimerId {
         let id = self.counter.next();

@@ -132,7 +132,7 @@ pub struct StageSpec<'a> {
 pub struct PipeSpawnHandles {
     /// Pid of the *last* stage — what an operator inspecting the
     /// pipe via `ps` would call "the pid of this pipe". The actuator
-    /// surfaces this via [`crate::pool::state::RunningJob::pid`] and
+    /// surfaces this via `pool::state::RunningJob::pid` and
     /// uses it only for log lines; the per-stage signalers carry
     /// their own pids internally for syscall routing.
     pub last_pid: u32,

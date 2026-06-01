@@ -100,7 +100,7 @@ use super::protocol::WireId;
 /// Both [`Serialize`] and [`Deserialize`] are manual and both gate
 /// the same RFC 3339 vocabulary. Serialize writes the inner `&str`
 /// verbatim (it is invariant-by-construction UTF-8 RFC 3339 thanks to
-/// [`Self::from(SystemTime)`]). Deserialize takes any JSON string,
+/// its `From<SystemTime>` impl). Deserialize takes any JSON string,
 /// validates it with [`humantime::parse_rfc3339`], and stores the
 /// validated bytes. A non-RFC-3339 token fails the boundary — the
 /// wire layer cannot accept opaque text masquerading as a timestamp.
@@ -189,7 +189,7 @@ impl std::fmt::Display for WireTime {
 /// `Deserialize` accepts any UTF-8 string (the server-side projection
 /// is the gating shape; the client treats the inner bytes as opaque
 /// path-display text). The renderer reproduces the value verbatim
-/// through [`Display`].
+/// through [`Display`](std::fmt::Display).
 ///
 /// Construction is one-way: every [`From`] impl projects *into*
 /// `WirePath`. There is no `From<String>` — a `WirePath` is built
@@ -1028,10 +1028,9 @@ impl WireDiagnostic {
 /// [`WireId`] / `Wire*` enum derives, [`CompactString`] /
 /// [`WirePath`] as quoted strings, primitives). No field uses a
 /// `serialize_with` adapter that could return `Err`. Marks the
-/// diag-fan-out path
-/// ([`crate::driver::Hub::dispatch_to_subscribers`]), the
-/// back-pressure `_missed` marker emit
-/// ([`crate::driver::ipc::conns::ConnState::try_dispatch_diag`]), and the
+/// diag-fan-out path ([`crate::driver::Hub::dispatch_to_subscribers`]),
+/// the back-pressure `_missed` marker emit
+/// (`crate::driver::ipc::conns::ConnState::try_dispatch_diag`), and the
 /// client `tail -o json` re-emit ([`crate::ipc::client::tail`]) safe
 /// for [`crate::ipc::framing::encode_line`] without an
 /// `.expect`-at-a-distance.
@@ -1126,9 +1125,9 @@ impl WireBurstIntent {
     /// `match` so a new variant without a paired arm fails to compile,
     /// keeping the textual vocabulary single-source against the per-enum
     /// drift test. Mirrors [`super::protocol::WireErrorCode::as_str`]'s
-    /// convention; every snake-only wire enum below carries the same
-    /// pair (`as_str` + [`Display`]) so renderers reach the wire form
-    /// through the `{}` formatter with no intermediate helper.
+    /// convention; every snake-only wire enum below carries the same pair
+    /// (`as_str` + [`Display`](std::fmt::Display)) so renderers reach the
+    /// wire form through the `{}` formatter with no intermediate helper.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Standard => "standard",
@@ -1718,7 +1717,7 @@ impl std::fmt::Display for WireAbsorbMode {
 /// `show`-detail projection of an armed [`specter_core::AbsorbWindow`].
 ///
 /// Constructed field-by-field in the `show` projection
-/// ([`crate::driver::ipc::project`]) rather than through a `From`: the
+/// (`crate::driver::ipc::project`) rather than through a `From`: the
 /// window's expiry is an engine-monotonic [`std::time::Instant`] with
 /// no wall-clock of its own, so the projection threads it through the
 /// driver's startup-anchor pair (`project_wall`) to reach a
@@ -1736,7 +1735,7 @@ pub(crate) struct WireAbsorbWindow {
 /// Reload-trigger projection of [`crate::driver::ReloadTrigger`].
 /// The enum lives here to keep every wire shape (core- or bin-sourced)
 /// declared in one module; the `From` projection lives at the source
-/// ([`crate::driver::state`]) so a new `ReloadTrigger` variant fails
+/// (`crate::driver::state`) so a new `ReloadTrigger` variant fails
 /// to compile at its declaration site, keeping the wire layer a leaf
 /// (no `crate::driver` import here). Surfaces in
 /// `StatusResponse.last_reload_via`.

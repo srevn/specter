@@ -1,7 +1,7 @@
 //! Thin libc wrappers — the lone `unsafe` surface in this module.
 //! Module-level `#[allow(unsafe_code)]` keeps the audit boundary at
 //! the file edge; every direct syscall in the kqueue backend lives
-//! here. Mirror of [`crate::inotify::ffi`]'s discipline.
+//! here. Mirror of `crate::inotify::ffi`'s discipline.
 //!
 //! The surface is two-flavoured:
 //!
@@ -16,8 +16,8 @@
 //!   The watcher's race-free install pattern: open with the
 //!   platform's "event-only" flag, `fstat` to discover the kind.
 //!   The inotify backend integrates the same shape directly into
-//!   its `ffi` module ([`crate::inotify::ffi::open_o_path`] /
-//!   [`crate::inotify::ffi::fstat_kind`]); we mirror that here so
+//!   its `ffi` module (`crate::inotify::ffi::open_o_path` /
+//!   `crate::inotify::ffi::fstat_kind`); we mirror that here so
 //!   the `unsafe` surface per backend is one file.
 //!
 //! ## Non-blocking discipline

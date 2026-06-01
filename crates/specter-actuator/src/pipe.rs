@@ -1,18 +1,17 @@
 //! Shared pipe-spawn helpers used by both the production [`OsSpawner`]
-//! and the [`MockSpawner`] testkit. The two types here are the
+//! and the `MockSpawner` testkit. The two types here are the
 //! "aggregating" side of the pipe machinery — they coordinate
 //! per-stage outcomes (waiter) and per-stage shutdown signals
 //! (signaler) into a single `ChildWaiter` / `ChildSignaler` pair the
 //! controller can reason about uniformly.
 //!
-//! Lives outside of `os.rs` so [`crate::testkit::MockSpawner`] can
-//! construct pipe handles against its own per-stage mock
-//! signalers/waiters without re-implementing the aggregation rules.
-//! The shapes ARE the contract — `Spawner::spawn_pipe`'s pipefail-on
-//! semantics and shutdown-fan-out behaviour both live in this module.
+//! Lives outside of `os.rs` so `MockSpawner` can construct pipe handles
+//! against its own per-stage mock signalers/waiters without
+//! re-implementing the aggregation rules. The shapes ARE the contract —
+//! `Spawner::spawn_pipe`'s pipefail-on semantics and shutdown-fan-out
+//! behaviour both live in this module.
 //!
 //! [`OsSpawner`]: crate::OsSpawner
-//! [`MockSpawner`]: crate::testkit::MockSpawner
 
 use crate::spawner::{ChildSignaler, ChildWaiter};
 use crossbeam::channel::{Receiver, unbounded};
@@ -358,7 +357,7 @@ fn fold_reports(reports: Vec<Option<EffectOutcome>>) -> EffectOutcome {
 /// The child process for `failed_idx` is alive but its waiter was
 /// dropped along with the failed spawn closure, so the controller
 /// must SIGKILL + sync-reap it via the signaler — same shape as
-/// [`crate::pool::state::recover_orphan_after_wait_thread_failure`]
+/// `pool::state::recover_orphan_after_wait_thread_failure`
 /// for the single-process path.
 ///
 /// SIGKILLing every stage before draining serves two purposes:

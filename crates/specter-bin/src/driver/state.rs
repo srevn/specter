@@ -6,14 +6,14 @@
 //! natural home on `Engine`, `Loader`, or any channel bundle:
 //!
 //! - **Start instants** (`start_instant`, `start_wall`) — captured
-//!   once at [`Self::new`], invariant for the process lifetime.
+//!   once at [`DriverState::new`], invariant for the process lifetime.
 //!   `start_instant` is monotonic (`Instant`) for elapsed-since-boot
 //!   arithmetic; `start_wall` is wall-clock (`SystemTime`) for
 //!   operator-meaningful boot display. Both are sampled inside the
 //!   constructor so wall and monotonic agree to within their own
 //!   nanosecond resolution.
 //! - **Reload counter** (`reload_count`) — bumped by
-//!   [`Self::record_reload`] on every successful reload (i.e., after
+//!   [`DriverState::record_reload`] on every successful reload (i.e., after
 //!   `read_and_parse_config` returns `Some`; covers both empty-diff
 //!   and apply-diff branches). A parse-fail reload short-circuits
 //!   upstream of the bump site and never reaches the record.
@@ -21,13 +21,13 @@
 //!   and trigger lifted into a single [`LastReload`] observable;
 //!   `None` before the first reload fires, `Some` after.
 //! - **Socket path** (`socket_path`) — the UNIX-socket path the IPC
-//!   server bound to. Set once in [`Self::new`] from the path
+//!   server bound to. Set once in [`DriverState::new`] from the path
 //!   `App::run` passed to `sockpath::bind_socket_atomic`; invariant
 //!   for the daemon's lifetime (no setter). Read by the IPC `status`
 //!   projection so operators see the exact path the listener is
 //!   serving.
 //!
-//! **Sole writer:** [`Self::record_reload`]. The counter and the
+//! **Sole writer:** [`DriverState::record_reload`]. The counter and the
 //! [`LastReload`] pair move together as one observable transition;
 //! the edge method captures the wall-clock internally rather than
 //! taking it as a parameter. The [`LastReload`] sum type makes the

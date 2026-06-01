@@ -2,7 +2,7 @@
 //! global semaphore.
 //!
 //! All mutations happen on the controller thread. The wait threads send
-//! [`Reaped`] events through `reap_tx`; the controller pulls them off
+//! `Reaped` events through `reap_tx`; the controller pulls them off
 //! `reap_rx` (also held inside [`super::SubprocessActuator`]) and routes
 //! to [`ActuatorState::handle_reap`].
 //!
@@ -16,7 +16,8 @@
 //! `Box<[ProgramOp]>` walked by a `u32` cursor. Each op carries a
 //! [`SpawnBody`] (single Exec or N-stage Pipe) plus explicit `on_ok` /
 //! `on_failed` branch targets — dispatch after a reap is a single
-//! [`ProgramOp::target`] lookup on the outcome. The actuator walks the
+//! [`ProgramOp::target`](specter_core::program::ProgramOp::target)
+//! lookup on the outcome. The actuator walks the
 //! program with stop-on-failure semantics encoded by the lowering pass
 //! (Exec/Pipe `on_failed = Terminate`; predicate `on_failed` ≠
 //! Terminate so the predicate outcome doesn't propagate).
@@ -138,20 +139,20 @@ enum SpawnFailureCause {
 
 /// Per-`DedupKey` actuator slot.
 ///
-/// At most one in-flight child ([`running`]) plus a single
-/// Latest-coalesce next-plan slot ([`pending`]) plus, between adjacent
+/// At most one in-flight child (`running`) plus a single
+/// Latest-coalesce next-plan slot (`pending`) plus, between adjacent
 /// instructions of an in-flight plan when the global permit cap is
-/// exhausted, a [`plan_continue`] hand-off.
+/// exhausted, a `plan_continue` hand-off.
 ///
 /// **Three slots, three roles:**
 ///
-/// - [`running`] is the currently-spawned instruction's bookkeeping
+/// - `running` is the currently-spawned instruction's bookkeeping
 ///   (pid, signaler for shutdown SIGTERM/SIGKILL, plus the per-plan
 ///   snapshot needed to advance to the next instruction).
-/// - [`plan_continue`] is "this plan's next instruction, deferred on
+/// - `plan_continue` is "this plan's next instruction, deferred on
 ///   permit." Bypasses the per-Sub gate (same program, already admitted
 ///   by `start_plan`) but respects the global permit cap.
-/// - [`pending`] is the user's next intent. Latest-coalesced on submit;
+/// - `pending` is the user's next intent. Latest-coalesced on submit;
 ///   never replaces a running instruction or a `plan_continue`.
 ///
 /// **Plan-atomicity invariant.** A new submit during a running plan
@@ -176,10 +177,14 @@ pub(crate) struct Slot {
 /// Bookkeeping for one in-flight op of a plan.
 ///
 /// With the CFG-shaped IR, outcome routing (propagate / branch / no-op)
-/// lives on the op's edges ([`ProgramOp::on_ok`] / [`ProgramOp::on_failed`]),
-/// not in the running job's variant tag. The reap-path reads the
-/// edge directly via [`ProgramOp::target`], so there's nothing here
-/// that depends on which spawn shape produced the running child.
+/// lives on the op's edges
+/// ([`ProgramOp::on_ok`](specter_core::program::ProgramOp::on_ok) /
+/// [`ProgramOp::on_failed`](specter_core::program::ProgramOp::on_failed)),
+/// not in the running job's variant tag. The reap-path reads the edge
+/// directly via
+/// [`ProgramOp::target`](specter_core::program::ProgramOp::target), so
+/// there's nothing here that depends on which spawn shape produced the
+/// running child.
 ///
 /// Carries:
 ///
@@ -392,7 +397,7 @@ impl ActuatorState {
     ///    circuits on `is_dead`, so a race with a natural reap is
     ///    benign (SIGTERM on a reaped pid is a documented no-op).
     /// 4. Leave `slot.running` in place. The wait thread will deliver
-    ///    [`Reaped`](super::Reaped) through the existing pipeline;
+    ///    `Reaped` through the existing pipeline;
     ///    [`Self::handle_reap`] will run [`Self::terminate_plan`] and
     ///    emit one completion via [`EffectCompleteSender::send`], which
     ///    the engine routes to `EffectCompleteOutsideAwaiting` (the
@@ -511,9 +516,11 @@ impl ActuatorState {
 
     /// The Pump-policy reap pipeline. Two main exits:
     ///
-    /// 1. **Advance**: the op's [`ProgramOp::target`] for the reaped
-    ///    outcome is [`BranchTarget::Continue`], so the plan continues
-    ///    at the named slot. Handed to [`Self::try_spawn_step`]; a
+    /// 1. **Advance**: the op's
+    ///    [`ProgramOp::target`](specter_core::program::ProgramOp::target)
+    ///    for the reaped outcome is [`BranchTarget::Continue`], so the
+    ///    plan continues at the named slot. Handed to
+    ///    [`Self::try_spawn_step`]; a
     ///    `SpawnError::Failed` here loops the dispatch with a
     ///    synthesised `Failed` outcome for the new cursor — a predicate
     ///    spawn-failure cascade naturally walks to its own
@@ -579,8 +586,9 @@ impl ActuatorState {
     /// Drive the post-reap / post-spawn-failure dispatch loop.
     ///
     /// `cursor` and `outcome` define "where we are" and "what just
-    /// happened." The op's edge ([`ProgramOp::target`] on the outcome)
-    /// decides:
+    /// happened." The op's edge
+    /// ([`ProgramOp::target`](specter_core::program::ProgramOp::target)
+    /// on the outcome) decides:
     ///
     /// - [`BranchTarget::Terminate`] → propagate `outcome` to
     ///   `EffectComplete` and return.
@@ -1572,11 +1580,11 @@ impl ActuatorState {
     /// solely to publish the dead-ratchet backstop after the
     /// `catch_unwind` of [`ChildWaiter::wait`] — see [`wait_loop`]
     /// for the protocol contract. Cloning at the call site (rather
-    /// than at the [`SpawnHandles`] origin) keeps the controller's
-    /// install-side reference live regardless of whether the
-    /// spawn-the-wait-thread step succeeds; on `Builder::spawn`
-    /// failure the closure-owned clone drops, the recovery branch
-    /// drives the install-side clone through SIGKILL +
+    /// than at the [`SpawnHandles`](crate::SpawnHandles) origin) keeps
+    /// the controller's install-side reference live regardless of
+    /// whether the spawn-the-wait-thread step succeeds; on
+    /// `Builder::spawn` failure the closure-owned clone drops, the
+    /// recovery branch drives the install-side clone through SIGKILL +
     /// `reap_blocking`, and nothing leaks.
     ///
     /// The function is `&mut self` because the recovery branch
@@ -1667,8 +1675,8 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
 }
 
 /// Wait-thread body. Block on `waiter.wait()`; on return, publish the
-/// dead-ratchet backstop, release the permit, and send a
-/// [`super::Reaped`] to the controller.
+/// dead-ratchet backstop, release the permit, and send a `Reaped` to
+/// the controller.
 ///
 /// Three orderings are load-bearing:
 ///
@@ -1696,7 +1704,7 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
 ///    Subs can dispatch immediately on the freed permit even if the
 ///    reap channel is briefly saturated. Spawns for the *same* Sub
 ///    still wait for the controller to drop `sub` from
-///    `running_subs` when it processes the [`super::Reaped`] — by
+///    `running_subs` when it processes the `Reaped` — by
 ///    design (per-Sub serialization). The brief stale-membership
 ///    window between `drop(permit)` and `handle_reap` is benign:
 ///    same-Sub items defer one extra pump cycle, no over-spawning.

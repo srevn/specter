@@ -37,11 +37,11 @@ pub(crate) fn run(args: &ShowArgs) -> ExitCode {
     render_show(args.output, &show, &args.client)
 }
 
-/// Render the [`ShowResponse`] and derive the exit code from its
-/// arm. Lifting the derivation above the format match keeps the
-/// rule single-source across `-o human` and `-o json`. The stdout
-/// [`Styler`](style::Styler) resolves only on the `-o human` path —
-/// `-o json` bypasses color entirely.
+/// Render the [`ShowResponse`] and derive the exit code from its arm. Lifting
+/// the derivation above the format match keeps the rule single-source across
+/// `-o human` and `-o json`. The stdout
+/// [`Styler`](crate::ipc::render::style::Styler) resolves only on the `-o
+/// human` path — `-o json` bypasses color entirely.
 fn render_show(output: OutputFormat, show: &ShowResponse, client: &ClientArgs) -> ExitCode {
     if let Err(code) = connect::emit_human_or_json(client, "show", output, show, show::render) {
         return code;

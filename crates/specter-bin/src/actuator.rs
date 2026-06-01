@@ -25,9 +25,9 @@
 //!   of the call. There is no bin-side mirror name: the actuator's
 //!   own contract is the one struct that crosses the seam.
 //!
-//! `effect_complete_tx` is NOT in either struct — it's lifted into a
-//! [`specter_actuator::EffectCompleteSender`] trait object (the bin's
-//! [`crate::app::WakingEffectCompleteSender`]) at `App::run`'s wiring
+//! `effect_complete_tx` is NOT in either struct — it's lifted into
+//! a [`specter_actuator::EffectCompleteSender`] trait object (the
+//! bin's `WakingEffectCompleteSender`) at `App::run`'s wiring
 //! point so the actuator never names [`specter_core::Input`]. The
 //! trait object is passed alongside the [`RunWiring`] into the
 //! actuator-thread spawn.
@@ -35,7 +35,7 @@
 //! Prober traffic does NOT live here. The prober's response channel
 //! pairs the driver's [`crate::driver::Reactor`]
 //! `prober_response_rx` with the bin's
-//! [`crate::app::WakingProberResponseSender`] wrapper — the pair is
+//! `WakingProberResponseSender` wrapper — the pair is
 //! allocated inline in `App::run` because both halves are wrapped
 //! before they cross any constructor boundary.
 //!

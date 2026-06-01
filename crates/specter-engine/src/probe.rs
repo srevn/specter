@@ -9,7 +9,7 @@
 //!
 //! 1. **Correlation monotonicity for the probe id space.** The
 //!    engine-wide mint floor is the bare `Engine.correlations`
-//!    [`MonotonicCounter`] field, driven solely by
+//!    [`crate::counter::MonotonicCounter`] field, driven solely by
 //!    [`Engine::mint_probe_correlation`]. The phantom-typed counter
 //!    makes cross-space misuse (minting a
 //!    [`specter_core::CorrelationId`] from it, or vice versa) a compile

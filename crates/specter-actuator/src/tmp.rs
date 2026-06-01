@@ -5,9 +5,8 @@
 //! after `Command::spawn`, but the env var must be set *before* spawn).
 //! Correlation is hex-padded to 16 chars for stable lexicographic
 //! ordering. Both `temp_dir` and `actuator_pid` are captured once at
-//! actuator startup and held on
-//! [`crate::pool::state::ActuatorState`] — no per-Effect `getenv` or
-//! `getpid` syscall on the spawn path.
+//! actuator startup and held on `pool::state::ActuatorState` — no
+//! per-Effect `getenv` or `getpid` syscall on the spawn path.
 //!
 //! Format (one entry per line, tab-separated, in this order):
 //!
@@ -33,10 +32,9 @@
 //! are correct by construction.
 //!
 //! The handle is shared across plan steps via `Arc<DiffTmpFile>`:
-//! every [`crate::pool::state::RunningJob`] /
-//! [`crate::pool::state::PlanContinuation`] co-owns the Arc, and the
-//! last drop — at plan terminus, after every step has reaped and
-//! [`crate::pool::state::ActuatorState::terminate_plan`] has
+//! every `pool::state::RunningJob` / `pool::state::PlanContinuation`
+//! co-owns the Arc, and the last drop — at plan terminus, after every
+//! step has reaped and `pool::state::ActuatorState::terminate_plan` has
 //! returned — fires [`DiffTmpFile::drop`], which unlinks the file
 //! (best-effort, ENOENT-silent). The leak-on-process-crash case
 //! (no `Drop` runs on `process::exit`) is acceptable — a daemon

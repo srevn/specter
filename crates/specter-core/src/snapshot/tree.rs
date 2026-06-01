@@ -52,8 +52,8 @@
 //!   `dir_hash(d) == compute_dir_hash(d.fields)` hold by construction,
 //!   not by convention.
 //! - The walker may inherit a baseline leaf's hash via
-//!   [`LeafEntry::new_or_inherit`] when identity fields match — a pure
-//!   performance optimisation (skips one SipHash24 fold per unchanged
+//!   [`LeafEntry::from_metadata_or_inherit`] when identity fields match — a
+//!   pure performance optimisation (skips one SipHash24 fold per unchanged
 //!   leaf in a dirent-bumped directory), semantically equivalent to
 //!   recomputing since the inherited value is identical to what
 //!   recomputation would produce.

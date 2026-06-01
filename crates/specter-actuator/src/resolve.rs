@@ -43,7 +43,7 @@
 //! and passes the resulting `&Path` to [`resolve_step`] as `diff_path`.
 //! The resolver inserts `SPECTER_DIFF_PATH` at its alphabetical position
 //! in the env vec rather than relying on the caller to append after the
-//! fact. The env-order golden test ([`tests::env_order_is_alphabetical`])
+//! fact. The env-order golden test (`tests::env_order_is_alphabetical`)
 //! is then a guarantee about the bytes the spawned child sees, not just a
 //! property of the resolver's standalone output.
 //!
@@ -626,8 +626,8 @@ fn format_now(now: SystemTime) -> String {
 /// Unconditional `SPECTER_*` key count emitted by [`build_env`] — every
 /// key landing alphabetically except the optional `SPECTER_DIFF_PATH`,
 /// which adds one when present. Used to pre-size the env [`Vec`]; the
-/// env-order golden tests ([`tests::env_order_is_alphabetical`] and
-/// [`tests::env_order_with_diff_path_is_alphabetical`]) pin the actual
+/// env-order golden tests (`tests::env_order_is_alphabetical` and
+/// `tests::env_order_with_diff_path_is_alphabetical`) pin the actual
 /// keys, so this constant is a sizing hint, not a contract — drifting
 /// it from the push count would silently trigger one `Vec` resize per
 /// resolve but not break correctness. Bump when adding or removing an
@@ -635,7 +635,7 @@ fn format_now(now: SystemTime) -> String {
 const SPECTER_ENV_BASE_COUNT: usize = 15;
 
 /// Build the standard `SPECTER_*` env-var set. Keys land in alphabetical
-/// order by name — pinned by [`tests::env_order_is_alphabetical`].
+/// order by name — pinned by `tests::env_order_is_alphabetical`.
 ///
 /// `SPECTER_DIFF_PATH` slots into its alphabetical position when
 /// `diff_path` is `Some`; absent when `None`. The env order is total

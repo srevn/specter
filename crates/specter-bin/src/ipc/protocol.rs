@@ -217,7 +217,7 @@ pub(crate) enum WireErrorCode {
     /// failure instead of an invisible state mutation.
     ///
     /// The wire vocabulary is pinned by
-    /// [`tests::wire_error_code_round_trips_every_variant`]; the
+    /// `tests::wire_error_code_round_trips_every_variant`; the
     /// handler-side gate that reaches this variant lives on
     /// [`crate::driver::EngineDriver`]'s Subscribe arm.
     AlreadySubscribed,
@@ -248,7 +248,7 @@ impl WireErrorCode {
     ///
     /// Exhaustive `match` — a new variant without a paired arm fails
     /// to compile, keeping the wire vocabulary single-source against
-    /// [`tests::wire_error_code_round_trips_every_variant`]'s
+    /// `tests::wire_error_code_round_trips_every_variant`'s
     /// JSON-form pin.
     ///
     /// Takes `self` by value: the enum is `Copy` and a single byte
@@ -349,10 +349,10 @@ pub(crate) enum DisabledSource {
 }
 
 impl DisabledSource {
-    /// Wire-form token — mirrors the snake_case serde rename. Surfaces
-    /// in `list -o human`'s `DISABLED` column and `show -o human`'s
-    /// disabled-arm parenthetical via [`Self::Display`]; the renderer
-    /// paths reach the wire form through `{}` with no intermediate
+    /// Wire-form token — mirrors the snake_case serde rename. Surfaces in
+    /// `list -o human`'s `DISABLED` column and `show -o human`'s disabled-arm
+    /// parenthetical via its [`Display`](std::fmt::Display) impl; the
+    /// renderer paths reach the wire form through `{}` with no intermediate
     /// helper.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -410,7 +410,7 @@ pub(crate) struct StatusResponse {
 
 /// Most-recent successful reload as one wire observable — wall-clock
 /// at the reload-record call site plus the attribution enum that
-/// drove it. Mirrors [`crate::driver::state::LastReload`] on the wire; the
+/// drove it. Mirrors `crate::driver::state::LastReload` on the wire; the
 /// JSON form stays flat (the two inner fields inline directly
 /// alongside [`StatusResponse`]'s siblings via `#[serde(flatten)]`)
 /// so operator scripts that parsed `status.last_reload_at` /

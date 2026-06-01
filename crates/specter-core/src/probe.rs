@@ -29,8 +29,8 @@
 //! loudly. Convention is not relied on at either edge.
 //!
 //! `Tag` is `()` for carriers whose state variant is itself the routing
-//! class; it carries a real key (e.g. a [`ResourceId`]) only where the
-//! response handler needs a dispatch datum the variant does not encode.
+//! class; it carries a real key (e.g. a [`crate::ResourceId`]) only where
+//! the response handler needs a dispatch datum the variant does not encode.
 
 use crate::ids::ProbeCorrelation;
 

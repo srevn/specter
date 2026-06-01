@@ -241,7 +241,7 @@ pub(crate) fn emit_hint(client: &ClientArgs, msg: fmt::Arguments<'_>) {
 ///   <debug>` — a daemon-bug signal surfaced loudly, not coerced.
 ///
 /// `verb` is `&'static str` so a borrowed runtime string cannot leak
-/// into the prefix. `client` resolves the stderr [`Styler`](style::Styler):
+/// into the prefix. `client` resolves the stderr [`Styler`]:
 /// the `code` paints [`style::ERR_CODE`] (bold) so it stands out from
 /// the surrounding [`style::ERR`] amplification the operator scripts
 /// against; the three painted spans are siblings, never nested. Under a

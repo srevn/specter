@@ -45,7 +45,7 @@
 //! The bin drops the engine driver as part of its shutdown sequence
 //! (see `App::run`). The drop releases the engine-side receiver, so
 //! the next [`ProberResponseSender::send`] from a worker returns
-//! [`SendError::Disconnected`]. The worker logs that exit at
+//! [`crate::SendError::Disconnected`]. The worker logs that exit at
 //! `debug!` and unwinds its loop — the bin owns whatever shutdown
 //! cause logging the operator needs, at the right severity, on its
 //! own thread.

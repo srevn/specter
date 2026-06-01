@@ -11,8 +11,7 @@
 //!
 //! Consumers are [`crate::spawner::ChildSignaler::signal_term`] /
 //! `signal_kill` / `is_dead`, the post-reap fast-path inside
-//! `reap_blocking`, and the per-step timer thread
-//! ([`crate::timer::run_timer`]).
+//! `reap_blocking`, and the per-step timer thread (`run_timer`).
 //!
 //! `Release`-on-store / `Acquire`-on-load matches the publish-subscribe
 //! shape exactly: the writer publishes "child reaped; do not syscall
@@ -22,9 +21,8 @@
 //! the reap-side work".
 //!
 //! Production pairs are minted by [`crate::os::OsSpawner`]; the test
-//! mock by [`crate::testkit::MockSpawner`]; the in-crate test fixtures
-//! that exercise [`crate::pipe`] and [`crate::pool::state`] aggregation
-//! mirror the same shape.
+//! mock by `MockSpawner`; the in-crate test fixtures that exercise
+//! [`crate::pipe`] and `pool::state` aggregation mirror the same shape.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};

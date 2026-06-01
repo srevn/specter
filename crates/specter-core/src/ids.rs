@@ -36,7 +36,7 @@ slotmap::new_key_type! {
 /// Emits a tuple struct `pub struct $name(u64)` deriving the
 /// conventional correlation-token set (`Copy`, `Clone`, `Debug`,
 /// `Default`, `Eq`, `PartialEq`, `Ord`, `PartialOrd`), a
-/// [`From<u64>`] impl, and an inherent [`Self::as_u64`] accessor for
+/// [`From<u64>`] impl, and an inherent `as_u64` accessor for
 /// formatting paths (env vars, tmp file names).
 ///
 /// **What the macro guarantees: shape, not values.** The inner `u64`

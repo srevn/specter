@@ -19,7 +19,7 @@
 //!   drop one contributor at `(r, key)` and free the slot iff this
 //!   release zeroed `Resource::has_anchors()`. Co-resident
 //!   contributions at other keys keep the slot watched.
-//! - [`crate::Tree::vacate`] is the **protocol terminus** — clear the
+//! - [`specter_core::Tree::vacate`] is the **protocol terminus** — clear the
 //!   whole contributions map atomically, emitting the closing `Unwatch`
 //!   in one step. Used when every contribution at the slot is being
 //!   abandoned at once (kernel-watch rejection, or
@@ -27,9 +27,9 @@
 //!
 //! **Idempotent absent-key sub.** Calling [`sub_watch`] for a key that
 //! is not in the map is a silent no-op. This makes the helper safe to
-//! invoke against post-vacate slots ([`crate::Tree::vacate`] cleared
+//! invoke against post-vacate slots ([`specter_core::Tree::vacate`] cleared
 //! the map) and slots drained by a prior sub-walk in the same step
-//! (e.g., [`Engine::release_descendant_claim`]'s take-and-walk pass).
+//! (e.g., [`crate::Engine::release_descendant_claim`]'s take-and-walk pass).
 //!
 //! **Source of truth.** Contribution attribution is **data**: each
 //! caller passes the explicit [`ContribKey`] for the role it owns.
@@ -116,7 +116,7 @@ pub(crate) fn add_watch(
 /// of truth for refcounting, independent of owner state.
 ///
 /// **Idempotent.** Absent key ⇒ silent no-op. Reachable post-vacate
-/// ([`crate::Tree::vacate`] cleared the map) or post-prior-sub-walk
+/// ([`specter_core::Tree::vacate`] cleared the map) or post-prior-sub-walk
 /// (a sister helper drained this slot earlier in the same step).
 pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &mut StepOutput) {
     let Some(res) = tree.get_mut(r) else {

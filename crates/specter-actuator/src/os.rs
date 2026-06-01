@@ -339,7 +339,7 @@ const fn disqualify_posix_spawn(_cmd: &mut Command) {}
 ///
 /// Returns concrete types — the caller wraps in `Box<dyn>` for the
 /// waiter (single-consumer at wait time) and `Arc<dyn>` for the signaler
-/// (the controller installs it on [`crate::pool::state::RunningJob`] and
+/// (the controller installs it on `pool::state::RunningJob` and
 /// clones it into any per-step timer thread).
 fn build_pair(child: Child) -> (u32, OsChildWaiter, OsChildSignaler) {
     let pid = child.id();

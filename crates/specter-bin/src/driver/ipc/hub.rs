@@ -4,9 +4,9 @@
 //! register / deregister.
 //!
 //! Constructed once by `App::run` from the [`Registry`] clone
-//! minted via [`super::Reactor::registry_clone`]. Owned by
-//! [`super::EngineDriver`] for the rest of the daemon's lifetime,
-//! dropped BEFORE [`super::Reactor`] so the explicit `Drop` impl
+//! minted via [`crate::driver::Reactor::registry_clone`]. Owned by
+//! [`crate::driver::EngineDriver`] for the rest of the daemon's lifetime,
+//! dropped BEFORE [`crate::driver::Reactor`] so the explicit `Drop` impl
 //! below can deregister listener + every live conn stream against a
 //! still-live Poll selector.
 //!
@@ -19,7 +19,7 @@
 //! 1. **`Drop::drop` runs first** — `Registry::deregister` for the
 //!    listener and every live conn stream. The Reactor's Poll
 //!    selector is still live at this moment (the
-//!    [`super::EngineDriver`] field order places `ipc` before
+//!    [`crate::driver::EngineDriver`] field order places `ipc` before
 //!    `reactor`), so the deregister calls succeed against the
 //!    underlying selector via this server's [`Registry`] clone.
 //!    Errors are best-effort: `NotFound` is benign on a stream whose
@@ -202,8 +202,8 @@ impl Hub {
     /// [`crate::ipc::sockpath::bind_socket_atomic`]; we re-wrap it
     /// into mio's flavor after setting non-blocking. `registry` is
     /// the [`Registry::try_clone()`] handle minted via
-    /// [`super::Reactor::registry_clone`]; it shares the underlying
-    /// selector with the Reactor's Poll.
+    /// [`crate::driver::Reactor::registry_clone`]; it shares the
+    /// underlying selector with the Reactor's Poll.
     ///
     /// # Errors
     ///
@@ -689,11 +689,11 @@ impl Hub {
     /// on terminate, `false` otherwise (queue still holding bytes,
     /// close not armed, or conn already gone).
     ///
-    /// Called from [`super::EngineDriver::drain_ipc_lines`] after a
-    /// conn's lines are processed — the post-process pass folds in
-    /// any response bytes the handler may have pushed, so the queue
-    /// state at THIS point is the conn's settled state for the tick.
-    /// The read drain's oversize-line guard arms
+    /// Called from [`crate::driver::EngineDriver::drain_ipc_lines`]
+    /// after a conn's lines are processed — the post-process pass
+    /// folds in any response bytes the handler may have pushed, so
+    /// the queue state at THIS point is the conn's settled state
+    /// for the tick. The read drain's oversize-line guard arms
     /// `close_after_flush` without queueing anything, so an armed
     /// guard against an empty queue terminates inline here rather
     /// than waiting for a WRITABLE edge that will never come.
@@ -926,9 +926,9 @@ impl Drop for Hub {
     /// drop reaches each fd before the underlying selector closes.
     ///
     /// The Reactor's Poll selector is still live at this moment
-    /// (the [`super::EngineDriver`] field order places `ipc` before
-    /// `reactor`), so the deregister calls reach the same kernel-side
-    /// state the registrations created.
+    /// (the [`crate::driver::EngineDriver`] field order places `ipc`
+    /// before `reactor`), so the deregister calls reach the same
+    /// kernel-side state the registrations created.
     ///
     /// Errors are best-effort. `NotFound` is benign on a stream whose
     /// fd was already closed by a prior `terminate_conn`. A

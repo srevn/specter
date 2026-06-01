@@ -36,16 +36,16 @@
 //!   map's [`ContribKey::PromoterPrefix`] /
 //!   [`ContribKey::PromoterProxy`] entry has already been cleared by a
 //!   prior path).
-//! - **Cancel-first.** Callers that may have an in-flight probe MUST
-//!   invoke [`Engine::cancel_owner_probe`] first (idempotent — a no-op
-//!   on an already-disarmed slot, so "always cancel before release" is
-//!   the safe default). `release_promoter_prefix_parent_claim` is the
-//!   exception: it neither flips state nor drops a [`ProbeSlot`] (it
-//!   only `take`s the `prefix_parent` cache + `sub_watch`es the parent
-//!   slot), so no probe can be orphaned by it — exactly as
-//!   `release_watch_root_parent_claim` carries no cancel-first
-//!   contract. The two *state-bearing* release paths enforce
-//!   cancel-first differently because they differ structurally:
+//! - **Cancel-first.** Callers that may have an in-flight probe MUST invoke
+//!   [`Engine::cancel_owner_probe`] first (idempotent — a no-op on an
+//!   already-disarmed slot, so "always cancel before release" is the safe
+//!   default). `release_promoter_prefix_parent_claim` is the exception: it
+//!   neither flips state nor drops a [`specter_core::ProbeSlot`] (it only
+//!   `take`s the `prefix_parent` cache + `sub_watch`es the parent slot), so
+//!   no probe can be orphaned by it — exactly as
+//!   `release_watch_root_parent_claim` carries no cancel-first contract. The
+//!   two *state-bearing* release paths enforce cancel-first differently
+//!   because they differ structurally:
 //!   - **Descent prefix.** `release_promoter_descent_prefix_claim`'s
 //!     `PrefixPending → Active{empty}` flip *drops* the prior
 //!     `PrefixPending(DescentState)`. An armed descent slot reaching

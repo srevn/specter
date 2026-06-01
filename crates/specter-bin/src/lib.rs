@@ -3,7 +3,7 @@
 //! Wires the actor crates into a runnable binary: signal pipeline,
 //! channel topology, engine driver loop, hot-reload pipeline, and
 //! shutdown sequence. The library entry point [`run`] dispatches the
-//! parsed top-level `Cli` to the daemon ([`app::run`]) or to one of
+//! parsed top-level `Cli` to the daemon (`app::run`) or to one of
 //! the operator-client handlers; integration tests drive the
 //! lifecycle in-process via this entry point, and production `main`
 //! is a thin wrapper over `clap::Parser::parse` + [`run`].

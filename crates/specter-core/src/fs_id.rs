@@ -30,7 +30,7 @@
 //! `FsIdentity` knows the two halves agree *by construction* — the
 //! invariant is discharged by the type, not by caller convention.
 //!
-//! The test-only [`FsIdentity::synthetic`] constructor is the single,
+//! The test-only `FsIdentity::synthetic` constructor is the single,
 //! explicitly named exception: fixtures need identities the kernel would
 //! never co-locate (commonly `device: 0`). It is compiled out of
 //! release builds (`cfg(any(test, feature = "testkit"))`).

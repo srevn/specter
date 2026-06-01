@@ -31,13 +31,12 @@
 //!   sealed (Rust visibility is intra-crate; the choke reaches them
 //!   from another crate).
 //!
-//! `ActiveBurst` splits into `PreFireBurst` / `PostFireBurst` (see
-//! [`specter_core::profile`]); helpers below own a typed view of one or
-//! the other. Two typed state-machine moves cross the split: the fire
-//! transition (`Verifying → Awaiting`) at
-//! [`PreFireBurst::into_post_fire`], and its inverse — the post-rebase
-//! residual restart (`Rebasing → Batching`) at
-//! [`PostFireBurst::into_pre_fire_residual`].
+//! `ActiveBurst` splits into [`PreFireBurst`] / [`specter_core::PostFireBurst`];
+//! helpers below own a typed view of one or the other. Two typed state-machine
+//! moves cross the split: the fire transition (`Verifying → Awaiting`) at
+//! [`PreFireBurst::into_post_fire`], and its inverse — the post-rebase residual
+//! restart (`Rebasing → Batching`) at
+//! [`specter_core::PostFireBurst::into_pre_fire_residual`].
 //!
 //! - `start_seed_burst` / `start_standard_burst` — Idle →
 //!   `Active(PreFire(_))`.
@@ -1603,9 +1602,9 @@ impl Engine {
     /// Restart a fresh Standard `Batching` burst from the fire-tail
     /// residual — the consumer for events `absorb_event_into_fire_tail`
     /// accumulated after the rebase probe was already in flight. Single
-    /// source of the `Active(PostFire)` → `Active(PreFire(Batching))`
-    /// typed move (via [`PostFireBurst::into_pre_fire_residual`]); the
-    /// inverse of `transition_to_awaiting`'s fire move.
+    /// source of `Active(PostFire)` → `Active(PreFire(Batching))` typed
+    /// move (via [`specter_core::PostFireBurst::into_pre_fire_residual`]);
+    /// the inverse of `transition_to_awaiting`'s fire move.
     ///
     /// **Caller.** `dispatch_rebase_ok` only, after `rebase_baseline`,
     /// and only once it has established the residual is non-empty and
@@ -1794,8 +1793,8 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 ///
 /// - File anchor (`Profile.kind == Some(File)`) → the anchor itself.
 ///   kqueue per-file FDs surface events at the file directly, and the
-///   walker's [`crate::ProbeRequest::AnchorFile`] arm lstat's the leaf —
-///   promoting past the anchor would route the probe outside the
+///   walker's [`specter_core::ProbeRequest::AnchorFile`] arm lstat's the
+///   leaf — promoting past the anchor would route the probe outside the
 ///   Profile's coverage.
 /// - Seed intent (Dir / unclassified anchor) → the anchor. Seed bursts
 ///   compare against fire history rather than against a stable subtree

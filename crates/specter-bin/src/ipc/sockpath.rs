@@ -249,7 +249,7 @@ pub(crate) fn precheck_bind_parent(candidate: &SocketCandidate) -> Result<(), Bi
 ///    unlink surfaces with the precise reason an operator needs
 ///    to triage.
 ///
-/// **No connect timeout.** [`UnixStream::connect_timeout`] does not
+/// **No connect timeout.** `UnixStream::connect_timeout` does not
 /// exist in stable `std`; adding `socket2` / `nix` purely to set
 /// `SO_SNDTIMEO` before a single-shot probe over-engineers a path
 /// whose kernel-side behavior is already effectively synchronous on

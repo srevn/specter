@@ -212,7 +212,7 @@ impl<W: FsWatcher> EngineDriver<W> {
 ///
 /// These per-variant levels are also the client-side severity
 /// catalogue: `specter tail` colours each line by the same judgment in
-/// [`crate::ipc::render::diag::severity`] (`error!`→red, `warn!`→yellow,
+/// `crate::ipc::render::diag::severity` (`error!`→red, `warn!`→yellow,
 /// `info!`/`debug!`/`trace!`→unstyled, with `SubFired` elevated to
 /// green). Re-judging a variant means moving it in both places.
 pub(super) fn log_diagnostic(d: &Diagnostic) {

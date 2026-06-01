@@ -131,7 +131,7 @@ pub enum TickOutcome {
 /// [`crate::ipc::protocol::WireErrorCode::ShuttingDown`]; effect
 /// completions and probe responses arriving during the actuator's
 /// SIGTERM → grace → SIGKILL → reap-drain pipeline continue to flow
-/// through [`forward::EngineDriver::forward`]. [`crate::signals::SignalPipe`]
+/// through [`EngineDriver::forward`]. [`crate::signals::SignalPipe`]
 /// lives inside [`reactor::Reactor`] lives inside this driver — all
 /// three stay alive until the actuator-gone signal lands — so the
 /// second-tap hard-exit handshake stays installed across the entire
@@ -156,7 +156,7 @@ pub struct EngineDriver<W: FsWatcher = DefaultWatcher> {
     driver_state: DriverState,
     prober: Arc<dyn Prober>,
     /// Auto-reload settle deadline — armed by the config-event drain,
-    /// expires after [`CONFIG_SETTLE`] of quiet, at which point the
+    /// expires after `CONFIG_SETTLE` of quiet, at which point the
     /// driver runs the lstat-vs-`loader.config_meta` filter and (on
     /// drift) calls [`Self::dispatch_reload`]. Reset to `None` on
     /// expiry and re-armed per pulse (settle resets, so sustained
@@ -326,22 +326,22 @@ impl<W: FsWatcher> EngineDriver<W> {
         }
     }
 
-    /// Attach every active Sub and Promoter from
-    /// `loader.current_config` in source order. Disabled entries are
-    /// filtered out via [`Config::active_watches`] /
-    /// [`Config::active_promoters`] — they remain in the raw `Vec`s
-    /// for introspection but never reach the engine, mirroring the
-    /// "disabled = absent" discipline the diff layer applies to
-    /// hot-reload.
+    /// Attach every active Sub and Promoter from `loader.current_config` in
+    /// source order. Disabled entries are filtered out via
+    /// [`Config::active_watches`](specter_config::Config::active_watches) /
+    /// [`Config::active_promoters`](specter_config::Config::active_promoters)
+    /// — they remain in the raw `Vec`s for introspection but never reach the
+    /// engine, mirroring the "disabled = absent" discipline the diff layer
+    /// applies to hot-reload.
     ///
-    /// Each [`StepOutput`] is forwarded as we go so the watcher /
-    /// prober receive ops as the engine emits them — a single
-    /// startup-sized `ConfigDiff` would batch the entire attach into
-    /// one output and stall the watcher behind the post-call
-    /// `forward`. Hot-reload (in `reload.rs`) deliberately uses the
-    /// inverse pattern — a single batched `Input::ConfigDiff` — because
-    /// reload diffs are typically small. Revisit if those diffs grow
-    /// large enough to stall the watcher behind a single `forward`.
+    /// Each [`StepOutput`](specter_core::StepOutput) is forwarded as we go so
+    /// the watcher / prober receive ops as the engine emits them — a single
+    /// startup-sized `ConfigDiff` would batch the entire attach into one
+    /// output and stall the watcher behind the post-call `forward`.
+    /// Hot-reload (in `reload.rs`) deliberately uses the inverse pattern — a
+    /// single batched `Input::ConfigDiff` — because reload diffs are
+    /// typically small. Revisit if those diffs grow large enough to stall the
+    /// watcher behind a single `forward`.
     ///
     /// No bin-side reconciliation: the engine owns `name → id`
     /// resolution through its registries' `by_name` indices. The
@@ -422,7 +422,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// applies or fails — both are non-terminal) AND for the first
     /// SIGINT/SIGTERM (shutdown initiated; the driver stays alive
     /// through the actuator's grace and exits via
-    /// [`super::reactor::DrainedTick::actuator_gone`] when the
+    /// [`reactor::DrainedTick::actuator_gone`] when the
     /// actuator-thread closure drops its sender). Returns
     /// [`ControlFlow::Break`] only for the second-within-window
     /// (hard-exit escalation) — only reachable from tests because
@@ -556,7 +556,7 @@ enum SignalAction {
     /// caller returns [`ControlFlow::Continue`] — the driver stays
     /// alive through the actuator's grace and exits via the
     /// actuator-gone signal on `effect_complete_rx` (see
-    /// [`super::reactor::DrainedTick::actuator_gone`]).
+    /// [`reactor::DrainedTick::actuator_gone`]).
     Shutdown,
     /// Second SIGINT/SIGTERM within
     /// [`crate::signals::HARD_EXIT_WINDOW`]. The inner function

@@ -8,7 +8,7 @@
 //!
 //! Daemon-side IPC code — the kernel-fd owner ([`crate::driver::Hub`]),
 //! per-conn state, verb dispatch, and engine-state projection — lives
-//! under [`crate::driver::ipc`]. Direction is one-way: `driver::ipc`
+//! under `crate::driver::ipc`. Direction is one-way: `driver::ipc`
 //! consumes this module, never the reverse.
 //!
 //! # Submodules

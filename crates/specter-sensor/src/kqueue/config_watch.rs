@@ -40,9 +40,9 @@
 //!
 //! The file fd is dropped on terminal flags. The watcher does not
 //! own a state machine for "waiting for recreate" — after the
-//! drain-to-empty loop completes, [`Self::drain_ready`] checks the
-//! *final* `file_fd` state and calls [`Self::try_reopen`] iff a real
-//! event landed and the fd is now `None`. The decision is
+//! drain-to-empty loop completes, [`ConfigWatcher::drain_ready`]
+//! checks the *final* `file_fd` state and calls `try_reopen` iff a
+//! real event landed and the fd is now `None`. The decision is
 //! post-loop-of-loops, so the kqueue-unspecified intra-batch order
 //! of the parent's `NOTE_WRITE` and the file's terminal
 //! `NOTE_DELETE`/`NOTE_RENAME`/`NOTE_REVOKE` is irrelevant, and so
@@ -125,7 +125,7 @@ const EVENT_BATCH: usize = 16;
 /// One file fd + one parent-dir fd registered on a fresh kqueue;
 /// see the module docs for the full lifecycle and edge-case
 /// matrix. Construct with [`Self::new`]; drive with
-/// [`ConfigWatcher::wait`].
+/// [`ConfigWatcher::drain_ready`].
 #[derive(Debug)]
 pub struct KqueueConfigWatcher {
     /// File-side fd. Dropped to `None` on any terminal flag
@@ -279,7 +279,7 @@ impl KqueueConfigWatcher {
 
 impl ConfigWatcher for KqueueConfigWatcher {
     /// Non-blocking drain-to-empty of the kqueue queue. Loops on
-    /// [`ffi::kevent_drain`] (zero `timespec`) until the kernel
+    /// `ffi::kevent_drain` (zero `timespec`) until the kernel
     /// returns `0`, dispatching each record:
     ///
     /// - **`FILE_UDATA`** — `real_seen = true`. If any terminal
@@ -305,7 +305,7 @@ impl ConfigWatcher for KqueueConfigWatcher {
     /// kqueue-unspecified intra-batch order and the kernel's
     /// across-batch fragmentation.
     ///
-    /// `EINTR` is retried inside [`ffi::kevent_drain`]. Any other
+    /// `EINTR` is retried inside `ffi::kevent_drain`. Any other
     /// `io::Error` propagates verbatim — the caller logs at
     /// `error!` and exits the watcher loop; SIGHUP-only operation
     /// continues.

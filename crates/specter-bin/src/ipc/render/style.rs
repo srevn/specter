@@ -86,7 +86,7 @@ pub(crate) const fn state(label: WireStateLabel) -> Style {
 
 /// Severity tier of a streamed diagnostic — the hue its variant tag
 /// carries on a `tail` / `wait` line. The classifier
-/// [`super::diag::severity`] maps each `WireDiagnostic` variant to one
+/// `super::diag::severity` maps each `WireDiagnostic` variant to one
 /// of these tiers (mirroring the daemon's own tracing levels — see that
 /// function's rustdoc); [`severity_style`] maps the tier to its
 /// [`Style`].

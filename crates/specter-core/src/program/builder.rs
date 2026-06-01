@@ -14,14 +14,14 @@
 //! - **Forward-only.** A `Continue(target)` may only point past the
 //!   origin op (`target > origin`).
 //! - **In-bounds.** A `Continue(target)` must land on an emitted op
-//!   (`target < final_ops_len`). The patch-time check is the loose
-//!   bound `target <= pending.len()` — the `==` case is the
-//!   "future slot" produced by [`Self::continue_to_next`], promised
-//!   to be filled by a follow-up emit. [`Self::build`] re-checks the
+//!   (`target < final_ops_len`). The patch-time check is the loose bound
+//!   `target <= pending.len()` — the `==` case is the "future slot"
+//!   produced by [`ProgramBuilder::continue_to_next`], promised to be
+//!   filled by a follow-up emit. [`ProgramBuilder::build`] re-checks the
 //!   strict bound and reports [`ProgramError::OutOfBoundsEdge`] if the
 //!   promise was broken (no emit filled the deferred slot).
 //! - **Total patching.** Every emitted op must have both edges patched
-//!   before [`Self::build`]; an unpatched edge surfaces as
+//!   before [`ProgramBuilder::build`]; an unpatched edge surfaces as
 //!   [`ProgramError::UnpatchedEdge`] with the offending edge identity.
 //!
 //! The terminal targets [`super::BranchTarget::Terminate`] and

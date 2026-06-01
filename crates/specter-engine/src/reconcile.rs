@@ -2,16 +2,16 @@
 //!
 //! Every `ProbeResponse(Ok(snapshot))` for a Dir-shaped Profile flows
 //! through [`graft`]: splice the response into `Profile.current`, then
-//! apply the resulting [`Diff`](specter_core::Diff) to the engine's
-//! `Tree` via [`apply_diff_to_tree`]. The Diff is the **single
-//! representation of a snapshot change** consumed inside the engine —
-//! the same `diff_tree` algorithm core uses for Effect dispatch is the
-//! only classifier that mutates Tree state.
+//! apply the resulting [`Diff`] to the engine's `Tree` via
+//! [`apply_diff_to_tree`]. The Diff is the **single representation of
+//! a snapshot change** consumed inside the engine — the same `diff_tree`
+//! algorithm core uses for Effect dispatch is the only classifier that
+//! mutates Tree state.
 //!
-//! For each delta entry, [`apply_diff_to_tree`] ensures (or releases)
-//! the Tree slot, sets its kind, and installs or releases the
-//! per-Resource [`ContribKey::ProfileDescendant`] contribution via
-//! [`add_watch`] / [`sub_watch`] for covered Dirs (always) and covered
+//! For each delta entry, [`apply_diff_to_tree`] ensures (or releases) the
+//! Tree slot, sets its kind, and installs or releases the per-Resource
+//! [`ContribKey::ProfileDescendant`] contribution via [`add_watch`] /
+//! [`crate::refcounts::sub_watch`] for covered Dirs (always) and covered
 //! Leaves under `Profile.has_per_file_fds`. The Watch ops appear in
 //! `StepOutput.watch_ops`, resealed by `ResourceId` at emission.
 //!
@@ -333,9 +333,9 @@ pub(crate) fn apply_diff_to_tree(
 /// here. File-anchored Profiles never reach this helper — their
 /// `Profile.current` is `TreeSnapshot::File(leaf)`, integrated by an
 /// inline `install_file_current` call at `apply_snapshot`'s File arm.
-/// The typed [`crate::ProbeRequest`] dispatch chain plus the
-/// certifier's inline kind guard together guarantee no
-/// File-prior + Dir-response pair survives to this call site.
+/// The typed [`specter_core::ProbeRequest`] dispatch chain plus the
+/// certifier's inline kind guard together guarantee no File-prior +
+/// Dir-response pair survives to this call site.
 ///
 /// **Splice-first ordering.** The splice runs *before* any Tree
 /// mutation. A [`SpliceResult::CrossedUncovered`] verdict (a

@@ -70,16 +70,16 @@ impl Engine {
     }
 
     /// Release the Profile's watch-root parent contribution if held.
-    /// Idempotent; safe in any post-vacate state. Calls `try_reap` on
-    /// the parent slot — with this Profile's [`ContribKey::ProfileParent`]
-    /// just removed, the slot reaps unless some other claim still
-    /// holds it (a sibling child, another Profile parented here, a
-    /// Promoter proxy / prefix). The reap is a no-op at the call moment
-    /// when [`Engine::reap_profile`] runs this helper before the
-    /// anchor's own `try_reap` — the anchor is still a child of the
-    /// parent — but the cascading `try_reap` performed by [`Tree::try_reap`]
-    /// on the eventual anchor reap walks back up and frees the parent
-    /// in that same step.
+    /// Idempotent; safe in any post-vacate state. Calls `try_reap` on the
+    /// parent slot — with this Profile's [`ContribKey::ProfileParent`] just
+    /// removed, the slot reaps unless some other claim still holds it (a
+    /// sibling child, another Profile parented here, a Promoter proxy /
+    /// prefix). The reap is a no-op at the call moment when
+    /// [`Engine::reap_profile`] runs this helper before the anchor's own
+    /// `try_reap` — the anchor is still a child of the parent — but the
+    /// cascading `try_reap` performed by [`specter_core::Tree::try_reap`] on
+    /// the eventual anchor reap walks back up and frees the parent in that
+    /// same step.
     pub(crate) fn release_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // `take_watch_root_parent` reads and clears the cached id in one
         // move, so the read-then-null pair collapses to a single

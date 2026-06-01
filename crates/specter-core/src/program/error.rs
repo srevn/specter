@@ -11,7 +11,7 @@
 //!
 //! It lives in its own module — not in `builder` — because it is owned
 //! by neither sibling constructor: both raise it and one external
-//! mapper ([`specter-config`] lowering) consumes it. Every variant is a
+//! mapper (`specter-config` lowering) consumes it. Every variant is a
 //! *construction-hygiene* bug: a correct lowering pass never produces
 //! one from valid input. The validator captures them as load errors
 //! rather than letting them panic the daemon, so an internal lowering

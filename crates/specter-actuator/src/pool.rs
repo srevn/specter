@@ -56,19 +56,18 @@ pub fn default_concurrency() -> NonZeroUsize {
 /// - [`crate::timer::arm_timer`] (per-step deadline enforcement).
 ///
 /// Default for production; tests may override via
-/// [`SubprocessActuator::new_with_grace`] /
-/// [`SubprocessActuator::new_with_grace_and_env`].
+/// `SubprocessActuator::new_with_grace` /
+/// `SubprocessActuator::new_with_grace_and_env`.
 pub(crate) const SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 /// Channels the actuator's controller owns for the lifetime of
 /// [`SubprocessActuator::run`].
 ///
-/// Bundles the four reactive-surface channels — the effects pipe and
-/// the three shutdown-handshake legs — that the bin passes as a unit.
-/// The bin's [`crate::pool`]-paired transport bundle ([`channels::ActuatorIO::pair`]
-/// in `specter-bin`) returns the matching [`RunWiring`] directly so the
-/// actuator's contract is one owned struct, not four positional
-/// arguments.
+/// Bundles the four reactive-surface channels — the effects pipe and the
+/// three shutdown-handshake legs — that the bin passes as a unit. The bin's
+/// `crate::pool`-paired transport bundle ([`channels::ActuatorIO::pair`] in
+/// `specter-bin`) returns the matching [`RunWiring`] directly so the
+/// actuator's contract is one owned struct, not four positional arguments.
 ///
 /// [`channels::ActuatorIO::pair`]: # "in specter-bin"
 #[derive(Debug)]
@@ -93,9 +92,9 @@ pub struct RunWiring {
 /// Build the [`EffectCompletion`] back-channel sized to the resolved
 /// concurrency.
 ///
-/// One slot per in-flight [`crate::pool::state::RunningJob`]: every wait
+/// One slot per in-flight `pool::state::RunningJob`: every wait
 /// thread sends exactly one [`EffectCompletion`] in its lifetime
-/// ([`state::wait_loop`] after `drop(permit)`), and the live wait-thread
+/// (`state::wait_loop` after `drop(permit)`), and the live wait-thread
 /// count is bounded by the permit cap. So a fully-saturated pool
 /// draining in lock-step never blocks a permit-released wait thread on
 /// `reap_tx.send` waiting for the controller to consume —
@@ -393,7 +392,7 @@ impl Drop for SubprocessActuator {
     /// over `_exit`.
     ///
     /// **No grace window, no reap drain.** Drop is the panic-recovery
-    /// shape — clean exit goes through [`Self::shutdown`], which owns
+    /// shape — clean exit goes through `Self::shutdown`, which owns
     /// the SIGTERM → grace → SIGKILL → reap-drain phasing. Here the
     /// invariant is "make the kernel-side cleanup unblockable, then
     /// return." Wait threads each hold a `reap_tx` clone; the channel
@@ -403,7 +402,7 @@ impl Drop for SubprocessActuator {
     /// the kernel's reap or, in pathological cases, get reaped by the
     /// kernel on this process's `_exit`.
     ///
-    /// On the happy path, [`Self::shutdown`] has already drained
+    /// On the happy path, `Self::shutdown` has already drained
     /// `state.slots` of running children (its phase 4 reaps every
     /// completion before returning), so the iteration below runs
     /// zero times.

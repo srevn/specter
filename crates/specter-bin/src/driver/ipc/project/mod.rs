@@ -24,10 +24,10 @@
 //!
 //! # Projections
 //!
-//! - [`status`] — `specter status` summary.
-//! - [`list`] — `specter list` row union over engine + disabled
+//! - [`status()`] — `specter status` summary.
+//! - [`list()`] — `specter list` row union over engine + disabled
 //!   sources.
-//! - [`show`] — `specter show <name>` detail block.
+//! - [`show()`] — `specter show <name>` detail block.
 //!
 //! `program` lowers each [`specter_core::ActionProgram`] op to
 //! operator-readable lines for `show`. Every projection reuses the

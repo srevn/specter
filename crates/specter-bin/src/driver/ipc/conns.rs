@@ -312,8 +312,8 @@ impl ConnState {
     ///
     /// One-shot-per-conn is the contract: a fresh conn enters `Reqs`,
     /// flips to `Sub` once, and never flips back. The *structural*
-    /// gate lives at the [`super::ipc`] Subscribe handler — a repeat
-    /// Subscribe on a `Sub` conn returns
+    /// gate lives at the [`super::dispatch`] Subscribe handler — a
+    /// repeat Subscribe on a `Sub` conn returns
     /// [`crate::ipc::protocol::WireErrorCode::AlreadySubscribed`]
     /// before reaching this method. The `debug_assert!` here is the
     /// contract witness: any future caller that bypasses the handler
