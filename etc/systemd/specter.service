@@ -21,16 +21,5 @@ RuntimeDirectoryMode=0700
 StandardOutput=journal
 StandardError=journal
 
-NoNewPrivileges=true
-ProtectSystem=full
-PrivateDevices=true
-ProtectKernelTunables=true
-ProtectKernelModules=true
-ProtectControlGroups=true
-RestrictNamespaces=true
-RestrictRealtime=true
-LockPersonality=true
-MemoryDenyWriteExecute=true
-
 [Install]
 WantedBy=multi-user.target

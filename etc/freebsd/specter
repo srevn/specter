@@ -16,19 +16,18 @@ load_rc_config "${name}"
 : ${specter_enable:="NO"}
 : ${specter_user:="@SPECTER_USER@"}
 : ${specter_config:="@SPECTER_CONF@"}
-: ${specter_logfile:="/var/log/specter.log"}
 : ${specter_socket:="/var/run/specter/specter.sock"}
 
 procname="@SPECTER_BIN@"
 pidfile="/var/run/${name}.pid"
-
-specter_cmd="@SPECTER_BIN@ run --config ${specter_config} --socket ${specter_socket}"
-
-command="/usr/sbin/daemon"
-command_args="-f -p ${pidfile} -o ${specter_logfile} -u ${specter_user} ${specter_cmd}"
-extra_commands="reload"
+logfile="/var/log/${name}.log"
 
 start_precmd="specter_precmd"
+specter_cmd="${procname} run --config ${specter_config} --socket ${specter_socket}"
+
+command="/usr/sbin/daemon"
+command_args="-f -p ${pidfile} -o ${logfile} -u ${specter_user} ${specter_cmd}"
+extra_commands="reload"
 
 specter_precmd()
 {
