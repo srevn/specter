@@ -33,7 +33,7 @@ use specter_core::{
     PostFirePhase, PreFirePhase, ProbeFailure, ProbeOwner, ProbeResponse, ProbeSlot, Profile,
     ProfileId, ProfileState, PromoterClaimKind, PromoterId, PromoterState, ProofAuthority,
     QuiescenceVerdict, QuiescenceWitness, ReapTrigger, Resource, ResourceId, ResourceKind,
-    StableReason, StepOutput, SubAttachRequest, SubId, TimerId, TimerKind, TreeSnapshot,
+    StableReason, StepOutput, Sub, SubAttachRequest, SubId, TimerId, TimerKind, TreeSnapshot,
     WatchFailure, WatchRegistryDiff, quiescence_verdict,
 };
 use std::num::NonZeroU32;
@@ -1738,22 +1738,24 @@ impl Engine {
     }
 
     /// Anchor terminal event (Removed/Renamed/Revoked at `Profile.resource`). Anchor-terminal
-    /// dispatcher. Splits on whether every Sub on the Profile is dynamic (originates from a
-    /// Promoter) versus the mixed/static case.
+    /// dispatcher. Splits on whether every Sub on the Profile is dynamic
+    /// ([`specter_core::Sub::is_dynamic`] — engine-synthesised by a Promoter promotion or a
+    /// discovery mint) versus the mixed/static case.
     ///
     /// **All-dynamic** ⇒ [`Self::on_anchor_terminal_all_dynamic`]: the Profile has no static
-    /// recovery channel; the Promoter re-promotes on path reappearance, so the Profile is reaped
-    /// entirely (anchor, descendants, descent prefix, watch-root parent — the full quartet) and
-    /// each source Promoter is notified that its dynamic Sub has reaped. I-Recovery-Split: the
-    /// predicate is total over non-empty Subs.
+    /// recovery channel; the source re-synthesises on path reappearance (a Promoter re-promotes,
+    /// a discovery template's next reconcile re-mints), so the Profile is reaped entirely (anchor,
+    /// descendants, descent prefix, watch-root parent — the full quartet) and each Sub's source is
+    /// narrated per origin. I-Recovery-Split: the predicate is total over non-empty Subs.
     ///
     /// **Mixed or pure-static** ⇒ [`Self::finalize_anchor_lost`]: the existing recovery flow runs.
     /// The dynamic Subs (if any) stay attached — the static Sub keeps the Profile alive via
-    /// `Profile.watch_root_parent`'s recovery channel. On re-materialisation, the Promoter's
-    /// enumeration's derived dedup gate (`promoter_already_promoted`) finds the still-attached
-    /// dynamic Sub in `SubRegistry` and returns `true` (no fresh Sub for an already-known anchor),
-    /// so no engine work is needed for correctness — only the static Sub's recovery flow drives the
-    /// burst.
+    /// `Profile.watch_root_parent`'s recovery channel. On re-materialisation, the source-side
+    /// dedup gate (`promoter_already_promoted` / `discovery_already_minted`) finds the
+    /// still-attached dynamic Sub in `SubRegistry` and returns `true` (no fresh Sub for an
+    /// already-known anchor), so no engine work is needed for correctness — only the static Sub's
+    /// recovery flow drives the burst. A discovery *template* counts static here by construction:
+    /// `is_dynamic` reads synthesis origin, and templates are operator-declared.
     ///
     /// The empty-Subs case is structurally unreachable: a Profile with no Subs reaped on the last
     /// detach. Routed defensively to `finalize_anchor_lost` for idempotence.
@@ -1763,11 +1765,9 @@ impl Engine {
             self.finalize_anchor_lost(profile_id, out);
             return;
         }
-        let all_dynamic = subs.iter().all(|sid| {
-            self.subs
-                .get(*sid)
-                .is_some_and(|s| s.source_promoter.is_some())
-        });
+        let all_dynamic = subs
+            .iter()
+            .all(|sid| self.subs.get(*sid).is_some_and(Sub::is_dynamic));
         if all_dynamic {
             self.on_anchor_terminal_all_dynamic(profile_id, out);
         } else {
@@ -1821,25 +1821,60 @@ impl Engine {
             empty_path()
         });
 
-        // 3. Notify each source Promoter; emit the per-Sub lifecycle signal; then remove each
-        //    dynamic Sub from SubRegistry. `on_dynamic_sub_reaped` is the Promoter-keyed narration
-        //    (path-carrying); [`Diagnostic::SubDetached`] is the per-Sub operator-facing signal a
-        //    `wait --kind detach` IPC client filters on. Both fire in the same loop so the registry
-        //    borrow is still live for `source_promoter` lookup; the remove pass below tears the
-        //    entries down once the narration is done. SubRegistry's `by_profile` index drops the
-        //    entry on the last remove, so the post-loop registry has no back-references for this
-        //    Profile.
+        // 3. Narrate each Sub's reap per synthesis origin; emit the per-Sub lifecycle signal; then
+        //    remove each dynamic Sub from SubRegistry. The source-keyed narration
+        //    (`DynamicSubReaped` for a Promoter promotion, `DiscoverySubReaped` for a discovery
+        //    mint) is path-carrying; [`Diagnostic::SubDetached`] is the per-Sub operator-facing
+        //    signal a `wait --kind detach` IPC client filters on. Both fire in the same loop while
+        //    the registry borrow is still live for the source lookup; the remove pass below tears
+        //    the entries down once the narration is done. SubRegistry's `by_profile` index drops
+        //    the entry on the last remove, so the post-loop registry has no back-references for
+        //    this Profile. The reasons differ deliberately: a Promoter reap historically narrates
+        //    `PromoterReaped`; a discovery mint's anchor loss is `AnchorLost` — the watched path is
+        //    gone, no source-entity reap implied (the template stays live and re-mints on
+        //    reappearance).
         let sub_ids: SmallVec<[SubId; 2]> = self.subs.at(profile_id).iter().copied().collect();
         for sid in sub_ids.iter().copied() {
-            let Some(pid) = self.subs.get(sid).and_then(|s| s.source_promoter) else {
+            let Some((source_promoter, source_discovery)) = self
+                .subs
+                .get(sid)
+                .map(|s| (s.source_promoter, s.source_discovery))
+            else {
                 continue;
             };
-            self.on_dynamic_sub_reaped(pid, sid, &anchor_path, out);
-            out.diagnostics.push(Diagnostic::SubDetached {
-                sub: sid,
-                profile: profile_id,
-                reason: DetachReason::PromoterReaped,
-            });
+            match (source_promoter, source_discovery) {
+                (Some(pid), _) => {
+                    self.on_dynamic_sub_reaped(pid, sid, &anchor_path, out);
+                    out.diagnostics.push(Diagnostic::SubDetached {
+                        sub: sid,
+                        profile: profile_id,
+                        reason: DetachReason::PromoterReaped,
+                    });
+                }
+                (None, Some(src)) => {
+                    out.diagnostics.push(Diagnostic::DiscoverySubReaped {
+                        source: src,
+                        sub: sid,
+                        path: Arc::clone(&anchor_path),
+                    });
+                    out.diagnostics.push(Diagnostic::SubDetached {
+                        sub: sid,
+                        profile: profile_id,
+                        reason: DetachReason::AnchorLost,
+                    });
+                }
+                (None, None) => {
+                    // The all-dynamic predicate admitted only synthesised Subs; a static Sub here
+                    // is a routing breach — loud in dev. In release the removal pass below still
+                    // tears it down (the Profile is being reaped wholesale); only the per-origin
+                    // narration is skipped, never mis-attributed.
+                    debug_assert!(
+                        false,
+                        "all-dynamic anchor-terminal teardown reached a static Sub \
+                         (sub = {sid:?}, profile = {profile_id:?})",
+                    );
+                }
+            }
         }
         for sid in sub_ids {
             let _ = self.subs.remove(sid);
@@ -1952,6 +1987,15 @@ impl Engine {
     /// [`Engine::seed_drift_observed`] fork. Pure `&self`; reads the post-graft state the caller
     /// ([`Engine::fire_or_seal`]) committed immediately before.
     ///
+    /// **The shape layer precedes both the intent fork and the fold override.** A
+    /// `MatchChain`-shaped Profile classifies [`Consequence::Reconcile`] for *any* intent: cold
+    /// Seed (first enumeration), triggered Seed, Standard, and post-recovery Seed all converge on
+    /// the same idempotent reconcile (the registry dedup query makes a re-reconcile a no-op), so
+    /// the Seed-flag machinery below is never consulted for discovery. The early return also
+    /// bypasses the fold override *structurally* rather than by assertion: an operator `absorb`
+    /// window suppresses Effects, discovery emits none, so minting proceeds under absorb and the
+    /// latch stays unconsumed — disabling the discovery Sub is the lever to stop minting.
+    ///
     /// A Standard burst always fires the Standard consequence. A Seed burst splits three disjoint
     /// ways: a fresh Profile that witnessed activity owes a *first* fire (the Standard consequence
     /// — no baseline yet, the post-command rebase establishes it); a recovery whose tree drifted
@@ -1972,6 +2016,17 @@ impl Engine {
     /// orthogonal-to-[`specter_core::BurstIntent`] terminal-consequence switch the latch was
     /// designed to be.
     fn classify_consequence(&self, profile_id: ProfileId, intent: BurstIntent) -> Consequence {
+        // Shape layer: a discovery Profile's stable verdict reconciles the match set, whatever
+        // the intent. Returning before the intent match keeps the fold override unreachable —
+        // absorb-inertness is structural, not asserted.
+        if self
+            .profiles
+            .get(profile_id)
+            .is_some_and(|p| p.config().match_chain().is_some())
+        {
+            return Consequence::Reconcile;
+        }
+
         let base = match intent {
             BurstIntent::Standard => Consequence::StandardFire,
             BurstIntent::Seed => {
@@ -2021,11 +2076,12 @@ impl Engine {
     /// `current`, and `seed_owes_first_fire`'s inputs (`any_fired`, the pre-fire `dirty`
     /// accumulator) are invariant under the graft, so the classification is order-stable.
     ///
-    /// The two non-firing arms — [`Consequence::SilentPin`] and [`Consequence::AbsorbFold`] — share
-    /// the silent-seal terminus ([`Engine::seal_baseline_silently`]): no Effect to defer, so
-    /// neither consults the Draining gate. `AbsorbFold` runs a per-cause prologue first (the
-    /// [`Diagnostic::QuiescenceAbsorbed`] narration + the per-Profile count bump/consume), since
-    /// the seal may reap the Profile. The three firing consequences cross the single gate in
+    /// The three non-firing arms — [`Consequence::SilentPin`], [`Consequence::AbsorbFold`], and
+    /// [`Consequence::Reconcile`] — share the silent-seal terminus
+    /// ([`Engine::seal_baseline_silently`]): no Effect to defer, so none consults the Draining
+    /// gate. `AbsorbFold` and `Reconcile` each run a per-cause prologue first (the
+    /// [`Diagnostic::QuiescenceAbsorbed`] narration + count bump; the reconcile's mint pass),
+    /// since the seal may reap the Profile. The three firing consequences cross the single gate in
     /// [`Engine::gated_fire`].
     fn fire_or_seal(
         &mut self,
@@ -2070,6 +2126,15 @@ impl Engine {
                     now,
                     out,
                 );
+            }
+            Consequence::Reconcile => {
+                // Prologue-before-seal, `AbsorbFold`'s ordering rationale: the seal can reap the
+                // Profile (a template detached mid-burst marks the burst for reap), so the mint
+                // pass lands while it is live. `reconcile_matches` derives its template set from
+                // the live registry, so that same zombie burst mints nothing — and it touches no
+                // burst state; the burst exits through the seal's `finish_burst_to_idle` alone.
+                self.reconcile_matches(profile_id, now, out);
+                self.seal_baseline_silently(profile_id, out);
             }
             Consequence::SilentPin => self.seal_baseline_silently(profile_id, out),
             Consequence::AbsorbFold => {
@@ -3471,21 +3536,32 @@ enum Consequence {
     /// `SilentPin`'s four-origin arm would hide an operator-visible event. No emission; **never
     /// Draining-gated** — like `SilentPin`, no Effect to defer.
     AbsorbFold,
+    /// The discovery consequence — the Profile's scan shape is `MatchChain`, so a stable verdict
+    /// reconciles the match set ([`Engine::reconcile_matches`]: mint a dynamic Sub per chain
+    /// terminus × template) instead of firing Effects. Reached by the *shape pre-check* for any
+    /// intent, before the intent fork and the fold override run: reconcile is idempotent via the
+    /// registry dedup query, so first enumeration and re-reconcile are the same operation, and a
+    /// forced ceiling reconciles from the forced graft identically (`forced` is ignored — fresh
+    /// data, same consequence). Non-firing: never Draining-gated, never absorb-folded (structural
+    /// — the early return precedes the override), exits through the silent seal after the mints.
+    Reconcile,
 }
 
 impl Consequence {
     /// True for the three arms that run the Subs' reactions ([`Self::StandardFire`] /
-    /// [`Self::FreshSeedFire`] / [`Self::RecoveryFire`]); false for the two silent-seal arms
-    /// ([`Self::SilentPin`] / [`Self::AbsorbFold`]). The [`Engine::classify_consequence`] override
-    /// consults this to decide whether a fold latch has a fire to override: a non-firing `base`
-    /// passes through untouched (so a Cold-Seed `SilentPin` leaves the `absorb` window unconsumed
-    /// for the first genuinely fireable burst). Wildcard-free — a future firing variant is a
-    /// compile error here, not a silently-unfoldable fire.
+    /// [`Self::FreshSeedFire`] / [`Self::RecoveryFire`]); false for the silent-seal arms
+    /// ([`Self::SilentPin`] / [`Self::AbsorbFold`]) and for [`Self::Reconcile`] (discovery mints
+    /// attachments, not Effects — there is nothing for an `absorb` window to suppress). The
+    /// [`Engine::classify_consequence`] override consults this to decide whether a fold latch has
+    /// a fire to override: a non-firing `base` passes through untouched (so a Cold-Seed
+    /// `SilentPin` leaves the `absorb` window unconsumed for the first genuinely fireable burst).
+    /// Wildcard-free — a future firing variant is a compile error here, not a silently-unfoldable
+    /// fire.
     #[must_use]
     const fn is_firing(&self) -> bool {
         match self {
             Self::StandardFire | Self::FreshSeedFire | Self::RecoveryFire(_) => true,
-            Self::SilentPin | Self::AbsorbFold => false,
+            Self::SilentPin | Self::AbsorbFold | Self::Reconcile => false,
         }
     }
 }

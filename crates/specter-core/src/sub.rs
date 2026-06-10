@@ -764,8 +764,14 @@ impl SubRegistry {
         })
     }
 
-    /// Whether `profile` has at least one attached `PerStableFile` Sub — the scope test behind the
-    /// per-file recovery-drop signal.
+    /// Whether `profile` has at least one attached Sub that *reacts* per-stable-file — the scope
+    /// test behind the per-file recovery-drop signal.
+    ///
+    /// **Template-bearing Subs are excluded.** A discovery Sub stores the user's scope as the
+    /// minted Subs' reaction spec (the double-duty params reading), but its own reaction is
+    /// minting — it never fires a per-file Effect, so a per-file template scope must not trip the
+    /// recovery-drop diagnostic on the discovery Profile. The minted Subs answer for themselves on
+    /// their own Profiles, where their stored scope *is* their reaction.
     ///
     /// **Must not be collapsed into [`crate::Profile::has_per_file_fds`].** That predicate is
     /// events-mask derived (`CONTENT | METADATA` present) and a `SubtreeRoot` Sub watching
@@ -779,7 +785,7 @@ impl SubRegistry {
         self.at(profile).iter().any(|sid| {
             self.subs
                 .get(*sid)
-                .is_some_and(|s| s.scope == EffectScope::PerStableFile)
+                .is_some_and(|s| s.template.is_none() && s.scope == EffectScope::PerStableFile)
         })
     }
 }

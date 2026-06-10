@@ -271,6 +271,18 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) -> Option<SubId> {
+        // A discovery template and the `MatchChain` shape are coupled iff: a template on a
+        // non-chain Profile could never reconcile, and a plain Sub on a chain Profile could never
+        // react (its Profile mints attachments, not Effects). One assert closes both directions —
+        // and transitively forbids a chain-shaped *template* (its mint would be a template-less
+        // Sub on a chain Profile and trip this same assert at mint time).
+        debug_assert_eq!(
+            req.params.template.is_some(),
+            req.identity.config.match_chain().is_some(),
+            "attach_sub_inner: SubParams::template ⟺ ScanConfig::MatchChain \
+             (a template mints; a chain Profile reconciles — neither exists without the other)",
+        );
+
         // Phase 1 — Identity resolution. The trichotomy below is the structural source of truth for
         // "what state is this Profile entering on this attach?". Two predicates are exhaustively
         // typed rather than derived ambiguously:
@@ -802,14 +814,20 @@ impl Engine {
     /// Time-independent: detach is a pure registry/refcount operation (no timer scheduling, no
     /// burst transitions that need a `now`). Bursts running on detached Profiles continue under
     /// their existing schedule until `finish_burst_to_idle`.
+    ///
+    /// **Detaching a discovery template cascades to its minted set**: every Sub with
+    /// `source_discovery == sub` detaches recursively under
+    /// [`DetachReason::DiscoverySourceDetached`], whatever `reason` removed the template (IPC
+    /// disable, config removal, identity change). Depth is structurally one — minted Subs carry
+    /// `template: None`, so the recursive frames never re-enter the cascade arm.
     pub(crate) fn detach_sub_inner(
         &mut self,
         sub: SubId,
         reason: DetachReason,
         out: &mut StepOutput,
     ) {
-        let profile_id = match self.subs.remove(sub) {
-            Some(s) => s.profile(),
+        let (profile_id, was_template) = match self.subs.remove(sub) {
+            Some(s) => (s.profile(), s.template.is_some()),
             None => {
                 out.diagnostics.push(Diagnostic::DetachUnknownSub { sub });
                 return;
@@ -826,6 +844,24 @@ impl Engine {
             profile: profile_id,
             reason,
         });
+
+        // Cascade a detached template's minted set before the template's own Profile bookkeeping:
+        // each minted Sub's detach fully resolves (its Profile reaps) while causally downstream of
+        // the template's `SubDetached` above. Collect before detaching — no iteration over a
+        // mutating registry. Minted Subs live on terminus Profiles, never on the discovery Profile
+        // (termini sit at depth ≥ 1 and chain configs hash-fork from non-chain), so the cascade
+        // cannot perturb the `remaining_subs` count read below.
+        if was_template {
+            let minted: Vec<SubId> = self
+                .subs
+                .iter()
+                .filter(|(_, s)| s.source_discovery == Some(sub))
+                .map(|(id, _)| id)
+                .collect();
+            for mid in minted {
+                self.detach_sub_inner(mid, DetachReason::DiscoverySourceDetached, out);
+            }
+        }
 
         // A live Sub's `.profile()` is live by the attach invariant; this guard is defence-in-depth
         // — same effect as the get_mut-borrow bail it replaces, but no Profile write happens here

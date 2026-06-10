@@ -8,6 +8,7 @@ mod claims;
 mod counter;
 mod coverage;
 mod descent;
+mod discovery;
 mod engine;
 mod path;
 mod probe;

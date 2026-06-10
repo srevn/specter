@@ -45,6 +45,7 @@
 
 use crate::Engine;
 use crate::descent::MaterializeResult;
+use crate::discovery::FANOUT_WARNING_THRESHOLD;
 use crate::probe::{DescentOutcome, PromoterProbeRoute, WalkerContractViolation};
 use crate::refcounts::{add_watch, sub_watch};
 use compact_str::{CompactString, format_compact};
@@ -58,12 +59,6 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
-
-/// Threshold beyond which the engine emits a one-shot [`Diagnostic::PromoterFanoutThreshold`] for a
-/// Promoter. Operator signal that the pattern is matching more targets than typical — likely a
-/// too-broad pattern. `Promoter::latch_fanout_warning` check-and-latches atomically, so a
-/// steady-state busy Promoter only warns once per lifetime by construction.
-pub(crate) const FANOUT_WARNING_THRESHOLD: usize = 1000;
 
 impl Engine {
     /// Attach a Promoter to the engine. Materialises the literal-prefix path on the Tree (creating

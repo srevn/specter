@@ -217,6 +217,15 @@ pub(crate) fn covering_profiles(
 /// ancestor ∈ chain(D)}` (every chain link is a Resource-ancestor, so a contributing `D.resource`
 /// is necessarily a Tree-descendant of `ancestor.resource`); [`chain_reaches`] is the exact filter.
 /// Short-circuits on the first witness.
+///
+/// **Chain-shaped (`MatchChain`) descendants are excluded.** The gate exists to keep an ancestor's
+/// "tree settled" command from racing descendant *command* activity; a discovery burst fires no
+/// command (its consequence is a reconcile) and is N=1-short, so holding an ancestor in Draining
+/// for it would defer real work for nothing. Both consumers — the `gated_fire` gate and the
+/// `finish_burst_to_idle` Draining-exit sweep — re-evaluate this same query, so they inherit the
+/// filter together. The exclusion is *not* transitive: [`chain_reaches`] stays shape-agnostic, so
+/// a mid-burst **minted** Standard descendant still holds the outer ancestor, resolving its chain
+/// *through* the discovery Profile.
 pub(crate) fn has_active_standard_descendant(
     tree: &Tree,
     profiles: &ProfileMap,
@@ -229,10 +238,9 @@ pub(crate) fn has_active_standard_descendant(
     let mut stack: Vec<ResourceId> = tree.children_ids(root).collect();
     while let Some(node) = stack.pop() {
         for d in profiles.at(node) {
-            if profiles
-                .get(d)
-                .is_some_and(|p| p.state().in_active_standard_burst())
-                && chain_reaches(tree, profiles, d, ancestor)
+            if profiles.get(d).is_some_and(|p| {
+                p.state().in_active_standard_burst() && p.config().match_chain().is_none()
+            }) && chain_reaches(tree, profiles, d, ancestor)
             {
                 return true;
             }
