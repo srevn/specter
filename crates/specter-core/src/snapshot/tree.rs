@@ -311,15 +311,17 @@ const fn entry_kind_from_flags(is_file: bool, is_symlink: bool) -> EntryKind {
 /// the recursive `Arc<DirSnapshot>` (whose `root_meta.fs_id` is the kernel identity); `Uncovered`
 /// carries the `FsIdentity` directly.
 ///
-/// `Uncovered` means *the walker stored the entry but did not recurse* because one of three
-/// statically-knowable `ScanConfig` gates fired: `recursive=false`, beyond `max_depth`, or
-/// cross-filesystem boundary (the child's `fs_id.device` differs from the anchor's `root_dev`). The
-/// walker never mints `Uncovered` for transient I/O failures (raced unlink, kind-flip, EACCES on
-/// the subdir's `read_dir`); those surface as `Covered(empty_or_partial_arc)` via the walker's
-/// `read_dir` benign-empty contract, distinct from the uncovered variant. The structural
-/// consequence: within a Profile (whose `config_hash` freezes `recursive` and `max_depth`, and
-/// whose cross-fs identity bifurcates through `fs_id` rather than this variant), the `(Covered,
-/// Uncovered)` and `(Uncovered, Covered)` transitions on the *same* `fs_id` are unreachable.
+/// `Uncovered` means *the walker stored the entry but did not recurse* because the scan shape's
+/// recursion edge (`ScanConfig::descends_into`) refused the level: `Subtree`'s `recursive=false`,
+/// beyond-`max_depth`, or cross-filesystem gates (the child's `fs_id.device` differs from the
+/// anchor's `root_dev`), or `MatchChain`'s terminus depth (a matched directory at the chain's end
+/// is membership, not content — the pruned walk stops there by design). The walker never mints
+/// `Uncovered` for transient I/O failures (raced unlink, kind-flip, EACCES on the subdir's
+/// `read_dir`); those surface as `Covered(empty_or_partial_arc)` via the walker's `read_dir`
+/// benign-empty contract, distinct from the uncovered variant. The structural consequence: within
+/// a Profile (whose `config_hash` freezes the scan shape and its depth bounds, and whose cross-fs
+/// identity bifurcates through `fs_id` rather than this variant), the `(Covered, Uncovered)` and
+/// `(Uncovered, Covered)` transitions on the *same* `fs_id` are unreachable.
 ///
 /// Two boundary cases to keep distinct:
 /// - **`exclude` glob**: filtered entries are absent from the parent's `entries` map entirely — the

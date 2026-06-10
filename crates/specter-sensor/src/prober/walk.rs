@@ -434,9 +434,9 @@ pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
 ///
 /// Infallible by construction. Any failure inside the recursive [`enumerate_dir`] routes through
 /// the `Covered(empty_or_partial_arc)` contract and (for non-benign faults) the degrade choke;
-/// `DirChild::Uncovered(fs_id)` stays reserved for the static-config gates fronted by
-/// [`WalkContext::should_recurse`] (`recursive=false`, `max_depth`, cross-fs) and is never minted
-/// for transient I/O.
+/// `DirChild::Uncovered(fs_id)` stays reserved for the recursion-edge refusals fronted by
+/// [`WalkContext::should_recurse`] (`Subtree`'s `recursive=false` / `max_depth` / cross-fs gates,
+/// `MatchChain`'s terminus depth) and is never minted for transient I/O.
 #[must_use]
 fn snapshot_dir(
     ctx: &WalkContext<'_>,

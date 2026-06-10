@@ -287,22 +287,34 @@ mod tests {
         tree.set_kind(id, kind);
     }
 
+    /// The module's one `Profile` fixture: `config` under the supplied `max_settle`, `NO_EVENTS`,
+    /// `SETTLE`, unclassified kind. Coverage is a pure function of `(resource, config)`; the other
+    /// identity axes are held constant so every test reads as a config-shape variation.
+    fn profile_with(r: ResourceId, config: ScanConfig, max_settle: Duration) -> Profile {
+        Profile::new(
+            r,
+            ProfileIdentity {
+                config,
+                max_settle,
+                events: NO_EVENTS,
+            },
+            SETTLE,
+            None,
+        )
+    }
+
+    /// [`profile_with`] at the canonical `MAX_SETTLE` — the dominant shape. Tests that need two
+    /// co-located Profiles fork identity through `profile_with`'s explicit `max_settle` instead.
+    fn profile_at(r: ResourceId, config: ScanConfig) -> Profile {
+        profile_with(r, config, MAX_SETTLE)
+    }
+
     /// Anchor a Profile with the supplied `ScanConfig`. Caller still owns the `Tree` (and any
     /// descendant Resources they attach).
     fn anchor(tree: &mut Tree, segment: &str, builder: ScanConfigBuilder) -> (ResourceId, Profile) {
         let r = tree.ensure_root(segment, ResourceRole::User);
         mark(tree, r, ResourceKind::Dir);
-        let p = Profile::new(
-            r,
-            ProfileIdentity {
-                config: builder.build(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
-            SETTLE,
-            None,
-        );
-        (r, p)
+        (r, profile_at(r, builder.build()))
     }
 
     fn glob(src: &str) -> GlobPattern {
@@ -325,16 +337,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("log.txt", ResourceRole::User);
         mark(&mut tree, r, ResourceKind::File);
-        let p = Profile::new(
-            r,
-            ProfileIdentity {
-                config: ScanConfig::builder().build(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
-            SETTLE,
-            None,
-        );
+        let p = profile_at(r, ScanConfig::builder().build());
         assert!(covers(&p, r, &tree, &mut PathBuf::new()));
     }
 
@@ -345,16 +348,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("log.txt", ResourceRole::User);
         mark(&mut tree, r, ResourceKind::File);
-        let p = Profile::new(
-            r,
-            ProfileIdentity {
-                config: ScanConfig::builder().pattern(glob("*.rs")).build(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
-            SETTLE,
-            None,
-        );
+        let p = profile_at(r, ScanConfig::builder().pattern(glob("*.rs")).build());
         assert!(covers(&p, r, &tree, &mut PathBuf::new()));
     }
 
@@ -378,16 +372,7 @@ mod tests {
             .ensure_child(parent, "anchor", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, anchor_id, ResourceKind::Dir);
-        let profile = Profile::new(
-            anchor_id,
-            ProfileIdentity {
-                config: recursive_unbounded().build(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
-            SETTLE,
-            None,
-        );
+        let profile = profile_at(anchor_id, recursive_unbounded().build());
         assert!(!covers(&profile, parent, &tree, &mut PathBuf::new()));
     }
 
@@ -743,19 +728,10 @@ mod tests {
     fn anchor_chain(tree: &mut Tree, segment: &str, pattern: &str) -> (ResourceId, Profile) {
         let r = tree.ensure_root(segment, ResourceRole::User);
         mark(tree, r, ResourceKind::Dir);
-        let p = Profile::new(
-            r,
-            ProfileIdentity {
-                config: ScanConfig::MatchChain(Arc::new(
-                    PatternSpec::parse(pattern).expect("test pattern parses"),
-                )),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
-            SETTLE,
-            None,
-        );
-        (r, p)
+        let config = ScanConfig::MatchChain(Arc::new(
+            PatternSpec::parse(pattern).expect("test pattern parses"),
+        ));
+        (r, profile_at(r, config))
     }
 
     fn child(tree: &mut Tree, parent: ResourceId, segment: &str, kind: ResourceKind) -> ResourceId {
@@ -863,19 +839,7 @@ mod tests {
         let mut profiles = ProfileMap::new();
         let r = tree.ensure_root("root", ResourceRole::User);
         mark_dir(&mut tree, r);
-        let pid = profiles.attach(
-            &mut tree,
-            Profile::new(
-                r,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
+        let pid = profiles.attach(&mut tree, profile_at(r, cfg_recursive()));
         assert!(nearest_covering_ancestor(&tree, &profiles, pid).is_none());
     }
 
@@ -893,45 +857,9 @@ mod tests {
         for r in [root, a, b] {
             mark_dir(&mut tree, r);
         }
-        let p_root = profiles.attach(
-            &mut tree,
-            Profile::new(
-                root,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
-        let p_a = profiles.attach(
-            &mut tree,
-            Profile::new(
-                a,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
-        let p_b = profiles.attach(
-            &mut tree,
-            Profile::new(
-                b,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
+        let p_root = profiles.attach(&mut tree, profile_at(root, cfg_recursive()));
+        let p_a = profiles.attach(&mut tree, profile_at(a, cfg_recursive()));
+        let p_b = profiles.attach(&mut tree, profile_at(b, cfg_recursive()));
 
         assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_b), Some(p_a));
         assert_eq!(
@@ -959,30 +887,9 @@ mod tests {
         }
         let _p_root = profiles.attach(
             &mut tree,
-            Profile::new(
-                root,
-                ProfileIdentity {
-                    config: ScanConfig::builder().recursive(false).build(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
+            profile_at(root, ScanConfig::builder().recursive(false).build()),
         );
-        let p_b = profiles.attach(
-            &mut tree,
-            Profile::new(
-                b,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
+        let p_b = profiles.attach(&mut tree, profile_at(b, cfg_recursive()));
         assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_b), None);
     }
 
@@ -995,29 +902,11 @@ mod tests {
         mark_dir(&mut tree, r);
         let p_a = profiles.attach(
             &mut tree,
-            Profile::new(
-                r,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: Duration::from_secs(6),
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
+            profile_with(r, cfg_recursive(), Duration::from_secs(6)),
         );
         let p_b = profiles.attach(
             &mut tree,
-            Profile::new(
-                r,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: Duration::from_secs(12),
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
+            profile_with(r, cfg_recursive(), Duration::from_secs(12)),
         );
         // Both at root; root has no Profile ancestor; resolution walks ancestors of root.resource
         // (none — root is a Tree root).
@@ -1041,43 +930,13 @@ mod tests {
         // them separate Profiles).
         let p_root_a = profiles.attach(
             &mut tree,
-            Profile::new(
-                root,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: Duration::from_secs(6),
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
+            profile_with(root, cfg_recursive(), Duration::from_secs(6)),
         );
         let p_root_b = profiles.attach(
             &mut tree,
-            Profile::new(
-                root,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: Duration::from_secs(12),
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
+            profile_with(root, cfg_recursive(), Duration::from_secs(12)),
         );
-        let p_leaf = profiles.attach(
-            &mut tree,
-            Profile::new(
-                leaf,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
+        let p_leaf = profiles.attach(&mut tree, profile_at(leaf, cfg_recursive()));
 
         let smaller = std::cmp::min(p_root_a, p_root_b);
         assert_eq!(
@@ -1105,33 +964,9 @@ mod tests {
         for r in [root, a, b] {
             mark_dir(&mut tree, r);
         }
-        let p_root = profiles.attach(
-            &mut tree,
-            Profile::new(
-                root,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
+        let p_root = profiles.attach(&mut tree, profile_at(root, cfg_recursive()));
         // `a` deliberately carries no Profile.
-        let p_b = profiles.attach(
-            &mut tree,
-            Profile::new(
-                b,
-                ProfileIdentity {
-                    config: cfg_recursive(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        );
+        let p_b = profiles.attach(&mut tree, profile_at(b, cfg_recursive()));
         assert_eq!(
             nearest_covering_ancestor(&tree, &profiles, p_b),
             Some(p_root),
@@ -1159,19 +994,7 @@ mod tests {
         r: ResourceId,
         builder: ScanConfigBuilder,
     ) -> ProfileId {
-        profiles.attach(
-            tree,
-            Profile::new(
-                r,
-                ProfileIdentity {
-                    config: builder.build(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
-                SETTLE,
-                None,
-            ),
-        )
+        profiles.attach(tree, profile_at(r, builder.build()))
     }
 
     /// A Profile at `r` driven into an Active burst of `intent`. Phase is `Batching` — the lightest
@@ -1186,16 +1009,7 @@ mod tests {
         builder: ScanConfigBuilder,
         intent: BurstIntent,
     ) -> ProfileId {
-        let mut p = Profile::new(
-            r,
-            ProfileIdentity {
-                config: builder.build(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
-            SETTLE,
-            None,
-        );
+        let mut p = profile_at(r, builder.build());
         p.transition_state(ProfileState::Active(
             ActiveBurst::PreFire(PreFireBurst::new(
                 TimerId::from(1),
