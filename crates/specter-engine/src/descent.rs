@@ -689,20 +689,26 @@ impl crate::Engine {
     /// fresh probe (no settle wait — descent is event-driven). I5: drops the event if a probe is
     /// already in flight (the in-flight probe will pick up the change in its response). The "in
     /// flight" signal is an armed descent probe slot for this owner.
+    ///
+    /// Returns `true` iff it re-armed the descent slot and emitted a fresh probe; `false` when a
+    /// gate skipped (probe already in flight, or the owner is no longer descending). The overflow
+    /// reseed path keys its per-owner diagnostic on this — the gates here are the single source of
+    /// "did a reseed happen", so an external re-check could never drift from them. The `FsEvent`
+    /// dispatch loop discards the value (a skipped descent event needs no narration).
     pub(crate) fn on_descent_event(
         &mut self,
         owner: ProbeOwner,
         _now: Instant,
         out: &mut StepOutput,
-    ) {
+    ) -> bool {
         if self.pending_probe_for(owner).is_some() {
-            return;
+            return false;
         }
         // Liveness gate: an `FsEvent` for an owner no longer descending is a benign post-transition
         // race — nothing to re-probe. The choke reads `current_prefix` back off the descent slot at
         // emit time.
         if self.descent_state(owner).is_none() {
-            return;
+            return false;
         }
 
         let correlation = self.mint_probe_correlation();
@@ -718,6 +724,7 @@ impl crate::Engine {
         // The choke reads the correlation back off the descent slot and resolves the prefix target
         // off state.
         self.emit_owner_probe(owner, out);
+        true
     }
 }
 

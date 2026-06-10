@@ -743,8 +743,9 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
 }
 
 /// `PrefixPending` Promoter with in-flight descent probe: the reseed skips the probe emission (the
-/// in-flight probe's response will reflect the post-overflow state) but still emits the
-/// `PromoterReseededForOverflow` diagnostic — the engine's signal that the reseed was attempted.
+/// in-flight probe's response will reflect the post-overflow state) and emits no
+/// `PromoterReseededForOverflow` diagnostic — nothing was reseeded, so narrating a reseed would
+/// misreport the overflow handling.
 #[test]
 fn sensor_overflow_skips_promoter_with_in_flight_probe() {
     let mut e = Engine::new();
@@ -768,7 +769,7 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
         now,
     );
 
-    // Diagnostic surfaces (the reseed was attempted).
+    // No diagnostic — the in-flight skip reseeded nothing.
     let reseed_count = overflow_out
         .diagnostics
         .iter()
@@ -779,7 +780,7 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
             )
         })
         .count();
-    assert_eq!(reseed_count, 1);
+    assert_eq!(reseed_count, 0, "no reseed diagnostic on the skip path");
 
     // No fresh probe emitted. Pending-probe correlation unchanged.
     let new_probe_emitted = overflow_out

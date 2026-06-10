@@ -1410,11 +1410,13 @@ impl Engine {
     ///   seed re-baselines against the post-overflow tree, which strictly dominates whatever the
     ///   Standard burst was tracking. `reap_pending` Profiles reaped inside `finish_burst_to_idle`
     ///   skip the seed (no Profile to seed).
-    /// - **`Pending(_)`** — descent in flight; the anchor doesn't yet exist and the Profile holds
-    ///   no baseline to drift-test. Skip. The descent's prefix watch continues to deliver future
-    ///   `IN_CREATE` events; if the missed event was an `IN_CREATE` for the next path component,
-    ///   the descent stalls until a future probe / rename / fresh kernel event re-syncs. v1
-    ///   limitation accepted in exchange for handler simplicity.
+    /// - **`Pending(_)`** — the anchor doesn't yet exist and the Profile holds no baseline to
+    ///   drift-test, so there is nothing to re-Seed; instead the descent re-probes via
+    ///   [`Engine::on_descent_event`]. A disarmed descent (awaiting an `IN_CREATE` for the next
+    ///   path component) that lost that event to the overflow window would otherwise wedge until
+    ///   some unrelated event at the prefix; the fresh probe reads the post-overflow tree directly.
+    ///   Skips internally when a probe is already in flight — its response reflects the
+    ///   post-overflow state.
     ///
     /// # Scope
     ///
@@ -1519,10 +1521,13 @@ impl Engine {
                     self.start_seed_burst(pid, None, now, out);
                 }
                 ProfileState::Pending(_) => {
-                    // Descent in flight; no baseline to drift-test. The descent's prefix watch
-                    // keeps delivering future structural events; if the missed event was the
-                    // IN_CREATE we were waiting for, descent stalls until a re-probe occurs through
-                    // other means. Documented v1 limitation.
+                    // No baseline to drift-test — re-probe the descent prefix instead, so an
+                    // IN_CREATE lost to the unreliable window can't wedge the descent (a disarmed
+                    // slot would otherwise wait forever for an event the kernel already dropped).
+                    // Skips internally when a probe is already in flight (its response reflects
+                    // the post-overflow tree). No per-Profile diagnostic — consistent with the
+                    // Idle/Active arms; the step's SensorOverflow diagnostic covers it.
+                    self.on_descent_event(ProbeOwner::Profile(pid), now, out);
                 }
             }
         }
@@ -1537,45 +1542,25 @@ impl Engine {
 
         for qid in promoters_to_reseed {
             // Project the relevant state into a local enum so the borrow on
-            // `self.promoters.get(qid)` ends before the `&mut self` calls below (mint,
-            // descent_state_mut, dispatch_next_enumeration). Stale id ⇒ skip without emitting the
+            // `self.promoters.get(qid)` ends before the `&mut self` calls below
+            // (on_descent_event, dispatch_next_enumeration). Stale id ⇒ skip without emitting the
             // reseed diagnostic — the Promoter is gone.
-            let qowner = ProbeOwner::Promoter(qid);
-            let probe_in_flight = self.pending_probe_for(qowner).is_some();
             let action = match self.promoters.get(qid) {
                 None => continue,
                 Some(q) => match q.state() {
-                    // `emit_owner_probe` reads `current_prefix` back off the descent slot; the
-                    // target is not carried here.
-                    PromoterState::PrefixPending(_) if !probe_in_flight => {
-                        PromoterReseedAction::DescentProbe
-                    }
-                    // PrefixPending with in-flight descent probe: the probe's response will reflect
-                    // the post-overflow state. No double-probe.
-                    PromoterState::PrefixPending(_) => PromoterReseedAction::Skip,
+                    PromoterState::PrefixPending(_) => PromoterReseedAction::Descent,
                     PromoterState::Active { proxies, .. } => {
                         PromoterReseedAction::Enumerate(proxies.keys().copied().collect())
                     }
                 },
             };
 
-            match action {
-                PromoterReseedAction::DescentProbe => {
-                    let correlation = self.mint_probe_correlation();
-                    // Loud arm — the classification just above proved `PrefixPending` under a
-                    // `promoters.get(qid)` that resolved `Some`, and nothing mutated `qid` since,
-                    // so `descent_state_mut` is structurally `Some`. The `!probe_in_flight` guard
-                    // means the slot is empty, so `arm_probe`'s empty-slot precondition holds.
-                    let Some(d) = self.descent_state_mut(qowner) else {
-                        unreachable!(
-                            "overflow reseed: Promoter {qid:?} left \
-                             PrefixPending between classification and re-arm"
-                        );
-                    };
-                    d.arm_probe(correlation);
-                    // The choke reads the correlation and the prefix target back off the descent
-                    // slot.
-                    self.emit_owner_probe(qowner, out);
+            let reseeded = match action {
+                // The in-flight gate lives inside on_descent_event (single source): a probe
+                // already in flight skips the re-arm — its response reflects the post-overflow
+                // state — and the `false` return suppresses the diagnostic below.
+                PromoterReseedAction::Descent => {
+                    self.on_descent_event(ProbeOwner::Promoter(qid), now, out)
                 }
                 PromoterReseedAction::Enumerate(proxy_keys) => {
                     // Enqueue every proxy. Single-slot drain processes one at a time via the
@@ -1586,12 +1571,16 @@ impl Engine {
                         }
                     }
                     self.dispatch_next_enumeration(qid, out);
+                    true
                 }
-                PromoterReseedAction::Skip => {}
-            }
+            };
 
-            out.diagnostics
-                .push(Diagnostic::PromoterReseededForOverflow { promoter: qid });
+            // Gated on the action having done anything: a skipped descent re-arm reseeded
+            // nothing, so narrating it would misreport the overflow handling.
+            if reseeded {
+                out.diagnostics
+                    .push(Diagnostic::PromoterReseededForOverflow { promoter: qid });
+            }
         }
 
         out.diagnostics.push(Diagnostic::SensorOverflow { scope });
@@ -3628,22 +3617,20 @@ enum CompletionRoute {
 
 /// Per-Promoter dispatch projection used by [`Engine::on_sensor_overflow`]. Computed under a short
 /// `&self.promoters` borrow, then dispatched under `&mut self` — splitting the borrow lifetimes is
-/// the only way to thread the post-state-read calls (`mint_probe_correlation` then the slot arm,
+/// the only way to thread the post-state-read calls (`on_descent_event`,
 /// `dispatch_next_enumeration`) through Rust's borrow rules without re-querying the registry per
 /// access.
 ///
 /// Variants:
-/// - `DescentProbe`: `PrefixPending` Promoter with no in-flight descent probe; re-arm and emit. The
+/// - `Descent`: `PrefixPending` Promoter; route through `Engine::on_descent_event`, whose gates
+///   (probe in flight, still descending) decide whether a fresh probe actually goes out. The
 ///   prefix target is not carried — `emit_owner_probe` reads `current_prefix` back off the descent
 ///   slot, so a stale snapshot cannot diverge from state.
 /// - `Enumerate(proxies)`: `Active` Promoter; enqueue every proxy and drain the first into a probe
 ///   via `dispatch_next_enumeration`.
-/// - `Skip`: `PrefixPending` Promoter with an in-flight descent probe; the probe's response will
-///   reflect the post-overflow state, so a second probe would be redundant.
 enum PromoterReseedAction {
-    DescentProbe,
+    Descent,
     Enumerate(Vec<ResourceId>),
-    Skip,
 }
 
 /// Event-class assignment. Maps an [`FsEvent`] + the resource's [`ResourceKind`] to the

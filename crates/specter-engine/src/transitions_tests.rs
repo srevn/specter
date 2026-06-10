@@ -2972,9 +2972,10 @@ fn sensor_overflow_armed_verifying_reap_emits_cancel_only() {
 }
 
 #[test]
-fn sensor_overflow_pending_profile_is_skipped() {
-    // Pending(_) Profile: descent in flight; no baseline to drift-test. Overflow is a no-op for the
-    // Profile state but still emits the diagnostic.
+fn sensor_overflow_pending_profile_with_in_flight_probe_not_duplicated() {
+    // Pending(_) Profile with the descent probe still in flight: the overflow re-probe skips
+    // inside `on_descent_event` (I5 — the in-flight probe's response already reflects the
+    // post-overflow tree), preserving the armed slot and emitting no second probe.
     let mut e = Engine::new();
     let req = SubAttachRequest::for_anchor(
         "guard".into(),
@@ -2996,6 +2997,9 @@ fn sensor_overflow_pending_profile_is_skipped() {
         e.descent_state(ProbeOwner::Profile(pid)).is_some(),
         "fixture: profile is in Pending(_)",
     );
+    let in_flight_corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("fixture: descent probe in flight");
 
     let pre_state = format!("{:?}", e.profiles.get(pid).unwrap().state());
     let out = e.step(
@@ -3011,14 +3015,99 @@ fn sensor_overflow_pending_profile_is_skipped() {
         "Pending Profile state preserved across overflow",
     );
     assert!(
-        e.descent_state(ProbeOwner::Profile(pid)).is_some(),
-        "descent still in flight after overflow",
+        !out.probe_ops()
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Probe { .. })),
+        "no second probe — the in-flight one covers the overflow window",
+    );
+    assert_eq!(
+        e.pending_probe_for(ProbeOwner::Profile(pid)),
+        Some(in_flight_corr),
+        "in-flight correlation preserved",
     );
     assert!(
         out.diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::SensorOverflow { .. })),
         "diagnostic still emitted regardless of per-Profile dispatch",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+#[test]
+fn sensor_overflow_pending_profile_reprobes() {
+    // Pending(_) Profile with a DISARMED descent slot (a prior probe found the next segment
+    // absent / failed, so the descent is waiting on an IN_CREATE): overflow re-probes the current
+    // prefix. Without the re-probe, an IN_CREATE lost to the unreliable window wedges the descent
+    // forever — the stall this pins against.
+    let mut e = Engine::new();
+    let a = e
+        .tree
+        .ensure_path(&[FS_ROOT_SEGMENT, "a"], ResourceRole::User)
+        .expect("non-empty fixture");
+    e.tree.set_kind(a, ResourceKind::Dir);
+    let req = SubAttachRequest::for_anchor(
+        "guard".into(),
+        SubAttachAnchor::Path(std::path::PathBuf::from("/a/b")),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
+    let _ = e.step(Input::AttachSub(req), Instant::now());
+    let pid = {
+        let mut iter = e.profiles.iter();
+        iter.next().expect("profile exists").0
+    };
+    let corr = e
+        .pending_probe_for(ProbeOwner::Profile(pid))
+        .expect("fixture: descent probe in flight at /a");
+
+    // Failed response: descent retains state (current_prefix = /a) but the slot disarms — the
+    // exact "awaiting an event the kernel may have dropped" shape the overflow re-probe exists
+    // for.
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: ProbeOwner::Profile(pid),
+            correlation: corr,
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+        }),
+        Instant::now(),
+    );
+    assert!(
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
+        "fixture: slot disarmed after Failed response",
+    );
+    assert!(
+        e.descent_state(ProbeOwner::Profile(pid)).is_some(),
+        "fixture: still descending",
+    );
+
+    let out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        Instant::now(),
+    );
+
+    let a_path = e.tree.path_of(a).expect("a path resolves");
+    assert!(
+        out.probe_ops().iter().any(|op| {
+            matches!(
+                op,
+                ProbeOp::Probe { request }
+                    if request.owner() == ProbeOwner::Profile(pid)
+                        && *request.target_path() == *a_path,
+            )
+        }),
+        "fresh descent probe at the current prefix /a",
+    );
+    assert!(
+        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
+        "descent slot re-armed post-overflow",
     );
     let _ = e.cancel_all_in_flight_probes();
 }

@@ -494,14 +494,14 @@ pub enum Diagnostic {
     /// `Input::SensorOverflow` arrived from the Sensor; the engine reseeded `promoter` (alongside
     /// any in-scope Profiles surfaced by [`Self::SensorOverflow`]'s peer reseed loop). Per-Promoter
     /// dispatch is state-keyed:
-    /// - `PrefixPending(_)` ⇒ a fresh descent probe is emitted at `current_prefix` (gated on the
-    ///   Promoter's descent slot being unarmed; an in-flight descent probe's response will reflect
-    ///   the post-overflow state).
+    /// - `PrefixPending(_)` ⇒ a fresh descent probe is emitted at `current_prefix`.
     /// - `Active { proxies }` ⇒ every proxy is enqueued into `pending_enumerations`; the dispatcher
     ///   drains one immediately into a probe, with the rest queued behind the single-slot.
     ///
-    /// One emission per affected Promoter. The bursts the reseed schedules carry no per-Promoter
-    /// annotation that they were triggered by overflow rather than a normal `FsEvent`.
+    /// One emission per Promoter the reseed actually acted on: a `PrefixPending` Promoter whose
+    /// descent probe is already in flight reseeds nothing (the in-flight response reflects the
+    /// post-overflow state) and emits no diagnostic. The bursts the reseed schedules carry no
+    /// per-Promoter annotation that they were triggered by overflow rather than a normal `FsEvent`.
     PromoterReseededForOverflow { promoter: PromoterId },
     /// A `PerStableFile` Sub's loss-window reactions were dropped: a recovery reseed absorbed the
     /// change into the rebased baseline and the per-file path keeps no survival witness (a v1
