@@ -653,6 +653,8 @@ fn mixed_resident_recovery_does_not_duplicate_dynamic_sub() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let s_out = e.step(Input::AttachSub(static_req), Instant::now());

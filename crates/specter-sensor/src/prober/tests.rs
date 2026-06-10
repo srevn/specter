@@ -1719,11 +1719,11 @@ fn certify_absent_chain_leaf_is_authoritative_not_undischarged() {
 // ---------------------------------------------------------------- walk: MatchChain positional
 // pruned walk
 //
-// The positional shape probes membership, not content: chain dirs recurse (`Covered`), the
-// terminus stays unexplored (`Uncovered` dirs / plain `Leaf` files), and everything off the chain
-// is filter-dropped. The pattern's literal prefix need not equal the test anchor path: the walker
-// only consumes anchor-relative depths (`matches_at` / `terminus_depth`); anchor == literal
-// prefix is the engine's attach-time contract, not a walker input.
+// The positional shape probes membership, not content: chain dirs recurse (`Covered`), the terminus
+// stays unexplored (`Uncovered` dirs / plain `Leaf` files), and everything off the chain is
+// filter-dropped. The pattern's literal prefix need not equal the test anchor path: the walker only
+// consumes anchor-relative depths (`matches_at` / `terminus_depth`); anchor == literal prefix is
+// the engine's attach-time contract, not a walker input.
 
 fn chain_cfg(pattern: &str) -> ScanConfig {
     ScanConfig::MatchChain(Arc::new(
@@ -1733,10 +1733,10 @@ fn chain_cfg(pattern: &str) -> ScanConfig {
 
 #[test]
 fn match_chain_walk_prunes_to_chain_and_terminus() {
-    // `app*/log` below the anchor (terminus depth 2). One fixture exercises every drop and
-    // terminus class: a dir terminus (app1/log) with content below it, a file terminus
-    // (app2/log), a depth-2 non-match (app1/note), a mid-chain file matching the glob (app3),
-    // and a depth-1 non-match (junk).
+    // `app*/log` below the anchor (terminus depth 2). One fixture exercises every drop and terminus
+    // class: a dir terminus (app1/log) with content below it, a file terminus (app2/log), a depth-2
+    // non-match (app1/note), a mid-chain file matching the glob (app3), and a depth-1 non-match
+    // (junk).
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("app1/log/deep")).unwrap();
     std::fs::write(tmp.path().join("app1/log/deep/x"), b"x").unwrap();
@@ -1781,9 +1781,9 @@ fn match_chain_walk_prunes_to_chain_and_terminus() {
 #[test]
 fn match_chain_off_chain_filter_drops_stay_authoritative() {
     // Positional filter drops are scope, not blindness: with a `Chains` obligation through one
-    // chain (app1/log), dropping the non-matching sibling `junk` is off-chain and must not
-    // degrade the proof. Doubles as the pin that a dir terminus *on* the obligation chain
-    // discharges by observation at its parent's level — `Uncovered` is not a hole.
+    // chain (app1/log), dropping the non-matching sibling `junk` is off-chain and must not degrade
+    // the proof. Doubles as the pin that a dir terminus *on* the obligation chain discharges by
+    // observation at its parent's level — `Uncovered` is not a hole.
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("app1/log")).unwrap();
     std::fs::create_dir(tmp.path().join("junk")).unwrap();
@@ -1859,11 +1859,11 @@ fn match_chain_mtime_skip_compounds_on_chain_dirs() {
 
 #[test]
 fn match_chain_depth_stays_anchor_relative_when_rooted_below_anchor() {
-    // `/srv/*/data/*/log` (terminus depth 4), anchor = <tmp>, recursion root = <tmp>/app1/data —
-    // a dirty-LCA two levels down. The terminus leaf box1/log sits at anchor-relative depth 4; a
-    // walk-root-relative measurement would test it at depth 2 against the `data` literal and
-    // drop it. Its presence pins that positional indexing keeps the anchor basis under
-    // dirty-LCA-scoped Standard probes.
+    // `/srv/*/data/*/log` (terminus depth 4), anchor = <tmp>, recursion root = <tmp>/app1/data — a
+    // dirty-LCA two levels down. The terminus leaf box1/log sits at anchor-relative depth 4; a
+    // walk-root-relative measurement would test it at depth 2 against the `data` literal and drop
+    // it. Its presence pins that positional indexing keeps the anchor basis under dirty-LCA-scoped
+    // Standard probes.
     let tmp = TempDir::new().unwrap();
     let target = tmp.path().join("app1/data");
     std::fs::create_dir_all(target.join("box1")).unwrap();

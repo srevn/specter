@@ -536,12 +536,12 @@ fn enumerate_dir(
         let entry_depth = u32::try_from(rel.components().count()).unwrap_or(u32::MAX);
         // Pre-`lstat` scope gate — the kind-independent half of the shape's predicate (Subtree:
         // hidden / exclude; MatchChain: the positional segment match). Skipping here saves the
-        // per-dirent `lstat` syscall on out-of-scope subtrees (a `target/` tree in a Cargo
-        // project is thousands of dirents). Agreement invariant with the recursion edge: the
-        // structural depth bound admits every depth `descends_into` reaches (`descends_into(d−1)
-        // ⇒ dirents enumerate at depth d ⇒ the bound admits d`), so a drop here is always a
-        // genuine scope filter, never a depth-bound desync — `note_filter_drop` is the runtime
-        // tripwire for exactly that regression.
+        // per-dirent `lstat` syscall on out-of-scope subtrees (a `target/` tree in a Cargo project
+        // is thousands of dirents). Agreement invariant with the recursion edge: the structural
+        // depth bound admits every depth `descends_into` reaches (`descends_into(d−1) ⇒ dirents
+        // enumerate at depth d ⇒ the bound admits d`), so a drop here is always a genuine scope
+        // filter, never a depth-bound desync — `note_filter_drop` is the runtime tripwire for
+        // exactly that regression.
         if !ctx.config.accepts_structural(rel, entry_depth) {
             completeness = ctx.note_filter_drop(&child_path, completeness);
             continue;
@@ -666,13 +666,13 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    /// Real mounts are untestable in unit CI, so the cross-device pin is the predicate
-    /// composition: `should_recurse` translates the walker's device observation into
-    /// `descends_into`'s `same_device` and the shape applies its policy. A device-mismatched
-    /// child must still descend under `MatchChain` (bounded chain walk; levels may cross mounts)
-    /// while the same mismatch refuses under `Subtree` — and the same-device control proves the
-    /// `child_dev == root_dev` translation isn't polarity-inverted. Lives inline because
-    /// `WalkContext` is module-private by design.
+    /// Real mounts are untestable in unit CI, so the cross-device pin is the predicate composition:
+    /// `should_recurse` translates the walker's device observation into `descends_into`'s
+    /// `same_device` and the shape applies its policy. A device-mismatched child must still descend
+    /// under `MatchChain` (bounded chain walk; levels may cross mounts) while the same mismatch
+    /// refuses under `Subtree` — and the same-device control proves the `child_dev == root_dev`
+    /// translation isn't polarity-inverted. Lives inline because `WalkContext` is module-private by
+    /// design.
     #[test]
     fn should_recurse_device_gate_is_shape_policy() {
         let obligation = ProofObligation::WholeSubtree;

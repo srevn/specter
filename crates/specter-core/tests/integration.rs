@@ -75,6 +75,8 @@ fn shared_profile_via_config_hash() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     ));
 

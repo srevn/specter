@@ -1067,6 +1067,8 @@ impl Engine {
                 settle,
                 log_output,
                 source_promoter: Some(promoter_id),
+                template: None,
+                source_discovery: None,
             },
         );
 

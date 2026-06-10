@@ -62,6 +62,55 @@ pub fn file_leaf(kind: EntryKind, inode: u64) -> LeafEntry {
     LeafEntry::synthetic(kind, 0, UNIX_EPOCH, FsIdentity::synthetic(inode, 0))
 }
 
+/// A `Covered` Dir child wrapping `snap` — the walker-recursed shape [`dir_snap`] cannot express.
+///
+/// Compose with [`dir_snap_nested`] to build the chain-shaped snapshots a `MatchChain` walk
+/// produces: covered chain dirs down to the terminus, `Uncovered` dirs / `Leaf`s at it.
+#[must_use]
+pub const fn covered(snap: Arc<DirSnapshot>) -> ChildEntry {
+    ChildEntry::Dir(DirChild::Covered(snap))
+}
+
+/// An `Uncovered` Dir child identified by `inode` — the recursion-edge refusal shape.
+///
+/// A chain terminus dir or a cross-fs boundary; mirrors [`dir_snap`]'s Dir-child construction as a
+/// standalone entry for [`dir_snap_nested`].
+#[must_use]
+pub const fn uncovered(inode: u64) -> ChildEntry {
+    ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0)))
+}
+
+/// A `Leaf` child of `kind` identified by `inode` — [`file_leaf`] wrapped as a [`ChildEntry`] for
+/// [`dir_snap_nested`].
+#[must_use]
+pub fn leaf(kind: EntryKind, inode: u64) -> ChildEntry {
+    ChildEntry::Leaf(file_leaf(kind, inode))
+}
+
+/// Build a directory snapshot from pre-built children — the nested sibling of [`dir_snap`].
+///
+/// For fixtures that need `Covered` Dir chains, which `dir_snap`'s flat `(name, kind, inode)`
+/// triples cannot express. Children come from [`covered`] / [`uncovered`] / [`leaf`]; the root meta
+/// is the same zero sentinel as [`dir_snap`]'s, so equal children hash equal across calls.
+///
+/// Names must be single path components — same loud-in-dev discipline as [`dir_snap`].
+#[must_use]
+pub fn dir_snap_nested(children: &[(&str, ChildEntry)]) -> Arc<DirSnapshot> {
+    let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
+    for (name, child) in children {
+        debug_assert!(
+            !name.contains('/'),
+            "dir_snap_nested: '{name}' must be a single path component, not a nested path",
+        );
+        map.insert(CompactString::new(name), child.clone());
+    }
+    Arc::new(DirSnapshot::new(
+        DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
+        0,
+        map,
+    ))
+}
+
 /// Build a [`DirtyProvenance`] from `(slot, absolute-path)` pairs — the canonical fixture for the
 /// Standard pre-fire obligation / scope projection (`chains`, `lca_path`) and `pre_fire_target`.
 ///

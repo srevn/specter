@@ -2925,6 +2925,8 @@ fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
             settle: Duration::from_millis(100),
             log_output: false,
             source_promoter: Some(PromoterId::default()),
+            template: None,
+            source_discovery: None,
         },
     );
     let _ = rig
@@ -3146,6 +3148,8 @@ fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
             settle: Duration::from_millis(100),
             log_output: false,
             source_promoter: Some(PromoterId::default()),
+            template: None,
+            source_discovery: None,
         },
     );
     let _ = rig

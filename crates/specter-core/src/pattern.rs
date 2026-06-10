@@ -144,22 +144,22 @@ impl PatternSpec {
         u32::try_from(self.components.len() - self.literal_prefix_len).unwrap_or(u32::MAX)
     }
 
-    /// True iff `segment` matches the positional component at anchor-relative `depth`
-    /// (`1 ..= terminus_depth`). Total: out-of-range depths return `false` — `0` included, since
-    /// the anchor *is* the literal prefix, not a chain position.
+    /// True iff `segment` matches the positional component at anchor-relative `depth` (`1 ..=
+    /// terminus_depth`). Total: out-of-range depths return `false` — `0` included, since the anchor
+    /// *is* the literal prefix, not a chain position.
     ///
-    /// `Literal` compares byte-equality against the bare segment. A literal component never
-    /// carries a glob discriminator (the parser routes those to `Glob`), but glob-special
-    /// non-discriminator bytes such as `\` stay literal here — never escape-interpreted. `Glob`
-    /// runs the compiled matcher against the bare segment, so brace alternation, `?`, and
-    /// character classes apply per-position.
+    /// `Literal` compares byte-equality against the bare segment. A literal component never carries
+    /// a glob discriminator (the parser routes those to `Glob`), but glob-special non-discriminator
+    /// bytes such as `\` stay literal here — never escape-interpreted. `Glob` runs the compiled
+    /// matcher against the bare segment, so brace alternation, `?`, and character classes apply
+    /// per-position.
     #[must_use]
     pub fn matches_at(&self, depth: u32, segment: &str) -> bool {
         if depth == 0 || depth > self.terminus_depth() {
             return false;
         }
-        // In range ⇒ the index lands in `literal_prefix_len ..= components.len() − 1`
-        // (`depth <= terminus_depth = len − lpl`), so the direct index cannot panic.
+        // In range ⇒ the index lands in `literal_prefix_len ..= components.len() − 1` (`depth <=
+        // terminus_depth = len − lpl`), so the direct index cannot panic.
         match &self.components[self.literal_prefix_len + depth as usize - 1] {
             PatternComponent::Literal(lit) => lit.as_str() == segment,
             PatternComponent::Glob(g) => g.matches_path(Path::new(segment)),
@@ -444,8 +444,8 @@ mod tests {
     }
 
     /// `terminus_depth` is the chain length below the literal-prefix anchor — pinned across the
-    /// three prefix shapes (mixed literal/glob, root-anchored `/*`, consecutive globs) so the
-    /// `len − lpl` arithmetic can't silently drift against the parser's decomposition.
+    /// three prefix shapes (mixed literal/glob, root-anchored `/*`, consecutive globs) so the `len
+    /// − lpl` arithmetic can't silently drift against the parser's decomposition.
     #[test]
     fn terminus_depth_measures_chain_below_literal_prefix() {
         let mixed = PatternSpec::parse("/srv/staging/*/data/*/log").expect("valid pattern");
@@ -457,8 +457,8 @@ mod tests {
     }
 
     /// The `Literal` arm of `matches_at` is byte-equality, not glob matching. `\` is glob-special
-    /// but not a parse discriminator, so `a\b` stays a `Literal` component; a glob-interpreting
-    /// arm would escape it to match `ab`. Case and prefix mismatches pin plain equality.
+    /// but not a parse discriminator, so `a\b` stays a `Literal` component; a glob-interpreting arm
+    /// would escape it to match `ab`. Case and prefix mismatches pin plain equality.
     #[test]
     fn matches_at_literal_is_byte_equality_not_glob() {
         let spec = PatternSpec::parse(r"/srv/*/a\b").expect("valid pattern");

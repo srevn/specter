@@ -41,6 +41,8 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -166,6 +168,8 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(req), now);

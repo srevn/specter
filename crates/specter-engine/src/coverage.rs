@@ -716,15 +716,15 @@ mod tests {
     //
     // `covers` reuses its chain walk unchanged — the positional shape only swaps the per-prefix
     // predicate. These pin the covers-specific compositions (cumulative-`rel` depth feeding
-    // `matches_at`; the final prefix's `kind_or_file` collapse meeting the kinded chain rule);
-    // the predicate arms themselves are the `scan_config` grid's.
+    // `matches_at`; the final prefix's `kind_or_file` collapse meeting the kinded chain rule); the
+    // predicate arms themselves are the `scan_config` grid's.
 
     use specter_core::PatternSpec;
     use std::sync::Arc;
 
-    /// Anchor a Profile whose scan shape is the positional chain parsed from `pattern`. The
-    /// anchor segment is the pattern's literal-prefix tail by convention; `covers` itself never
-    /// re-derives that correspondence (it measures depths from `profile.resource`).
+    /// Anchor a Profile whose scan shape is the positional chain parsed from `pattern`. The anchor
+    /// segment is the pattern's literal-prefix tail by convention; `covers` itself never re-derives
+    /// that correspondence (it measures depths from `profile.resource`).
     fn anchor_chain(tree: &mut Tree, segment: &str, pattern: &str) -> (ResourceId, Profile) {
         let r = tree.ensure_root(segment, ResourceRole::User);
         mark(tree, r, ResourceKind::Dir);
@@ -744,10 +744,10 @@ mod tests {
 
     #[test]
     fn match_chain_covers_chain_prefixes_and_stops_below_terminus() {
-        // `/srv/*/data/*/log`, anchored at `srv` (terminus depth 4). Every matching chain prefix
-        // is covered; the slot below the terminus is not — discovery never covers below a
-        // terminus, so a minted Profile owns that subtree without overlap; and a non-matching
-        // sibling rejects at its position.
+        // `/srv/*/data/*/log`, anchored at `srv` (terminus depth 4). Every matching chain prefix is
+        // covered; the slot below the terminus is not — discovery never covers below a terminus, so
+        // a minted Profile owns that subtree without overlap; and a non-matching sibling rejects at
+        // its position.
         let mut tree = Tree::new();
         let (root, profile) = anchor_chain(&mut tree, "srv", "/srv/*/data/*/log");
         let app1 = child(&mut tree, root, "app1", ResourceKind::Dir);
@@ -777,8 +777,8 @@ mod tests {
 
     #[test]
     fn match_chain_covers_file_terminus_via_glob() {
-        // `/srv/*/*.log` — a Glob terminus admitting File targets at depth 2; the terminus
-        // pattern still discriminates.
+        // `/srv/*/*.log` — a Glob terminus admitting File targets at depth 2; the terminus pattern
+        // still discriminates.
         let mut tree = Tree::new();
         let (root, profile) = anchor_chain(&mut tree, "srv", "/srv/*/*.log");
         let app1 = child(&mut tree, root, "app1", ResourceKind::Dir);
@@ -792,10 +792,9 @@ mod tests {
     #[test]
     fn match_chain_rejects_mid_chain_non_dir_and_unclassified_slots() {
         // Mid-chain positions name directories the chain descends through. A File target there is
-        // out of scope — and so is an *unclassified* slot: `covers` collapses Unknown to
-        // File-shape (`kind_or_file`), which composes with the kinded chain rule. The walker can
-        // never pin this case (it always knows the kind post-`lstat`); only `covers` sees
-        // unprobed slots.
+        // out of scope — and so is an *unclassified* slot: `covers` collapses Unknown to File-shape
+        // (`kind_or_file`), which composes with the kinded chain rule. The walker can never pin
+        // this case (it always knows the kind post-`lstat`); only `covers` sees unprobed slots.
         let mut tree = Tree::new();
         let (root, profile) = anchor_chain(&mut tree, "srv", "/srv/*/log");
         let as_file = child(&mut tree, root, "app1", ResourceKind::File);

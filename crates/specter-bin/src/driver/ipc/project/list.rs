@@ -336,6 +336,8 @@ mod tests {
                 settle: Duration::from_millis(100),
                 log_output: false,
                 source_promoter: Some(PromoterId::default()),
+                template: None,
+                source_discovery: None,
             },
         );
         let mut engine = Engine::new();

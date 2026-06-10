@@ -481,6 +481,23 @@ pub(crate) enum WireDiagnostic {
         sub: WireId,
         path: WirePath,
     },
+    DiscoveryMinted {
+        at: WireTime,
+        source: WireId,
+        path: WirePath,
+        kind: WireResourceKind,
+    },
+    DiscoveryFanoutThreshold {
+        at: WireTime,
+        source: WireId,
+        count: usize,
+    },
+    DiscoverySubReaped {
+        at: WireTime,
+        source: WireId,
+        sub: WireId,
+        path: WirePath,
+    },
     InvalidBurstTransition {
         at: WireTime,
         profile: WireId,
@@ -879,6 +896,25 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 sub: WireId::from(*sub),
                 path: WirePath::from(path),
             },
+            Diagnostic::DiscoveryMinted { source, path, kind } => Self::DiscoveryMinted {
+                at: at.clone(),
+                source: WireId::from(*source),
+                path: WirePath::from(path),
+                kind: WireResourceKind::from(*kind),
+            },
+            Diagnostic::DiscoveryFanoutThreshold { source, count } => {
+                Self::DiscoveryFanoutThreshold {
+                    at: at.clone(),
+                    source: WireId::from(*source),
+                    count: *count,
+                }
+            }
+            Diagnostic::DiscoverySubReaped { source, sub, path } => Self::DiscoverySubReaped {
+                at: at.clone(),
+                source: WireId::from(*source),
+                sub: WireId::from(*sub),
+                path: WirePath::from(path),
+            },
             Diagnostic::InvalidBurstTransition {
                 profile,
                 helper,
@@ -965,6 +1001,9 @@ impl WireDiagnostic {
             Self::PromoterEnumerationVanished { .. } => "promoter_enumeration_vanished",
             Self::PromoterEnumerationFailed { .. } => "promoter_enumeration_failed",
             Self::DynamicSubReaped { .. } => "dynamic_sub_reaped",
+            Self::DiscoveryMinted { .. } => "discovery_minted",
+            Self::DiscoveryFanoutThreshold { .. } => "discovery_fanout_threshold",
+            Self::DiscoverySubReaped { .. } => "discovery_sub_reaped",
             Self::InvalidBurstTransition { .. } => "invalid_burst_transition",
             Self::WalkerContractViolated { .. } => "walker_contract_violated",
             Self::Missed { .. } => "_missed",
@@ -1042,6 +1081,9 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "promoter_enumeration_vanished",
     "promoter_enumeration_failed",
     "dynamic_sub_reaped",
+    "discovery_minted",
+    "discovery_fanout_threshold",
+    "discovery_sub_reaped",
     "invalid_burst_transition",
     "walker_contract_violated",
     "_missed",
@@ -1394,6 +1436,8 @@ pub(crate) enum WireDetachReason {
     ConfigDiffIdentityChanged,
     IpcDisabled,
     PromoterReaped,
+    AnchorLost,
+    DiscoverySourceDetached,
 }
 
 impl From<DetachReason> for WireDetachReason {
@@ -1403,6 +1447,8 @@ impl From<DetachReason> for WireDetachReason {
             DetachReason::ConfigDiffIdentityChanged => Self::ConfigDiffIdentityChanged,
             DetachReason::IpcDisabled => Self::IpcDisabled,
             DetachReason::PromoterReaped => Self::PromoterReaped,
+            DetachReason::AnchorLost => Self::AnchorLost,
+            DetachReason::DiscoverySourceDetached => Self::DiscoverySourceDetached,
         }
     }
 }
@@ -1414,6 +1460,8 @@ impl WireDetachReason {
             Self::ConfigDiffIdentityChanged => "config_diff_identity_changed",
             Self::IpcDisabled => "ipc_disabled",
             Self::PromoterReaped => "promoter_reaped",
+            Self::AnchorLost => "anchor_lost",
+            Self::DiscoverySourceDetached => "discovery_source_detached",
         }
     }
 }
@@ -2124,6 +2172,23 @@ mod tests {
                 promoter: WireId(174),
                 sub: WireId(175),
                 path: WirePath::from(Path::new("/tmp/p/dyn")),
+            },
+            WireDiagnostic::DiscoveryMinted {
+                at: at(),
+                source: WireId(190),
+                path: WirePath::from(Path::new("/srv/app1/log")),
+                kind: WireResourceKind::Dir,
+            },
+            WireDiagnostic::DiscoveryFanoutThreshold {
+                at: at(),
+                source: WireId(191),
+                count: 1024,
+            },
+            WireDiagnostic::DiscoverySubReaped {
+                at: at(),
+                source: WireId(192),
+                sub: WireId(193),
+                path: WirePath::from(Path::new("/srv/app1/log")),
             },
             WireDiagnostic::InvalidBurstTransition {
                 at: at(),

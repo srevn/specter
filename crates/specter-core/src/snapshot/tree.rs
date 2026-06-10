@@ -318,8 +318,8 @@ const fn entry_kind_from_flags(is_file: bool, is_symlink: bool) -> EntryKind {
 /// is membership, not content — the pruned walk stops there by design). The walker never mints
 /// `Uncovered` for transient I/O failures (raced unlink, kind-flip, EACCES on the subdir's
 /// `read_dir`); those surface as `Covered(empty_or_partial_arc)` via the walker's `read_dir`
-/// benign-empty contract, distinct from the uncovered variant. The structural consequence: within
-/// a Profile (whose `config_hash` freezes the scan shape and its depth bounds, and whose cross-fs
+/// benign-empty contract, distinct from the uncovered variant. The structural consequence: within a
+/// Profile (whose `config_hash` freezes the scan shape and its depth bounds, and whose cross-fs
 /// identity bifurcates through `fs_id` rather than this variant), the `(Covered, Uncovered)` and
 /// `(Uncovered, Covered)` transitions on the *same* `fs_id` are unreachable.
 ///

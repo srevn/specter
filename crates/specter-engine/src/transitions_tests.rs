@@ -84,6 +84,8 @@ fn engine_with_attached_sub() -> (
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let out = e.step(Input::AttachSub(req), now);
@@ -245,6 +247,8 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -311,6 +315,8 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let now = Instant::now();
@@ -374,6 +380,8 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let now = Instant::now();
@@ -544,6 +552,8 @@ fn kind_mismatched_response_routes_through_finalize_anchor_lost_debug() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let now = Instant::now();
@@ -635,6 +645,8 @@ fn attach_sub_existing_profile_bumps_refcount() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let out = e.step(Input::AttachSub(req), now);
@@ -1010,6 +1022,8 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -1107,6 +1121,8 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -1649,6 +1665,8 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let out = e.step(Input::AttachSub(req), now);
@@ -2244,6 +2262,8 @@ fn effect_emission_carries_diff_when_needs_diff() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let out = e.step(Input::AttachSub(req), now);
@@ -2378,6 +2398,8 @@ fn probe_op_for_file_anchor_is_file_kind() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let now = Instant::now();
@@ -3144,6 +3166,8 @@ fn sensor_overflow_resource_scope_filters_profiles() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let req_b = SubAttachRequest {
@@ -3415,6 +3439,8 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
                 settle: Duration::from_millis(50),
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         }),
         now,
@@ -3437,6 +3463,8 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
                 settle: Duration::from_millis(200),
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         }),
         now,
@@ -3478,6 +3506,8 @@ fn config_diff_added_only_attaches_subs() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let mut diff = specter_core::SubRegistryDiff::default();
@@ -3826,6 +3856,8 @@ fn config_diff_applies_both_halves_in_one_step() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
 
@@ -3974,6 +4006,8 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -4087,6 +4121,8 @@ fn per_stable_file_skips_dir_entries() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -4331,6 +4367,8 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let _ = e.step(Input::AttachSub(req), now);
@@ -4414,6 +4452,8 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let out = e.step(Input::AttachSub(req), Instant::now());
@@ -4440,6 +4480,8 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let _ = e.step(Input::AttachSub(req2), Instant::now());
@@ -4473,6 +4515,8 @@ fn structure_only_profile_has_per_file_fds_false() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
@@ -4799,6 +4843,8 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -4985,6 +5031,8 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
@@ -6698,6 +6746,8 @@ fn attach_per_stable_file_sibling(
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let out = e.step(Input::AttachSub(req), now);
@@ -7044,6 +7094,8 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let out_b = e.step(Input::AttachSub(req_b), now);
@@ -7914,6 +7966,8 @@ mod props {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         };
         let out = e.step(Input::AttachSub(req), now);

@@ -1815,6 +1815,8 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let attach_out = e.step(Input::AttachSub(static_req), Instant::now());
@@ -1888,6 +1890,8 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let out = e.step(Input::AttachSub(req), Instant::now());
@@ -1937,6 +1941,8 @@ fn anchor_terminal_predicate_static_sub_makes_mixed() {
             settle: SETTLE,
             log_output: false,
             source_promoter: None,
+            template: None,
+            source_discovery: None,
         },
     };
     let _ = e.step(Input::AttachSub(req), Instant::now());

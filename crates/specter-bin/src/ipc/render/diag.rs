@@ -106,6 +106,9 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::PromoterEnumerationVanished { at, .. }
         | WireDiagnostic::PromoterEnumerationFailed { at, .. }
         | WireDiagnostic::DynamicSubReaped { at, .. }
+        | WireDiagnostic::DiscoveryMinted { at, .. }
+        | WireDiagnostic::DiscoveryFanoutThreshold { at, .. }
+        | WireDiagnostic::DiscoverySubReaped { at, .. }
         | WireDiagnostic::InvalidBurstTransition { at, .. }
         | WireDiagnostic::WalkerContractViolated { at, .. }
         | WireDiagnostic::Missed { at, .. } => at,
@@ -177,6 +180,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::RebindUnknownSub { .. }
         | W::PromoterDescentFailed { .. }
         | W::PromoterFanoutThreshold { .. }
+        | W::DiscoveryFanoutThreshold { .. }
         | W::PromoterEnumerationFailed { .. }
         | W::InvalidBurstTransition { .. }
         | W::Missed { .. } => Severity::Warn,
@@ -203,7 +207,9 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::PromotionKindObserved { .. }
         | W::PromoterProxyStaleEvent { .. }
         | W::PromoterEnumerationVanished { .. }
-        | W::DynamicSubReaped { .. } => Severity::Info,
+        | W::DynamicSubReaped { .. }
+        | W::DiscoveryMinted { .. }
+        | W::DiscoverySubReaped { .. } => Severity::Info,
     }
 }
 
@@ -533,6 +539,24 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             ..
         } => {
             field(out, sty, "promoter", promoter.0);
+            field(out, sty, "sub", sub.0);
+            field(out, sty, "path", path);
+        }
+        WireDiagnostic::DiscoveryMinted {
+            source, path, kind, ..
+        } => {
+            field(out, sty, "source", source.0);
+            field(out, sty, "path", path);
+            field(out, sty, "kind", kind);
+        }
+        WireDiagnostic::DiscoveryFanoutThreshold { source, count, .. } => {
+            field(out, sty, "source", source.0);
+            field(out, sty, "count", count);
+        }
+        WireDiagnostic::DiscoverySubReaped {
+            source, sub, path, ..
+        } => {
+            field(out, sty, "source", source.0);
             field(out, sty, "sub", sub.0);
             field(out, sty, "path", path);
         }
@@ -958,6 +982,15 @@ mod tests {
             }),
             "dynamic_sub_reaped" => json!({
                 "diag": tag, "at": at, "promoter": id, "sub": id, "path": "/x",
+            }),
+            "discovery_minted" => json!({
+                "diag": tag, "at": at, "source": id, "path": "/x", "kind": "dir",
+            }),
+            "discovery_fanout_threshold" => json!({
+                "diag": tag, "at": at, "source": id, "count": 1024,
+            }),
+            "discovery_sub_reaped" => json!({
+                "diag": tag, "at": at, "source": id, "sub": id, "path": "/x",
             }),
             "invalid_burst_transition" => json!({
                 "diag": tag, "at": at, "profile": id,

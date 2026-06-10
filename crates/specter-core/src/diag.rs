@@ -122,12 +122,22 @@ pub enum SpliceFailureCause {
 ///   anchor-terminal teardown unwound the whole Profile). Pairs with
 ///   [`Diagnostic::DynamicSubReaped`] (Promoter-keyed narration); `SubDetached` is the per-Sub
 ///   lifecycle signal the latter complements.
+/// - [`Self::AnchorLost`]: a discovery-minted Sub's anchor disappeared and the all-dynamic
+///   anchor-terminal teardown unwound its Profile — the honest vocabulary for "the watched path is
+///   gone", with no source-entity reap implied (the discovery template stays live and re-mints on
+///   reappearance). Pairs with [`Diagnostic::DiscoverySubReaped`] (source-keyed, path-carrying
+///   narration).
+/// - [`Self::DiscoverySourceDetached`]: the discovery Sub that minted this Sub was detached, so the
+///   cascade reaped the minted set — the discovery analogue of a Promoter-removal cascade, named
+///   for what actually happened to *this* Sub's source rather than overloading the anchor story.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DetachReason {
     ConfigDiffRemoved,
     ConfigDiffIdentityChanged,
     IpcDisabled,
     PromoterReaped,
+    AnchorLost,
+    DiscoverySourceDetached,
 }
 
 /// Subject of a [`Diagnostic::PromoterClaimPurged`] emission.
@@ -677,6 +687,29 @@ pub enum Diagnostic {
     /// Operator narration; if the path re-materialises a fresh enumeration re-promotes it.
     DynamicSubReaped {
         promoter: PromoterId,
+        sub: SubId,
+        path: Arc<Path>,
+    },
+    /// A discovery template's reconcile pass matched `path` and minted a dynamic Sub for it; `kind`
+    /// is the snapshot's kind for the matched terminus. `source` is the discovery Sub the mint ran
+    /// for. Operator narration — the discovery sibling of [`Self::PromotionKindObserved`].
+    DiscoveryMinted {
+        source: SubId,
+        path: Arc<Path>,
+        kind: ResourceKind,
+    },
+    /// A discovery template's live minted-Sub count (derived from `SubRegistry`) crossed the
+    /// warning threshold for the first time — the pattern is matching more targets than typical
+    /// (likely too broad, e.g. `/*` without further constraint). One-shot per template lifetime;
+    /// the latch on `Sub.fanout_warned` suppresses repeats. The discovery sibling of
+    /// [`Self::PromoterFanoutThreshold`].
+    DiscoveryFanoutThreshold { source: SubId, count: usize },
+    /// A dynamic Sub minted by the discovery template `source` at `path` was reaped because its
+    /// anchor disappeared. Operator narration; if the path re-materialises the next reconcile
+    /// re-mints it (under a fresh [`SubId`]). The discovery sibling of [`Self::DynamicSubReaped`];
+    /// pairs with the per-Sub [`Self::SubDetached`] carrying [`DetachReason::AnchorLost`].
+    DiscoverySubReaped {
+        source: SubId,
         sub: SubId,
         path: Arc<Path>,
     },

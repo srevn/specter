@@ -562,6 +562,23 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             path = %path.display(),
             "dynamic Sub reaped (anchor terminal — Profile all-dynamic teardown)",
         ),
+        Diagnostic::DiscoveryMinted { source, path, kind } => tracing::debug!(
+            ?source,
+            path = %path.display(),
+            ?kind,
+            "discovery reconcile minted a dynamic Sub",
+        ),
+        Diagnostic::DiscoveryFanoutThreshold { source, count } => tracing::warn!(
+            ?source,
+            count,
+            "discovery fanout exceeded warning threshold (consider tightening pattern)",
+        ),
+        Diagnostic::DiscoverySubReaped { source, sub, path } => tracing::debug!(
+            ?source,
+            ?sub,
+            path = %path.display(),
+            "discovery-minted Sub reaped (anchor terminal — Profile all-dynamic teardown)",
+        ),
         Diagnostic::InvalidBurstTransition {
             profile,
             helper,
@@ -606,6 +623,14 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::RebindUnknownSub { sub }
         | D::EffectCompleteForUnknownSub { sub }
         | D::EffectCompleteOutsideAwaiting { sub, .. } => Some(*sub),
+
+        // The discovery trio keys to the *source* template — the entity an operator names in a
+        // per-Sub filter — exactly as the Promoter trio keys to its promoter (unprojectable there
+        // only because `PromoterId` is not a `SubId`). The minted/reaped Sub's own lifecycle
+        // signals (`SubAttached` / `SubDetached`) project their own ids alongside.
+        D::DiscoveryMinted { source, .. }
+        | D::DiscoveryFanoutThreshold { source, .. }
+        | D::DiscoverySubReaped { source, .. } => Some(*source),
 
         D::StaleProbeResponse { .. }
         | D::StaleTimer { .. }

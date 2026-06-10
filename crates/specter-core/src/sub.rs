@@ -35,6 +35,26 @@ pub enum SubAttachAnchor {
     Path(PathBuf),
 }
 
+/// The identity a discovery Sub mints its dynamic Subs with — the second identity a dynamic
+/// `[[watch]]` carries beyond the discovery Sub's own.
+///
+/// A discovery Sub's *reaction* is to mint Subs that run its program on each match; its Profile
+/// fires attachments, never Effects. The Sub's own `program` / `scope` / `log_output` therefore
+/// double as the minted Subs' reaction spec, while this template carries what a plain `SubParams`
+/// cannot: the minted Profiles' identity (the user's scan / events / `max_settle` knobs) and the
+/// minted Subs' debounce. The discovery Sub's own identity is pinned to discovery constants at
+/// config lowering — every user knob lands here instead, so the `[[watch]]` surface keeps its
+/// meaning (`settle` debounces the *reaction*, not the discovery walk).
+#[derive(Clone, Debug)]
+pub struct MintTemplate {
+    /// Minted Profiles' identity (the user's scan / events / `max_settle` knobs).
+    pub identity: ProfileIdentity,
+    /// Minted Subs' debounce (the user's `settle`). Together with `identity.max_settle` it must
+    /// satisfy the config layer's `validate_settle` floor — enforced at lowering and debug-asserted
+    /// by `Profile::new` at every mint.
+    pub settle: Duration,
+}
+
 /// The per-Sub reaction declaration: everything that is *not* Profile identity or the anchor.
 ///
 /// `name` is `CompactString`, moved end to end: `SubSpec.name` (config) is already `CompactString`,
@@ -65,6 +85,19 @@ pub struct SubParams {
     /// for dynamic Subs. Read at the engine's recovery fan-out (`on_anchor_terminal_event`) to
     /// distinguish all-dynamic Profiles (wholesale teardown) from mixed/static ones.
     pub source_promoter: Option<PromoterId>,
+    /// `Some` ⇒ this Sub is a discovery template; its Profile's scan shape is `MatchChain` — the
+    /// two are coupled iff (the engine's attach boundary asserts both directions: a template on a
+    /// non-chain Profile and a plain Sub on a chain Profile are equally unconstructable). Minted
+    /// Subs always carry `None`, so the detach cascade is structurally one level deep — no
+    /// transitive discovery.
+    ///
+    /// `Arc`: every reconcile pass collects the Profile's template set before minting — a refcount
+    /// bump per pass instead of a `ScanConfig` deep-clone, and `SubParams: Clone` stays cheap.
+    pub template: Option<Arc<MintTemplate>>,
+    /// Discovery Sub that minted this Sub — `None` for operator-declared and Promoter-synthesised
+    /// Subs. The discovery sibling of `source_promoter`: read at the engine's recovery fan-out and
+    /// by the detach cascade (`source_discovery == detached id` reaps the minted set).
+    pub source_discovery: Option<SubId>,
 }
 
 /// Public-API request to attach a Sub.
@@ -101,9 +134,10 @@ impl SubAttachRequest {
         }
     }
 
-    /// Build a static (operator-declared) attach request — `source_promoter` is `None`. Dynamic
-    /// (Promoter-synthesised) Subs are built by the engine's `try_promote` via [`Self::from_parts`]
-    /// directly.
+    /// Build a static (operator-declared) attach request — `source_promoter`, `template`, and
+    /// `source_discovery` are all `None`. Dynamic (Promoter-synthesised) Subs are built by the
+    /// engine's `try_promote` via [`Self::from_parts`] directly; discovery templates and their
+    /// minted Subs likewise carry their extra fields through `from_parts`.
     #[must_use]
     pub const fn for_anchor(
         name: CompactString,
@@ -130,6 +164,8 @@ impl SubAttachRequest {
                 settle,
                 log_output,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         )
     }
@@ -247,11 +283,11 @@ impl ClassSet {
     pub const IN_PLACE_WRITES: Self = Self::CONTENT;
 
     /// Classes whose subscription suffices to witness *membership* quiescence over a settle window
-    /// — the criterion for scan shapes whose proof object is a match set
-    /// (`ScanConfig::MatchChain`) rather than a subtree content hash. Membership changes (entries
-    /// appearing / vanishing / renaming at chain positions) are all STRUCTURE point events; no
-    /// in-place-write analog can span the window invisibly, so a STRUCTURE-covering mask folds the
-    /// verdict via `EventsReliable` — N=1, no hash-channel ride.
+    /// — the criterion for scan shapes whose proof object is a match set (`ScanConfig::MatchChain`)
+    /// rather than a subtree content hash. Membership changes (entries appearing / vanishing /
+    /// renaming at chain positions) are all STRUCTURE point events; no in-place-write analog can
+    /// span the window invisibly, so a STRUCTURE-covering mask folds the verdict via
+    /// `EventsReliable` — N=1, no hash-channel ride.
     ///
     /// **HAZARD — the membership witness does not cover leaf content.** A matched *file* terminus
     /// still folds `{mtime, size, leaf_hash}` into the pruned snapshot hash, so an unwatched
@@ -317,6 +353,21 @@ impl std::ops::BitAndAssign for ClassSet {
     }
 }
 
+/// A discovery template's runtime carrier on [`Sub`]: the intent ([`MintTemplate`], frozen at
+/// attach) plus the per-template-lifetime state that has no meaning off a template.
+///
+/// `fanout_warned` is the one-shot fan-out warning latch — `true` once this template's live
+/// minted-Sub count first crossed the warning threshold, so a pathological pattern warns once per
+/// template lifetime. Same discipline as [`Sub::has_fired`]: a plain bool whose lifetime *is* the
+/// slotmap entry's, mutated only through [`SubRegistry::latch_fanout_warning`] (the registry holds
+/// the sole `&mut Sub`). Homing the latch here rather than as a `Sub` field makes a latched
+/// non-template unrepresentable.
+#[derive(Debug)]
+pub struct DiscoveryTemplate {
+    pub spec: Arc<MintTemplate>,
+    pub fanout_warned: bool,
+}
+
 #[derive(Debug)]
 pub struct Sub {
     pub name: CompactString,
@@ -344,6 +395,16 @@ pub struct Sub {
     /// for dynamic Subs spawned by a Promoter's `try_promote`. Read at the engine's recovery
     /// fan-out (`on_anchor_terminal_event`); never mutated post-attach.
     pub source_promoter: Option<PromoterId>,
+    /// `Some` ⇒ this Sub is a discovery template (see [`SubParams::template`] for the ⟺ coupling
+    /// with the `MatchChain` Profile shape). The carried `spec` is never mutated post-attach: a
+    /// template change is an identity change at the config layer (reap + reattach), never an
+    /// in-place rebind — the minted Subs hold `Arc`s of the template's program, so a rebind would
+    /// strand them on stale reaction state. The carrier's `fanout_warned` latch is the one runtime
+    /// field, mutated only through [`SubRegistry::latch_fanout_warning`].
+    pub template: Option<DiscoveryTemplate>,
+    /// Discovery Sub that minted this Sub — the discovery sibling of [`Self::source_promoter`].
+    /// Never mutated post-attach.
+    pub source_discovery: Option<SubId>,
     /// The per-Sub Effect fire history: `true` once this Sub has emitted at least one Effect. Sole
     /// load-bearing reader is the B1 dedup suppress (`!forced && nothing_changed && has_fired` — a
     /// never-fired Sub is its own first emission); the per-Profile SeedDrift filter
@@ -401,6 +462,11 @@ impl Sub {
             needs_diff,
             log_output: params.log_output,
             source_promoter: params.source_promoter,
+            template: params.template.map(|spec| DiscoveryTemplate {
+                spec,
+                fanout_warned: false,
+            }),
+            source_discovery: params.source_discovery,
             has_fired: false,
             last_fired_at: None,
             fire_count: 0,
@@ -413,6 +479,17 @@ impl Sub {
     #[must_use]
     pub const fn profile(&self) -> ProfileId {
         self.profile
+    }
+
+    /// Whether this Sub was synthesised by the engine rather than declared by the operator — a
+    /// Promoter promotion or a discovery mint. The anchor-terminal recovery fan-out reads it to
+    /// split all-dynamic Profiles (wholesale teardown; the source re-mints on reappearance) from
+    /// mixed/static ones (the static Sub's `watch_root_parent` recovery channel keeps the Profile
+    /// alive). A discovery *template* is operator-declared (`false`) — its recovery is the static
+    /// channel, exactly like any other `[[watch]]`.
+    #[must_use]
+    pub const fn is_dynamic(&self) -> bool {
+        self.source_promoter.is_some() || self.source_discovery.is_some()
     }
 }
 
@@ -593,9 +670,14 @@ impl SubRegistry {
     /// [`Self::find_by_name`] in the same step as the rebind, so a stale id is structurally
     /// unexpected; the caller surfaces it via [`crate::Diagnostic::RebindUnknownSub`].
     ///
-    /// `debug_assert!`s pin the `name` / `source_promoter` invariants — a release-mode breach would
-    /// silently rewrite the identifying fields under the registry's `by_name` index, leaving the
-    /// index pointing at the wrong [`SubId`]; the assertions catch the breach at the call site.
+    /// `debug_assert!`s pin the `name` / `source_promoter` / `source_discovery` invariants — a
+    /// release-mode breach would silently rewrite the identifying fields under the registry's
+    /// `by_name` index, leaving the index pointing at the wrong [`SubId`]; the assertions catch the
+    /// breach at the call site. The template assertion is both-`None`, not equality
+    /// (`ProfileIdentity` deliberately has no `Eq`): any field change on a template-bearing spec
+    /// classifies as `modified_identity` (wholesale reap + reattach) at the config diff, never an
+    /// in-place rebind — the minted Subs hold `Arc`s of the template's program, so a rebind would
+    /// strand them on stale reaction state.
     pub fn rebind(&mut self, sub: SubId, new_params: SubParams) -> Option<(Duration, ProfileId)> {
         let s = self.subs.get_mut(sub)?;
         debug_assert_eq!(
@@ -605,6 +687,15 @@ impl SubRegistry {
         debug_assert_eq!(
             s.source_promoter, new_params.source_promoter,
             "rebind cannot change source_promoter (static↔dynamic boundary)",
+        );
+        debug_assert_eq!(
+            s.source_discovery, new_params.source_discovery,
+            "rebind cannot change source_discovery (static↔dynamic boundary)",
+        );
+        debug_assert!(
+            s.template.is_none() && new_params.template.is_none(),
+            "rebind never touches a template-bearing Sub — template changes classify \
+             as modified_identity (reap + reattach), never an in-place rebind",
         );
         let prior_settle = s.settle;
         let profile = s.profile;
@@ -648,6 +739,29 @@ impl SubRegistry {
             .copied()
             .filter(|sid| self.subs.get(*sid).is_some_and(|s| s.has_fired))
             .collect()
+    }
+
+    /// One-shot fan-out warning latch for the discovery template `sub`.
+    ///
+    /// `count` is the caller's *live* minted-Sub tally for this template, derived from registry
+    /// truth — no mirror to drift. Returns `Some(count)` the first time `count` exceeds `threshold`
+    /// and latches [`DiscoveryTemplate::fanout_warned`] so later crossings return `None` — a
+    /// pathological pattern warns once per template lifetime. The check-and-latch is atomic here,
+    /// so the one-shot property is structural rather than a caller convention; the engine reads the
+    /// latch off the template carrier as a pre-gate so it can skip computing `count` once warned. A
+    /// stale `SubId` or a non-template Sub is a silent `None` — the latch lives on the template
+    /// carrier, so the miss mirrors [`Self::mark_fired`]'s died-with-the-entry contract.
+    pub fn latch_fanout_warning(
+        &mut self,
+        sub: SubId,
+        threshold: usize,
+        count: usize,
+    ) -> Option<usize> {
+        let t = self.subs.get_mut(sub)?.template.as_mut()?;
+        (count > threshold && !t.fanout_warned).then(|| {
+            t.fanout_warned = true;
+            count
+        })
     }
 
     /// Whether `profile` has at least one attached `PerStableFile` Sub — the scope test behind the
@@ -760,6 +874,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         );
         assert!(sub.needs_diff);
@@ -776,6 +892,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         );
         assert!(sub.needs_diff);
@@ -792,6 +910,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         );
         assert!(!sub.needs_diff);
@@ -814,6 +934,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         );
         assert!(!sub.has_fired, "fresh Sub: no prior Effect emission");
@@ -838,6 +960,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         ));
         let t0 = Instant::now();
@@ -878,6 +1002,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         ));
         reg.record_dedup_suppressed(sid);
@@ -909,6 +1035,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         ));
         let s2 = reg.insert(Sub::from_request(
@@ -920,6 +1048,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         ));
 
@@ -953,6 +1083,8 @@ mod tests {
                     settle: SETTLE,
                     log_output: false,
                     source_promoter: None,
+                    template: None,
+                    source_discovery: None,
                 },
             )
         };
@@ -999,6 +1131,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         ));
         assert_eq!(reg.find_by_name("build"), Some(id));
@@ -1023,6 +1157,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         ));
         reg.remove(id);
@@ -1046,6 +1182,8 @@ mod tests {
                     settle: SETTLE,
                     log_output: false,
                     source_promoter: source,
+                    template: None,
+                    source_discovery: None,
                 },
             )
         };
@@ -1084,6 +1222,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: Some(PromoterId::default()),
+                template: None,
+                source_discovery: None,
             },
         ));
         assert_eq!(reg.find_by_name("p@/tmp/x"), Some(dynamic_id));
@@ -1112,6 +1252,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         ));
 
@@ -1135,6 +1277,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         );
 
@@ -1167,6 +1311,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         );
         assert!(
@@ -1251,6 +1397,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         ));
         reg.mark_fired(sid);
@@ -1269,6 +1417,8 @@ mod tests {
                 settle: new_settle,
                 log_output: true,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         );
 
@@ -1321,6 +1471,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         ));
         reg.remove(sid).expect("removed");
@@ -1333,6 +1485,8 @@ mod tests {
                 settle: SETTLE,
                 log_output: false,
                 source_promoter: None,
+                template: None,
+                source_discovery: None,
             },
         );
         assert!(res.is_none(), "stale SubId yields None");
