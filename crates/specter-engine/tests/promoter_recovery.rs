@@ -1,19 +1,16 @@
-//! Promoter terminus-loss recovery (the structural mirror of
-//! a Profile's `watch_root_parent` anchor-loss recovery).
+//! Promoter terminus-loss recovery (the structural mirror of a Profile's `watch_root_parent`
+//! anchor-loss recovery).
 //!
-//! These cross-cutting tests drive one [`Engine`] through the full
-//! recovery composition with synthetic [`ProbeResponse`] / [`Input`]
-//! injection: an `Active` Promoter loses its materialised literal
-//! prefix (`terminus`), collapses to `Active { proxies: ∅ }` while the
-//! preserved `prefix_parent` edge survives, and re-enters the shared
-//! descent machine on the parent's *next* structural event — never via
-//! an idle self-probe. The inline `promoter_tests.rs` pins the
-//! individual transitions; this file pins their composition and the
-//! refcount / dedup invariants that only emerge end-to-end.
+//! These cross-cutting tests drive one [`Engine`] through the full recovery composition with
+//! synthetic [`ProbeResponse`] / [`Input`] injection: an `Active` Promoter loses its materialised
+//! literal prefix (`terminus`), collapses to `Active { proxies: ∅ }` while the preserved
+//! `prefix_parent` edge survives, and re-enters the shared descent machine on the parent's *next*
+//! structural event — never via an idle self-probe. The inline `promoter_tests.rs` pins the
+//! individual transitions; this file pins their composition and the refcount / dedup invariants
+//! that only emerge end-to-end.
 //!
-//! Pattern under test is `/srv/app/*`: literal prefix `/srv/app`
-//! (`literal_prefix_len == 3`), terminus `/srv/app`, recovery parent
-//! edge at `/srv`.
+//! Pattern under test is `/srv/app/*`: literal prefix `/srv/app` (`literal_prefix_len == 3`),
+//! terminus `/srv/app`, recovery parent edge at `/srv`.
 
 use compact_str::CompactString;
 use specter_core::testkit::{dir_snap, empty_program};
@@ -31,8 +28,8 @@ use std::time::{Duration, Instant};
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 
-/// `true` iff the Promoter is `Active { proxies: ∅ }` — the exact
-/// terminus-lost discriminant Design W keys recovery on.
+/// `true` iff the Promoter is `Active { proxies: ∅ }` — the exact terminus-lost discriminant Design
+/// W keys recovery on.
 fn active_empty(e: &Engine, pid: PromoterId) -> bool {
     matches!(
         e.promoters().get(pid).map(specter_core::Promoter::state),
@@ -40,8 +37,8 @@ fn active_empty(e: &Engine, pid: PromoterId) -> bool {
     )
 }
 
-/// The proxy resource ids of an `Active` Promoter (panics if
-/// `PrefixPending` — the caller asserts `Active` shape first).
+/// The proxy resource ids of an `Active` Promoter (panics if `PrefixPending` — the caller asserts
+/// `Active` shape first).
 fn proxy_ids(e: &Engine, pid: PromoterId) -> Vec<ResourceId> {
     let other = e.promoters().get(pid).map(specter_core::Promoter::state);
     let Some(PromoterState::Active { proxies, .. }) = other else {
@@ -50,9 +47,8 @@ fn proxy_ids(e: &Engine, pid: PromoterId) -> Vec<ResourceId> {
     proxies.keys().copied().collect()
 }
 
-/// Attach `/srv/app/*` with `/srv/app` pre-placed ⇒ immediate `Active`
-/// with the proxy at the materialised terminus. Returns
-/// `(pid, srv, srv_app)`.
+/// Attach `/srv/app/*` with `/srv/app` pre-placed ⇒ immediate `Active` with the proxy at the
+/// materialised terminus. Returns `(pid, srv, srv_app)`.
 fn attach_active(e: &mut Engine) -> (PromoterId, ResourceId, ResourceId) {
     let srv = pre_place_dir(e, &["srv"]);
     let srv_app = pre_place_dir(e, &["srv", "app"]);
@@ -70,9 +66,9 @@ fn respond_ok(e: &mut Engine, pid: PromoterId, children: &[(&str, EntryKind, u64
     );
 }
 
-/// Drive `Active`-with-proxy → terminus loss: an `FsEvent` at the proxy
-/// arms a fresh enumeration probe, which we answer `Vanished`. Returns
-/// the `Vanished`-step output (for the no-idle-probe assertion).
+/// Drive `Active`-with-proxy → terminus loss: an `FsEvent` at the proxy arms a fresh enumeration
+/// probe, which we answer `Vanished`. Returns the `Vanished`-step output (for the no-idle-probe
+/// assertion).
 fn lose_terminus(
     e: &mut Engine,
     pid: PromoterId,
@@ -107,8 +103,7 @@ fn terminus_loss_then_parent_event_recovers_and_remints_with_no_idle_probe() {
     let mut e = Engine::new();
     let (pid, srv, srv_app) = attach_active(&mut e);
 
-    // Post-attach: proxy at the terminus; the preserved parent edge is
-    // installed at /srv.
+    // Post-attach: proxy at the terminus; the preserved parent edge is installed at /srv.
     assert_eq!(
         proxy_ids(&e, pid),
         vec![srv_app],
@@ -133,8 +128,8 @@ fn terminus_loss_then_parent_event_recovers_and_remints_with_no_idle_probe() {
         "/srv carries exactly the parent-edge contribution",
     );
 
-    // Initial enumeration is empty — no dynamic Sub yet (keeps the
-    // recovery mechanism isolated from the dynamic-Sub lifecycle).
+    // Initial enumeration is empty — no dynamic Sub yet (keeps the recovery mechanism isolated from
+    // the dynamic-Sub lifecycle).
     respond_ok(&mut e, pid, &[]);
     assert!(
         dynamic_subs_of(&e, pid).is_empty(),
@@ -169,9 +164,8 @@ fn terminus_loss_then_parent_event_recovers_and_remints_with_no_idle_probe() {
         "parent-edge contribution preserved across the loss",
     );
 
-    // Scenario 2 — between loss and the parent event the Promoter emits
-    // ZERO probes. This is the property that distinguishes Design W
-    // (event-gated) from a self-triggered idle-probe recovery.
+    // Scenario 2 — between loss and the parent event the Promoter emits ZERO probes. This is the
+    // property that distinguishes Design W (event-gated) from a self-triggered idle-probe recovery.
     assert!(
         !loss_out
             .probe_ops()
@@ -269,9 +263,9 @@ fn terminus_loss_then_parent_event_recovers_and_remints_with_no_idle_probe() {
 }
 
 // ---------------------------------------------------------------------
-// Scenario 3 — cascade: rm -rf terminus AND its parent. Recovery rewinds
-// through the shared owner-polymorphic descent machine; the +2 overlap
-// pins /srv alive while the descent climbs to FS-root and back.
+// Scenario 3 — cascade: rm -rf terminus AND its parent. Recovery rewinds through the shared
+// owner-polymorphic descent machine; the +2 overlap pins /srv alive while the descent climbs to
+// FS-root and back.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -370,18 +364,16 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
 }
 
 // ---------------------------------------------------------------------
-// Scenario 4 — terminus == "/" (literal_prefix_len == 1): no parent, so
-// no PromoterPrefixParent, the recovery carrier never classifies, and
-// start_promoter_prefix_recovery (with its components[lpl-1] read) is
-// structurally unreachable — no from_vec panic path exists.
+// Scenario 4 — terminus == "/" (literal_prefix_len == 1): no parent, so no PromoterPrefixParent,
+// the recovery carrier never classifies, and start_promoter_prefix_recovery (with its
+// components[lpl-1] read) is structurally unreachable — no from_vec panic path exists.
 // ---------------------------------------------------------------------
 
 #[test]
 fn root_terminus_installs_no_parent_edge_and_never_recovers() {
     let mut e = Engine::new();
-    // `/*/data`: components [Literal("/"), Glob("*"), Literal("data")];
-    // literal_prefix_len == 1 ⇒ terminus is "/" (FS-root, always present
-    // ⇒ immediate Active).
+    // `/*/data`: components [Literal("/"), Glob("*"), Literal("data")]; literal_prefix_len == 1 ⇒
+    // terminus is "/" (FS-root, always present ⇒ immediate Active).
     let out = e.step(
         Input::AttachPromoter(promoter_req("rooted", "/*/data")),
         Instant::now(),
@@ -415,8 +407,8 @@ fn root_terminus_installs_no_parent_edge_and_never_recovers() {
     );
     assert!(active_empty(&e, pid));
 
-    // An event at FS-root must NOT classify as a Promoter recovery
-    // (prefix_parent is None) — no PrefixPending re-entry, no panic.
+    // An event at FS-root must NOT classify as a Promoter recovery (prefix_parent is None) — no
+    // PrefixPending re-entry, no panic.
     let ev_out = e.step(
         Input::FsEvent {
             resource: fs_root,
@@ -436,11 +428,10 @@ fn root_terminus_installs_no_parent_edge_and_never_recovers() {
         e.promoters().get(pid).unwrap().prefix_parent().is_none(),
         "prefix_parent stays None — start_promoter_prefix_recovery is unreachable",
     );
-    // The event went nowhere (benign no-op: FS-root carries no
-    // contribution once the synthetic Vanish removed the sole proxy, so
-    // it is reported unwatched / no-consumer — never a recovery). The
-    // exact benign variant is incidental; what matters is that NO
-    // recovery diagnostic and NO PromoterPrefixParent purge fired.
+    // The event went nowhere (benign no-op: FS-root carries no contribution once the synthetic
+    // Vanish removed the sole proxy, so it is reported unwatched / no-consumer — never a recovery).
+    // The exact benign variant is incidental; what matters is that NO recovery diagnostic and NO
+    // PromoterPrefixParent purge fired.
     assert!(
         ev_out.diagnostics.iter().all(|d| matches!(
             d,
@@ -454,8 +445,8 @@ fn root_terminus_installs_no_parent_edge_and_never_recovers() {
 }
 
 // ---------------------------------------------------------------------
-// Scenario 7 — repeated loss → recovery cycles do not leak the
-// PromoterPrefixParent refcount (the recovery-idempotence guard).
+// Scenario 7 — repeated loss → recovery cycles do not leak the PromoterPrefixParent refcount (the
+// recovery-idempotence guard).
 // ---------------------------------------------------------------------
 
 #[test]
@@ -510,8 +501,8 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
 }
 
 // ---------------------------------------------------------------------
-// Scenario 8 — reap_promoter releases the preserved prefix_parent
-// contribution; the parent slot reaps if otherwise unheld.
+// Scenario 8 — reap_promoter releases the preserved prefix_parent contribution; the parent slot
+// reaps if otherwise unheld.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -559,9 +550,9 @@ fn reap_promoter_releases_prefix_parent_contribution() {
 }
 
 // ---------------------------------------------------------------------
-// Scenario 6 — all-dynamic: terminus loss + the promoted anchor's own
-// anchor-terminal reaps the dynamic Sub's Profile; recovery then mints
-// a genuinely fresh Sub (the derived gate is false — nothing attached).
+// Scenario 6 — all-dynamic: terminus loss + the promoted anchor's own anchor-terminal reaps the
+// dynamic Sub's Profile; recovery then mints a genuinely fresh Sub (the derived gate is false —
+// nothing attached).
 // ---------------------------------------------------------------------
 
 #[test]
@@ -575,8 +566,8 @@ fn all_dynamic_recovery_remints_after_profile_reap() {
     assert_eq!(first.len(), 1, "one dynamic Sub minted");
     let (foo_anchor, first_sid) = first.into_iter().next().unwrap();
 
-    // Anchor-terminal at /srv/app/foo: all-dynamic ⇒ Profile reaped,
-    // dynamic Sub detached (DynamicSubReaped).
+    // Anchor-terminal at /srv/app/foo: all-dynamic ⇒ Profile reaped, dynamic Sub detached
+    // (DynamicSubReaped).
     let at_out = e.step(
         Input::FsEvent {
             resource: foo_anchor,
@@ -630,10 +621,9 @@ fn all_dynamic_recovery_remints_after_profile_reap() {
 }
 
 // ---------------------------------------------------------------------
-// Scenario 5 — mixed co-resident: a static Sub keeps the promoted
-// anchor's Profile alive across terminus loss, so recovery
-// re-enumeration's derived gate finds the still-attached dynamic Sub
-// and does NOT mint a duplicate.
+// Scenario 5 — mixed co-resident: a static Sub keeps the promoted anchor's Profile alive across
+// terminus loss, so recovery re-enumeration's derived gate finds the still-attached dynamic Sub and
+// does NOT mint a duplicate.
 // ---------------------------------------------------------------------
 
 #[test]
@@ -647,9 +637,8 @@ fn mixed_resident_recovery_does_not_duplicate_dynamic_sub() {
     let (foo_anchor, dyn_sid) = promoted.into_iter().next().unwrap();
     let profile = e.subs().get(dyn_sid).expect("dynamic Sub alive").profile();
 
-    // A static Sub co-resident at the same anchor joins the Profile via
-    // dedup — it keeps the Profile (and hence the dynamic Sub) alive
-    // across terminus loss.
+    // A static Sub co-resident at the same anchor joins the Profile via dedup — it keeps the
+    // Profile (and hence the dynamic Sub) alive across terminus loss.
     let static_req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(foo_anchor),
         identity: ProfileIdentity {
@@ -675,8 +664,8 @@ fn mixed_resident_recovery_does_not_duplicate_dynamic_sub() {
         "static Sub dedups onto the dynamic Sub's Profile",
     );
 
-    // Terminus loss — the dynamic Sub is NOT reaped here (it reaps only
-    // via its own anchor-terminal, and the static Sub pins the Profile).
+    // Terminus loss — the dynamic Sub is NOT reaped here (it reaps only via its own
+    // anchor-terminal, and the static Sub pins the Profile).
     let _ = lose_terminus(&mut e, pid, srv_app);
     assert!(active_empty(&e, pid));
     assert!(

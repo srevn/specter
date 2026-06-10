@@ -1,16 +1,13 @@
-//! End-to-end pin: pipe drain must not deadlock when stage 0's child
-//! blocks indefinitely.
+//! End-to-end pin: pipe drain must not deadlock when stage 0's child blocks indefinitely.
 //!
-//! The parallel `PipeWaiter` (one OS thread per stage) lets stage 1's
-//! prompt failure fire the cascade SIGTERM that unblocks stage 0. A
-//! sequential waiter would head-of-line block on stage 0 and hang
-//! indefinitely waiting for its `sleep 60` to return.
+//! The parallel `PipeWaiter` (one OS thread per stage) lets stage 1's prompt failure fire the
+//! cascade SIGTERM that unblocks stage 0. A sequential waiter would head-of-line block on stage 0
+//! and hang indefinitely waiting for its `sleep 60` to return.
 //!
 //! Pairs with the in-crate unit test
-//! `pipe::tests::blocked_first_stage_unblocked_by_cascade_does_not_deadlock`,
-//! which pins the same property against synthetic `BlockingWaiter`s
-//! at the `PipeWaiter` abstraction layer. This test exercises the
-//! property end-to-end through `OsSpawner` + real children.
+//! `pipe::tests::blocked_first_stage_unblocked_by_cascade_does_not_deadlock`, which pins the same
+//! property against synthetic `BlockingWaiter`s at the `PipeWaiter` abstraction layer. This test
+//! exercises the property end-to-end through `OsSpawner` + real children.
 
 mod common;
 
@@ -23,9 +20,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// Build a single-op program whose `SpawnBody` is a Pipe of the given
-/// literal-argv stages. `on_ok = Escape`, `on_failed = Terminate` —
-/// the test only cares about the pipe's aggregated outcome.
+/// Build a single-op program whose `SpawnBody` is a Pipe of the given literal-argv stages. `on_ok =
+/// Escape`, `on_failed = Terminate` — the test only cares about the pipe's aggregated outcome.
 fn pipe_program(stages: Vec<Vec<String>>) -> Arc<ActionProgram> {
     assert!(stages.len() >= 2, "pipe_program requires >=2 stages");
     let action_stages: Arc<[ExecAction]> = stages
@@ -48,17 +44,14 @@ fn pipe_program(stages: Vec<Vec<String>>) -> Arc<ActionProgram> {
     Arc::new(b.build().unwrap())
 }
 
-/// Stage 0 blocks (`sleep 60`); stage 1 fails after ~2s. The parallel
-/// `PipeWaiter` must report `Failed` well under the 60-second sleep
-/// window, demonstrating that cascade SIGTERM from stage 1's report
-/// reaches stage 0's still-running child.
+/// Stage 0 blocks (`sleep 60`); stage 1 fails after ~2s. The parallel `PipeWaiter` must report
+/// `Failed` well under the 60-second sleep window, demonstrating that cascade SIGTERM from stage
+/// 1's report reaches stage 0's still-running child.
 ///
-/// **Outcome aggregation pins.** Stage 0 (sleep, no stdout) ignores
-/// SIGPIPE — it exits only because the cascade SIGTERM lands on it,
-/// so its outcome is `Failed { signal: Some(15) }`. Stage 1 exits
-/// cleanly with `Failed { exit_code: Some(7) }`. Spawn-order
-/// aggregation (last non-zero exit / first observed signal) yields
-/// `exit_code = 7` and `signal = 15`.
+/// **Outcome aggregation pins.** Stage 0 (sleep, no stdout) ignores SIGPIPE — it exits only because
+/// the cascade SIGTERM lands on it, so its outcome is `Failed { signal: Some(15) }`. Stage 1 exits
+/// cleanly with `Failed { exit_code: Some(7) }`. Spawn-order aggregation (last non-zero exit /
+/// first observed signal) yields `exit_code = 7` and `signal = 15`.
 #[test]
 fn pipe_drain_does_not_block_on_hung_stage_0() {
     let mut harness = Harness::new(nz(2));
@@ -77,10 +70,9 @@ fn pipe_drain_does_not_block_on_hung_stage_0() {
     ));
 
     let start = Instant::now();
-    // Generous upper bound — stage 1 exits at ~2s; the cascade
-    // SIGTERM should make stage 0 exit within scheduling slop.
-    // Anything anywhere near 60s indicates the sequential deadlock
-    // would have hit.
+    // Generous upper bound — stage 1 exits at ~2s; the cascade SIGTERM should make stage 0 exit
+    // within scheduling slop. Anything anywhere near 60s indicates the sequential deadlock would
+    // have hit.
     let inputs = harness.wait_for_effect_completes(1, Duration::from_secs(30));
     let elapsed = start.elapsed();
     assert!(
@@ -107,11 +99,9 @@ fn pipe_drain_does_not_block_on_hung_stage_0() {
     harness.shutdown();
 }
 
-/// Happy-path baseline. A pipe of two cleanly-completing stages
-/// (`echo hi | cat`) reports `Ok` — pins that the parallel design
-/// doesn't break the no-failure case. The kernel's SIGPIPE chain on
-/// stage 0's natural exit propagates EOF to stage 1's stdin without
-/// the cascade firing.
+/// Happy-path baseline. A pipe of two cleanly-completing stages (`echo hi | cat`) reports `Ok` —
+/// pins that the parallel design doesn't break the no-failure case. The kernel's SIGPIPE chain on
+/// stage 0's natural exit propagates EOF to stage 1's stdin without the cascade firing.
 #[test]
 fn pipe_drain_all_ok_completes_ok() {
     let mut harness = Harness::new(nz(2));

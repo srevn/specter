@@ -15,11 +15,10 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Build a `setup` closure that rewrites a PerFile [`Effect`]'s segment
-/// so the resolver-derived `relative()` / `target_path()` reflect `seg`.
-/// `relative()` is the [`EffectTarget::PerFile`] segment, so the
-/// closure rebuilds the target in place, preserving the fixture's
-/// resource and (empty) diff.
+/// Build a `setup` closure that rewrites a PerFile [`Effect`]'s segment so the resolver-derived
+/// `relative()` / `target_path()` reflect `seg`. `relative()` is the [`EffectTarget::PerFile`]
+/// segment, so the closure rebuilds the target in place, preserving the fixture's resource and
+/// (empty) diff.
 fn set_relative(seg: &'static str) -> impl FnOnce(&mut Effect) {
     move |e: &mut Effect| {
         let resource = e.sort_key().1;
@@ -32,22 +31,18 @@ fn set_relative(seg: &'static str) -> impl FnOnce(&mut Effect) {
     }
 }
 
-/// Spawn a script that writes the given env-var to a captured file, then
-/// asserts on its content.
+/// Spawn a script that writes the given env-var to a captured file, then asserts on its content.
 ///
-/// The actuator-side resolver derives every `SPECTER_*` env value from the
-/// substitution-domain projection on [`Effect`] — there is no `Effect.env`
-/// field to push pairs onto. To assert "the child sees `name=expected`"
-/// the helper takes a `setup` closure that mutates the resolver's
-/// *inputs* (e.g., set `e.target_relative` to assert on `SPECTER_PATH`,
-/// since `target_path` is now derived as `anchor_path.join(target_relative)`);
-/// the resolver's render-time output is what the spawned process observes
-/// via `getenv`.
+/// The actuator-side resolver derives every `SPECTER_*` env value from the substitution-domain
+/// projection on [`Effect`] — there is no `Effect.env` field to push pairs onto. To assert "the
+/// child sees `name=expected`" the helper takes a `setup` closure that mutates the resolver's
+/// *inputs* (e.g., set `e.target_relative` to assert on `SPECTER_PATH`, since `target_path` is now
+/// derived as `anchor_path.join(target_relative)`); the resolver's render-time output is what the
+/// spawned process observes via `getenv`.
 ///
-/// `expected_for` derives the expected value from the spawn cwd so that
-/// `SPECTER_ANCHOR` (which doubles as cwd) can assert against the
-/// tempdir's actual path; cases whose expected value is independent of
-/// the cwd ignore the argument.
+/// `expected_for` derives the expected value from the spawn cwd so that `SPECTER_ANCHOR` (which
+/// doubles as cwd) can assert against the tempdir's actual path; cases whose expected value is
+/// independent of the cwd ignore the argument.
 fn assert_env_var_received(
     name: &str,
     expected_for: impl FnOnce(&Path) -> String,
@@ -85,12 +80,10 @@ fn assert_env_var_received(
 #[test]
 fn child_receives_specter_path() {
     // `SPECTER_PATH` mirrors the resolver-derived `target_path` —
-    // `anchor_path.join(target_relative)`. The fixture defaults
-    // `anchor_path = cwd` (the tempdir) and `target_relative = ""`, so
-    // setting `target_relative = "src/a.c"` produces
-    // `SPECTER_PATH = <tempdir>/src/a.c`. The cwd-derivation
-    // `expected_for` keeps the assertion symmetrical with the actual
-    // join the resolver performs.
+    // `anchor_path.join(target_relative)`. The fixture defaults `anchor_path = cwd` (the tempdir)
+    // and `target_relative = ""`, so setting `target_relative = "src/a.c"` produces `SPECTER_PATH =
+    // <tempdir>/src/a.c`. The cwd-derivation `expected_for` keeps the assertion symmetrical with
+    // the actual join the resolver performs.
     assert_env_var_received(
         "SPECTER_PATH",
         |dir| dir.join("src/a.c").to_string_lossy().into_owned(),
@@ -100,11 +93,10 @@ fn child_receives_specter_path() {
 
 #[test]
 fn child_receives_specter_anchor() {
-    // `SPECTER_ANCHOR` mirrors `Effect.anchor_path`, which doubles as
-    // the spawn cwd. Asserting against an arbitrary string (the prior
-    // helper's "/abs/proj" placeholder) would set `cwd = /abs/proj`
-    // and the spawn would fail with ENOENT. The integration here
-    // verifies the cwd-anchor coupling end-to-end.
+    // `SPECTER_ANCHOR` mirrors `Effect.anchor_path`, which doubles as the spawn cwd. Asserting
+    // against an arbitrary string (the prior helper's "/abs/proj" placeholder) would set `cwd =
+    // /abs/proj` and the spawn would fail with ENOENT. The integration here verifies the cwd-anchor
+    // coupling end-to-end.
     assert_env_var_received(
         "SPECTER_ANCHOR",
         |dir| dir.to_string_lossy().into_owned(),
@@ -141,14 +133,12 @@ fn child_receives_specter_forced_zero() {
 
 #[test]
 fn child_receives_specter_created_newline_separated() {
-    // End-to-end witness for the diff-derived list env vars: a populated
-    // `Effect.diff.created` lands in the spawned child's `SPECTER_CREATED`
-    // newline-joined, no trailing newline. Resolver-level rendering is
-    // pinned by the unit tests; this test pins that the
-    // `cmd.envs(env.iter()...)` plumbing in `OsSpawner` propagates the
-    // value byte-for-byte through `execve`. The four sibling vars
-    // (`DELETED`/`MODIFIED`/`RENAMED_FROM`/`RENAMED_TO`) ride the same
-    // plumbing — no separate integration test is justified.
+    // End-to-end witness for the diff-derived list env vars: a populated `Effect.diff.created`
+    // lands in the spawned child's `SPECTER_CREATED` newline-joined, no trailing newline.
+    // Resolver-level rendering is pinned by the unit tests; this test pins that the
+    // `cmd.envs(env.iter()...)` plumbing in `OsSpawner` propagates the value byte-for-byte through
+    // `execve`. The four sibling vars (`DELETED`/`MODIFIED`/`RENAMED_FROM`/`RENAMED_TO`) ride the
+    // same plumbing — no separate integration test is justified.
     let dir = tempfile::tempdir().expect("tempdir");
     let out_path = dir.path().join("out");
     let cwd = dir.path().to_path_buf();
@@ -219,9 +209,8 @@ fn child_receives_specter_diff_path_when_diff_present() {
         }],
         ..Default::default()
     });
-    // Use a per-test unique correlation to avoid colliding on the
-    // tmp file path with parallel-running tests in the same binary
-    // (path = `specter-{pid}-{corr}.diff`; pid is shared per-binary).
+    // Use a per-test unique correlation to avoid colliding on the tmp file path with parallel-running
+    // tests in the same binary (path = `specter-{pid}-{corr}.diff`; pid is shared per-binary).
     let mut e = perfile_effect(
         1,
         1,
@@ -261,9 +250,8 @@ fn child_does_not_receive_specter_diff_path_without_diff() {
         out = out_path.display()
     );
     let mut h = Harness::new(nz(2));
-    // Subtree is the only shape that can carry no diff: a PerFile
-    // effect's diff is mandatory, so "no diff" is exercised here via a
-    // diff-less Subtree fire.
+    // Subtree is the only shape that can carry no diff: a PerFile effect's diff is mandatory, so
+    // "no diff" is exercised here via a diff-less Subtree fire.
     let e = subtree_effect(1, 1, 1, vec!["/bin/sh".into(), "-c".into(), script], cwd);
     h.submit(e);
     let completions = h.wait_for_effect_completes(1, Duration::from_secs(5));
@@ -316,10 +304,9 @@ fn tmp_diff_file_cleaned_up_after_completion() {
     h.shutdown();
     let recorded_path = std::fs::read_to_string(&path_record).expect("read path");
     assert!(!recorded_path.is_empty(), "child captured a path");
-    // Wait briefly for the wait thread's cleanup. The shutdown above
-    // joins the controller, but the wait thread runs cleanup before
-    // sending Reaped, so by the time EffectComplete arrives the file
-    // is gone.
+    // Wait briefly for the wait thread's cleanup. The shutdown above joins the controller, but the
+    // wait thread runs cleanup before sending Reaped, so by the time EffectComplete arrives the
+    // file is gone.
     let p = Path::new(&recorded_path);
     assert!(!p.exists(), "tmp file removed after wait");
 }

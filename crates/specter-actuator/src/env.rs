@@ -1,43 +1,35 @@
 //! Captured operator environment for `${env.<NAME>}` resolution.
 //!
-//! `EnvSnapshot::capture` walks `std::env::vars_os` once at actuator
-//! startup and freezes the result into a sorted map. The snapshot lives
-//! on `ActuatorState` as `Arc<EnvSnapshot>` and is handed to the
-//! resolver alongside every per-step resolve call.
+//! `EnvSnapshot::capture` walks `std::env::vars_os` once at actuator startup and freezes the result
+//! into a sorted map. The snapshot lives on `ActuatorState` as `Arc<EnvSnapshot>` and is handed to
+//! the resolver alongside every per-step resolve call.
 //!
 //! # Why a snapshot, not live reads
 //!
 //! Two reasons:
 //!
-//! 1. **Determinism (scoped).** Two spawn-time resolves of the same
-//!    `${env.X}` placeholder, within one Effect's plan, must return
-//!    the same value — even if a separate thread (or, in theory, the
-//!    operator) mutates the process env between steps. A snapshot
-//!    pins "what env did Specter start under" as the authoritative
-//!    answer for **specter-mediated placeholder reads**. It is *not*
-//!    a guarantee about what the child process sees when it reads env
-//!    directly — see [`crate::os`]'s `build_command` for the additive
-//!    parent-env contract; a child shell reading `$HOME` reads the
+//! 1. **Determinism (scoped).** Two spawn-time resolves of the same `${env.X}` placeholder, within
+//!    one Effect's plan, must return the same value — even if a separate thread (or, in theory, the
+//!    operator) mutates the process env between steps. A snapshot pins "what env did Specter start
+//!    under" as the authoritative answer for **specter-mediated placeholder reads**. It is *not* a
+//!    guarantee about what the child process sees when it reads env directly — see [`crate::os`]'s
+//!    `build_command` for the additive parent-env contract; a child shell reading `$HOME` reads the
 //!    daemon's live env, not the snapshot.
-//! 2. **Cheap reads.** `std::env::vars_os` allocates and re-walks the
-//!    OS env block on every call; per-step resolves would re-pay that
-//!    cost. The snapshot is read with a `BTreeMap::get` plus a string
-//!    borrow — no allocation on the lookup path.
+//! 2. **Cheap reads.** `std::env::vars_os` allocates and re-walks the OS env block on every call;
+//!    per-step resolves would re-pay that cost. The snapshot is read with a `BTreeMap::get` plus a
+//!    string borrow — no allocation on the lookup path.
 //!
-//! Specter never `setenv`s internally, so the snapshot doesn't go stale
-//! under our own code. A future SIGHUP-reload pipeline would capture a
-//! fresh `EnvSnapshot` and replace `ActuatorState.env_snapshot` from the
-//! controller thread; no swap point exists today, reload is v2 work.
+//! Specter never `setenv`s internally, so the snapshot doesn't go stale under our own code. A
+//! future SIGHUP-reload pipeline would capture a fresh `EnvSnapshot` and replace
+//! `ActuatorState.env_snapshot` from the controller thread; no swap point exists today, reload is
+//! v2 work.
 //!
-//! Non-UTF-8 entries are dropped at capture time and logged at
-//! `tracing::warn!`. The lexer [`crate::spawner`]'s upstream grammar
-//! guarantees placeholder names are ASCII (`[A-Za-z_][A-Za-z0-9_]*`),
-//! and the resolver compares the placeholder name byte-for-byte against
-//! the captured key — UTF-8 lossy keys would never match a well-formed
-//! placeholder, so dropping them costs no behaviour. The warn ensures
-//! an operator with a non-UTF-8 `LANG` (or similar) sees one diagnostic
-//! line at startup rather than chasing an opaque `UnsetEnvVar` resolver
-//! failure later.
+//! Non-UTF-8 entries are dropped at capture time and logged at `tracing::warn!`. The lexer
+//! [`crate::spawner`]'s upstream grammar guarantees placeholder names are ASCII
+//! (`[A-Za-z_][A-Za-z0-9_]*`), and the resolver compares the placeholder name byte-for-byte against
+//! the captured key — UTF-8 lossy keys would never match a well-formed placeholder, so dropping them
+//! costs no behaviour. The warn ensures an operator with a non-UTF-8 `LANG` (or similar) sees one
+//! diagnostic line at startup rather than chasing an opaque `UnsetEnvVar` resolver failure later.
 
 use compact_str::CompactString;
 use std::collections::BTreeMap;
@@ -45,36 +37,31 @@ use std::ffi::OsString;
 
 /// Frozen snapshot of the operator environment at actuator startup.
 ///
-/// Backed by [`BTreeMap<CompactString, CompactString>`] — alphabetical
-/// iteration is incidentally useful for diagnostics; the hot path is
-/// [`Self::get`].
+/// Backed by [`BTreeMap<CompactString, CompactString>`] — alphabetical iteration is incidentally
+/// useful for diagnostics; the hot path is [`Self::get`].
 #[derive(Debug)]
 pub(crate) struct EnvSnapshot {
     map: BTreeMap<CompactString, CompactString>,
 }
 
 impl EnvSnapshot {
-    /// Capture the current process environment. Called once per
-    /// actuator at startup. Non-UTF-8 keys or values are skipped.
+    /// Capture the current process environment. Called once per actuator at startup. Non-UTF-8 keys
+    /// or values are skipped.
     #[must_use]
     pub fn capture() -> Self {
         Self::from_vars_os(std::env::vars_os())
     }
 
-    /// Build a snapshot from any iterator of `(OsString, OsString)`
-    /// pairs — the same shape `std::env::vars_os` yields. Non-UTF-8
-    /// keys or values are dropped, with one `tracing::warn!` line per
-    /// dropped entry naming the offending key (rendered lossily for the
-    /// key-side drop; UTF-8 key + non-UTF-8 value renders the key as-is).
-    /// One-shot at startup; bounded by env size.
+    /// Build a snapshot from any iterator of `(OsString, OsString)` pairs — the same shape
+    /// `std::env::vars_os` yields. Non-UTF-8 keys or values are dropped, with one `tracing::warn!`
+    /// line per dropped entry naming the offending key (rendered lossily for the key-side drop; UTF-8
+    /// key + non-UTF-8 value renders the key as-is). One-shot at startup; bounded by env size.
     ///
-    /// Production [`Self::capture`] delegates here; tests reach for
-    /// this directly when they need to exercise the UTF-8 filter
-    /// deterministically (without touching the ambient process env,
-    /// which would require `unsafe std::env::set_var` and is racy
-    /// across single-process test runners). `from_map` is the lighter
-    /// test fixture for the common case where the test doesn't care
-    /// about the filter and only needs ASCII keys.
+    /// Production [`Self::capture`] delegates here; tests reach for this directly when they need to
+    /// exercise the UTF-8 filter deterministically (without touching the ambient process env, which
+    /// would require `unsafe std::env::set_var` and is racy across single-process test runners).
+    /// `from_map` is the lighter test fixture for the common case where the test doesn't care about
+    /// the filter and only needs ASCII keys.
     #[must_use]
     fn from_vars_os<I>(vars: I) -> Self
     where
@@ -82,9 +69,8 @@ impl EnvSnapshot {
     {
         let mut map = BTreeMap::new();
         for (k, v) in vars {
-            // Consume the key first; on success keep the owned `String`
-            // alive across the value check so a value-side drop still
-            // names the key.
+            // Consume the key first; on success keep the owned `String` alive across the value
+            // check so a value-side drop still names the key.
             let k_str = match k.into_string() {
                 Ok(s) => s,
                 Err(bad_key) => {
@@ -112,14 +98,13 @@ impl EnvSnapshot {
 
     /// Test fixture: build a snapshot from an iterator of pairs.
     ///
-    /// Keys deduplicate via [`BTreeMap`]: a later pair with the same
-    /// key wins, mirroring `std::env::set_var` semantics.
+    /// Keys deduplicate via [`BTreeMap`]: a later pair with the same key wins, mirroring
+    /// `std::env::set_var` semantics.
     ///
-    /// Gated to `cfg(test)` because every call site lives inside
-    /// `#[cfg(test)]` modules within this crate — exposing the
-    /// fixture on a production build would warn `dead_code` without
-    /// the gate. Tests below this module and in `pool::state::tests`
-    /// see this via the same `cfg(test)` predicate.
+    /// Gated to `cfg(test)` because every call site lives inside `#[cfg(test)]` modules within this
+    /// crate — exposing the fixture on a production build would warn `dead_code` without the gate.
+    /// Tests below this module and in `pool::state::tests` see this via the same `cfg(test)`
+    /// predicate.
     #[cfg(test)]
     #[must_use]
     pub fn from_map<I, K, V>(entries: I) -> Self
@@ -167,21 +152,17 @@ mod tests {
         assert!(snap.get("ANYTHING").is_none());
     }
 
-    /// Exercise the production [`EnvSnapshot::from_vars_os`] pipeline
-    /// (which [`EnvSnapshot::capture`] delegates to) on synthetic
-    /// `(OsString, OsString)` pairs. Pins three behaviors at once:
+    /// Exercise the production [`EnvSnapshot::from_vars_os`] pipeline (which [`EnvSnapshot::capture`]
+    /// delegates to) on synthetic `(OsString, OsString)` pairs. Pins three behaviors at once:
     ///
     /// - UTF-8 keys and values round-trip through the snapshot.
-    /// - Non-UTF-8 keys are silently dropped (matches the module
-    ///   docstring: the lexer's grammar guarantees ASCII placeholder
-    ///   names, so a non-UTF-8 key would never match a placeholder).
-    /// - Non-UTF-8 values are silently dropped for the same reason —
-    ///   the rendered argv slot would be replacement-char garbage
-    ///   regardless.
+    /// - Non-UTF-8 keys are silently dropped (matches the module docstring: the lexer's grammar
+    ///   guarantees ASCII placeholder names, so a non-UTF-8 key would never match a placeholder).
+    /// - Non-UTF-8 values are silently dropped for the same reason — the rendered argv slot would
+    ///   be replacement-char garbage regardless.
     ///
-    /// Avoids `unsafe std::env::set_var` (Rust 2024 marks it unsafe
-    /// due to inherent data races against concurrent `getenv`) by
-    /// driving the pipeline with synthetic input instead of the
+    /// Avoids `unsafe std::env::set_var` (Rust 2024 marks it unsafe due to inherent data races
+    /// against concurrent `getenv`) by driving the pipeline with synthetic input instead of the
     /// ambient process env.
     #[test]
     fn from_vars_os_round_trips_utf8_and_filters_non_utf8() {

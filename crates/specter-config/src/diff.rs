@@ -8,28 +8,23 @@ use std::collections::BTreeMap;
 
 /// Compute the full hot-reload diff between two validated [`Config`]s.
 ///
-/// A pure function of `(old, new)` — no id maps. The returned
-/// [`WatchRegistryDiff`] is **name-keyed**: `removed` carries operator
-/// names; `added` / `modified` carry pre-id requests whose name lives
-/// inside the request. The engine resolves name → id at apply time
-/// through its own authoritative `by_name` index — identity
-/// resolution is a registry-owner operation, not the loader's.
+/// A pure function of `(old, new)` — no id maps. The returned [`WatchRegistryDiff`] is
+/// **name-keyed**: `removed` carries operator names; `added` / `modified` carry pre-id requests
+/// whose name lives inside the request. The engine resolves name → id at apply time through its own
+/// authoritative `by_name` index — identity resolution is a registry-owner operation, not the
+/// loader's.
 ///
-/// **Static ↔ dynamic migration via path edit.** A `[[watch]]` whose
-/// path edits across the `is_dynamic` boundary (e.g., `/foo` → `/foo/*`)
-/// moves between [`Config::watches`] and [`Config::promoters`]
-/// between reloads. The diff produces `subs.removed + promoters.added`
-/// (or the reverse): a wholesale teardown then attach. The path
-/// semantics meaningfully changed; merging across the boundary would
-/// hide that.
+/// **Static ↔ dynamic migration via path edit.** A `[[watch]]` whose path edits across the
+/// `is_dynamic` boundary (e.g., `/foo` → `/foo/*`) moves between [`Config::watches`] and
+/// [`Config::promoters`] between reloads. The diff produces `subs.removed + promoters.added` (or
+/// the reverse): a wholesale teardown then attach. The path semantics meaningfully changed; merging
+/// across the boundary would hide that.
 ///
-/// Determinism: each side's `removed` is name-ordered structurally —
-/// it is built from a `BTreeMap`'s `keys()` iterator (ascending by
-/// API contract), so the order is established at construction and a
-/// debug-mode `is_sorted` check pins the invariant without paying for
-/// a runtime sort. `modified` is name-sorted load-bearing — built from
-/// source-order `active_*`, sorted at the end via `sort_unstable_by`
-/// (names are unique by validation, so stability is unobservable).
+/// Determinism: each side's `removed` is name-ordered structurally — it is built from a
+/// `BTreeMap`'s `keys()` iterator (ascending by API contract), so the order is established at
+/// construction and a debug-mode `is_sorted` check pins the invariant without paying for a runtime
+/// sort. `modified` is name-sorted load-bearing — built from source-order `active_*`, sorted at the
+/// end via `sort_unstable_by` (names are unique by validation, so stability is unobservable).
 /// `added` preserves new-source order.
 #[must_use]
 pub fn diff(old: &Config, new: &Config) -> WatchRegistryDiff {
@@ -39,33 +34,25 @@ pub fn diff(old: &Config, new: &Config) -> WatchRegistryDiff {
     }
 }
 
-/// Static-Sub half of the watch-registry diff. Extracted so the two
-/// halves are independently testable; the public entry point composes
-/// both.
+/// Static-Sub half of the watch-registry diff. Extracted so the two halves are independently
+/// testable; the public entry point composes both.
 ///
-/// Filters both sides through [`Config::active_watches`] before the
-/// name-keyed comparison: a disabled entry on either side is
-/// structurally equivalent to "absent." Flipping `enabled = true →
-/// false` therefore surfaces as `subs.removed`; the reverse as
-/// `subs.added`. Edits to fields on a disabled entry are invisible
-/// to the diff (the entry isn't in either filtered set) — they
-/// apply on the next `false → true` transition via the fresh
-/// attach.
+/// Filters both sides through [`Config::active_watches`] before the name-keyed comparison: a
+/// disabled entry on either side is structurally equivalent to "absent." Flipping `enabled = true →
+/// false` therefore surfaces as `subs.removed`; the reverse as `subs.added`. Edits to fields on a
+/// disabled entry are invisible to the diff (the entry isn't in either filtered set) — they apply
+/// on the next `false → true` transition via the fresh attach.
 ///
-/// Modified entries are partitioned by
-/// [`SubSpec::requires_new_profile`]:
+/// Modified entries are partitioned by [`SubSpec::requires_new_profile`]:
 ///
-/// - **`modified_identity`** — path / scan / max_settle / events
-///   differ; the Sub must move to a different Profile partition. The
-///   engine validates the new anchor's parse, then runs
+/// - **`modified_identity`** — path / scan / max_settle / events differ; the Sub must move to a
+///   different Profile partition. The engine validates the new anchor's parse, then runs
 ///   `detach_old → attach_new`.
-/// - **`modified_params`** — only per-Sub fields differ (`program`,
-///   `scope`, `settle`, `log_output`). The engine rebinds the live
-///   Sub in place; no Profile churn, no kernel-watch flap, no
-///   baseline loss.
+/// - **`modified_params`** — only per-Sub fields differ (`program`, `scope`, `settle`,
+///   `log_output`). The engine rebinds the live Sub in place; no Profile churn, no kernel-watch
+///   flap, no baseline loss.
 ///
-/// The partition is exhaustive and disjoint: every modified entry
-/// lands in exactly one bucket.
+/// The partition is exhaustive and disjoint: every modified entry lands in exactly one bucket.
 fn diff_subs(old: &Config, new: &Config) -> SubRegistryDiff {
     let old_by_name: BTreeMap<&CompactString, &SubSpec> =
         old.active_watches().map(|s| (&s.name, s)).collect();
@@ -94,14 +81,11 @@ fn diff_subs(old: &Config, new: &Config) -> SubRegistryDiff {
         }
     }
 
-    // `removed` is collected from a `BTreeMap`'s keys, so it is already
-    // name-ordered by construction — the debug assertion pins the
-    // invariant without paying for a runtime sort. Both `modified_*`
-    // buckets are built from source-order `active_watches()` and are
-    // the load-bearing sort: replay stability keys on config content,
-    // never slotmap mint order. Names are unique by validation, so
-    // `sort_unstable_by` is observably indistinguishable from a stable
-    // sort and strictly cheaper.
+    // `removed` is collected from a `BTreeMap`'s keys, so it is already name-ordered by construction
+    // — the debug assertion pins the invariant without paying for a runtime sort. Both `modified_*`
+    // buckets are built from source-order `active_watches()` and are the load-bearing sort: replay
+    // stability keys on config content, never slotmap mint order. Names are unique by validation, so
+    // `sort_unstable_by` is observably indistinguishable from a stable sort and strictly cheaper.
     debug_assert!(
         removed.is_sorted(),
         "removed must inherit BTreeMap key order",
@@ -117,10 +101,9 @@ fn diff_subs(old: &Config, new: &Config) -> SubRegistryDiff {
     }
 }
 
-/// Promoter half of the watch-registry diff. Mirrors [`diff_subs`]
-/// against [`Config::active_promoters`]. Same `enabled`-as-absent
-/// semantics: a disabled Promoter on either side is filtered before
-/// comparison; flipping the flag surfaces as `promoters.added` /
+/// Promoter half of the watch-registry diff. Mirrors [`diff_subs`] against
+/// [`Config::active_promoters`]. Same `enabled`-as-absent semantics: a disabled Promoter on either
+/// side is filtered before comparison; flipping the flag surfaces as `promoters.added` /
 /// `promoters.removed`.
 fn diff_promoters(old: &Config, new: &Config) -> PromoterRegistryDiff {
     let old_by_name: BTreeMap<&CompactString, &PromoterSpec> =
@@ -146,9 +129,8 @@ fn diff_promoters(old: &Config, new: &Config) -> PromoterRegistryDiff {
         }
     }
 
-    // Sort rationale mirrors `diff_subs`: `removed` is BTreeMap-keyed
-    // and so already name-ordered (debug-only assertion pins the
-    // invariant); `modified` is load-bearing on `active_promoters()`
+    // Sort rationale mirrors `diff_subs`: `removed` is BTreeMap-keyed and so already name-ordered
+    // (debug-only assertion pins the invariant); `modified` is load-bearing on `active_promoters()`
     // source order and uses `sort_unstable_by` since names are unique.
     debug_assert!(
         removed.is_sorted(),
@@ -186,9 +168,8 @@ mod tests {
         )
     }
 
-    /// Build a watch block with an explicit `settle`. `max_settle` is
-    /// left to the default (1h), which is comfortably above the floor
-    /// for any reasonable `settle`.
+    /// Build a watch block with an explicit `settle`. `max_settle` is left to the default (1h),
+    /// which is comfortably above the floor for any reasonable `settle`.
     fn block_full(name: &str, exec: &str, settle: &str) -> String {
         format!(
             "[[watch]]\nname = \"{name}\"\npath = \"{ROOT}\"\n\
@@ -268,9 +249,8 @@ mod tests {
         assert!(d.subs.modified_params.is_empty());
     }
 
-    /// Command change ⇒ per-Sub field only ⇒ `modified_params`. The
-    /// identity bucket stays empty: the partition is exhaustive and
-    /// disjoint per watch name.
+    /// Command change ⇒ per-Sub field only ⇒ `modified_params`. The identity bucket stays empty:
+    /// the partition is exhaustive and disjoint per watch name.
     #[test]
     fn different_command_lands_in_modified_params() {
         let old_blocks = [block("a", "echo")];
@@ -300,8 +280,7 @@ mod tests {
 
         assert_eq!(d.subs.removed, vec![CompactString::from("b")]);
 
-        // `block("a", "echo") → block("a", "fmt")` is a program-only
-        // change ⇒ `modified_params`.
+        // `block("a", "echo") → block("a", "fmt")` is a program-only change ⇒ `modified_params`.
         assert!(d.subs.modified_identity.is_empty());
         assert_eq!(d.subs.modified_params.len(), 1);
         assert_eq!(d.subs.modified_params[0].params.name, "a");
@@ -336,11 +315,10 @@ mod tests {
         assert!(d.subs.modified_params.is_empty());
     }
 
-    /// `settle` is a per-Sub field, not a Profile-identity field ⇒
-    /// `modified_params`. Pinning the bucket guards against a future
-    /// `settle`-into-identity drift that would silently re-route this
-    /// case through `modified_identity` (detach+attach with baseline
-    /// loss) instead of in-place rebind.
+    /// `settle` is a per-Sub field, not a Profile-identity field ⇒ `modified_params`. Pinning the
+    /// bucket guards against a future `settle`-into-identity drift that would silently re-route
+    /// this case through `modified_identity` (detach+attach with baseline loss) instead of in-place
+    /// rebind.
     #[test]
     fn settle_change_lands_in_modified_params() {
         let old_blocks = [block_full("a", "echo", "200ms")];
@@ -387,11 +365,9 @@ mod tests {
         assert_eq!(order, vec!["a", "b"]);
     }
 
-    /// `events` folds into `ProfileIdentity::config_hash` ⇒
-    /// `modified_identity`. Same role guard as
-    /// [`settle_change_lands_in_modified_params`]: pinning the bucket
-    /// makes a future identity-into-params drift visible at the diff
-    /// layer.
+    /// `events` folds into `ProfileIdentity::config_hash` ⇒ `modified_identity`. Same role guard as
+    /// [`settle_change_lands_in_modified_params`]: pinning the bucket makes a future
+    /// identity-into-params drift visible at the diff layer.
     #[test]
     fn events_change_lands_in_modified_identity() {
         let old_blocks = [block("a", "echo")];
@@ -416,9 +392,8 @@ mod tests {
 
     #[test]
     fn explicit_events_equal_to_default_yields_no_diff() {
-        // A user adding `events = ["structure", "content"]` cosmetically
-        // (matching the implicit subtree-root default) must not churn
-        // the Profile.
+        // A user adding `events = ["structure", "content"]` cosmetically (matching the implicit
+        // subtree-root default) must not churn the Profile.
         let old_blocks = [block("a", "echo")];
         let new_blocks = [format!(
             "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
@@ -441,8 +416,8 @@ mod tests {
 
     #[test]
     fn events_class_order_does_not_affect_diff() {
-        // Class set is bitmask-equality, not list-order — the parser
-        // collapses both orderings to the same ClassSet.
+        // Class set is bitmask-equality, not list-order — the parser collapses both orderings to
+        // the same ClassSet.
         let old_blocks = [format!(
             "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\n\
              actions = [{{ exec = [\"echo\"] }}]\nevents = [\"structure\", \"content\"]"
@@ -466,13 +441,11 @@ mod tests {
         );
     }
 
-    /// `scan` (recursive flag) folds into `ProfileIdentity::config_hash`
-    /// ⇒ `modified_identity`. Same name, same path, different scan ⇒
-    /// the Sub must move to a different Profile. Distinct from
-    /// `events_change_lands_in_modified_identity` because `scan` is a
-    /// nested struct (`ScanConfig`) where `events` is a `ClassSet`
-    /// bitmask — exercising a struct-equality path the bitmask test
-    /// doesn't.
+    /// `scan` (recursive flag) folds into `ProfileIdentity::config_hash` ⇒ `modified_identity`.
+    /// Same name, same path, different scan ⇒ the Sub must move to a different Profile. Distinct
+    /// from `events_change_lands_in_modified_identity` because `scan` is a nested struct
+    /// (`ScanConfig`) where `events` is a `ClassSet` bitmask — exercising a struct-equality path
+    /// the bitmask test doesn't.
     #[test]
     fn scan_change_lands_in_modified_identity() {
         let old_blocks = [block("a", "echo")];
@@ -491,9 +464,8 @@ mod tests {
 
     // ---- Promoter (dynamic) side ----
 
-    /// Adding a fresh dynamic [[watch]] populates `promoters.added` in
-    /// source order. Nothing on the old side, so no removed / modified
-    /// entries.
+    /// Adding a fresh dynamic [[watch]] populates `promoters.added` in source order. Nothing on the
+    /// old side, so no removed / modified entries.
     #[test]
     fn promoter_added_populates_added_in_source_order() {
         let old = cfg(&[]);
@@ -513,8 +485,7 @@ mod tests {
         assert!(d.promoters.modified.is_empty());
     }
 
-    /// Removing a dynamic [[watch]] populates `promoters.removed` with
-    /// the operator Promoter name.
+    /// Removing a dynamic [[watch]] populates `promoters.removed` with the operator Promoter name.
     #[test]
     fn promoter_removed_populates_removed_with_promoter_name() {
         let old_blocks = [dyn_block("logs", "/var/log/*", "echo")];
@@ -527,8 +498,8 @@ mod tests {
         assert!(d.promoters.modified.is_empty());
     }
 
-    /// Modifying any field on a dynamic [[watch]] surfaces the entry on
-    /// `promoters.modified`. Wholesale replace at the engine layer.
+    /// Modifying any field on a dynamic [[watch]] surfaces the entry on `promoters.modified`.
+    /// Wholesale replace at the engine layer.
     #[test]
     fn promoter_command_change_yields_modified() {
         let old_blocks = [dyn_block("logs", "/var/log/*", "echo")];
@@ -543,9 +514,8 @@ mod tests {
         assert_eq!(d.promoters.modified[0].name, "logs");
     }
 
-    /// Pattern source change is a structural modification (different
-    /// `pattern_spec.source`); diff surfaces it as `modified`. The
-    /// engine wholesale-replaces, which drains and re-mints dynamic
+    /// Pattern source change is a structural modification (different `pattern_spec.source`); diff
+    /// surfaces it as `modified`. The engine wholesale-replaces, which drains and re-mints dynamic
     /// Subs against the new pattern.
     #[test]
     fn promoter_pattern_change_yields_modified() {
@@ -608,8 +578,8 @@ mod tests {
         );
     }
 
-    /// `promoters.modified` sorts by name (mirrors the Sub-side
-    /// `modified_*` buckets, both individually sorted in `diff_subs`).
+    /// `promoters.modified` sorts by name (mirrors the Sub-side `modified_*` buckets, both
+    /// individually sorted in `diff_subs`).
     #[test]
     fn promoter_modified_sorted_by_name() {
         let old_blocks = [
@@ -631,11 +601,9 @@ mod tests {
 
     // ---- Cross-kind: static ↔ dynamic migration via path edit ----
 
-    /// Static → dynamic via path edit: name `foo` was static; new
-    /// config has `foo` as dynamic. Same name, but the path crossed the
-    /// `is_dynamic` boundary so the entry moves between
-    /// `Config.watches` and `Config.promoters`. Diff produces
-    /// `subs.removed + promoters.added`.
+    /// Static → dynamic via path edit: name `foo` was static; new config has `foo` as dynamic. Same
+    /// name, but the path crossed the `is_dynamic` boundary so the entry moves between
+    /// `Config.watches` and `Config.promoters`. Diff produces `subs.removed + promoters.added`.
     #[test]
     fn static_to_dynamic_migration_yields_subs_removed_plus_promoters_added() {
         let old_blocks = [block("foo", "echo")]; // path = "/" (static)
@@ -655,9 +623,8 @@ mod tests {
         assert!(d.promoters.modified.is_empty());
     }
 
-    /// Reverse direction: dynamic → static via path edit. The dynamic
-    /// `foo` from old becomes a static `foo` in new. Diff produces
-    /// `promoters.removed + subs.added`.
+    /// Reverse direction: dynamic → static via path edit. The dynamic `foo` from old becomes a
+    /// static `foo` in new. Diff produces `promoters.removed + subs.added`.
     #[test]
     fn dynamic_to_static_migration_yields_promoters_removed_plus_subs_added() {
         let old_blocks = [dyn_block("foo", "/foo/*", "echo")];
@@ -677,9 +644,8 @@ mod tests {
         assert!(d.subs.modified_params.is_empty());
     }
 
-    /// Mixed reload: one Sub modify, one Promoter add, one of each
-    /// removed. Each half stands on its own; the diff composes them
-    /// without interaction.
+    /// Mixed reload: one Sub modify, one Promoter add, one of each removed. Each half stands on its
+    /// own; the diff composes them without interaction.
     #[test]
     fn mixed_sub_and_promoter_changes_compose_independently() {
         let old_blocks = [
@@ -727,9 +693,8 @@ mod tests {
         )
     }
 
-    /// Flipping `enabled = true → false` filters the entry out of the
-    /// new effective set, surfacing as `subs.removed` — the same shape
-    /// the engine sees for an outright deletion. This is the
+    /// Flipping `enabled = true → false` filters the entry out of the new effective set, surfacing
+    /// as `subs.removed` — the same shape the engine sees for an outright deletion. This is the
     /// load-bearing case of the feature.
     #[test]
     fn enabled_true_to_false_yields_subs_removed() {
@@ -742,8 +707,7 @@ mod tests {
         assert!(d.subs.modified_params.is_empty());
     }
 
-    /// Reverse: `false → true` re-introduces the entry, surfacing as
-    /// `subs.added`.
+    /// Reverse: `false → true` re-introduces the entry, surfacing as `subs.added`.
     #[test]
     fn enabled_false_to_true_yields_subs_added() {
         let old = cfg(&[block_with_enabled("a", "echo", false).as_str()]);
@@ -756,9 +720,8 @@ mod tests {
         assert!(d.subs.modified_params.is_empty());
     }
 
-    /// Edits to other fields while the entry is disabled produce no
-    /// diff: both sides are filtered out before the comparison, so
-    /// the engine sees nothing. The new field values apply on the
+    /// Edits to other fields while the entry is disabled produce no diff: both sides are filtered
+    /// out before the comparison, so the engine sees nothing. The new field values apply on the
     /// next `false → true` transition via the fresh attach.
     #[test]
     fn disabled_to_disabled_with_field_change_yields_empty_diff() {
@@ -771,10 +734,8 @@ mod tests {
         assert!(d.subs.modified_params.is_empty());
     }
 
-    /// Promoter-side enabled flip mirrors the static side. One
-    /// transition is enough — the code path is structurally identical
-    /// (`active_promoters` filter ahead of the same name-keyed
-    /// matching).
+    /// Promoter-side enabled flip mirrors the static side. One transition is enough — the code path
+    /// is structurally identical (`active_promoters` filter ahead of the same name-keyed matching).
     #[test]
     fn promoter_enabled_true_to_false_yields_promoters_removed() {
         let old = cfg(&[dyn_block_with_enabled("logs", "/var/log/*", "echo", true).as_str()]);

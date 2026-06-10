@@ -1,24 +1,21 @@
 //! `Engine` — pure, deterministic, total.
 //!
-//! The engine owns the data model (`Tree`, `ProfileMap`, `SubRegistry`),
-//! the timer wheel, and the stability index; `step` consumes one [`Input`]
-//! at a time and emits a sorted [`StepOutput`]. State-machine bodies live
-//! in sibling modules:
+//! The engine owns the data model (`Tree`, `ProfileMap`, `SubRegistry`), the timer wheel, and the
+//! stability index; `step` consumes one [`Input`] at a time and emits a sorted [`StepOutput`].
+//! State-machine bodies live in sibling modules:
 //! - `burst.rs` — Idle ↔ Active phase transitions.
 //! - `transitions.rs` — per-input handlers (`on_fs_event`, etc.).
 //! - `reconcile.rs` — newly-discovered descendants.
 //! - `refcounts.rs` — `watch_demand` (contributions-map) edges.
 //!
-//! `step` is the single dispatch point; each `Input` variant routes to the
-//! corresponding `on_*` handler. `attach_sub` is the engine's public
-//! Sub-attachment API.
+//! `step` is the single dispatch point; each `Input` variant routes to the corresponding `on_*`
+//! handler. `attach_sub` is the engine's public Sub-attachment API.
 
 use crate::counter::MonotonicCounter;
 use crate::refcounts::add_watch;
 use crate::timer::{TimerEntry, TimerHeap};
-// Only the inline test module needs `CompactString` now that
-// `register_sub` moves the request's own (it reaches it via
-// `use super::*`); gating keeps the lib build warning-free.
+// Only the inline test module needs `CompactString` now that `register_sub` moves the request's own
+// (it reaches it via `use super::*`); gating keeps the lib build warning-free.
 #[cfg(test)]
 use compact_str::CompactString;
 // Identity.
@@ -46,73 +43,59 @@ use std::time::{Duration, Instant};
 
 /// Per-call stale-drain bound for [`Engine::pop_expired`].
 ///
-/// Realistic worst case per call is single-digit (each Active Profile
-/// carries ~2 timer slots and orphans at most one per burst
-/// transition; the bin's tick loop polls frequently enough that
-/// orphans collect incrementally rather than piling at the heap top).
-/// The bound is loose enough to absorb multi-Profile burst-end
-/// cleanup yet tight enough to surface an "engine transition leaks
+/// Realistic worst case per call is single-digit (each Active Profile carries ~2 timer slots and
+/// orphans at most one per burst transition; the bin's tick loop polls frequently enough that
+/// orphans collect incrementally rather than piling at the heap top). The bound is loose enough to
+/// absorb multi-Profile burst-end cleanup yet tight enough to surface an "engine transition leaks
 /// timer references" regression in dev/CI.
 const STALE_DRAIN_BOUND: u32 = 32;
 
-/// `pub(crate)` field visibility lets sibling modules read/write engine
-/// state directly. External consumers go through the public methods.
+/// `pub(crate)` field visibility lets sibling modules read/write engine state directly. External
+/// consumers go through the public methods.
 ///
 /// Per-owner descent state lives inline on the owner's state enum
 /// (`ProfileState::Pending(DescentState)` for Profiles,
-/// `PromoterState::PrefixPending(DescentState)` for Promoters). Read through
-/// the owner-polymorphic `Engine::descent_state` / `Engine::descent_state_mut`
-/// (both `pub(crate)`); per-event fan-out lives next to its sole consumer
-/// (`Engine::classify_event_carriers` in `transitions.rs`).
+/// `PromoterState::PrefixPending(DescentState)` for Promoters). Read through the owner-polymorphic
+/// `Engine::descent_state` / `Engine::descent_state_mut` (both `pub(crate)`); per-event fan-out
+/// lives next to its sole consumer (`Engine::classify_event_carriers` in `transitions.rs`).
 #[derive(Debug, Default)]
 pub struct Engine {
     pub(crate) tree: Tree,
     pub(crate) profiles: ProfileMap,
     pub(crate) subs: SubRegistry,
-    /// Engine-resident dynamic-watch sources. Promoter-side
-    /// contributions to per-Resource watch demand are tracked in the
-    /// per-Resource [`specter_core::Resource::contributions`] map via
-    /// [`specter_core::ContribKey::PromoterPrefix`] /
-    /// [`specter_core::ContribKey::PromoterProxy`]; this field is the
-    /// registry the Promoter helpers mutate.
+    /// Engine-resident dynamic-watch sources. Promoter-side contributions to per-Resource watch
+    /// demand are tracked in the per-Resource [`specter_core::Resource::contributions`] map via
+    /// [`specter_core::ContribKey::PromoterPrefix`] / [`specter_core::ContribKey::PromoterProxy`];
+    /// this field is the registry the Promoter helpers mutate.
     pub(crate) promoters: PromoterRegistry,
     pub(crate) timers: TimerHeap,
-    /// The engine-wide [`ProbeCorrelation`] monotone floor — the one
-    /// irreducible engine-resident probe datum now that every
-    /// probe-bearing fact homes on its owner's state slot. Driven
-    /// solely by [`Engine::mint_probe_correlation`]; see
-    /// [`crate::probe`] for the mint contract and the state-derived
-    /// projection surface beside it. Phantom-typed distinct from
-    /// `effect_correlations`: the two id spaces stay structurally
-    /// separate at the type level.
+    /// The engine-wide [`ProbeCorrelation`] monotone floor — the one irreducible engine-resident
+    /// probe datum now that every probe-bearing fact homes on its owner's state slot. Driven solely
+    /// by [`Engine::mint_probe_correlation`]; see [`crate::probe`] for the mint contract and the
+    /// state-derived projection surface beside it. Phantom-typed distinct from
+    /// `effect_correlations`: the two id spaces stay structurally separate at the type level.
     pub(crate) correlations: MonotonicCounter<ProbeCorrelation>,
-    /// Monotonic counter for [`CorrelationId`] minting. Bumped at every
-    /// `Effect` push in `transitions.rs::emit_effects` to stamp each
-    /// emission with a process-unique narration id — completion routing
-    /// is `DedupKey`-keyed and never reads it; see
-    /// [`specter_core::Effect::correlation`] for what the actuator
-    /// actually consumes it for. Phantom-typed distinct from the
-    /// probe-side counter: the two id spaces stay structurally separate
-    /// at the type level.
+    /// Monotonic counter for [`CorrelationId`] minting. Bumped at every `Effect` push in
+    /// `transitions.rs::emit_effects` to stamp each emission with a process-unique narration id —
+    /// completion routing is `DedupKey`-keyed and never reads it; see
+    /// [`specter_core::Effect::correlation`] for what the actuator actually consumes it for.
+    /// Phantom-typed distinct from the probe-side counter: the two id spaces stay structurally
+    /// separate at the type level.
     pub(crate) effect_correlations: MonotonicCounter<CorrelationId>,
-    /// Reusable relative-path buffer for [`crate::coverage::covers`],
-    /// owned at engine scope so its capacity survives across `step`
-    /// calls — under a keeps-up storm the per-event covering walk and
-    /// the per-fire reconcile walk reuse one allocation rather than
-    /// minting two `PathBuf`s per covered-descendant test. Logically
-    /// per-`covers`-call (cleared at the start of each build), so its
-    /// cross-call residue is never observable state; the engine stays a
+    /// Reusable relative-path buffer for [`crate::coverage::covers`], owned at engine scope so its
+    /// capacity survives across `step` calls — under a keeps-up storm the per-event covering walk
+    /// and the per-fire reconcile walk reuse one allocation rather than minting two `PathBuf`s per
+    /// covered-descendant test. Logically per-`covers`-call (cleared at the start of each build),
+    /// so its cross-call residue is never observable state; the engine stays a
     /// pure `Input -> StepOutput` machine. Not thread-local, not
-    /// interior-mutable: an explicit `&mut` threaded only into the two
-    /// hot paths; the cold pure-derivation queries keep a local.
+    /// interior-mutable: an explicit `&mut` threaded only into the two hot paths; the cold
+    /// pure-derivation queries keep a local.
     pub(crate) coverage_scratch: PathBuf,
-    /// Debug-only consume-once tripwire — the cross-step witness that
-    /// no [`ProbeCorrelation`] reaches a `dispatch_*` arm twice. The
-    /// structural laws (core slot arm-once, [`Engine::take_owner_probe`]
-    /// disarm-once) make the violation unconstructable; this records
-    /// the per-owner high-water dispatched correlation so a property
-    /// test or fuzzer surfaces a regression as a panic. Absent in
-    /// release: zero cost, zero footprint.
+    /// Debug-only consume-once tripwire — the cross-step witness that no [`ProbeCorrelation`]
+    /// reaches a `dispatch_*` arm twice. The structural laws (core slot arm-once,
+    /// [`Engine::take_owner_probe`] disarm-once) make the violation unconstructable; this records
+    /// the per-owner high-water dispatched correlation so a property test or fuzzer surfaces a
+    /// regression as a panic. Absent in release: zero cost, zero footprint.
     #[cfg(debug_assertions)]
     pub(crate) dispatch_ledger: crate::probe::DispatchLedger,
 }
@@ -123,18 +106,16 @@ impl Engine {
         Self::default()
     }
 
-    /// Owner-polymorphic descent state accessor. Returns the `DescentState`
-    /// payload of the owner's "in-descent" state variant
-    /// (`ProfileState::Pending` for Profiles, `PromoterState::PrefixPending`
-    /// for Promoters). Returns `None` for owners not currently descending,
-    /// stale ids, or any other state.
+    /// Owner-polymorphic descent state accessor. Returns the `DescentState` payload of the owner's
+    /// "in-descent" state variant (`ProfileState::Pending` for Profiles,
+    /// `PromoterState::PrefixPending` for Promoters). Returns `None` for owners not currently
+    /// descending, stale ids, or any other state.
     ///
-    /// Sole reader API for the descent-state payload outside the routing
-    /// match sites in `on_*_probe_response`. The exhaustive `ProbeOwner`
-    /// match enforces that adding a new owner kind requires extending this
-    /// accessor; the per-state-type projection ([`ProfileState::descent_state`] /
-    /// [`specter_core::PromoterState::descent_state`]) owns the in-variant
-    /// payload match, so the dispatcher here stays a thin two-line route.
+    /// Sole reader API for the descent-state payload outside the routing match sites in
+    /// `on_*_probe_response`. The exhaustive `ProbeOwner` match enforces that adding a new owner
+    /// kind requires extending this accessor; the per-state-type projection
+    /// ([`ProfileState::descent_state`] / [`specter_core::PromoterState::descent_state`]) owns the
+    /// in-variant payload match, so the dispatcher here stays a thin two-line route.
     #[must_use]
     pub(crate) fn descent_state(&self, owner: ProbeOwner) -> Option<&DescentState> {
         match owner {
@@ -151,30 +132,23 @@ impl Engine {
         }
     }
 
-    /// Pure, deterministic, total. Consumes one [`Input`], emits a sorted
-    /// [`StepOutput`]. Each variant routes to the corresponding
-    /// `on_*` handler (`transitions.rs`) or registration entry
-    /// (`attach_sub_inner` / `detach_sub_inner` / `attach_promoter_inner`).
-    /// Exhaustive — adding a variant to [`Input`] is a compile error
-    /// here until a handler lands.
+    /// Pure, deterministic, total. Consumes one [`Input`], emits a sorted [`StepOutput`]. Each
+    /// variant routes to the corresponding `on_*` handler (`transitions.rs`) or registration entry
+    /// (`attach_sub_inner` / `detach_sub_inner` / `attach_promoter_inner`). Exhaustive — adding a
+    /// variant to [`Input`] is a compile error here until a handler lands.
     ///
-    /// Lifecycle inputs ([`Input::AttachSub`], [`Input::DetachSub`],
-    /// [`Input::AttachPromoter`]) take effect on the engine's
-    /// registries and narrate the outcome via `out.diagnostics`
-    /// ([`Diagnostic::SubAttached`] / [`Diagnostic::PromoterAttached`]),
-    /// not via a synchronous return. Identity (`name → SubId` /
-    /// `name → PromoterId`) is resolved engine-side through each
-    /// registry's `by_name` index, so the dispatcher's uniform shape
-    /// (one input, one [`StepOutput`]) holds across every variant.
+    /// Lifecycle inputs ([`Input::AttachSub`], [`Input::DetachSub`], [`Input::AttachPromoter`])
+    /// take effect on the engine's registries and narrate the outcome via `out.diagnostics`
+    /// ([`Diagnostic::SubAttached`] / [`Diagnostic::PromoterAttached`]), not via a synchronous
+    /// return. Identity (`name → SubId` / `name → PromoterId`) is resolved engine-side through each
+    /// registry's `by_name` index, so the dispatcher's uniform shape (one input, one
+    /// [`StepOutput`]) holds across every variant.
     ///
-    /// **MUST NOT be wrapped in `catch_unwind`.**
-    /// [`specter_core::ProbeSlot`]'s in-unwind silence depends on a
-    /// mid-`step` panic being fatal — *and* on the engine thread being
-    /// the only thread that mutates `ProbeSlot`s, so an unwind on any
-    /// other thread never reaches an armed slot. The driver's `tick` /
-    /// `run` carry the matching contract; this is the engine-side
-    /// mirror, the seam any library or test consumer of the engine
-    /// crate that bypasses the driver first encounters.
+    /// **MUST NOT be wrapped in `catch_unwind`.** [`specter_core::ProbeSlot`]'s in-unwind silence
+    /// depends on a mid-`step` panic being fatal — *and* on the engine thread being the only thread
+    /// that mutates `ProbeSlot`s, so an unwind on any other thread never reaches an armed slot. The
+    /// driver's `tick` / `run` carry the matching contract; this is the engine-side mirror, the seam
+    /// any library or test consumer of the engine crate that bypasses the driver first encounters.
     pub fn step(&mut self, input: Input, now: Instant) -> StepOutput {
         let mut out = StepOutput::default();
         match input {
@@ -209,15 +183,12 @@ impl Engine {
                 let _ = self.attach_sub_inner(req, now, &mut out);
             }
             Input::DetachSub(sub) => {
-                // [`Input::DetachSub`] is the engine's public detach
-                // surface. Its sole external producer is the bin's IPC
-                // `disable` handler. Hardcode the canonical reason here
-                // so the engine's public input shape stays a single-arg
-                // `SubId` rather than widening with a caller-supplied
-                // reason that has exactly one valid value in v1.
-                // Internal call sites (`on_config_diff`,
-                // `reap_promoter_inner`) call `detach_sub_inner`
-                // directly with their own reason.
+                // [`Input::DetachSub`] is the engine's public detach surface. Its sole external
+                // producer is the bin's IPC `disable` handler. Hardcode the canonical reason here
+                // so the engine's public input shape stays a single-arg `SubId` rather than
+                // widening with a caller-supplied reason that has exactly one valid value in v1.
+                // Internal call sites (`on_config_diff`, `reap_promoter_inner`) call
+                // `detach_sub_inner` directly with their own reason.
                 self.detach_sub_inner(sub, DetachReason::IpcDisabled, &mut out);
             }
             Input::ArmAbsorb { profile, duration } => {
@@ -231,108 +202,83 @@ impl Engine {
         out
     }
 
-    /// Attach a Sub at its [`SubAttachAnchor`] — a caller-supplied
-    /// `Resource` slot or a `Path` the engine materialises. Reuses an
-    /// existing Profile when `(anchor, config_hash)` matches; otherwise
-    /// creates a fresh Profile, emits `WatchOp::Watch` on its anchor,
-    /// and starts a Seed burst (`PreFireBurst { intent: Seed, phase:
-    /// Batching }`); the baseline is established once the settle-spaced
-    /// quiescence proof converges (the Seed-Ok pin in `fire_or_seal`),
-    /// not on the first probe.
+    /// Attach a Sub at its [`SubAttachAnchor`] — a caller-supplied `Resource` slot or a `Path` the
+    /// engine materialises. Reuses an existing Profile when `(anchor, config_hash)` matches;
+    /// otherwise creates a fresh Profile, emits `WatchOp::Watch` on its anchor, and starts a Seed
+    /// burst (`PreFireBurst { intent: Seed, phase: Batching }`); the baseline is established once
+    /// the settle-spaced quiescence proof converges (the Seed-Ok pin in `fire_or_seal`), not on the
+    /// first probe.
     ///
-    /// Three-phase pipeline; sole public entry is
-    /// [`Input::AttachSub`] via [`Self::step`]. The inner is
-    /// `pub(crate)` so [`Self::on_config_diff`] can compose multiple
-    /// detach/attach operations into one [`StepOutput`] on hot reload.
+    /// Three-phase pipeline; sole public entry is [`Input::AttachSub`] via [`Self::step`]. The
+    /// inner is `pub(crate)` so [`Self::on_config_diff`] can compose multiple detach/attach
+    /// operations into one [`StepOutput`] on hot reload.
     ///
-    /// **Zombie revival.** When the matched Profile is in deferred-reap
-    /// state ([`BurstFinish::Reap`], set by `detach_sub_inner` when
-    /// the last Sub detached during an Active burst), the attach
-    /// revives it: [`Diagnostic::ReapPendingCancelled`] emits, the
-    /// directive flips back to [`BurstFinish::ReturnToIdle`], and the
-    /// cleanup the deferred detach skipped (`recompute_profile_settle`)
-    /// runs. The in-flight burst continues to completion under the
-    /// new Sub set.
+    /// **Zombie revival.** When the matched Profile is in deferred-reap state
+    /// ([`BurstFinish::Reap`], set by `detach_sub_inner` when the last Sub detached during an
+    /// Active burst), the attach revives it: [`Diagnostic::ReapPendingCancelled`] emits, the
+    /// directive flips back to [`BurstFinish::ReturnToIdle`], and the cleanup the deferred detach
+    /// skipped (`recompute_profile_settle`) runs. The in-flight burst continues to completion under
+    /// the new Sub set.
     ///
-    /// Total: an unresolvable anchor returns `None` with a typed
-    /// diagnostic — [`Diagnostic::AttachPathInvalid`] for a malformed
-    /// `Path`, [`Diagnostic::AttachResourceStale`] for a `Resource`
-    /// with no live slot. External callers reconcile their `name →
-    /// SubId` index from the [`Diagnostic::SubAttached`] /
-    /// `AttachPathInvalid` / `AttachResourceStale` stream.
+    /// Total: an unresolvable anchor returns `None` with a typed diagnostic —
+    /// [`Diagnostic::AttachPathInvalid`] for a malformed `Path`, [`Diagnostic::AttachResourceStale`]
+    /// for a `Resource` with no live slot. External callers reconcile their `name → SubId` index from
+    /// the [`Diagnostic::SubAttached`] / `AttachPathInvalid` / `AttachResourceStale` stream.
     ///
     /// # Production invariants (`Path` anchor)
     ///
-    /// 1. **Absolute paths only.** A [`SubAttachAnchor::Path`] must be
-    ///    absolute and UTF-8. [`Tree::parse_attach_path`] is the canonical
-    ///    gate; it rejects non-absolute paths, non-UTF-8 segments, `.` / `..`
-    ///    components, Windows path prefixes, and empty segments. The
-    ///    config layer's `canonicalize_lenient` already enforces absolute
-    ///    paths for TOML-loaded configs, but hot-reload `ConfigDiff::added`
-    ///    constructs `SubAttachRequest` from a different path; the gate keeps
-    ///    the engine's contract independent of every caller.
-    /// 2. **Single FS-root.** Every validated [`specter_core::TreePath`]
-    ///    starts with [`specter_core::FS_ROOT_SEGMENT`];
-    ///    `materialize_path_or_pending` lazily bootstraps a synthetic `/`
-    ///    slot (role `ResourceRole::DescentScaffold`) before the
-    ///    pre-existence walk so every Profile's rewind chain terminates at this
-    ///    shared slot. The FS-root invariant is documented here rather
-    ///    than enforced at the Tree type level — unit tests for
-    ///    lower-level Tree functions (`coverage`, `refcounts`) still
-    ///    construct multi-root trees outside of the attach pipeline.
-    /// 3. **`Tree::path_of` reconstructs absolute paths.**
-    ///    `PathBuf::push("/")` resets the buffer to absolute, so the
-    ///    Sensor's `WatchOp::Watch { path }` always carries an absolute
-    ///    path for any Profile registered through this pipeline.
+    /// 1. **Absolute paths only.** A [`SubAttachAnchor::Path`] must be absolute and UTF-8.
+    ///    [`Tree::parse_attach_path`] is the canonical gate; it rejects non-absolute paths,
+    ///    non-UTF-8 segments, `.` / `..` components, Windows path prefixes, and empty segments. The
+    ///    config layer's `canonicalize_lenient` already enforces absolute paths for TOML-loaded
+    ///    configs, but hot-reload `ConfigDiff::added` constructs `SubAttachRequest` from a
+    ///    different path; the gate keeps the engine's contract independent of every caller.
+    /// 2. **Single FS-root.** Every validated [`specter_core::TreePath`] starts with
+    ///    [`specter_core::FS_ROOT_SEGMENT`]; `materialize_path_or_pending` lazily bootstraps a
+    ///    synthetic `/` slot (role `ResourceRole::DescentScaffold`) before the pre-existence walk
+    ///    so every Profile's rewind chain terminates at this shared slot. The FS-root invariant is
+    ///    documented here rather than enforced at the Tree type level — unit tests for lower-level
+    ///    Tree functions (`coverage`, `refcounts`) still construct multi-root trees outside of the
+    ///    attach pipeline.
+    /// 3. **`Tree::path_of` reconstructs absolute paths.** `PathBuf::push("/")` resets the buffer
+    ///    to absolute, so the Sensor's `WatchOp::Watch { path }` always carries an absolute path
+    ///    for any Profile registered through this pipeline.
     ///
     /// # Pipeline (three phases)
     ///
-    /// 1. **Identity resolution.** `resolve_attach_anchor` resolves the
-    ///    request's `anchor` — parsing and materialising a `Path`, or
-    ///    liveness-checking a `Resource` — and yields a typed
-    ///    [`AnchorResolution`] indicating whether the anchor is
-    ///    materialised (`Immediate`) or scaffolded (`Pending`).
-    ///    `find_or_create_profile` then classifies the `(anchor,
+    /// 1. **Identity resolution.** `resolve_attach_anchor` resolves the request's `anchor` —
+    ///    parsing and materialising a `Path`, or liveness-checking a `Resource` — and yields a
+    ///    typed [`AnchorResolution`] indicating whether the anchor is materialised (`Immediate`) or
+    ///    scaffolded (`Pending`). `find_or_create_profile` then classifies the `(anchor,
     ///    config_hash)` lookup into a [`ProfileOrigin`] trichotomy.
-    /// 2. **Sub registration.** `register_sub` consumes the request to
-    ///    mint the [`Sub`] and emit [`Diagnostic::SubAttached`] — the
-    ///    single point at which a SubId enters the registry.
-    /// 3. **Per-origin bookkeeping.** Existing-Profile arms run their
-    ///    targeted cleanup (`revive_zombie` /
-    ///    `join_existing`); the `Fresh` arm dispatches on the
-    ///    anchor resolution to either `bootstrap_pending` (Idle →
-    ///    Pending) or `bootstrap_immediate` (anchor watch +
+    /// 2. **Sub registration.** `register_sub` consumes the request to mint the [`Sub`] and emit
+    ///    [`Diagnostic::SubAttached`] — the single point at which a SubId enters the registry.
+    /// 3. **Per-origin bookkeeping.** Existing-Profile arms run their targeted cleanup
+    ///    (`revive_zombie` / `join_existing`); the `Fresh` arm dispatches on the anchor resolution
+    ///    to either `bootstrap_pending` (Idle → Pending) or `bootstrap_immediate` (anchor watch +
     ///    `watch_root_parent` + Seed burst).
     ///
-    /// `bootstrap_pending` and `bootstrap_immediate` are *not*
-    /// interchangeable orderings of the same operations — they encode
-    /// a real semantic divide:
-    /// - **Pending** only enters the descent; anchor-watch
-    ///   installation, the `watch_root_parent` bump, and the Seed-burst
-    ///   launch are deferred to descent's anchor branch
-    ///   (`dispatch_descent_ok`), because the anchor slot isn't a live
-    ///   `User` resource yet.
-    /// - **Immediate** runs anchor-watch installation, the
-    ///   `watch_root_parent` bump, and the Seed burst all at attach
-    ///   time.
+    /// `bootstrap_pending` and `bootstrap_immediate` are *not* interchangeable orderings of the
+    /// same operations — they encode a real semantic divide:
+    /// - **Pending** only enters the descent; anchor-watch installation, the `watch_root_parent`
+    ///   bump, and the Seed-burst launch are deferred to descent's anchor branch
+    ///   (`dispatch_descent_ok`), because the anchor slot isn't a live `User` resource yet.
+    /// - **Immediate** runs anchor-watch installation, the `watch_root_parent` bump, and the Seed
+    ///   burst all at attach time.
     pub(crate) fn attach_sub_inner(
         &mut self,
         req: SubAttachRequest,
         now: Instant,
         out: &mut StepOutput,
     ) -> Option<SubId> {
-        // Phase 1 — Identity resolution. The trichotomy below is the
-        // structural source of truth for "what state is this Profile
-        // entering on this attach?". Two predicates are exhaustively
+        // Phase 1 — Identity resolution. The trichotomy below is the structural source of truth for
+        // "what state is this Profile entering on this attach?". Two predicates are exhaustively
         // typed rather than derived ambiguously:
-        // - "no live Subs on the Profile" is ambiguous against
-        //   `ZombieRevival` (the prior burst hasn't released its anchor
-        //   claim yet) — the origin tells you whether the Sub is the
-        //   *first* on the Profile or the *first since reap was
-        //   deferred*.
-        // - `anchor_claim == None` is ambiguous against `Fresh` (no
-        //   bump yet) vs `Pending` revival (descent prefix carried it
-        //   instead). The fresh-Profile arm structurally cannot mean
+        // - "no live Subs on the Profile" is ambiguous against `ZombieRevival` (the prior burst
+        //   hasn't released its anchor claim yet) — the origin tells you whether the Sub is the
+        //   *first* on the Profile or the *first since reap was deferred*.
+        // - `anchor_claim == None` is ambiguous against `Fresh` (no bump yet) vs `Pending` revival
+        //   (descent prefix carried it instead). The fresh-Profile arm structurally cannot mean
         //   "Profile existed but its anchor was unbumped."
         let SubAttachRequest {
             anchor,
@@ -343,22 +289,19 @@ impl Engine {
         let resolved_anchor = resolved.anchor();
         let (profile_id, origin) = self.find_or_create_profile(resolved_anchor, identity, &params);
 
-        // Phase 2 — Sub registration. Consumes `params` for the
-        // `Sub::from_request` move; captures `settle` first for the
-        // `ExistingJoin` arm below (params is no longer accessible
-        // after this point).
+        // Phase 2 — Sub registration. Consumes `params` for the `Sub::from_request` move; captures
+        // `settle` first for the `ExistingJoin` arm below (params is no longer accessible after
+        // this point).
         let attach_settle = params.settle;
         let sub_id = self.register_sub(params, profile_id, out);
 
-        // Phase 3 — Per-origin bookkeeping. Existing-Profile arms run
-        // their targeted cleanup and stop; the `Fresh` arm dispatches
-        // on the anchor resolution.
+        // Phase 3 — Per-origin bookkeeping. Existing-Profile arms run their targeted cleanup and
+        // stop; the `Fresh` arm dispatches on the anchor resolution.
         //
-        // The events mask folds into `config_hash`, so a Sub joining
-        // an existing Profile shares its mask by construction —
-        // `events_union` and `has_per_file_fds` are invariant for the
-        // Profile's lifetime. No retroactive per-leaf `watch_demand`
-        // bump is needed on either existing-Profile arm.
+        // The events mask folds into `config_hash`, so a Sub joining an existing Profile shares its
+        // mask by construction — `events_union` and `has_per_file_fds` are invariant for the
+        // Profile's lifetime. No retroactive per-leaf `watch_demand` bump is needed on either
+        // existing-Profile arm.
         match origin {
             ProfileOrigin::ZombieRevival => self.revive_zombie(profile_id, out),
             ProfileOrigin::ExistingJoin => self.join_existing(profile_id, attach_settle),
@@ -377,31 +320,24 @@ impl Engine {
         Some(sub_id)
     }
 
-    /// Phase 1 of `attach_sub_inner` — resolve the request's anchor to
-    /// a Tree slot, classifying the outcome as `Immediate` (anchor is
-    /// materialised on disk) or `Pending` (anchor is a scaffold; the
-    /// engine must descend before the burst can start).
+    /// Phase 1 of `attach_sub_inner` — resolve the request's anchor to a Tree slot, classifying the
+    /// outcome as `Immediate` (anchor is materialised on disk) or `Pending` (anchor is a scaffold;
+    /// the engine must descend before the burst can start).
     ///
-    /// A [`SubAttachAnchor::Path`] routes through
-    /// [`Tree::parse_attach_path`] (which rejects non-absolute,
-    /// non-UTF-8, `.` / `..`, Windows-prefix, and empty-segment paths)
-    /// and then [`Self::materialize_path_or_pending`]; a malformed path
-    /// emits [`Diagnostic::AttachPathInvalid`] and returns `None`.
+    /// A [`SubAttachAnchor::Path`] routes through [`Tree::parse_attach_path`] (which rejects
+    /// non-absolute, non-UTF-8, `.` / `..`, Windows-prefix, and empty-segment paths) and then
+    /// [`Self::materialize_path_or_pending`]; a malformed path emits
+    /// [`Diagnostic::AttachPathInvalid`] and returns `None`.
     ///
-    /// A [`SubAttachAnchor::Resource`] re-gates the caller's claimed
-    /// slot with an O(1) liveness check: a stale id emits
-    /// [`Diagnostic::AttachResourceStale`] and returns `None`,
-    /// otherwise it resolves [`AnchorResolution::Immediate`] (a
-    /// `Resource` anchor never descends).
+    /// A [`SubAttachAnchor::Resource`] re-gates the caller's claimed slot with an O(1) liveness
+    /// check: a stale id emits [`Diagnostic::AttachResourceStale`] and returns `None`, otherwise it
+    /// resolves [`AnchorResolution::Immediate`] (a `Resource` anchor never descends).
     ///
-    /// Promotes a `DescentScaffold` anchor to `User` on the
-    /// `Immediate` path (the scaffold may have been left over from an
-    /// earlier attach's `ensure_path` intermediate or from the FS-root
-    /// bootstrap). The role is metadata — retention runs through the
-    /// `Profile` back-ref installed by `find_or_create_profile`. The
-    /// `Pending` arm defers role promotion to descent's anchor branch
-    /// (`dispatch_descent_ok::materialize_profile_anchor`) where the
-    /// slot becomes live on disk.
+    /// Promotes a `DescentScaffold` anchor to `User` on the `Immediate` path (the scaffold may have
+    /// been left over from an earlier attach's `ensure_path` intermediate or from the FS-root
+    /// bootstrap). The role is metadata — retention runs through the `Profile` back-ref installed by
+    /// `find_or_create_profile`. The `Pending` arm defers role promotion to descent's anchor branch
+    /// (`dispatch_descent_ok::materialize_profile_anchor`) where the slot becomes live on disk.
     fn resolve_attach_anchor(
         &mut self,
         anchor: &SubAttachAnchor,
@@ -435,12 +371,10 @@ impl Engine {
                 }
             }
             SubAttachAnchor::Resource(r) => {
-                // The caller claims `r` is already live. Re-gate it at
-                // the boundary — the request crossed a channel and
-                // cannot hold a Tree borrow, so liveness is verified
-                // here, symmetric with the Path arm's `parse_attach_path`
-                // re-check. A stale slot is dropped gracefully rather
-                // than panicking downstream.
+                // The caller claims `r` is already live. Re-gate it at the boundary — the request
+                // crossed a channel and cannot hold a Tree borrow, so liveness is verified here,
+                // symmetric with the Path arm's `parse_attach_path` re-check. A stale slot is
+                // dropped gracefully rather than panicking downstream.
                 if self.tree.get(*r).is_none() {
                     out.diagnostics
                         .push(Diagnostic::AttachResourceStale { resource: *r });
@@ -450,9 +384,8 @@ impl Engine {
             }
         };
 
-        // Promote a `DescentScaffold` anchor to `User` on the
-        // Immediate path. The Pending arm's anchor stays scaffolded
-        // until descent's anchor branch flips it.
+        // Promote a `DescentScaffold` anchor to `User` on the Immediate path. The Pending arm's
+        // anchor stays scaffolded until descent's anchor branch flips it.
         if let AnchorResolution::Immediate { anchor } = resolved {
             self.tree
                 .promote_scaffold(anchor, specter_core::ResourceRole::User);
@@ -461,25 +394,21 @@ impl Engine {
         Some(resolved)
     }
 
-    /// Pure pre-check that returns `true` iff a subsequent
-    /// [`Self::attach_sub_inner`] call with `req` would clear its only
-    /// fallible boundary — `Tree::parse_attach_path` for a `Path`
-    /// anchor, or slot liveness for a `Resource` anchor. Mutates
-    /// nothing; never installs a scaffold, never promotes a role.
+    /// Pure pre-check that returns `true` iff a subsequent [`Self::attach_sub_inner`] call with
+    /// `req` would clear its only fallible boundary — `Tree::parse_attach_path` for a `Path`
+    /// anchor, or slot liveness for a `Resource` anchor. Mutates nothing; never installs a
+    /// scaffold, never promotes a role.
     ///
-    /// Sole consumer is [`Self::on_config_diff`]'s `modified_identity`
-    /// arm: it runs the validate *before* detaching the old Sub so a
-    /// malformed path doesn't tear down a live attachment for nothing.
-    /// The detach + attach pair is then total — validate said yes, so
-    /// the attach won't surface a parse error.
+    /// Sole consumer is [`Self::on_config_diff`]'s `modified_identity` arm: it runs the validate
+    /// *before* detaching the old Sub so a malformed path doesn't tear down a live attachment for
+    /// nothing. The detach + attach pair is then total — validate said yes, so the attach won't
+    /// surface a parse error.
     ///
-    /// Emits the same diagnostic [`Self::attach_sub_inner`] would on
-    /// the failure path (`AttachPathInvalid` / `AttachResourceStale`),
-    /// so the validate-then-act site never re-emits on its own. The
-    /// re-parse at attach time (one `Tree::parse_attach_path` call,
-    /// O(path length), pure) is the cost of total composition; the
-    /// attach has no engine-state precondition the validate could lock
-    /// in.
+    /// Emits the same diagnostic [`Self::attach_sub_inner`] would on the failure path
+    /// (`AttachPathInvalid` / `AttachResourceStale`), so the validate-then-act site never re-emits
+    /// on its own. The re-parse at attach time (one `Tree::parse_attach_path` call, O(path length),
+    /// pure) is the cost of total composition; the attach has no engine-state precondition the
+    /// validate could lock in.
     pub(crate) fn validate_sub_attach(&self, req: &SubAttachRequest, out: &mut StepOutput) -> bool {
         match &req.anchor {
             SubAttachAnchor::Path(p) => match Tree::parse_attach_path(p) {
@@ -504,20 +433,16 @@ impl Engine {
         }
     }
 
-    /// Phase 2 of `attach_sub_inner` — register the Sub and emit
-    /// [`Diagnostic::SubAttached`].
+    /// Phase 2 of `attach_sub_inner` — register the Sub and emit [`Diagnostic::SubAttached`].
     ///
-    /// Consumes `params` for the [`Sub::from_request`] move (which
-    /// moves `params.name` into `Sub.name`), so the narration name is
-    /// captured first as one `CompactString` clone — inline for
-    /// typical short names, the single irreducible copy on the static
-    /// attach path. `source_promoter` is a cheap `Option<PromoterId>`
-    /// copy.
+    /// Consumes `params` for the [`Sub::from_request`] move (which moves `params.name` into
+    /// `Sub.name`), so the narration name is captured first as one `CompactString` clone — inline
+    /// for typical short names, the single irreducible copy on the static attach path.
+    /// `source_promoter` is a cheap `Option<PromoterId>` copy.
     ///
-    /// Sole emitter of `SubAttached`; downstream Phase-3 helpers never
-    /// re-emit. The diagnostic is pure operator narration — identity
-    /// is resolved engine-side via the registry's `by_name` index, not
-    /// from this stream.
+    /// Sole emitter of `SubAttached`; downstream Phase-3 helpers never re-emit. The diagnostic is
+    /// pure operator narration — identity is resolved engine-side via the registry's `by_name`
+    /// index, not from this stream.
     fn register_sub(
         &mut self,
         params: SubParams,
@@ -537,20 +462,15 @@ impl Engine {
 
     /// Phase 3 of `attach_sub_inner` — zombie-revival arm.
     ///
-    /// The deferred-reap detach branch flipped the Active burst's
-    /// finish directive to [`BurstFinish::Reap`] and skipped the
-    /// `recompute_profile_settle` the refcount-still-positive detach
-    /// path performs (there is no fire-history purge — it is per-Sub
-    /// and dies with the Sub). This helper un-defers the reap and runs
-    /// the recompute symmetrically:
-    /// [`ProfileState::clear_active_reap`] flips
-    /// `BurstFinish::Reap → ReturnToIdle` on Active (returning `true`
-    /// by construction of the [`ProfileOrigin::ZombieRevival`]
-    /// classification — the `debug_assert!` pins the invariant against
-    /// a future routing breach), emits
-    /// [`Diagnostic::ReapPendingCancelled`], and recomputes
-    /// `Profile.settle` over the live Sub set (just the attaching Sub
-    /// on first revival; further attaches in the same step take the
+    /// The deferred-reap detach branch flipped the Active burst's finish directive to
+    /// [`BurstFinish::Reap`] and skipped the `recompute_profile_settle` the refcount-still-positive
+    /// detach path performs (there is no fire-history purge — it is per-Sub and dies with the Sub).
+    /// This helper un-defers the reap and runs the recompute symmetrically:
+    /// [`ProfileState::clear_active_reap`] flips `BurstFinish::Reap → ReturnToIdle` on Active
+    /// (returning `true` by construction of the [`ProfileOrigin::ZombieRevival`] classification —
+    /// the `debug_assert!` pins the invariant against a future routing breach), emits
+    /// [`Diagnostic::ReapPendingCancelled`], and recomputes `Profile.settle` over the live Sub set
+    /// (just the attaching Sub on first revival; further attaches in the same step take the
     /// `ExistingJoin` arm because the directive is already cleared).
     fn revive_zombie(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let cleared = self
@@ -570,12 +490,10 @@ impl Engine {
 
     /// Phase 3 of `attach_sub_inner` — existing-join arm.
     ///
-    /// `attach_settle` is the request's `settle`; the Profile's
-    /// `settle` is the min over its live Subs' settles, so the
-    /// attaching Sub only shrinks it (and only when its settle is
-    /// strictly lower). No other bookkeeping is required: the events
-    /// mask folds into `config_hash`, so a joining Sub shares the
-    /// existing Profile's mask by construction.
+    /// `attach_settle` is the request's `settle`; the Profile's `settle` is the min over its live
+    /// Subs' settles, so the attaching Sub only shrinks it (and only when its settle is strictly
+    /// lower). No other bookkeeping is required: the events mask folds into `config_hash`, so a
+    /// joining Sub shares the existing Profile's mask by construction.
     fn join_existing(&mut self, profile_id: ProfileId, attach_settle: Duration) {
         if let Some(p) = self.profiles.get_mut(profile_id)
             && attach_settle < p.settle
@@ -584,28 +502,26 @@ impl Engine {
         }
     }
 
-    /// Phase 3 of `attach_sub_inner` — fresh-Profile, immediate-Seed
-    /// arm (anchor materialised on disk at attach time).
+    /// Phase 3 of `attach_sub_inner` — fresh-Profile, immediate-Seed arm (anchor materialised on
+    /// disk at attach time).
     ///
     /// Sequence:
-    /// 1. Install the Profile's anchor [`ContribKey::ProfileAnchor`]
-    ///    contribution at `events_union` mask.
+    /// 1. Install the Profile's anchor [`ContribKey::ProfileAnchor`] contribution at `events_union`
+    ///    mask.
     /// 2. Flip [`AnchorClaim::Held`].
-    /// 3. Set up the `watch_root_parent` (STRUCTURE contribution at
-    ///    the anchor's parent, for anchor-reappearance detection).
-    /// 4. Start the Seed burst (`PreFire(Batching)`); the baseline is
-    ///    established once the settle-spaced quiescence proof converges
-    ///    (the Seed-Ok pin in `fire_or_seal`), not on the first probe.
+    /// 3. Set up the `watch_root_parent` (STRUCTURE contribution at the anchor's parent, for
+    ///    anchor-reappearance detection).
+    /// 4. Start the Seed burst (`PreFire(Batching)`); the baseline is established once the
+    ///    settle-spaced quiescence proof converges (the Seed-Ok pin in `fire_or_seal`), not on the
+    ///    first probe.
     ///
-    /// (No parent-edge step: the `Draining → Verifying` reconfirm is a
-    /// fresh `coverage` query, so an attach maintains no per-Profile
-    /// ancestor cache.)
+    /// (No parent-edge step: the `Draining → Verifying` reconfirm is a fresh `coverage` query, so
+    /// an attach maintains no per-Profile ancestor cache.)
     ///
-    /// Contrast with [`Self::bootstrap_pending`]: the Pending arm runs
-    /// only the descent entry — the anchor watch, `watch_root_parent`
-    /// bump, and Seed burst are deferred to descent's anchor branch
-    /// (`dispatch_descent_ok::materialize_profile_anchor`), which runs
-    /// them when the anchor becomes live on disk.
+    /// Contrast with [`Self::bootstrap_pending`]: the Pending arm runs only the descent entry — the
+    /// anchor watch, `watch_root_parent` bump, and Seed burst are deferred to descent's anchor
+    /// branch (`dispatch_descent_ok::materialize_profile_anchor`), which runs them when the anchor
+    /// becomes live on disk.
     fn bootstrap_immediate(
         &mut self,
         profile_id: ProfileId,
@@ -634,19 +550,15 @@ impl Engine {
         self.start_seed_burst(profile_id, None, now, out);
     }
 
-    /// Phase 3 of `attach_sub_inner` — fresh-Profile, pending-descent
-    /// arm (anchor scaffolded but not yet materialised on disk). The
-    /// Pending half of the `bootstrap_immediate` / `bootstrap_pending`
-    /// dispatch.
+    /// Phase 3 of `attach_sub_inner` — fresh-Profile, pending-descent arm (anchor scaffolded but
+    /// not yet materialised on disk). The Pending half of the `bootstrap_immediate` /
+    /// `bootstrap_pending` dispatch.
     ///
-    /// The anchor-watch installation, the `watch_root_parent` bump, and
-    /// the Seed-burst launch are all deferred to descent's anchor
-    /// branch (`dispatch_descent_ok::materialize_profile_anchor`) —
-    /// this arm only enters the descent. It is a thin delegation to
-    /// `enter_pending_descent` (which runs the four-step
-    /// `mint correlation → state-flip → add_watch on prefix → emit probe`
-    /// sequence); the named arm is retained for dispatch symmetry with
-    /// [`Self::bootstrap_immediate`].
+    /// The anchor-watch installation, the `watch_root_parent` bump, and the Seed-burst launch are all
+    /// deferred to descent's anchor branch (`dispatch_descent_ok::materialize_profile_anchor`) — this
+    /// arm only enters the descent. It is a thin delegation to `enter_pending_descent` (which runs
+    /// the four-step `mint correlation → state-flip → add_watch on prefix → emit probe` sequence);
+    /// the named arm is retained for dispatch symmetry with [`Self::bootstrap_immediate`].
     fn bootstrap_pending(
         &mut self,
         profile_id: ProfileId,
@@ -657,28 +569,22 @@ impl Engine {
         self.enter_pending_descent(profile_id, prefix, remaining, out);
     }
 
-    /// Find an existing Profile at `(anchor, identity.config_hash())`
-    /// or create a fresh one. Returns the [`ProfileId`] and a
-    /// [`ProfileOrigin`] classifying the outcome — `Fresh`,
-    /// `ExistingJoin`, or `ZombieRevival` (existing Profile carrying
-    /// [`BurstFinish::Reap`]).
+    /// Find an existing Profile at `(anchor, identity.config_hash())` or create a fresh one.
+    /// Returns the [`ProfileId`] and a [`ProfileOrigin`] classifying the outcome — `Fresh`,
+    /// `ExistingJoin`, or `ZombieRevival` (existing Profile carrying [`BurstFinish::Reap`]).
     ///
-    /// `identity` is taken by value: the `Fresh` arm moves its fields
-    /// straight into [`Profile::new`] (no clone); the existing-Profile
-    /// arms drop it. The canonical hash is computed once here.
+    /// `identity` is taken by value: the `Fresh` arm moves its fields straight into [`Profile::new`]
+    /// (no clone); the existing-Profile arms drop it. The canonical hash is computed once here.
     ///
-    /// The slim three-variant enum supersedes the prior
-    /// `is_fresh_profile + was_zombie` two-read pattern: the
-    /// trichotomy is captured in one read, and downstream branches
-    /// dispatch on the typed origin rather than re-deriving zombie
-    /// state from `reap_pending`.
+    /// The slim three-variant enum supersedes the prior `is_fresh_profile + was_zombie` two-read
+    /// pattern: the trichotomy is captured in one read, and downstream branches dispatch on the
+    /// typed origin rather than re-deriving zombie state from `reap_pending`.
     ///
-    /// **Fresh-Profile bookkeeping that lives here.** The anchor's
-    /// classified kind is read from the Tree slot and threaded through
-    /// [`Profile::new`]: `None` for a `DescentScaffold` anchor (descent
-    /// materialisation classifies it) or a freshly-`ensure`d-but-unprobed
-    /// slot (first Seed-Ok classifies it). Existing Profiles already
-    /// carry the field from their own first-classify moment.
+    /// **Fresh-Profile bookkeeping that lives here.** The anchor's classified kind is read from the
+    /// Tree slot and threaded through [`Profile::new`]: `None` for a `DescentScaffold` anchor
+    /// (descent materialisation classifies it) or a freshly-`ensure`d-but-unprobed slot (first
+    /// Seed-Ok classifies it). Existing Profiles already carry the field from their own
+    /// first-classify moment.
     fn find_or_create_profile(
         &mut self,
         anchor: ResourceId,
@@ -699,57 +605,46 @@ impl Engine {
             };
             return (pid, origin);
         }
-        // Read the anchor's classified kind before construction:
-        // `profiles.attach` only registers Profile-side indices on the
-        // anchor slot, never its `kind`, so the slot's classification is
-        // identical before and after. Threading it through the
-        // constructor removes the post-attach re-borrow + `expect`.
+        // Read the anchor's classified kind before construction: `profiles.attach` only registers
+        // Profile-side indices on the anchor slot, never its `kind`, so the slot's classification
+        // is identical before and after. Threading it through the constructor removes the
+        // post-attach re-borrow + `expect`.
         let anchor_kind = self.tree.get(anchor).and_then(specter_core::Resource::kind);
         let p = Profile::new(anchor, identity, params.settle, anchor_kind);
         let pid = self.profiles.attach(&mut self.tree, p);
         (pid, ProfileOrigin::Fresh)
     }
 
-    /// Set up the Profile's watch-root parent contribution. For each
-    /// User-role Profile P, the Engine ensures `P.resource.parent` (if
-    /// it exists) carries a `+1` `watch_demand` contribution from P. The
-    /// parent's role is promoted to `WatchRootParent` only if it was
-    /// previously a bare `DescentScaffold`; `User` parents stay `User`
-    /// (never demote User). The role tag is metadata — retention runs
-    /// through the [`ContribKey::ProfileParent`] entry installed below.
+    /// Set up the Profile's watch-root parent contribution. For each User-role Profile P, the
+    /// Engine ensures `P.resource.parent` (if it exists) carries a `+1` `watch_demand` contribution
+    /// from P. The parent's role is promoted to `WatchRootParent` only if it was previously a bare
+    /// `DescentScaffold`; `User` parents stay `User` (never demote User). The role tag is metadata
+    /// — retention runs through the [`ContribKey::ProfileParent`] entry installed below.
     ///
-    /// Caches the parent id on `Profile.watch_root_parent` so
-    /// `reap_profile` can release the contribution without re-deriving.
-    /// `None` if the anchor has no parent in the Tree (a root anchor) —
-    /// root rename detection is then unavailable.
+    /// Caches the parent id on `Profile.watch_root_parent` so `reap_profile` can release the
+    /// contribution without re-deriving. `None` if the anchor has no parent in the Tree (a root
+    /// anchor) — root rename detection is then unavailable.
     ///
-    /// Sole call sites: `attach_sub_inner` (immediate-Seed path, where
-    /// the anchor exists on disk and so does its parent) and
-    /// `descent::dispatch_descent_ok` (anchor materialization).
+    /// Sole call sites: `attach_sub_inner` (immediate-Seed path, where the anchor exists on disk
+    /// and so does its parent) and `descent::dispatch_descent_ok` (anchor materialization).
     ///
-    /// **Anchor sourced from owner state.** The anchor is read back via
-    /// [`Profile::resource`] rather than taken as a parameter: the slot
-    /// is the Profile's own identity axis, write-once for the Profile's
-    /// lifetime (the slot identity `(parent, segment)` is itself
-    /// write-once in the Tree). A caller-passes-wrong-anchor breach
-    /// class is unrepresentable — the seam reads the single source of
-    /// truth at every entry, so the cache cannot drift against the
-    /// Tree's `parent(resource)` under a routing mistake.
+    /// **Anchor sourced from owner state.** The anchor is read back via [`Profile::resource`]
+    /// rather than taken as a parameter: the slot is the Profile's own identity axis, write-once
+    /// for the Profile's lifetime (the slot identity `(parent, segment)` is itself write-once in
+    /// the Tree). A caller-passes-wrong-anchor breach class is unrepresentable — the seam reads the
+    /// single source of truth at every entry, so the cache cannot drift against the Tree's
+    /// `parent(resource)` under a routing mistake.
     ///
-    /// **Per-file recovery limitation.** This parent-edge channel is
-    /// what makes `rm -rf anchor` survivable: the anchor
-    /// re-materialises via descent and a post-recovery Seed-Ok
-    /// rebases `baseline := observed`. The Subtree side re-fires its
-    /// drifted Subs across the loss window, but a `PerStableFile`
-    /// Sub's reactions to changes that occurred during the loss are
-    /// dropped — v1 keeps no per-leaf survival witness on the
-    /// per-file path. This (witness-bearing) drop is surfaced to
-    /// operators via [`Diagnostic::PerFileDriftDroppedOnRecovery`],
-    /// which is witness-gated: a plain `Input::SensorOverflow` reseed
-    /// of a healthy `Snapshot`-baseline Profile drops per-file
-    /// overflow-window reactions the same way but carries no witness,
-    /// so that subclass is a further v1 limitation the diagnostic
-    /// does not cover (deferred with the per-leaf-witness work).
+    /// **Per-file recovery limitation.** This parent-edge channel is what makes `rm -rf anchor`
+    /// survivable: the anchor re-materialises via descent and a post-recovery Seed-Ok rebases
+    /// `baseline := observed`. The Subtree side re-fires its drifted Subs across the loss window,
+    /// but a `PerStableFile` Sub's reactions to changes that occurred during the loss are dropped —
+    /// v1 keeps no per-leaf survival witness on the per-file path. This (witness-bearing) drop is
+    /// surfaced to operators via [`Diagnostic::PerFileDriftDroppedOnRecovery`], which is
+    /// witness-gated: a plain `Input::SensorOverflow` reseed of a healthy `Snapshot`-baseline
+    /// Profile drops per-file overflow-window reactions the same way but carries no witness, so
+    /// that subclass is a further v1 limitation the diagnostic does not cover (deferred with the
+    /// per-leaf-witness work).
     pub(crate) fn set_watch_root_parent(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some((anchor, cached_parent)) = self
             .profiles
@@ -762,29 +657,24 @@ impl Engine {
             return;
         };
 
-        // Idempotent: "Watch root deletion" recovery re-enters descent
-        // on a Profile whose `watch_root_parent` field was set at the
-        // original materialization and never cleared on
-        // `on_anchor_terminal_event`. When recovery's descent advances
-        // back to anchor materialization it would otherwise call this
-        // helper again, double-bumping the parent's `watch_demand` for
-        // the same Profile. Skip the bump if the cache already points
-        // at the same parent id.
+        // Idempotent: "Watch root deletion" recovery re-enters descent on a Profile whose
+        // `watch_root_parent` field was set at the original materialization and never cleared on
+        // `on_anchor_terminal_event`. When recovery's descent advances back to anchor materialization
+        // it would otherwise call this helper again, double-bumping the parent's `watch_demand` for
+        // the same Profile. Skip the bump if the cache already points at the same parent id.
         if cached_parent == Some(parent_id) {
             return;
         }
 
-        // Promote role: DescentScaffold → WatchRootParent. User and
-        // existing WatchRootParent stay as they are (the helper
-        // preserves non-scaffold roles).
+        // Promote role: DescentScaffold → WatchRootParent. User and existing WatchRootParent stay
+        // as they are (the helper preserves non-scaffold roles).
         self.tree
             .promote_scaffold(parent_id, specter_core::ResourceRole::WatchRootParent);
 
-        // The watch-root parent is engine infrastructure (used to detect
-        // anchor reappearance after a `rm -rf` of the anchor).
-        // Contribution is `STRUCTURE` regardless of the Sub's user mask.
-        // The corresponding bookkeeping flag is `Profile.watch_root_parent
-        // == Some(parent_id)`, written below.
+        // The watch-root parent is engine infrastructure (used to detect anchor reappearance after
+        // a `rm -rf` of the anchor). Contribution is `STRUCTURE` regardless of the Sub's user mask.
+        // The corresponding bookkeeping flag is `Profile.watch_root_parent == Some(parent_id)`,
+        // written below.
         add_watch(
             &mut self.tree,
             parent_id,
@@ -798,57 +688,44 @@ impl Engine {
         }
     }
 
-    /// Set up the Promoter's parent-edge recovery contribution — the
-    /// structural twin of [`Self::set_watch_root_parent`] for the
-    /// Promoter side. Installs a `+1 STRUCTURE`
-    /// [`ContribKey::PromoterPrefixParent`] `watch_demand` at the
-    /// terminus's parent, so a `rm -rf` of the materialised
-    /// literal-prefix directory is detectable via the surviving parent
-    /// watch and the Promoter can re-descend (the recovery flow in
-    /// `classify_event_carriers` → `start_promoter_prefix_recovery`).
-    /// Caches the parent id on `Promoter.prefix_parent` so reap /
-    /// FD-exhaustion purge can release the contribution without
-    /// re-deriving.
+    /// Set up the Promoter's parent-edge recovery contribution — the structural twin of
+    /// [`Self::set_watch_root_parent`] for the Promoter side. Installs a `+1 STRUCTURE`
+    /// [`ContribKey::PromoterPrefixParent`] `watch_demand` at the terminus's parent, so a `rm -rf`
+    /// of the materialised literal-prefix directory is detectable via the surviving parent watch
+    /// and the Promoter can re-descend (the recovery flow in `classify_event_carriers` →
+    /// `start_promoter_prefix_recovery`). Caches the parent id on `Promoter.prefix_parent` so reap
+    /// / FD-exhaustion purge can release the contribution without re-deriving.
     ///
-    /// **Terminus sourced from owner state.** The terminus is read back
-    /// via [`specter_core::Promoter::terminus`] rather than taken as
-    /// a parameter: the proxy registered at `pattern_component_index ==
-    /// literal_prefix_len` is the terminus's own structural address,
-    /// uniquely identified inside the `Active` proxies map for the
-    /// Promoter's lifetime. A caller-passes-wrong-terminus breach class
-    /// is unrepresentable — the seam reads the single source of truth
-    /// at every entry, so the cache cannot drift against the Tree's
+    /// **Terminus sourced from owner state.** The terminus is read back via
+    /// [`specter_core::Promoter::terminus`] rather than taken as a parameter: the proxy registered
+    /// at `pattern_component_index == literal_prefix_len` is the terminus's own structural address,
+    /// uniquely identified inside the `Active` proxies map for the Promoter's lifetime. A
+    /// caller-passes-wrong-terminus breach class is unrepresentable — the seam reads the single
+    /// source of truth at every entry, so the cache cannot drift against the Tree's
     /// `parent(terminus)` under a routing mistake.
     ///
-    /// **No terminus ⇒ no channel.** The early return covers
-    /// `PrefixPending` (no terminus until materialisation) and the
-    /// transient `Active { proxies: ∅ }` window before
-    /// [`Self::enter_active`]'s `register_proxy` step installs the
-    /// terminus entry — the helper's sole production caller runs
-    /// `register_proxy` first, so in correct operation the slot is
+    /// **No terminus ⇒ no channel.** The early return covers `PrefixPending` (no terminus until
+    /// materialisation) and the transient `Active { proxies: ∅ }` window before
+    /// [`Self::enter_active`]'s `register_proxy` step installs the terminus entry — the helper's
+    /// sole production caller runs `register_proxy` first, so in correct operation the slot is
     /// always populated by the time the helper reads back.
     ///
-    /// **No parent ⇒ no channel.** A `terminus == "/"` Promoter
-    /// (`literal_prefix_len == 1`) has no parent in the Tree; the early
-    /// return installs nothing. This subsumes an explicit arithmetic
-    /// `lpl >= 2` guard — and `/` never `Vanishes` on Unix, so the
-    /// channel is genuinely never needed there.
+    /// **No parent ⇒ no channel.** A `terminus == "/"` Promoter (`literal_prefix_len == 1`) has no
+    /// parent in the Tree; the early return installs nothing. This subsumes an explicit arithmetic
+    /// `lpl >= 2` guard — and `/` never `Vanishes` on Unix, so the channel is genuinely never
+    /// needed there.
     ///
-    /// **Idempotent on the recovery cycle.** Terminus-loss recovery
-    /// re-enters `enter_active`, which calls this helper again while
-    /// `Promoter.prefix_parent` is *still* set from the original
-    /// materialisation (the rewind machine never clears it). The
-    /// `already_set` short-circuit skips the second `add_watch`, so the
-    /// parent's `watch_demand` does not leak `+1` per recovery.
+    /// **Idempotent on the recovery cycle.** Terminus-loss recovery re-enters `enter_active`, which
+    /// calls this helper again while `Promoter.prefix_parent` is *still* set from the original
+    /// materialisation (the rewind machine never clears it). The `already_set` short-circuit skips
+    /// the second `add_watch`, so the parent's `watch_demand` does not leak `+1` per recovery.
     ///
-    /// Reuses `ResourceRole::WatchRootParent` — the role is metadata
-    /// only (retention runs through the contribution, never the role),
-    /// so the Profile twin's role serves the Promoter edge too without
-    /// proliferating a near-identical role.
+    /// Reuses `ResourceRole::WatchRootParent` — the role is metadata only (retention runs through
+    /// the contribution, never the role), so the Profile twin's role serves the Promoter edge too
+    /// without proliferating a near-identical role.
     ///
-    /// Sole call site: [`Self::enter_active`] (both the
-    /// immediate-`Materialized` and `PrefixPending → Active` arms,
-    /// each of which has just registered the terminus proxy).
+    /// Sole call site: [`Self::enter_active`] (both the immediate-`Materialized` and `PrefixPending
+    /// → Active` arms, each of which has just registered the terminus proxy).
     pub(crate) fn set_promoter_prefix_parent(
         &mut self,
         promoter_id: PromoterId,
@@ -865,28 +742,23 @@ impl Engine {
             return;
         };
 
-        // Idempotent: terminus-loss recovery re-enters `enter_active`
-        // with `prefix_parent` still cached from the original
-        // materialisation. Skipping the bump when the cache already
-        // names this parent keeps the parent's `watch_demand`
-        // contribution at exactly `+1` across any number of
-        // loss → recovery cycles.
+        // Idempotent: terminus-loss recovery re-enters `enter_active` with `prefix_parent` still
+        // cached from the original materialisation. Skipping the bump when the cache already names
+        // this parent keeps the parent's `watch_demand` contribution at exactly `+1` across any
+        // number of loss → recovery cycles.
         if cached_parent == Some(parent_id) {
             return;
         }
 
-        // Promote role: DescentScaffold → WatchRootParent. User and
-        // existing WatchRootParent stay as they are (the helper
-        // preserves non-scaffold roles). Role is metadata; retention
-        // runs through the contribution installed below.
+        // Promote role: DescentScaffold → WatchRootParent. User and existing WatchRootParent stay
+        // as they are (the helper preserves non-scaffold roles). Role is metadata; retention runs
+        // through the contribution installed below.
         self.tree
             .promote_scaffold(parent_id, specter_core::ResourceRole::WatchRootParent);
 
-        // The parent-edge watch is engine infrastructure (terminus
-        // reappearance detection). Contribution is `STRUCTURE`
-        // regardless of the dynamic Subs' user masks. The bookkeeping
-        // flag is `Promoter.prefix_parent == Some(parent_id)`, written
-        // below.
+        // The parent-edge watch is engine infrastructure (terminus reappearance detection).
+        // Contribution is `STRUCTURE` regardless of the dynamic Subs' user masks. The bookkeeping
+        // flag is `Promoter.prefix_parent == Some(parent_id)`, written below.
         add_watch(
             &mut self.tree,
             parent_id,
@@ -902,43 +774,34 @@ impl Engine {
 
     /// Detach a Sub by id.
     ///
-    /// Recomputes `Profile.settle = min(remaining_subs.settles)`. If no
-    /// Subs remain on the Profile (`subs.at(pid)` empty):
-    /// - **Idle / Pending Profile:** reap immediately. Release anchor
-    ///   `watch_demand` (1→0 emits Unwatch), release
-    ///   `watch_root_parent` contribution, and `try_reap` the
-    ///   anchor Resource.
-    /// - **Active Profile:** flip the burst's [`BurstFinish::Reap`]
-    ///   directive via [`ProfileState::mark_active_for_reap`]. The
-    ///   active burst runs to completion; on `finish_burst_to_idle`,
-    ///   the Engine skips Effect emission (`emit_effects` reads the
-    ///   directive) and reaps the Profile in the same step as the
-    ///   Active → Idle transition (any pre-fire phase converges
-    ///   through `finish_burst_to_idle`).
+    /// Recomputes `Profile.settle = min(remaining_subs.settles)`. If no Subs remain on the Profile
+    /// (`subs.at(pid)` empty):
+    /// - **Idle / Pending Profile:** reap immediately. Release anchor `watch_demand` (1→0 emits
+    ///   Unwatch), release `watch_root_parent` contribution, and `try_reap` the anchor Resource.
+    /// - **Active Profile:** flip the burst's [`BurstFinish::Reap`] directive via
+    ///   [`ProfileState::mark_active_for_reap`]. The active burst runs to completion; on
+    ///   `finish_burst_to_idle`, the Engine skips Effect emission (`emit_effects` reads the
+    ///   directive) and reaps the Profile in the same step as the Active → Idle transition (any
+    ///   pre-fire phase converges through `finish_burst_to_idle`).
     ///
-    /// If the count remains > 0, the Profile stays alive; only
-    /// `Profile.settle` is recomputed.
+    /// If the count remains > 0, the Profile stays alive; only `Profile.settle` is recomputed.
     ///
-    /// Idempotent on stale `SubId` ([`Diagnostic::DetachUnknownSub`] +
-    /// drop). Sole public entry is [`Input::DetachSub`] via
-    /// [`Self::step`]; the `pub(crate)` inner survives because
-    /// [`Self::on_config_diff`] composes multiple detach/attach
-    /// operations into one [`StepOutput`] on hot reload.
+    /// Idempotent on stale `SubId` ([`Diagnostic::DetachUnknownSub`] + drop). Sole public entry is
+    /// [`Input::DetachSub`] via [`Self::step`]; the `pub(crate)` inner survives because
+    /// [`Self::on_config_diff`] composes multiple detach/attach operations into one [`StepOutput`]
+    /// on hot reload.
     ///
-    /// `reason` is the per-call-site lifecycle attribution carried on
-    /// the emitted [`Diagnostic::SubDetached`]. Callers pass the
-    /// [`DetachReason`] variant that names their origin
-    /// ([`Input::DetachSub`] is canonically [`DetachReason::IpcDisabled`];
-    /// internal call sites supply their own — `ConfigDiffRemoved` /
-    /// `ConfigDiffIdentityChanged` from hot-reload, `PromoterReaped`
-    /// from the Promoter teardown loop). The diagnostic is emitted iff
-    /// the Sub was actually removed (the `DetachUnknownSub` early-return
-    /// suppresses it — no lifecycle change happened).
+    /// `reason` is the per-call-site lifecycle attribution carried on the emitted
+    /// [`Diagnostic::SubDetached`]. Callers pass the [`DetachReason`] variant that names their
+    /// origin ([`Input::DetachSub`] is canonically [`DetachReason::IpcDisabled`]; internal call
+    /// sites supply their own — `ConfigDiffRemoved` / `ConfigDiffIdentityChanged` from hot-reload,
+    /// `PromoterReaped` from the Promoter teardown loop). The diagnostic is emitted iff the Sub was
+    /// actually removed (the `DetachUnknownSub` early-return suppresses it — no lifecycle change
+    /// happened).
     ///
-    /// Time-independent: detach is a pure registry/refcount operation
-    /// (no timer scheduling, no burst transitions that need a `now`).
-    /// Bursts running on detached Profiles continue under their existing
-    /// schedule until `finish_burst_to_idle`.
+    /// Time-independent: detach is a pure registry/refcount operation (no timer scheduling, no
+    /// burst transitions that need a `now`). Bursts running on detached Profiles continue under
+    /// their existing schedule until `finish_burst_to_idle`.
     pub(crate) fn detach_sub_inner(
         &mut self,
         sub: SubId,
@@ -952,56 +815,46 @@ impl Engine {
                 return;
             }
         };
-        // Emit the lifecycle signal once per real detach — *after* the
-        // removal succeeded (the `DetachUnknownSub` arm above means no
-        // Sub left the registry, so there's nothing to narrate) and
-        // *before* the post-detach reap branches (so an immediate reap
-        // emitting `ProfileReaped` lands after the `SubDetached` that
-        // caused it; the post-`step` sort then orders them by
-        // [`StepOutput::sort_for_emission`]'s diagnostic seal, but
-        // emission-site order matches the causal chain).
+        // Emit the lifecycle signal once per real detach — *after* the removal succeeded (the
+        // `DetachUnknownSub` arm above means no Sub left the registry, so there's nothing to
+        // narrate) and *before* the post-detach reap branches (so an immediate reap emitting
+        // `ProfileReaped` lands after the `SubDetached` that caused it; the post-`step` sort then
+        // orders them by [`StepOutput::sort_for_emission`]'s diagnostic seal, but emission-site
+        // order matches the causal chain).
         out.diagnostics.push(Diagnostic::SubDetached {
             sub,
             profile: profile_id,
             reason,
         });
 
-        // A live Sub's `.profile()` is live by the attach invariant; this
-        // guard is defence-in-depth — same effect as the get_mut-borrow
-        // bail it replaces, but no Profile write happens here (the
-        // post-detach count is derived from the registry).
+        // A live Sub's `.profile()` is live by the attach invariant; this guard is defence-in-depth
+        // — same effect as the get_mut-borrow bail it replaces, but no Profile write happens here
+        // (the post-detach count is derived from the registry).
         if self.profiles.get(profile_id).is_none() {
             return;
         }
-        // Post-`remove` count, read straight from the Sub registry —
-        // `Profile.sub_refcount` was a denormalised mirror of this and
-        // has been removed.
+        // Post-`remove` count, read straight from the Sub registry — `Profile.sub_refcount` was a
+        // denormalised mirror of this and has been removed.
         let remaining_subs = self.subs.at(profile_id).len();
 
-        // No fire-history purge: the detached Sub's `Sub.has_fired`
-        // died with it at `self.subs.remove(sub)` above. The flag is
-        // per-Sub and slotmap-scoped, so a future drift verdict on this
-        // Profile structurally cannot re-fire a detached Sub (and a
-        // hot-reload-modified Sub re-attaches under a fresh `SubId`
-        // starting `false`). The old per-Profile `fired_subs` set
-        // needed a targeted purge here; the per-Sub home dissolves it.
+        // No fire-history purge: the detached Sub's `Sub.has_fired` died with it at
+        // `self.subs.remove(sub)` above. The flag is per-Sub and slotmap-scoped, so a future drift
+        // verdict on this Profile structurally cannot re-fire a detached Sub (and a
+        // hot-reload-modified Sub re-attaches under a fresh `SubId` starting `false`). The old
+        // per-Profile `fired_subs` set needed a targeted purge here; the per-Sub home dissolves it.
         if remaining_subs > 0 {
             // Recompute Profile.settle = min(remaining_subs.settles).
             //
-            // Every Sub on a Profile shares the same `events` mask
-            // (events folds into `config_hash`); detaching one Sub
-            // cannot flip `Profile.has_per_file_fds` or
-            // `Profile.events`.
+            // Every Sub on a Profile shares the same `events` mask (events folds into `config_hash`);
+            // detaching one Sub cannot flip `Profile.has_per_file_fds` or `Profile.events`.
             self.recompute_profile_settle(profile_id);
             return;
         }
 
-        // No Subs remain: classify the reap path via the typed
-        // [`ProfileState::detach_lifecycle`] projection — `ReapNow` for
-        // Idle / Pending Profiles (no burst to drain), `DeferToBurstEnd`
-        // for Active Profiles (the burst's Draining-sweep reconfirm
-        // must run first). Pending Profiles reap synchronously
-        // alongside Idle: there is no `finish_burst_to_idle` to resolve
+        // No Subs remain: classify the reap path via the typed [`ProfileState::detach_lifecycle`]
+        // projection — `ReapNow` for Idle / Pending Profiles (no burst to drain), `DeferToBurstEnd`
+        // for Active Profiles (the burst's Draining-sweep reconfirm must run first). Pending
+        // Profiles reap synchronously alongside Idle: there is no `finish_burst_to_idle` to resolve
         // a deferred reap.
         let lifecycle = self
             .profiles
@@ -1012,12 +865,10 @@ impl Engine {
                 self.reap_profile(profile_id, ReapTrigger::Immediate, out);
             }
             Some(DetachLifecycle::DeferToBurstEnd) => {
-                // `recompute_profile_settle` is deliberately skipped —
-                // the Profile is about to drop on burst end, so the
-                // recompute would be wasted. A revival via fresh
-                // `attach_sub_inner` (zombie-revival branch) un-defers
-                // the reap and runs the recompute symmetrically. (No
-                // fire-history purge exists to skip — it is per-Sub.)
+                // `recompute_profile_settle` is deliberately skipped — the Profile is about to drop
+                // on burst end, so the recompute would be wasted. A revival via fresh
+                // `attach_sub_inner` (zombie-revival branch) un-defers the reap and runs the
+                // recompute symmetrically. (No fire-history purge exists to skip — it is per-Sub.)
                 let marked = self
                     .profiles
                     .get_mut(profile_id)
@@ -1032,28 +883,23 @@ impl Engine {
         }
     }
 
-    /// In-place per-Sub rebind — the `modified_params` arm of
-    /// [`Self::on_config_diff`]. Replaces `sub`'s `program`, `scope`,
-    /// `settle`, and `log_output` via the engine-internal edge method
-    /// [`SubRegistry::rebind`]; preserves `SubId`, `profile`, `name`,
-    /// `source_promoter`, and `has_fired`.
+    /// In-place per-Sub rebind — the `modified_params` arm of [`Self::on_config_diff`]. Replaces
+    /// `sub`'s `program`, `scope`, `settle`, and `log_output` via the engine-internal edge method
+    /// [`SubRegistry::rebind`]; preserves `SubId`, `profile`, `name`, `source_promoter`, and
+    /// `has_fired`.
     ///
-    /// Touches no Profile state, no Tree slot, and no kernel watch: the
-    /// silent biggest win over the `modified_identity` detach+attach
-    /// path is that the anchor's `watch_demand` stays installed
+    /// Touches no Profile state, no Tree slot, and no kernel watch: the silent biggest win over the
+    /// `modified_identity` detach+attach path is that the anchor's `watch_demand` stays installed
     /// throughout the rebind — there is no brief "no watcher" window.
     ///
-    /// Bookkeeping is one tiny ledger update: when `params.settle`
-    /// differs from the prior settle, the Profile's `settle` floor (min
-    /// over its live Subs) is recomputed via
-    /// [`Self::recompute_profile_settle`]. The currently-armed settle
-    /// timer (if any) keeps its existing deadline; the *next* settle
-    /// window uses the new floor.
+    /// Bookkeeping is one tiny ledger update: when `params.settle` differs from the prior settle,
+    /// the Profile's `settle` floor (min over its live Subs) is recomputed via
+    /// [`Self::recompute_profile_settle`]. The currently-armed settle timer (if any) keeps its
+    /// existing deadline; the *next* settle window uses the new floor.
     ///
-    /// On a stale [`SubId`] (the rebind invariant says the dispatcher
-    /// just resolved through `find_by_name`, so this is structurally
-    /// unexpected), emits [`Diagnostic::RebindUnknownSub`] and returns
-    /// without mutating engine state.
+    /// On a stale [`SubId`] (the rebind invariant says the dispatcher just resolved through
+    /// `find_by_name`, so this is structurally unexpected), emits [`Diagnostic::RebindUnknownSub`]
+    /// and returns without mutating engine state.
     pub(crate) fn rebind_sub_inner(
         &mut self,
         sub: SubId,
@@ -1071,133 +917,102 @@ impl Engine {
         out.diagnostics.push(Diagnostic::SubRebound { sub });
     }
 
-    /// Reap a Profile: release every contribution it holds (anchor watch,
-    /// watch-root parent watch, descent prefix watch, per-descendant
-    /// watches), detach from `ProfileMap`, try-reap the anchor Resource,
-    /// and emit a [`Diagnostic::ProfileReaped`] carrying the
-    /// [`ReapTrigger`] that drove this reap. The trigger is supplied by
-    /// the caller (not derived from state) because the two paths reach
-    /// `reap_profile` with structurally distinct preconditions:
-    /// `Immediate` from `detach_sub_inner` on Idle/Pending (no burst),
-    /// and `DeferredFromBurst` from `finish_burst_to_idle` honouring a
-    /// prior [`BurstFinish::Reap`] (the burst's drain has just run).
+    /// Reap a Profile: release every contribution it holds (anchor watch, watch-root parent watch,
+    /// descent prefix watch, per-descendant watches), detach from `ProfileMap`, try-reap the anchor
+    /// Resource, and emit a [`Diagnostic::ProfileReaped`] carrying the [`ReapTrigger`] that drove
+    /// this reap. The trigger is supplied by the caller (not derived from state) because the two
+    /// paths reach `reap_profile` with structurally distinct preconditions: `Immediate` from
+    /// `detach_sub_inner` on Idle/Pending (no burst), and `DeferredFromBurst` from
+    /// `finish_burst_to_idle` honouring a prior [`BurstFinish::Reap`] (the burst's drain has just
+    /// run).
     ///
-    /// **Quartet.** A Profile may hold up to four kinds of contribution
-    /// to per-Resource `watch_demand`:
+    /// **Quartet.** A Profile may hold up to four kinds of contribution to per-Resource
+    /// `watch_demand`:
     ///
-    ///   - **Anchor** (1-to-1): `Profile.resource.watch_demand` carries
-    ///     `+1` from this Profile while
-    ///     `Profile.anchor_claim == AnchorClaim::Held`.
-    ///   - **Watch-root parent** (1-to-1): `Profile.watch_root_parent`'s
-    ///     resource carries `+1` `STRUCTURE` for anchor-reappearance
-    ///     detection.
-    ///   - **Descent prefix** (1-to-1): the deepest existing prefix on
-    ///     a Pending Profile's path carries `+1` `STRUCTURE`.
-    ///   - **Per-descendant** (1-to-N): every covered Tree slot in
-    ///     `Profile.current` carries `+1` (Dir always; Leaf under
-    ///     `has_per_file_fds`). The 1-to-N source-of-truth is the
-    ///     snapshot itself, not a per-Profile flag.
+    ///   - **Anchor** (1-to-1): `Profile.resource.watch_demand` carries `+1` from this Profile
+    ///     while `Profile.anchor_claim == AnchorClaim::Held`.
+    ///   - **Watch-root parent** (1-to-1): `Profile.watch_root_parent`'s resource carries `+1`
+    ///     `STRUCTURE` for anchor-reappearance detection.
+    ///   - **Descent prefix** (1-to-1): the deepest existing prefix on a Pending Profile's path
+    ///     carries `+1` `STRUCTURE`.
+    ///   - **Per-descendant** (1-to-N): every covered Tree slot in `Profile.current` carries `+1`
+    ///     (Dir always; Leaf under `has_per_file_fds`). The 1-to-N source-of-truth is the snapshot
+    ///     itself, not a per-Profile flag.
     ///
-    /// **Trichotomy invariant** (preserved from prior shape, now within
-    /// the quartet). Anchor and descent-prefix are mutually exclusive at
-    /// any moment: either the Profile is `Pending` (descent prefix only)
-    /// or materialized (anchor + descendants + watch-root parent). The
-    /// clamp recovery path (`Input::WatchOpRejected`) leaves the Profile
-    /// with no contributions; the purge fan-out cleans up the
-    /// bookkeeping.
+    /// **Trichotomy invariant** (preserved from prior shape, now within the quartet). Anchor and
+    /// descent-prefix are mutually exclusive at any moment: either the Profile is `Pending`
+    /// (descent prefix only) or materialized (anchor + descendants + watch-root parent). The clamp
+    /// recovery path (`Input::WatchOpRejected`) leaves the Profile with no contributions; the purge
+    /// fan-out cleans up the bookkeeping.
     ///
     /// # Partial order
     ///
-    /// `reap_profile`'s steps partition into five strictly-ordered groups
-    /// where group N must complete before group N+1 begins. Within
-    /// groups (1) and (4) members are unordered — any permutation
-    /// produces an equivalent [`StepOutput`]:
+    /// `reap_profile`'s steps partition into five strictly-ordered groups where group N must
+    /// complete before group N+1 begins. Within groups (1) and (4) members are unordered — any
+    /// permutation produces an equivalent [`StepOutput`]:
     ///
-    /// 1. **Probe disarm.** [`Engine::cancel_owner_probe`] emits a
-    ///    `ProbeOp::Cancel` and disarms the owner's slot for any
-    ///    in-flight probe (a Pending Profile's descent probe; an Active
-    ///    burst never reaches this entry with an armed slot — every
-    ///    path that drives a deferred reap from Active disarms first:
-    ///    response dispatch via `take_owner_probe`, or the
-    ///    overflow-reseed reap branch via `cancel_owner_probe`, both
-    ///    *before* `finish_burst_to_idle`). Must
-    ///    precede (2) because [`Engine::release_descent_prefix_claim`]'s
-    ///    `transition_state(Idle)` *drops* the prior
-    ///    `Pending(DescentState)`: an armed descent slot reaching that
-    ///    discard trips `ProbeSlot`'s Drop tripwire (the cancel-first
-    ///    contract, now structurally enforced; see the helper's rustdoc).
+    /// 1. **Probe disarm.** [`Engine::cancel_owner_probe`] emits a `ProbeOp::Cancel` and disarms the
+    ///    owner's slot for any in-flight probe (a Pending Profile's descent probe; an Active burst
+    ///    never reaches this entry with an armed slot — every path that drives a deferred reap from
+    ///    Active disarms first: response dispatch via `take_owner_probe`, or the overflow-reseed reap
+    ///    branch via `cancel_owner_probe`, both *before* `finish_burst_to_idle`). Must precede (2)
+    ///    because [`Engine::release_descent_prefix_claim`]'s `transition_state(Idle)` *drops* the
+    ///    prior `Pending(DescentState)`: an armed descent slot reaching that discard trips
+    ///    `ProbeSlot`'s Drop tripwire (the cancel-first contract, now structurally enforced; see the
+    ///    helper's rustdoc).
     ///
-    /// 2. **Release quartet** — `release_descent_prefix_claim`,
-    ///    `release_descendant_claim`, `release_anchor_claim`,
-    ///    `release_watch_root_parent_claim`. Each is idempotent,
-    ///    counter-aware, and safe on a post-vacate slot. None reads or
-    ///    mutates state another might also touch:
-    ///    - `release_descendant_claim` `take()`s `Profile.current`; the
-    ///      other three never read it.
-    ///    - `release_anchor_claim` removes `ProfileAnchor(pid)` from the
-    ///      anchor's contributions; the other three never read the
-    ///      anchor's contribution map.
-    ///    - `release_watch_root_parent_claim` calls `try_reap` on the
-    ///      *parent* slot (no-op while the anchor is still a child); the
-    ///      anchor's eventual `try_reap` in (5) cascades upward and
-    ///      reaps the parent then.
-    ///    - `release_descent_prefix_claim` releases the descent-prefix
-    ///      contribution and transitions `Pending → Idle`; mutually
-    ///      exclusive with anchor by the trichotomy invariant.
+    /// 2. **Release quartet** — `release_descent_prefix_claim`, `release_descendant_claim`,
+    ///    `release_anchor_claim`, `release_watch_root_parent_claim`. Each is idempotent,
+    ///    counter-aware, and safe on a post-vacate slot. None reads or mutates state another might
+    ///    also touch:
+    ///    - `release_descendant_claim` `take()`s `Profile.current`; the other three never read it.
+    ///    - `release_anchor_claim` removes `ProfileAnchor(pid)` from the anchor's contributions;
+    ///      the other three never read the anchor's contribution map.
+    ///    - `release_watch_root_parent_claim` calls `try_reap` on the *parent* slot (no-op while
+    ///      the anchor is still a child); the anchor's eventual `try_reap` in (5) cascades upward
+    ///      and reaps the parent then.
+    ///    - `release_descent_prefix_claim` releases the descent-prefix contribution and transitions
+    ///      `Pending → Idle`; mutually exclusive with anchor by the trichotomy invariant.
     ///
-    ///    Cardinality order chosen for readability: 1-to-1 prefixed
-    ///    claims first, the 1-to-N descendant walk, then the remaining
-    ///    1-to-1 claims. Any of 4! = 24 permutations is correct.
+    ///    Cardinality order chosen for readability: 1-to-1 prefixed claims first, the 1-to-N
+    ///    descendant walk, then the remaining 1-to-1 claims. Any of 4! = 24 permutations is correct.
     ///
-    /// 3. **`ProfileMap::detach`.** Must follow (2) — the release
-    ///    helpers read `&Profile` (anchor, watch_root_parent,
-    ///    snapshot). Must precede (4) — `Tree::try_reap` only reaps the
-    ///    anchor slot once this Profile no longer occupies it.
+    /// 3. **`ProfileMap::detach`.** Must follow (2) — the release helpers read `&Profile` (anchor,
+    ///    watch_root_parent, snapshot). Must precede (4) — `Tree::try_reap` only reaps the anchor
+    ///    slot once this Profile no longer occupies it.
     ///
-    /// 4. **Anchor try-reap.** `Tree::try_reap(anchor)` cascades upward
-    ///    through any now-orphaned ancestors (the watch-root parent
-    ///    slot is freed in this step if the anchor was its sole
-    ///    remaining child). No parent-edge recompute accompanies it:
-    ///    the `Draining → Verifying` reconfirm is a fresh `coverage`
-    ///    query, so a reaped Profile leaves no cached ancestor edge for
-    ///    dependents to have rewritten — they re-derive on their next
-    ///    query against the post-detach topology.
+    /// 4. **Anchor try-reap.** `Tree::try_reap(anchor)` cascades upward through any now-orphaned
+    ///    ancestors (the watch-root parent slot is freed in this step if the anchor was its sole
+    ///    remaining child). No parent-edge recompute accompanies it: the `Draining → Verifying`
+    ///    reconfirm is a fresh `coverage` query, so a reaped Profile leaves no cached ancestor edge
+    ///    for dependents to have rewritten — they re-derive on their next query against the
+    ///    post-detach topology.
     ///
-    /// 5. **`Diagnostic::ProfileReaped` emit.** Last by convention so the
-    ///    diagnostic ordering across a step (which is sorted by emission
-    ///    site rather than by the [`StepOutput::sort_for_emission`] pass)
-    ///    reads "do the work, then announce it."
+    /// 5. **`Diagnostic::ProfileReaped` emit.** Last by convention so the diagnostic ordering
+    ///    across a step (which is sorted by emission site rather than by the
+    ///    [`StepOutput::sort_for_emission`] pass) reads "do the work, then announce it."
     ///
-    /// **Note on `discard_anchor_state` overlap.** This helper performs
-    /// `release_descendant_claim` + `release_anchor_claim` inline
-    /// rather than via [`Engine::discard_anchor_state`]. The two
+    /// **Note on `discard_anchor_state` overlap.** This helper performs `release_descendant_claim`
+    /// + `release_anchor_claim` inline rather than via [`Engine::discard_anchor_state`]. The two
     /// helpers differ in purpose:
     ///
-    /// - `discard_anchor_state` exists for the "anchor lost, Profile
-    ///   lives" case — the seven `dispatch_*_vanished/failed` +
-    ///   `finalize_anchor_lost` sites. Its `kind = None` and
-    ///   `baseline = None` writes prepare the Profile for the next
-    ///   Seed burst's probe-shape dispatch, and it deliberately
-    ///   preserves `watch_root_parent` (the recovery channel).
-    /// - `reap_profile` is "Profile dies entirely." There is no next
-    ///   Seed burst — the Profile detaches in group (3) — so the
-    ///   `kind` and `baseline` writes that `discard_anchor_state` would
-    ///   perform are wasted on a struct about to drop. Reap also
-    ///   releases `watch_root_parent`, which `discard_anchor_state`
-    ///   deliberately preserves.
+    /// - `discard_anchor_state` exists for the "anchor lost, Profile lives" case — the seven
+    ///   `dispatch_*_vanished/failed` + `finalize_anchor_lost` sites. Its `kind = None` and
+    ///   `baseline = None` writes prepare the Profile for the next Seed burst's probe-shape
+    ///   dispatch, and it deliberately preserves `watch_root_parent` (the recovery channel).
+    /// - `reap_profile` is "Profile dies entirely." There is no next Seed burst — the Profile
+    ///   detaches in group (3) — so the `kind` and `baseline` writes that `discard_anchor_state`
+    ///   would perform are wasted on a struct about to drop. Reap also releases
+    ///   `watch_root_parent`, which `discard_anchor_state` deliberately preserves.
     ///
-    /// The structural overlap (both call `release_descendant_claim +
-    /// release_anchor_claim`) is intentional; the field clears and
-    /// `watch_root_parent` release are deliberately partitioned across
-    /// the two helpers.
+    /// The structural overlap (both call `release_descendant_claim + release_anchor_claim`) is
+    /// intentional; the field clears and `watch_root_parent` release are deliberately partitioned
+    /// across the two helpers.
     ///
-    /// Sole call sites: `detach_sub_inner` (Idle / Pending Profile,
-    /// immediate reap; `via = Immediate`),
-    /// `on_anchor_terminal_all_dynamic` (non-Active arm of the
-    /// all-dynamic Promoter teardown path; `via = Immediate`), and
-    /// `finish_burst_to_idle` (deferred reap when
-    /// [`BurstFinish::Reap`] was set mid-burst; `via =
-    /// DeferredFromBurst`).
+    /// Sole call sites: `detach_sub_inner` (Idle / Pending Profile, immediate reap; `via =
+    /// Immediate`), `on_anchor_terminal_all_dynamic` (non-Active arm of the all-dynamic Promoter
+    /// teardown path; `via = Immediate`), and `finish_burst_to_idle` (deferred reap when
+    /// [`BurstFinish::Reap`] was set mid-burst; `via = DeferredFromBurst`).
     pub(crate) fn reap_profile(
         &mut self,
         profile_id: ProfileId,
@@ -1209,9 +1024,8 @@ impl Engine {
         };
         let anchor = p.resource();
 
-        // Trichotomy invariant: Pending and AnchorClaim::Held are mutually
-        // exclusive. Descent flips Pending → Idle and bumps the anchor
-        // atomically in `dispatch_descent_ok`'s anchor branch.
+        // Trichotomy invariant: Pending and AnchorClaim::Held are mutually exclusive. Descent flips
+        // Pending → Idle and bumps the anchor atomically in `dispatch_descent_ok`'s anchor branch.
         debug_assert!(
             !matches!(
                 (p.state(), p.anchor_claim()),
@@ -1220,62 +1034,48 @@ impl Engine {
             "reap_profile: Pending + AnchorClaim::Held must be mutually exclusive",
         );
 
-        // Consume any in-flight probe BEFORE the descent-prefix helper
-        // transitions the Profile to Idle. Idempotent: emits Cancel
-        // iff a probe was in flight (Pending with a descent probe in
-        // flight for this call path; an Active burst never reaches
-        // `reap_profile`'s entry armed — `finish_burst_to_idle` runs
-        // `reap_profile` only after the slot was consumed, either by
-        // the burst response or by the overflow-reseed reap branch).
-        // Mirrors `on_watch_op_rejected`'s descent-purge pattern. A
-        // missed disarm is not silently tolerated: the armed
-        // slot would reach `release_descent_prefix_claim`'s state
-        // discard (or `profiles.detach`) and trip `ProbeSlot`'s Drop
-        // tripwire in every build — the discard *is* the enforcement.
+        // Consume any in-flight probe BEFORE the descent-prefix helper transitions the Profile to
+        // Idle. Idempotent: emits Cancel iff a probe was in flight (Pending with a descent probe in
+        // flight for this call path; an Active burst never reaches `reap_profile`'s entry armed —
+        // `finish_burst_to_idle` runs `reap_profile` only after the slot was consumed, either by the
+        // burst response or by the overflow-reseed reap branch). Mirrors `on_watch_op_rejected`'s
+        // descent-purge pattern. A missed disarm is not silently tolerated: the armed slot would
+        // reach `release_descent_prefix_claim`'s state discard (or `profiles.detach`) and trip
+        // `ProbeSlot`'s Drop tripwire in every build — the discard *is* the enforcement.
         self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
 
-        // Reap is the only "done with this owner forever" edge; drop
-        // its `DispatchLedger` high-water so the debug-only `BTreeMap`
-        // doesn't grow with the cumulative count of ever-attached
-        // Profiles. Correctness-preserving (the next attach at the
-        // same SlotMap slot bumps the generation, producing a distinct
-        // `ProbeOwner`); release-only the call compiles out.
+        // Reap is the only "done with this owner forever" edge; drop its `DispatchLedger` high-water
+        // so the debug-only `BTreeMap` doesn't grow with the cumulative count of ever-attached
+        // Profiles. Correctness-preserving (the next attach at the same SlotMap slot bumps the
+        // generation, producing a distinct `ProbeOwner`); release-only the call compiles out.
         #[cfg(debug_assertions)]
         self.dispatch_ledger.forget(ProbeOwner::Profile(profile_id));
 
-        // Release quartet — group (2) of the partial order (see rustdoc).
-        // Members are mutually independent; the four helpers touch
-        // disjoint state. Code order chosen for readability (1-to-1
-        // prefixed claims first, then the 1-to-N descendant walk, then
-        // the remaining 1-to-1 claims); any permutation is equally
-        // correct.
+        // Release quartet — group (2) of the partial order (see rustdoc). Members are mutually
+        // independent; the four helpers touch disjoint state. Code order chosen for readability
+        // (1-to-1 prefixed claims first, then the 1-to-N descendant walk, then the remaining 1-to-1
+        // claims); any permutation is equally correct.
         self.release_descent_prefix_claim(profile_id, out);
         self.release_descendant_claim(profile_id, out);
         self.release_anchor_claim(profile_id, out);
         self.release_watch_root_parent_claim(profile_id, out);
 
-        // Detach the Profile from the registry. No parent-edge cache
-        // to clean: the `Draining → Verifying` reconfirm is a fresh
-        // query (`coverage::nearest_covering_ancestor`), so a dependent
-        // resolving its covering ancestor re-derives against the
-        // post-detach topology on its next query — there is no stored
-        // edge to rewrite, hence no post-detach fixup pass. The returned
-        // `Option<Profile>` carries the detached payload for diagnostic
-        // use only at the inline site; `_detached` names the discard so
-        // a reader doesn't have to chase whether a field was needed.
+        // Detach the Profile from the registry. No parent-edge cache to clean: the `Draining →
+        // Verifying` reconfirm is a fresh query (`coverage::nearest_covering_ancestor`), so a
+        // dependent resolving its covering ancestor re-derives against the post-detach topology on
+        // its next query — there is no stored edge to rewrite, hence no post-detach fixup pass. The
+        // returned `Option<Profile>` carries the detached payload for diagnostic use only at the
+        // inline site; `_detached` names the discard so a reader doesn't have to chase whether a
+        // field was needed.
         let _detached = self.profiles.detach(&mut self.tree, profile_id);
 
-        // Try to reap the anchor's slot. No-op if it still has
-        // children (a descendant Profile / Promoter / scaffold survives
-        // here), other Profiles attached at the same slot, a Promoter
-        // back-ref, or any co-resident contribution. On success,
-        // [`Tree::try_reap`] cascades upward through any now-orphaned
-        // ancestors — the watch-root parent slot whose only remaining
-        // claim was *this* Profile's anchor as its sole child is freed
-        // in the same step. `try_reap` folds in `Tree::vacate` as its
-        // closing-emission step, so any residual kernel-watch protocol
-        // (the closing `Unwatch`) is emitted before the slot leaves the
-        // Tree.
+        // Try to reap the anchor's slot. No-op if it still has children (a descendant Profile /
+        // Promoter / scaffold survives here), other Profiles attached at the same slot, a Promoter
+        // back-ref, or any co-resident contribution. On success, [`Tree::try_reap`] cascades upward
+        // through any now-orphaned ancestors — the watch-root parent slot whose only remaining
+        // claim was *this* Profile's anchor as its sole child is freed in the same step. `try_reap`
+        // folds in `Tree::vacate` as its closing-emission step, so any residual kernel-watch
+        // protocol (the closing `Unwatch`) is emitted before the slot leaves the Tree.
         self.tree.try_reap(anchor, out);
 
         out.diagnostics.push(Diagnostic::ProfileReaped {
@@ -1284,17 +1084,15 @@ impl Engine {
         });
     }
 
-    /// Recompute `Profile.settle = min(remaining_subs.settles)` after a
-    /// Sub addition or removal. O(subs-on-profile), bounded — typically
-    /// 1–2 in v1 because `max_settle` already partitions Profiles.
+    /// Recompute `Profile.settle = min(remaining_subs.settles)` after a Sub addition or removal.
+    /// O(subs-on-profile), bounded — typically 1–2 in v1 because `max_settle` already partitions
+    /// Profiles.
     ///
-    /// Uses `.map(...).expect(...)` rather than a defensive
-    /// `.filter_map(...)`: [`SubRegistry::insert`] and
-    /// [`SubRegistry::remove`] keep the `by_profile` index and the
-    /// slotmap in lockstep, so every id returned by [`SubRegistry::at`]
-    /// is live in [`SubRegistry::get`] by construction. A `None`
-    /// here would be a structural invariant breach; the `expect` is
-    /// the surface that names it.
+    /// Uses `.map(...).expect(...)` rather than a defensive `.filter_map(...)`:
+    /// [`SubRegistry::insert`] and [`SubRegistry::remove`] keep the `by_profile` index and the
+    /// slotmap in lockstep, so every id returned by [`SubRegistry::at`] is live in
+    /// [`SubRegistry::get`] by construction. A `None` here would be a structural invariant breach;
+    /// the `expect` is the surface that names it.
     pub(crate) fn recompute_profile_settle(&mut self, profile_id: ProfileId) {
         let new_min: Option<Duration> = self
             .subs
@@ -1314,8 +1112,7 @@ impl Engine {
 
     /// Read-only view of the Engine's `Tree`.
     ///
-    /// The bin uses this to inspect Resource topology; tests use it for
-    /// setup verification.
+    /// The bin uses this to inspect Resource topology; tests use it for setup verification.
     #[must_use]
     pub const fn tree(&self) -> &Tree {
         &self.tree
@@ -1323,18 +1120,16 @@ impl Engine {
 
     /// Mutable access for path-to-`ResourceId` materialization.
     ///
-    /// The bin uses this at startup to walk a config's `path` strings into
-    /// the Tree before calling `attach_sub`. Use the dedicated refcount
-    /// helpers to modify `watch_demand` — direct mutation breaks the
-    /// 0↔non-empty contributions-edge invariant.
+    /// The bin uses this at startup to walk a config's `path` strings into the Tree before calling
+    /// `attach_sub`. Use the dedicated refcount helpers to modify `watch_demand` — direct mutation
+    /// breaks the 0↔non-empty contributions-edge invariant.
     pub const fn tree_mut(&mut self) -> &mut Tree {
         &mut self.tree
     }
 
     /// Read-only view of the `ProfileMap`.
     ///
-    /// For inspection only; state-machine mutations route through `step`
-    /// and `attach_sub`.
+    /// For inspection only; state-machine mutations route through `step` and `attach_sub`.
     #[must_use]
     pub const fn profiles(&self) -> &ProfileMap {
         &self.profiles
@@ -1348,9 +1143,8 @@ impl Engine {
 
     /// Read-only view of the `PromoterRegistry`.
     ///
-    /// Symmetric with [`Self::subs`] / [`Self::profiles`]; integration
-    /// tests inspect Promoter state through this accessor (the field
-    /// itself is `pub(crate)` because all Promoter mutations go
+    /// Symmetric with [`Self::subs`] / [`Self::profiles`]; integration tests inspect Promoter state
+    /// through this accessor (the field itself is `pub(crate)` because all Promoter mutations go
     /// through engine-internal paths).
     #[must_use]
     pub const fn promoters(&self) -> &PromoterRegistry {
@@ -1363,26 +1157,21 @@ impl Engine {
         self.timers.peek_top().map(|e| e.deadline)
     }
 
-    /// Pop the earliest expired-and-still-referenced timer. Stale entries
-    /// (cancelled because the Profile's burst was reset) are silently
-    /// dropped. The returned [`TimerEntry`] carries the owning profile,
-    /// kind, and id together — the bin forwards it to
-    /// [`Input::TimerExpired`] without any rediscovery.
+    /// Pop the earliest expired-and-still-referenced timer. Stale entries (cancelled because the
+    /// Profile's burst was reset) are silently dropped. The returned [`TimerEntry`] carries the
+    /// owning profile, kind, and id together — the bin forwards it to [`Input::TimerExpired`]
+    /// without any rediscovery.
     ///
-    /// **Stale-drain bound (dev only).** A single call drains at most
-    /// 32 stale entries before tripping a `debug_assert!`. Realistic
-    /// per-call drain is single-digit — each Active Profile carries
-    /// ~2 timer slots and orphans at most one per burst transition,
-    /// and the bin's tick loop polls frequently enough that orphans
-    /// collect incrementally. The bound is loose enough to absorb
-    /// multi-Profile burst-end cleanup, tight enough to surface an
-    /// "engine transition leaks timer references" regression. Release
-    /// builds run unbounded (the lazy drain is correct either way; the
-    /// bound is purely a developer-time invariant check).
+    /// **Stale-drain bound (dev only).** A single call drains at most 32 stale entries before
+    /// tripping a `debug_assert!`. Realistic per-call drain is single-digit — each Active Profile
+    /// carries ~2 timer slots and orphans at most one per burst transition, and the bin's tick loop
+    /// polls frequently enough that orphans collect incrementally. The bound is loose enough to
+    /// absorb multi-Profile burst-end cleanup, tight enough to surface an "engine transition leaks
+    /// timer references" regression. Release builds run unbounded (the lazy drain is correct either
+    /// way; the bound is purely a developer-time invariant check).
     pub fn pop_expired(&mut self, now: Instant) -> Option<TimerEntry> {
-        // Stale-drain accounting — see the rustdoc above for the bound's
-        // semantics. `u32` is more than enough headroom even in a
-        // release build where the assert is compiled out.
+        // Stale-drain accounting — see the rustdoc above for the bound's semantics. `u32` is more
+        // than enough headroom even in a release build where the assert is compiled out.
         let mut stale_drops: u32 = 0;
         loop {
             let top = self.timers.peek_top()?;
@@ -1407,24 +1196,19 @@ impl Engine {
     }
 }
 
-/// Whether `id` is the live timer for `profile`'s `kind` slot —
-/// `pop_expired` uses this to filter stale heap heads, and
-/// `on_timer_expired` re-runs it as defense-in-depth for direct
+/// Whether `id` is the live timer for `profile`'s `kind` slot — `pop_expired` uses this to filter
+/// stale heap heads, and `on_timer_expired` re-runs it as defense-in-depth for direct
 /// `step(Input::TimerExpired)` callers (tests, fuzzers).
 ///
-/// Implemented as a thin lookup-and-compare against
-/// [`ProfileState::timer_token`]: every `(state, kind)` pair routes
-/// to whichever burst-side type carries the field, with the
-/// type-impossible pairs (e.g., `Settle` on `PostFire`) folding to
-/// `None` at the leaf without an explicit fallthrough arm. Returns
-/// `false` for stale `profile` ids and for any state that doesn't
-/// own a `kind` timer right now.
+/// Implemented as a thin lookup-and-compare against [`ProfileState::timer_token`]: every `(state,
+/// kind)` pair routes to whichever burst-side type carries the field, with the type-impossible
+/// pairs (e.g., `Settle` on `PostFire`) folding to `None` at the leaf without an explicit
+/// fallthrough arm. Returns `false` for stale `profile` ids and for any state that doesn't own a
+/// `kind` timer right now.
 ///
-/// Free function rather than a method on [`Engine`]: the projection
-/// is purely a query over [`ProfileMap`] and doesn't reach into the
-/// engine's other fields, so a free function keeps the call-site
-/// shape (`is_timer_referenced(&self.profiles, …)`) honest about
-/// the dependency.
+/// Free function rather than a method on [`Engine`]: the projection is purely a query over
+/// [`ProfileMap`] and doesn't reach into the engine's other fields, so a free function keeps the
+/// call-site shape (`is_timer_referenced(&self.profiles, …)`) honest about the dependency.
 pub(crate) fn is_timer_referenced(
     profiles: &ProfileMap,
     profile: ProfileId,
@@ -1437,50 +1221,41 @@ pub(crate) fn is_timer_referenced(
         .is_some_and(|live| live == id)
 }
 
-/// Find-or-create-or-revive outcome for `attach_sub_inner`. The three
-/// arms drive distinct downstream bookkeeping:
-/// - `Fresh`: brand-new Profile, no prior burst history. Bumps the
-///   anchor's `watch_demand`, sets up `watch_root_parent`, starts a
-///   Seed burst (immediate) or enters Pending descent.
-/// - `ExistingJoin`: Profile is alive with at least one live Sub; the
-///   attaching Sub joins the existing burst lifecycle (or shares the
-///   existing baseline if Idle). Only `Profile.settle` may need
-///   `min`-recompute.
-/// - `ZombieRevival`: Profile is in [`ProfileState::Active`] with
-///   [`BurstFinish::Reap`] (deferred reap). Clear the directive via
-///   [`ProfileState::clear_active_reap`], emit
-///   [`Diagnostic::ReapPendingCancelled`], and run the
-///   `recompute_profile_settle` the deferred-reap detach skipped.
+/// Find-or-create-or-revive outcome for `attach_sub_inner`. The three arms drive distinct
+/// downstream bookkeeping:
+/// - `Fresh`: brand-new Profile, no prior burst history. Bumps the anchor's `watch_demand`, sets up
+///   `watch_root_parent`, starts a Seed burst (immediate) or enters Pending descent.
+/// - `ExistingJoin`: Profile is alive with at least one live Sub; the attaching Sub joins the
+///   existing burst lifecycle (or shares the existing baseline if Idle). Only `Profile.settle` may
+///   need `min`-recompute.
+/// - `ZombieRevival`: Profile is in [`ProfileState::Active`] with [`BurstFinish::Reap`] (deferred
+///   reap). Clear the directive via [`ProfileState::clear_active_reap`], emit
+///   [`Diagnostic::ReapPendingCancelled`], and run the `recompute_profile_settle` the deferred-reap
+///   detach skipped.
 ///
-/// Engine-local because no external caller distinguishes the arms —
-/// the engine dispatches on the typed origin inside `attach_sub_inner`
-/// and returns only `Option<SubId>` from the public surface.
+/// Engine-local because no external caller distinguishes the arms — the engine dispatches on the
+/// typed origin inside `attach_sub_inner` and returns only `Option<SubId>` from the public surface.
 enum ProfileOrigin {
     Fresh,
     ExistingJoin,
     ZombieRevival,
 }
 
-/// Outcome of `attach_sub_inner`'s Phase 1 anchor resolution. The two
-/// variants encode the semantic divide between attaches whose anchor
-/// is already live on disk and those whose anchor is scaffolded
-/// awaiting materialisation. The split drives Phase 3's
-/// `bootstrap_immediate` vs `bootstrap_pending` dispatch.
+/// Outcome of `attach_sub_inner`'s Phase 1 anchor resolution. The two variants encode the semantic
+/// divide between attaches whose anchor is already live on disk and those whose anchor is
+/// scaffolded awaiting materialisation. The split drives Phase 3's `bootstrap_immediate` vs
+/// `bootstrap_pending` dispatch.
 ///
-/// The `Immediate` arm subsumes both a fully-materialised
-/// [`SubAttachAnchor::Path`] and a liveness-checked
-/// [`SubAttachAnchor::Resource`]; only `Path` can resolve `Pending`.
+/// The `Immediate` arm subsumes both a fully-materialised [`SubAttachAnchor::Path`] and a
+/// liveness-checked [`SubAttachAnchor::Resource`]; only `Path` can resolve `Pending`.
 enum AnchorResolution {
-    /// The anchor is a live, materialised Tree slot.
-    /// `bootstrap_immediate` will install the anchor watch contribution
-    /// and start the Seed burst.
+    /// The anchor is a live, materialised Tree slot. `bootstrap_immediate` will install the anchor
+    /// watch contribution and start the Seed burst.
     Immediate { anchor: ResourceId },
-    /// The anchor is a `DescentScaffold`-roled slot awaiting
-    /// materialisation. `prefix` is the deepest existing ancestor
-    /// (where the descent probe is currently watching) and `remaining`
-    /// carries the path components from `prefix` (exclusive) down to
-    /// `anchor` (inclusive). `bootstrap_pending` will enter
-    /// `ProfileState::Pending(_)` and start descent.
+    /// The anchor is a `DescentScaffold`-roled slot awaiting materialisation. `prefix` is the
+    /// deepest existing ancestor (where the descent probe is currently watching) and `remaining`
+    /// carries the path components from `prefix` (exclusive) down to `anchor` (inclusive).
+    /// `bootstrap_pending` will enter `ProfileState::Pending(_)` and start descent.
     Pending {
         anchor: ResourceId,
         prefix: ResourceId,
@@ -1489,9 +1264,8 @@ enum AnchorResolution {
 }
 
 impl AnchorResolution {
-    /// The anchor slot — the Profile's resource on attach. Both
-    /// variants expose the same field name so `find_or_create_profile`
-    /// can key off it without matching on the variant.
+    /// The anchor slot — the Profile's resource on attach. Both variants expose the same field name
+    /// so `find_or_create_profile` can key off it without matching on the variant.
     const fn anchor(&self) -> ResourceId {
         match self {
             Self::Immediate { anchor } | Self::Pending { anchor, .. } => *anchor,
@@ -1509,8 +1283,8 @@ mod tests {
     };
     use std::time::{Duration, Instant};
 
-    // Compile-time `Send + Sync` check on `Engine`. The bin loop parks
-    // `Engine` on its own thread; `Send + Sync` is load-bearing for that.
+    // Compile-time `Send + Sync` check on `Engine`. The bin loop parks `Engine` on its own thread;
+    // `Send + Sync` is load-bearing for that.
     const _: fn() = || {
         const fn assert_send_sync<T: Send + Sync>() {}
         assert_send_sync::<Engine>();
@@ -1592,8 +1366,7 @@ mod tests {
 
     #[test]
     fn step_watch_op_rejected_emits_diagnostic_for_stale_resource() {
-        // Stale ResourceId or already-Unwatched resource yields a
-        // Diagnostic + no other ops.
+        // Stale ResourceId or already-Unwatched resource yields a Diagnostic + no other ops.
         let mut e = Engine::new();
         let out = e.step(
             Input::WatchOpRejected {
@@ -1661,9 +1434,8 @@ mod tests {
 
     #[test]
     fn pop_expired_drains_stale_entries_silently() {
-        // Schedule timers for null/unknown Profiles (no Active state holds
-        // them). The validating drain consumes every stale entry, but returns
-        // None — there's nothing live to fire.
+        // Schedule timers for null/unknown Profiles (no Active state holds them). The validating
+        // drain consumes every stale entry, but returns None — there's nothing live to fire.
         let mut e = Engine::new();
         let now = Instant::now();
         let past = now
@@ -1683,11 +1455,10 @@ mod tests {
         assert_eq!(e.timers.len(), 0, "stale heads were drained");
     }
 
-    /// Stale-drain bound: a `pop_expired` call that drains more than
-    /// [`STALE_DRAIN_BOUND`] consecutive stale entries trips the
-    /// `debug_assert!`. Production code is structurally bounded
-    /// (per-Profile orphan count is small); this test pins the
-    /// regression sensor by deliberately exceeding the bound.
+    /// Stale-drain bound: a `pop_expired` call that drains more than [`STALE_DRAIN_BOUND`]
+    /// consecutive stale entries trips the `debug_assert!`. Production code is structurally bounded
+    /// (per-Profile orphan count is small); this test pins the regression sensor by deliberately
+    /// exceeding the bound.
     #[test]
     #[cfg_attr(
         not(debug_assertions),
@@ -1700,8 +1471,8 @@ mod tests {
         let past = now
             .checked_sub(Duration::from_millis(1))
             .expect("test clock has room for sub-millisecond rewind");
-        // Schedule one beyond the bound. All stale (default ProfileId
-        // has no Active state), so the drain runs through them all.
+        // Schedule one beyond the bound. All stale (default ProfileId has no Active state), so the
+        // drain runs through them all.
         for _ in 0..=STALE_DRAIN_BOUND {
             let _ = e
                 .timers
@@ -1712,8 +1483,8 @@ mod tests {
 
     #[test]
     fn pop_expired_stops_at_first_future_entry() {
-        // Mix of expired-stale and future-dated. The drain consumes the stale
-        // expired heads, then returns None when peeking a future-dated entry.
+        // Mix of expired-stale and future-dated. The drain consumes the stale expired heads, then
+        // returns None when peeking a future-dated entry.
         let mut e = Engine::new();
         let now = Instant::now();
         let past = now
@@ -1735,9 +1506,8 @@ mod tests {
 
     #[test]
     fn mint_probe_correlation_is_monotone() {
-        // Successive `mint_probe_correlation` calls yield strictly
-        // increasing, globally-unique correlations drawn off the one
-        // engine-wide monotone floor — distinct ids in a single id
+        // Successive `mint_probe_correlation` calls yield strictly increasing, globally-unique
+        // correlations drawn off the one engine-wide monotone floor — distinct ids in a single id
         // space (owners' slots hold their own correlation).
         let mut e = Engine::new();
         let a = e.mint_probe_correlation();
@@ -1750,11 +1520,10 @@ mod tests {
         assert_eq!(c, ProbeCorrelation::from(3));
     }
 
-    /// Counter saturation on the probe side — release-runnable. Proves
-    /// `mint_probe_correlation` routes through the panicking
-    /// `MonotonicCounter::next` rather than reimplementing the bump,
-    /// symmetric with `effect_correlations_panic_on_counter_saturation`.
-    /// Pairs with the `MonotonicCounter` unit tests in `counter.rs`.
+    /// Counter saturation on the probe side — release-runnable. Proves `mint_probe_correlation`
+    /// routes through the panicking `MonotonicCounter::next` rather than reimplementing the bump,
+    /// symmetric with `effect_correlations_panic_on_counter_saturation`. Pairs with the
+    /// `MonotonicCounter` unit tests in `counter.rs`.
     #[test]
     #[should_panic(expected = "MonotonicCounter")]
     fn mint_probe_correlation_panics_on_counter_saturation() {
@@ -1775,12 +1544,10 @@ mod tests {
         assert_eq!(e.effect_correlations.peek(), 0);
     }
 
-    /// Counter saturation on the effect side — release-runnable. The
-    /// effect counter has no per-call-site wrapper — the minting is
-    /// inline at the two `emit_effects` push sites in `transitions.rs`
-    /// — so this test exercises the counter directly to prove the field
-    /// is wired up. Pairs with the `MonotonicCounter` unit tests in
-    /// `counter.rs`.
+    /// Counter saturation on the effect side — release-runnable. The effect counter has no
+    /// per-call-site wrapper — the minting is inline at the two `emit_effects` push sites in
+    /// `transitions.rs` — so this test exercises the counter directly to prove the field is wired
+    /// up. Pairs with the `MonotonicCounter` unit tests in `counter.rs`.
     #[test]
     #[should_panic(expected = "MonotonicCounter")]
     fn effect_correlations_panic_on_counter_saturation() {
@@ -1817,11 +1584,10 @@ mod tests {
         assert!(saw, "AttachPathInvalid must carry the offending path");
     }
 
-    /// End-to-end gate enforcement: a relative-path attach request rolls
-    /// up no `SubId`, no Tree slots, and no Profile — only the diagnostic
-    /// surfaces. Pins the contract that `attach_sub_inner`'s
-    /// `Tree::parse_attach_path` short-circuit is total: rejection
-    /// produces `None` plus zero side-effects on engine state.
+    /// End-to-end gate enforcement: a relative-path attach request rolls up no `SubId`, no Tree
+    /// slots, and no Profile — only the diagnostic surfaces. Pins the contract that
+    /// `attach_sub_inner`'s `Tree::parse_attach_path` short-circuit is total: rejection produces
+    /// `None` plus zero side-effects on engine state.
     #[test]
     fn attach_with_relative_path_emits_diagnostic_and_no_state() {
         let mut e = Engine::new();
@@ -1857,10 +1623,9 @@ mod tests {
         )));
     }
 
-    /// End-to-end counterpart for non-UTF-8 paths. The test fabricates a
-    /// path with a non-UTF-8 segment via `OsStr::from_bytes` (Unix-only)
-    /// and confirms the same total-rejection contract: no SubId, no Tree
-    /// slots, no Profile.
+    /// End-to-end counterpart for non-UTF-8 paths. The test fabricates a path with a non-UTF-8
+    /// segment via `OsStr::from_bytes` (Unix-only) and confirms the same total-rejection contract:
+    /// no SubId, no Tree slots, no Profile.
     #[cfg(unix)]
     #[test]
     fn attach_with_non_utf8_path_emits_diagnostic_and_no_state() {
@@ -1904,18 +1669,17 @@ mod tests {
         )));
     }
 
-    /// A `Resource` anchor naming a dead slot is re-gated at the
-    /// boundary — graceful `AttachResourceStale` + `None`, no panic,
-    /// zero engine-state mutation. Symmetric with the `Path`-arm
-    /// total-rejection tests above.
+    /// A `Resource` anchor naming a dead slot is re-gated at the boundary — graceful
+    /// `AttachResourceStale` + `None`, no panic, zero engine-state mutation. Symmetric with the
+    /// `Path`-arm total-rejection tests above.
     #[test]
     fn attach_with_stale_resource_emits_diagnostic_and_no_state() {
         let mut e = Engine::new();
         let pre_tree_len = e.tree.len();
         let pre_profile_count = e.profiles.len();
 
-        // `slotmap::new_key_type!` never mints the default key, so
-        // `ResourceId::default()` is permanently stale.
+        // `slotmap::new_key_type!` never mints the default key, so `ResourceId::default()` is
+        // permanently stale.
         let stale = ResourceId::default();
         let req = SubAttachRequest::for_anchor(
             "stale".into(),
@@ -1986,11 +1750,9 @@ mod tests {
 
     #[test]
     fn set_watch_root_parent_idempotent_on_recovery_path() {
-        // "Watch root deletion" recovery re-enters descent on a Profile
-        // whose `watch_root_parent` was set at the original materialization.
-        // When recovery's descent advances back to anchor materialization,
-        // set_watch_root_parent must not double-bump the parent's
-        // watch_demand.
+        // "Watch root deletion" recovery re-enters descent on a Profile whose `watch_root_parent`
+        // was set at the original materialization. When recovery's descent advances back to anchor
+        // materialization, set_watch_root_parent must not double-bump the parent's watch_demand.
         let mut e = Engine::new();
         let parent = e.tree.ensure_root("p", specter_core::ResourceRole::User);
         let anchor = e
@@ -2019,10 +1781,9 @@ mod tests {
             Some(parent)
         );
 
-        // Second call against the same Profile: must be a no-op (no bump).
-        // The anchor is sourced from `Profile::resource()` — write-once for
-        // the Profile's lifetime — so the second call sees the cache equal
-        // to `tree.parent(Profile::resource())` and short-circuits.
+        // Second call against the same Profile: must be a no-op (no bump). The anchor is sourced
+        // from `Profile::resource()` — write-once for the Profile's lifetime — so the second call
+        // sees the cache equal to `tree.parent(Profile::resource())` and short-circuits.
         let mut out2 = StepOutput::default();
         e.set_watch_root_parent(pid, &mut out2);
         let after_second = e.tree.get(parent).unwrap().watch_demand();
@@ -2051,25 +1812,21 @@ mod tests {
 
     #[test]
     fn attach_revives_reap_pending_profile() {
-        // Detach A's Sub mid-Active to flip the Active burst's directive
-        // to [`BurstFinish::Reap`], then re-attach B at the same
-        // `(anchor, config_hash)`. The revival path must:
+        // Detach A's Sub mid-Active to flip the Active burst's directive to [`BurstFinish::Reap`],
+        // then re-attach B at the same `(anchor, config_hash)`. The revival path must:
         //   - reuse A's Profile (same ProfileId),
         //   - leave the anchor's watch_demand at 1 (no double-bump),
         //   - emit no spurious Watch op for the anchor,
-        //   - flip the directive back to `BurstFinish::ReturnToIdle`
-        //     via `clear_active_reap`,
+        //   - flip the directive back to `BurstFinish::ReturnToIdle` via `clear_active_reap`,
         //   - keep `anchor_claim` Held,
-        //   - recompute `Profile.settle` to B's settle (NOT min-update —
-        //     A is gone, B is the only live Sub),
+        //   - recompute `Profile.settle` to B's settle (NOT min-update — A is gone, B is the only
+        //     live Sub),
         //   - emit `Diagnostic::ReapPendingCancelled`.
         //
-        // (No `fired_subs` cleanup is asserted because there is none to
-        // assert: fire history is per-Sub (`Sub.has_fired`) and dies
-        // with the slotmap entry on detach. A revived Profile's
-        // freshly-attached Subs start `has_fired == false`
-        // structurally — there is no per-Profile fire container to
-        // purge.)
+        // (No `fired_subs` cleanup is asserted because there is none to assert: fire history is
+        // per-Sub (`Sub.has_fired`) and dies with the slotmap entry on detach. A revived Profile's
+        // freshly-attached Subs start `has_fired == false` structurally — there is no per-Profile
+        // fire container to purge.)
         let mut e = Engine::new();
         let r = e
             .tree
@@ -2087,8 +1844,8 @@ mod tests {
         let watch_demand_after_attach = e.tree.get(r).unwrap().watch_demand();
         assert_eq!(watch_demand_after_attach, 1, "anchor watch_demand from A");
 
-        // Detach A. Profile is Active → directive flips to
-        // `BurstFinish::Reap`; anchor watch unchanged.
+        // Detach A. Profile is Active → directive flips to `BurstFinish::Reap`; anchor watch
+        // unchanged.
         let _ = e.step(Input::DetachSub(sid_a), Instant::now());
         assert!(matches!(
             e.profiles().get(pid).unwrap().state().burst_finish(),
@@ -2096,8 +1853,8 @@ mod tests {
         ));
         assert_eq!(e.tree.get(r).unwrap().watch_demand(), 1);
 
-        // Revive with B (settle=200ms; deliberately larger than A's stale
-        // 50ms so the min-update would be visibly wrong).
+        // Revive with B (settle=200ms; deliberately larger than A's stale 50ms so the min-update
+        // would be visibly wrong).
         let attach_out = e.step(
             Input::AttachSub(revival_attach_req(r, "B", Duration::from_millis(200))),
             now,
@@ -2148,10 +1905,9 @@ mod tests {
 
     #[test]
     fn finish_burst_to_idle_does_not_reap_revived_profile() {
-        // After revival, the in-flight burst's lifecycle continues under
-        // the new Sub set. When the probe responds and the burst ends,
-        // `finish_burst_to_idle` must NOT call `reap_profile` (the
-        // revival cleared `reap_pending`).
+        // After revival, the in-flight burst's lifecycle continues under the new Sub set. When the
+        // probe responds and the burst ends, `finish_burst_to_idle` must NOT call `reap_profile`
+        // (the revival cleared `reap_pending`).
         let mut e = Engine::new();
         let r = e
             .tree
@@ -2166,8 +1922,8 @@ mod tests {
         let sid_a =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
         let pid = e.subs().get(sid_a).unwrap().profile();
-        // Batching-first Seed: expire the settle timer (settle = 50ms)
-        // so the verify probe is in flight before the revival below.
+        // Batching-first Seed: expire the settle timer (settle = 50ms) so the verify probe is in
+        // flight before the revival below.
         let t_settle = now + Duration::from_millis(50);
         while let Some(entry) = e.pop_expired(t_settle) {
             e.step(
@@ -2191,10 +1947,9 @@ mod tests {
         let sid_b =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
 
-        // Drive the in-flight Seed-Verifying burst to a terminal Vanished.
-        // `dispatch_seed_vanished → finalize_anchor_lost → finish_burst_to_idle`
-        // would reap if `reap_pending` were still set; the revival cleared
-        // it, so the Profile transitions to Idle (anchor lost) and stays.
+        // Drive the in-flight Seed-Verifying burst to a terminal Vanished. `dispatch_seed_vanished
+        // → finalize_anchor_lost → finish_burst_to_idle` would reap if `reap_pending` were still
+        // set; the revival cleared it, so the Profile transitions to Idle (anchor lost) and stays.
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: ProbeOwner::Profile(pid),
@@ -2220,13 +1975,11 @@ mod tests {
 
     // ===== reap_profile release-quartet permutation =====
 
-    /// Snapshot of "claim state" after running a permutation of the
-    /// release quartet. The fields are exactly the bookkeeping the four
-    /// release helpers clear (per-Profile flags + per-Resource
-    /// `watch_demand` counters); two runs that produce the same snapshot
-    /// have produced equivalent observable effects on engine state.
-    /// `StepOutput.watch_ops` is also compared by the caller because
-    /// the helpers emit `Unwatch` operations whose order is part of the
+    /// Snapshot of "claim state" after running a permutation of the release quartet. The fields are
+    /// exactly the bookkeeping the four release helpers clear (per-Profile flags + per-Resource
+    /// `watch_demand` counters); two runs that produce the same snapshot have produced equivalent
+    /// observable effects on engine state. `StepOutput.watch_ops` is also compared by the caller
+    /// because the helpers emit `Unwatch` operations whose order is part of the
     /// post-`sort_for_emission` contract.
     #[derive(Debug, Eq, PartialEq)]
     struct QuartetFinalState {
@@ -2237,18 +1990,15 @@ mod tests {
         parent_watch_demand: u32,
     }
 
-    /// Build a "materialised" Profile carrying three of the four
-    /// quartet claims (anchor, watch_root_parent, descendants — the
-    /// descent-prefix claim is mutually exclusive with anchor per the
-    /// trichotomy invariant). Returns the IDs the test body needs to
-    /// inspect the post-release state.
+    /// Build a "materialised" Profile carrying three of the four quartet claims (anchor,
+    /// watch_root_parent, descendants — the descent-prefix claim is mutually exclusive with anchor
+    /// per the trichotomy invariant). Returns the IDs the test body needs to inspect the
+    /// post-release state.
     ///
-    /// The fixture uses `attach_sub_inner` to bootstrap so every
-    /// per-Resource contribution lands through the canonical
-    /// `add_watch` path rather than a hand-rolled mutation that would
-    /// not exercise refcount discipline. The Dir snapshot installed
-    /// onto `Profile.current` after attach gives `release_descendant_claim`
-    /// something to release.
+    /// The fixture uses `attach_sub_inner` to bootstrap so every per-Resource contribution lands
+    /// through the canonical `add_watch` path rather than a hand-rolled mutation that would not
+    /// exercise refcount discipline. The Dir snapshot installed onto `Profile.current` after attach
+    /// gives `release_descendant_claim` something to release.
     fn build_materialised_profile_for_permutation() -> (Engine, ProfileId, ResourceId, ResourceId) {
         use specter_core::{
             ChildEntry, ClassSet, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ResourceKind,
@@ -2283,11 +2033,9 @@ mod tests {
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
         let pid = e.subs().get(sid).expect("Sub alive").profile();
 
-        // Install a Dir snapshot on Profile.current so the descendant
-        // release has a snapshot to take. Mirrors what
-        // `dispatch_quiescence_ok` would write at probe completion. One
-        // child leaf gives `release_descendant_claim` a non-trivial
-        // diff to apply.
+        // Install a Dir snapshot on Profile.current so the descendant release has a snapshot to
+        // take. Mirrors what `dispatch_quiescence_ok` would write at probe completion. One child
+        // leaf gives `release_descendant_claim` a non-trivial diff to apply.
         let child_id = e
             .tree
             .ensure_child(anchor, "child", ResourceRole::User)
@@ -2313,16 +2061,14 @@ mod tests {
             .expect("Profile alive")
             .install_dir_current(Arc::new(dir));
 
-        // Drop the auto-emitted Watch operations from attach — the
-        // permutation test only cares about deltas across release
-        // calls.
+        // Drop the auto-emitted Watch operations from attach — the permutation test only cares
+        // about deltas across release calls.
         let _ = out;
 
         (e, pid, anchor, parent)
     }
 
-    /// Run the release quartet in a given index permutation and
-    /// capture the post-release state.
+    /// Run the release quartet in a given index permutation and capture the post-release state.
     fn run_quartet_permutation(perm: [usize; 4]) -> QuartetFinalState {
         let (mut e, pid, anchor, parent) = build_materialised_profile_for_permutation();
         let releases: [fn(&mut Engine, ProfileId, &mut StepOutput); 4] = [
@@ -2355,14 +2101,13 @@ mod tests {
                 .get(parent)
                 .map_or(0, specter_core::Resource::watch_demand),
         };
-        // The attach-time Seed-Verifying probe is still armed; the
-        // release quartet never consumes it. Drain before `e` drops.
+        // The attach-time Seed-Verifying probe is still armed; the release quartet never consumes
+        // it. Drain before `e` drops.
         let _ = e.cancel_all_in_flight_probes();
         final_state
     }
 
-    /// Enumerate every permutation of `[0, 1, 2, 3]` via Heap's
-    /// algorithm. 24 results.
+    /// Enumerate every permutation of `[0, 1, 2, 3]` via Heap's algorithm. 24 results.
     fn all_quartet_permutations() -> Vec<[usize; 4]> {
         fn heaps(arr: &mut [usize; 4], k: usize, out: &mut Vec<[usize; 4]>) {
             if k == 1 {
@@ -2384,21 +2129,18 @@ mod tests {
         out
     }
 
-    /// Pin the partial-order claim in `reap_profile`'s rustdoc: every
-    /// permutation of the four release helpers yields the same
-    /// observable claim state. The fixture exercises three live claims
-    /// (anchor + watch_root_parent + descendants); the fourth helper
-    /// (`release_descent_prefix_claim`) no-ops on the non-Pending
-    /// Profile but still occupies a position in the permutation.
+    /// Pin the partial-order claim in `reap_profile`'s rustdoc: every permutation of the four release
+    /// helpers yields the same observable claim state. The fixture exercises three live claims
+    /// (anchor + watch_root_parent + descendants); the fourth helper (`release_descent_prefix_claim`)
+    /// no-ops on the non-Pending Profile but still occupies a position in the permutation.
     #[test]
     fn release_quartet_is_permutation_invariant() {
         let perms = all_quartet_permutations();
         assert_eq!(perms.len(), 24, "Heap's algorithm enumerates 4! = 24");
 
         let canonical = run_quartet_permutation([0, 1, 2, 3]);
-        // Final state pins the helpers actually did their work: anchor
-        // released, watch_root_parent released, snapshot taken, both
-        // resource watch_demand counters at zero.
+        // Final state pins the helpers actually did their work: anchor released, watch_root_parent
+        // released, snapshot taken, both resource watch_demand counters at zero.
         assert_eq!(canonical.anchor_claim, AnchorClaim::None);
         assert_eq!(canonical.watch_root_parent, None);
         assert!(canonical.current_is_none);

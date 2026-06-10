@@ -1,10 +1,9 @@
 //! Sibling unit tests for `prober::walk` and `prober::pool`.
 //!
-//! Walk tests use real `tempfile::TempDir` fixtures — no mocking the
-//! filesystem. Pool tests drive `run_worker` directly with synchronous
-//! crossbeam channels and a custom probe closure: that's how
-//! cancellation, panic recovery, and post-run cleanup get
-//! deterministic coverage without relying on multi-thread scheduling.
+//! Walk tests use real `tempfile::TempDir` fixtures — no mocking the filesystem. Pool tests drive
+//! `run_worker` directly with synchronous crossbeam channels and a custom probe closure: that's how
+//! cancellation, panic recovery, and post-run cleanup get deterministic coverage without relying on
+//! multi-thread scheduling.
 
 use super::pool::{ExpectedMap, WorkerProber, lock_expected, run_probe, run_worker};
 use super::walk::{probe_anchor_file, probe_descent, probe_subtree};
@@ -39,11 +38,9 @@ fn seed(map: &ExpectedMap, p: ProfileId, c: u64) {
         .insert(ProbeOwner::Profile(p), ProbeCorrelation::from(c));
 }
 
-/// Test-side [`ProberResponseSender`] — wraps a single `Sender<Input>`
-/// clone and forwards each `ProbeResponse` wrapped in
-/// `Input::ProbeResponse(_)`, mirroring the bin's `DriverProberSender`.
-/// Sender refcount is identical to production: one clone per sink, no
-/// per-worker fan-out.
+/// Test-side [`ProberResponseSender`] — wraps a single `Sender<Input>` clone and forwards each
+/// `ProbeResponse` wrapped in `Input::ProbeResponse(_)`, mirroring the bin's `DriverProberSender`.
+/// Sender refcount is identical to production: one clone per sink, no per-worker fan-out.
 struct TestProberSink {
     tx: Sender<Input>,
 }
@@ -71,25 +68,20 @@ fn req_anchor(profile: ProfileId, correlation: u64) -> ProbeRequest {
     }
 }
 
-/// `ProofObligation::Chains` from a populated `set` of root→leaf chain
-/// paths. Panics on empty — tests that don't exercise the obligation
-/// must use [`no_obligation`] instead. Walker-mechanics tests never want
-/// `WholeSubtree` ("never skip"), so the bridge is total over non-empty
-/// sets.
+/// `ProofObligation::Chains` from a populated `set` of root→leaf chain paths. Panics on empty —
+/// tests that don't exercise the obligation must use [`no_obligation`] instead. Walker-mechanics
+/// tests never want `WholeSubtree` ("never skip"), so the bridge is total over non-empty sets.
 fn chains_from(set: BTreeSet<Arc<Path>>) -> ProofObligation {
     ProofObligation::Chains(
         NonEmptyChainSet::new(set).expect("chains_from requires a non-empty obligation set"),
     )
 }
 
-/// Marker obligation for tests that don't exercise the proof obligation
-/// — a single non-matching chain path (outside any tempdir hierarchy)
-/// so the walker's `obligation_at_or_under` always returns `false` and
-/// mtime-skip stays allowed (the test semantic "no obligation"). The
-/// type-level non-emptiness of `NonEmptyChainSet` rules out
-/// `Chains(empty)`, but the *behavioural* "no obligation" stays
-/// reachable through a chain path that can never start with a tempdir
-/// frame.
+/// Marker obligation for tests that don't exercise the proof obligation — a single non-matching
+/// chain path (outside any tempdir hierarchy) so the walker's `obligation_at_or_under` always
+/// returns `false` and mtime-skip stays allowed (the test semantic "no obligation"). The type-level
+/// non-emptiness of `NonEmptyChainSet` rules out `Chains(empty)`, but the *behavioural* "no
+/// obligation" stays reachable through a chain path that can never start with a tempdir frame.
 fn no_obligation() -> ProofObligation {
     let path: Arc<Path> = Arc::from(Path::new("/__no_obligation_for_tests"));
     let mut set = BTreeSet::new();
@@ -97,16 +89,15 @@ fn no_obligation() -> ProofObligation {
     chains_from(set)
 }
 
-/// Default arg pack for `probe_subtree` calls:
-/// `captured_with = 0`, no baseline, no obligation, `forced = false`.
-/// Use the explicit form when the test wants to exercise mtime-skip /
-/// the obligation / forced.
+/// Default arg pack for `probe_subtree` calls: `captured_with = 0`, no baseline, no obligation,
+/// `forced = false`. Use the explicit form when the test wants to exercise mtime-skip / the
+/// obligation / forced.
 fn psub(path: &std::path::Path, cfg: &ScanConfig) -> ProbeOutcome {
     probe_subtree(path, path, cfg, 0, None, &no_obligation(), false)
 }
 
-/// Recursively collect every entry's relative path (segment from the
-/// anchor) from a `ProbeOutcome::SubtreeProven`. Sorted.
+/// Recursively collect every entry's relative path (segment from the anchor) from a
+/// `ProbeOutcome::SubtreeProven`. Sorted.
 fn segments(outcome: &ProbeOutcome) -> Vec<String> {
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = outcome else {
         panic!("expected SubtreeProven, got {outcome:?}");
@@ -171,8 +162,8 @@ fn probe_anchor_file_returns_vanished_for_symlink() {
     std::fs::write(&target, b"x").unwrap();
     std::os::unix::fs::symlink(&target, &link).unwrap();
 
-    // probe_anchor_file uses lstat — the symlink is the kind it sees, not the
-    // target. Symlink ≠ regular file ⇒ Vanished.
+    // probe_anchor_file uses lstat — the symlink is the kind it sees, not the target. Symlink ≠
+    // regular file ⇒ Vanished.
     assert!(matches!(probe_anchor_file(&link), ProbeOutcome::Vanished));
 }
 
@@ -284,8 +275,7 @@ fn probe_subtree_max_depth_three_collects_three_levels() {
         .max_depth(Some(3))
         .build();
     let segs = segments(&psub(tmp.path(), &cfg));
-    // Depth 1: "a"; depth 2: "a/b"; depth 3: "a/b/c". File is at depth
-    // 4 — excluded by max_depth=3.
+    // Depth 1: "a"; depth 2: "a/b"; depth 3: "a/b/c". File is at depth 4 — excluded by max_depth=3.
     assert_eq!(
         segs,
         vec!["a".to_string(), "a/b".to_string(), "a/b/c".to_string()]
@@ -306,8 +296,8 @@ fn probe_subtree_exclude_drops_matched_entries() {
         .exclude(exclude)
         .build();
     let segs = segments(&psub(tmp.path(), &cfg));
-    // `target/**` matches paths under target (and `target` itself with
-    // globset's `**` semantics). `target/foo` is excluded.
+    // `target/**` matches paths under target (and `target` itself with globset's `**` semantics).
+    // `target/foo` is excluded.
     assert!(!segs.iter().any(|s| s.starts_with("target/")));
     assert!(segs.contains(&"src".to_string()));
     assert!(segs.contains(&"src/main.c".to_string()));
@@ -382,8 +372,8 @@ fn probe_subtree_does_not_descend_symlinks() {
 
     let cfg = ScanConfig::builder().recursive(true).build();
     let segs = segments(&psub(tmp.path(), &cfg));
-    // `link` is a symlink: emitted as Symlink entry but not descended
-    // through. `target` is a real dir: emitted and descended.
+    // `link` is a symlink: emitted as Symlink entry but not descended through. `target` is a real
+    // dir: emitted and descended.
     assert!(segs.contains(&"link".to_string()));
     assert!(segs.contains(&"target".to_string()));
     assert!(segs.contains(&"target/file.c".to_string()));
@@ -427,26 +417,21 @@ fn probe_subtree_skips_unreadable_subdir_emits_remaining() {
     std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     let segs = segments(&result);
-    // `forbidden` is emitted as a Dir entry; readdir on it skips with
-    // a warn; siblings still emit.
+    // `forbidden` is emitted as a Dir entry; readdir on it skips with a warn; siblings still emit.
     assert!(segs.contains(&"forbidden".to_string()));
     assert!(segs.contains(&"ok.c".to_string()));
     // `inside.c` is unreachable.
     assert!(!segs.iter().any(|s| s.contains("inside")));
 }
 
-/// EACCES contract: `read_dir` failure on a subdir produces
-/// `DirChild::Covered(empty_arc)` — covered-but-empty. The
-/// `Uncovered` variant is reserved for the three static-config gates
-/// (`recursive=false`, `max_depth`, cross-filesystem). Transient I/O
-/// failures inside the recursive walk — EACCES on `read_dir`, ENOENT
-/// after a raced unlink, ENOTDIR after a kind-flip — all surface as
-/// `Covered(empty_or_partial_arc)` via the walker's benign-empty
-/// path. The engine's reconcile path treats `(Covered, Uncovered)` |
-/// `(Uncovered, Covered)` coverage flips on the same `fs_id` as
-/// structurally unreachable, so collapsing a transient failure into
-/// an `Uncovered` would route the perms/race-change through an
-/// unreachable arm.
+/// EACCES contract: `read_dir` failure on a subdir produces `DirChild::Covered(empty_arc)` —
+/// covered-but-empty. The `Uncovered` variant is reserved for the three static-config gates
+/// (`recursive=false`, `max_depth`, cross-filesystem). Transient I/O failures inside the recursive
+/// walk — EACCES on `read_dir`, ENOENT after a raced unlink, ENOTDIR after a kind-flip — all
+/// surface as `Covered(empty_or_partial_arc)` via the walker's benign-empty path. The engine's
+/// reconcile path treats `(Covered, Uncovered)` | `(Uncovered, Covered)` coverage flips on the same
+/// `fs_id` as structurally unreachable, so collapsing a transient failure into an `Uncovered` would
+/// route the perms/race-change through an unreachable arm.
 #[test]
 fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
     use std::os::unix::fs::PermissionsExt;
@@ -489,24 +474,19 @@ fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
 
 // ---------------------------------------------------------------- walk: static Uncovered emission
 //
-// `DirChild::Uncovered(fs_id)` is reserved for three statically-knowable
-// `ScanConfig` gates checked at the dirent in `build_dir_child`:
-// `!recursive`, `depth + 1 >= max_depth`, and `cmeta.dev() != root_dev`
-// (cross-filesystem). The tests below pin the first two; cross-fs is
-// hard to set up portably and is documented at the rustdoc level on
-// `DirChild`. Read together with
-// `probe_subtree_unreadable_subdir_emits_dir_child_some_empty`: the
-// EACCES test pins the *negative* contract (transient I/O must NOT
-// emit `Uncovered`); the static tests below pin the *positive*
+// `DirChild::Uncovered(fs_id)` is reserved for three statically-knowable `ScanConfig` gates checked
+// at the dirent in `build_dir_child`: `!recursive`, `depth + 1 >= max_depth`, and `cmeta.dev() !=
+// root_dev` (cross-filesystem). The tests below pin the first two; cross-fs is hard to set up
+// portably and is documented at the rustdoc level on `DirChild`. Read together with
+// `probe_subtree_unreadable_subdir_emits_dir_child_some_empty`: the EACCES test pins the *negative*
+// contract (transient I/O must NOT emit `Uncovered`); the static tests below pin the *positive*
 // contract (these gates DO emit `Uncovered`).
 
 #[test]
 fn probe_subtree_recursive_false_emits_uncovered_at_depth_one_dir_child() {
-    // With `recursive=false`, the walker enumerates the anchor's
-    // direct children but does not descend into any depth-1 directory.
-    // Each depth-1 directory dirent is stored as `DirChild::Uncovered`
-    // — the walker knows it's a directory but its config refuses the
-    // recursion.
+    // With `recursive=false`, the walker enumerates the anchor's direct children but does not descend
+    // into any depth-1 directory. Each depth-1 directory dirent is stored as `DirChild::Uncovered` —
+    // the walker knows it's a directory but its config refuses the recursion.
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/inside.c"), b"x").unwrap();
@@ -526,11 +506,10 @@ fn probe_subtree_recursive_false_emits_uncovered_at_depth_one_dir_child() {
 
 #[test]
 fn probe_subtree_max_depth_emits_uncovered_at_boundary() {
-    // `max_depth=2` lets the depth=0 frame recurse into `a` (depth 1)
-    // because `0+1 < 2` is true; inside `a` (now at depth 1), the gate
-    // `1+1 < 2` is false, so `b` is stored as `DirChild::Uncovered`.
-    // Pins the `max_depth` arm at the boundary; cross-checks the
-    // gate's "depth+1" half-open semantic.
+    // `max_depth=2` lets the depth=0 frame recurse into `a` (depth 1) because `0+1 < 2` is true;
+    // inside `a` (now at depth 1), the gate `1+1 < 2` is false, so `b` is stored as
+    // `DirChild::Uncovered`. Pins the `max_depth` arm at the boundary; cross-checks the gate's
+    // "depth+1" half-open semantic.
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("a/b")).unwrap();
     let cfg = ScanConfig::builder()
@@ -556,14 +535,12 @@ fn probe_subtree_max_depth_emits_uncovered_at_boundary() {
 
 // ---------------------------------------------------------------- walk: mtime-skip
 //
-// The mtime-skip path: equal `(mtime, inode, device)` between
-// `baseline.root_meta()` and the freshly `lstat`ed directory ⇒ return
-// `Arc::clone(baseline)`. These tests pin the exact-match success case
-// and each defeat case.
+// The mtime-skip path: equal `(mtime, inode, device)` between `baseline.root_meta()` and the
+// freshly `lstat`ed directory ⇒ return `Arc::clone(baseline)`. These tests pin the exact-match
+// success case and each defeat case.
 
-/// Probe `target_path` once with `cfg`, take the resulting Arc, and
-/// re-probe with that Arc as `baseline_subtree`. Returns `(first, second)`
-/// for `Arc::ptr_eq` comparison.
+/// Probe `target_path` once with `cfg`, take the resulting Arc, and re-probe with that Arc as
+/// `baseline_subtree`. Returns `(first, second)` for `Arc::ptr_eq` comparison.
 fn probe_then_reprobe_with_baseline(
     target: &std::path::Path,
     cfg: &ScanConfig,
@@ -729,8 +706,8 @@ fn mtime_skip_does_not_match_when_device_differs() {
 
 #[test]
 fn mtime_skip_recursive_propagates_via_subtree_baseline() {
-    // Top-level mtime matches AND child-subdir's mtime matches ⇒ child Arc
-    // re-used (recursive Arc::ptr_eq through the BTreeMap).
+    // Top-level mtime matches AND child-subdir's mtime matches ⇒ child Arc re-used (recursive
+    // Arc::ptr_eq through the BTreeMap).
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
@@ -838,8 +815,7 @@ fn chains_with_descendant_in_set_refuses_skip_at_target() {
     else {
         panic!("first probe failed");
     };
-    // Chains = {tmp/sub/file.c}: descendant; root must enumerate so we
-    // can recurse into `sub`.
+    // Chains = {tmp/sub/file.c}: descendant; root must enumerate so we can recurse into `sub`.
     let mut obligation = BTreeSet::new();
     obligation.insert(Arc::from(tmp.path().join("sub").join("file.c")));
     let second = probe_subtree(
@@ -897,10 +873,9 @@ fn chains_with_unrelated_path_does_not_affect_skip() {
 
 #[test]
 fn chains_propagate_through_recursion_to_descendant() {
-    // Chains = {target/dir_a/dir_b}: target enumerates → dir_a
-    // enumerates → dir_b enumerates. sibling dir_c (mtime-stable) is
-    // mtime-skipped during the recursion, since no chain path is at-or-
-    // under dir_c.
+    // Chains = {target/dir_a/dir_b}: target enumerates → dir_a enumerates → dir_b enumerates.
+    // sibling dir_c (mtime-stable) is mtime-skipped during the recursion, since no chain path is
+    // at-or- under dir_c.
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("dir_a/dir_b")).unwrap();
     std::fs::create_dir(tmp.path().join("dir_c")).unwrap();
@@ -936,8 +911,8 @@ fn chains_propagate_through_recursion_to_descendant() {
     let ProbeOutcome::SubtreeProven { snapshot: top, .. } = second else {
         panic!("re-probe failed");
     };
-    // dir_c was untouched and not under a chain path; the recursion
-    // should mtime-skip and reuse the baseline Arc.
+    // dir_c was untouched and not under a chain path; the recursion should mtime-skip and reuse the
+    // baseline Arc.
     let new_dir_c_arc = Arc::clone(top.lookup_covered_dir("dir_c").unwrap());
     assert!(Arc::ptr_eq(&prior_dir_c_arc, &new_dir_c_arc));
 }
@@ -1038,22 +1013,17 @@ fn forced_false_default_path_unaffected() {
 
 // ---------------------------------------------------------------- walk: leaf-hash cache transfer
 //
-// When mtime-skip fails for a directory but a child leaf is observably
-// unchanged, the walker constructs the fresh leaf via
-// `LeafEntry::new_or_inherit`, which inherits the baseline leaf's
-// `leaf_hash` when every identity field matches. Under eager
-// construction the inherited value is byte-equal to what fresh
-// computation would produce (both are pure functions of the fields),
-// so the inheritance is unobservable at the hash level; these tests
-// pin the integration shape and the identity-gate's negative arm — a
-// baseline whose identity fields disagree must NOT leak its hash into
-// the freshly-stat'd output.
+// When mtime-skip fails for a directory but a child leaf is observably unchanged, the walker
+// constructs the fresh leaf via `LeafEntry::new_or_inherit`, which inherits the baseline leaf's
+// `leaf_hash` when every identity field matches. Under eager construction the inherited value is
+// byte-equal to what fresh computation would produce (both are pure functions of the fields), so
+// the inheritance is unobservable at the hash level; these tests pin the integration shape and the
+// identity-gate's negative arm — a baseline whose identity fields disagree must NOT leak its hash
+// into the freshly-stat'd output.
 
-/// Forge a baseline whose `a.c` entry has the contents `leaf_override`
-/// (defaulting to a leaf with the same identity as the disk file).
-/// `root_meta`'s mtime is set to `UNIX_EPOCH` to defeat the walker's
-/// top-level mtime-skip, forcing the per-child cache-transfer path to
-/// run.
+/// Forge a baseline whose `a.c` entry has the contents `leaf_override` (defaulting to a leaf with
+/// the same identity as the disk file). `root_meta`'s mtime is set to `UNIX_EPOCH` to defeat the
+/// walker's top-level mtime-skip, forcing the per-child cache-transfer path to run.
 fn baseline_at_unix_epoch(
     real: &Arc<DirSnapshot>,
     leaf_override: Option<LeafEntry>,
@@ -1146,12 +1116,10 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
         ChildEntry::Leaf(l) => l.clone(),
         ChildEntry::Dir(_) => panic!(),
     };
-    // Forge an identity-mismatched override (size differs by 1). The
-    // baseline's hash differs from the canonical hash of the disk's
-    // fields; the walker must NOT inherit the baseline's stale hash
-    // — the freshly-stat'd leaf must report its true (real-fields)
-    // hash, equal to `real_leaf.leaf_hash()` and unequal to the
-    // mismatched baseline's hash.
+    // Forge an identity-mismatched override (size differs by 1). The baseline's hash differs from
+    // the canonical hash of the disk's fields; the walker must NOT inherit the baseline's stale
+    // hash — the freshly-stat'd leaf must report its true (real-fields) hash, equal to
+    // `real_leaf.leaf_hash()` and unequal to the mismatched baseline's hash.
     let mismatch = LeafEntry::synthetic(
         real_leaf.kind(),
         real_leaf.size().wrapping_add(1),
@@ -1191,9 +1159,8 @@ fn cache_transfer_skipped_when_leaf_identity_changes() {
 
 #[test]
 fn cache_transfer_threads_through_recursion() {
-    // Bumping both root and sub mtimes forces enumeration at every level;
-    // the deep leaf still has the right hash via the threaded baseline
-    // subtree.
+    // Bumping both root and sub mtimes forces enumeration at every level; the deep leaf still has
+    // the right hash via the threaded baseline subtree.
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"hello").unwrap();
@@ -1393,9 +1360,8 @@ fn dir_snapshot_excluded_paths_absent() {
         panic!();
     };
     assert!(arc.entries().contains_key("main.c"));
-    // `target/foo` excluded; `target` itself depends on glob semantics —
-    // `target/**` matches paths under target, so `target` itself is in
-    // (the prober_recursive integration test pins the same).
+    // `target/foo` excluded; `target` itself depends on glob semantics — `target/**` matches paths
+    // under target, so `target` itself is in (the prober_recursive integration test pins the same).
     let target_present = arc.entries().contains_key("target");
     let target_uncov = match arc.entries().get("target") {
         Some(ChildEntry::Dir(DirChild::Covered(s))) => s.entries().is_empty(),
@@ -1412,8 +1378,8 @@ fn dir_snapshot_excluded_paths_absent() {
 
 #[test]
 fn entries_are_lex_sorted_by_btreemap() {
-    // BTreeMap iterates lex-by-key by construction; verify the walker
-    // produces a map whose keys' iteration order is lex.
+    // BTreeMap iterates lex-by-key by construction; verify the walker produces a map whose keys'
+    // iteration order is lex.
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("zeta"), b"x").unwrap();
     std::fs::write(tmp.path().join("alpha"), b"x").unwrap();
@@ -1441,9 +1407,8 @@ fn entries_are_lex_sorted_by_btreemap() {
 
 #[test]
 fn dir_hash_recursive_is_deterministic_across_two_probes_on_stable_fs() {
-    // Two probes against a static fs (no writes between) should produce
-    // identical dir_hash values; mtime/inode/device are stable, entries
-    // identical.
+    // Two probes against a static fs (no writes between) should produce identical dir_hash values;
+    // mtime/inode/device are stable, entries identical.
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
@@ -1477,22 +1442,18 @@ fn dir_hash_recursive_is_deterministic_across_two_probes_on_stable_fs() {
 
 // ---------------------------------------------------------------- walk: anchor scope basis
 //
-// `ProbeRequest::Subtree` carries the Profile anchor distinct from the
-// recursion-root `target_path`. The walker measures every dirent's `rel`
-// (hence its depth) as `strip_prefix(anchor_path)`, so `exclude` /
-// `pattern` / `max_depth` / `recursive` resolve against the same origin
-// the engine's `covers` uses even when a Standard burst roots the walk at
-// a dirty-LCA below the anchor. These pins drive `target` strictly below
-// `anchor`, where measuring `rel` from the walk root instead of the anchor
-// would diverge from `covers`: a false `Authoritative` for path-shaped
-// filters (`exclude` / `pattern`), over-inclusion for depth-shaped ones
-// (`max_depth` / `recursive`).
+// `ProbeRequest::Subtree` carries the Profile anchor distinct from the recursion-root `target_path`.
+// The walker measures every dirent's `rel` (hence its depth) as `strip_prefix(anchor_path)`, so
+// `exclude` / `pattern` / `max_depth` / `recursive` resolve against the same origin the engine's
+// `covers` uses even when a Standard burst roots the walk at a dirty-LCA below the anchor. These pins
+// drive `target` strictly below `anchor`, where measuring `rel` from the walk root instead of the
+// anchor would diverge from `covers`: a false `Authoritative` for path-shaped filters (`exclude` /
+// `pattern`), over-inclusion for depth-shaped ones (`max_depth` / `recursive`).
 
-/// `<tmp>/sub/secret/a` under a recursive `exclude=["secret/**"]` config,
-/// plus the obligation chain through the nested leaf. The recursion root
-/// is `<tmp>/sub`; the *true* anchor is `<tmp>`. Shared by the keeps-it
-/// (true anchor) and drops-it (anchor set to the LCA) pins — they differ
-/// only in the `anchor_path` argument to `probe_subtree`.
+/// `<tmp>/sub/secret/a` under a recursive `exclude=["secret/**"]` config, plus the obligation chain
+/// through the nested leaf. The recursion root is `<tmp>/sub`; the *true* anchor is `<tmp>`. Shared
+/// by the keeps-it (true anchor) and drops-it (anchor set to the LCA) pins — they differ only in
+/// the `anchor_path` argument to `probe_subtree`.
 fn nested_secret_fixture(tmp: &TempDir) -> (PathBuf, ScanConfig, ProofObligation) {
     let target = tmp.path().join("sub");
     std::fs::create_dir_all(target.join("secret")).unwrap();
@@ -1508,12 +1469,10 @@ fn nested_secret_fixture(tmp: &TempDir) -> (PathBuf, ScanConfig, ProofObligation
 
 #[test]
 fn anchor_relative_glob_keeps_deep_nested_match() {
-    // anchor = <tmp>, recursion root = <tmp>/sub. The leaf's anchor-rel
-    // path is `sub/secret/a`, which the start-anchored `secret/**` does
-    // NOT match — so it stays in scope. Measuring `rel` from the LCA
-    // would yield `secret/a`, drop it, and certify `Authoritative` over a
-    // region never observed. Chain-through + `Authoritative` proves the
-    // on-chain leaf was observed, not filtered.
+    // anchor = <tmp>, recursion root = <tmp>/sub. The leaf's anchor-rel path is `sub/secret/a`, which
+    // the start-anchored `secret/**` does NOT match — so it stays in scope. Measuring `rel` from the
+    // LCA would yield `secret/a`, drop it, and certify `Authoritative` over a region never observed.
+    // Chain-through + `Authoritative` proves the on-chain leaf was observed, not filtered.
     let tmp = TempDir::new().unwrap();
     let (target, cfg, obligation) = nested_secret_fixture(&tmp);
     let outcome = probe_subtree(&target, tmp.path(), &cfg, 0, None, &obligation, false);
@@ -1540,15 +1499,13 @@ fn anchor_relative_glob_keeps_deep_nested_match() {
 
 #[test]
 fn depth_is_anchor_relative_when_rooted_below_anchor() {
-    // The depth-shaped scope axis. Non-recursive, anchor = <tmp>; the lone
-    // dirty resource is the depth-1 sub*directory* <tmp>/d, so the
-    // recursion root is <tmp>/d, below the anchor. The file <tmp>/d/file is
-    // anchor-rel `d/file`, depth 2 → excluded by `depth > 1 && !recursive`.
-    // Rooting the walk at <tmp>/d does not relax that: every dirent's depth
-    // is `strip_prefix(anchor).components().count()`, not walk-root-relative
-    // (an LCA-relative depth of 1 would wrongly admit it). One pin covers
-    // the whole axis: `accepts_structural` and `should_recurse` both read
-    // that single `entry_depth`, so the `max_depth` gate re-bases
+    // The depth-shaped scope axis. Non-recursive, anchor = <tmp>; the lone dirty resource is the
+    // depth-1 sub*directory* <tmp>/d, so the recursion root is <tmp>/d, below the anchor. The file
+    // <tmp>/d/file is anchor-rel `d/file`, depth 2 → excluded by `depth > 1 && !recursive`. Rooting
+    // the walk at <tmp>/d does not relax that: every dirent's depth is
+    // `strip_prefix(anchor).components().count()`, not walk-root-relative (an LCA-relative depth of
+    // 1 would wrongly admit it). One pin covers the whole axis: `accepts_structural` and
+    // `should_recurse` both read that single `entry_depth`, so the `max_depth` gate re-bases
     // identically.
     let tmp = TempDir::new().unwrap();
     let target = tmp.path().join("d");
@@ -1564,17 +1521,15 @@ fn depth_is_anchor_relative_when_rooted_below_anchor() {
     );
 }
 
-// ---------------------------------------------------------------- walk: on-chain filter-drop tripwire
+// ---------------------------------------------------------------- walk: on-chain filter-drop
+// tripwire
 //
-// `WalkContext::note_filter_drop` is the runtime witness that walker scope
-// equals engine `covers`: an obligation-chain leaf the walker nonetheless
-// filters is a scope regression (the engine only chains covers()-accepted
-// paths, which are walker-accepted under the shared anchor basis). Feeding
-// the nested-secret fixture with `anchor_path == target` sets the scope
-// basis to the LCA instead of the true anchor, so the start-anchored
-// `secret/**` matches the LCA-relative `secret/a` and drops the on-chain
-// leaf. The walker refuses to certify it: loud in dev, degrade to
-// `Undischarged` in release.
+// `WalkContext::note_filter_drop` is the runtime witness that walker scope equals engine `covers`: an
+// obligation-chain leaf the walker nonetheless filters is a scope regression (the engine only chains
+// covers()-accepted paths, which are walker-accepted under the shared anchor basis). Feeding the
+// nested-secret fixture with `anchor_path == target` sets the scope basis to the LCA instead of the
+// true anchor, so the start-anchored `secret/**` matches the LCA-relative `secret/a` and drops the
+// on-chain leaf. The walker refuses to certify it: loud in dev, degrade to `Undischarged` in release.
 
 #[cfg(debug_assertions)]
 #[test]
@@ -1582,10 +1537,9 @@ fn depth_is_anchor_relative_when_rooted_below_anchor() {
 fn on_chain_filter_drop_trips_debug_assert() {
     let tmp = TempDir::new().unwrap();
     let (target, cfg, obligation) = nested_secret_fixture(&tmp);
-    // anchor == target == the LCA, not the true anchor `<tmp>`. The walker
-    // measures the leaf at LCA-relative `secret/a`, which `secret/**`
-    // matches and drops; the drop is on-chain ⇒ debug_assert fires. Called
-    // directly (not via the pool, whose `catch_unwind` would convert the
+    // anchor == target == the LCA, not the true anchor `<tmp>`. The walker measures the leaf at
+    // LCA-relative `secret/a`, which `secret/**` matches and drops; the drop is on-chain ⇒
+    // debug_assert fires. Called directly (not via the pool, whose `catch_unwind` would convert the
     // panic to `Failed`).
     let _ = probe_subtree(&target, &target, &cfg, 0, None, &obligation, false);
 }
@@ -1607,13 +1561,11 @@ fn on_chain_filter_drop_degrades_to_undischarged_in_release() {
 
 // ---------------------------------------------------------------- walk: certify obligation fold
 //
-// `certify` folds the degrade ledger against the obligation. It is
-// unidirectional: a degraded frame `f` flags `Undischarged` only for a
-// chain `p` at-or-below it (`p.starts_with(f)`); a chain off the degraded
-// subtree stays `Authoritative`. And an *absent* (deleted) chain leaf is
-// observed-absent, not a hole — it never degrades a frame, so the
-// obligation discharges. These pin the fold both ways and the delete
-// safety the presence-check form would have broken.
+// `certify` folds the degrade ledger against the obligation. It is unidirectional: a degraded frame
+// `f` flags `Undischarged` only for a chain `p` at-or-below it (`p.starts_with(f)`); a chain off
+// the degraded subtree stays `Authoritative`. And an *absent* (deleted) chain leaf is
+// observed-absent, not a hole — it never degrades a frame, so the obligation discharges. These pin
+// the fold both ways and the delete safety the presence-check form would have broken.
 
 #[test]
 fn certify_on_chain_degraded_frame_is_undischarged() {
@@ -1625,8 +1577,8 @@ fn certify_on_chain_degraded_frame_is_undischarged() {
     std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o000)).unwrap();
 
     let cfg = ScanConfig::builder().recursive(true).build();
-    // The chain runs through the unreadable subtree, so the degraded
-    // `forbidden` frame lies at-or-above it ⇒ Undischarged.
+    // The chain runs through the unreadable subtree, so the degraded `forbidden` frame lies
+    // at-or-above it ⇒ Undischarged.
     let mut chain = BTreeSet::new();
     chain.insert(Arc::from(forbidden.join("inside.c")));
     let outcome = probe_subtree(
@@ -1668,8 +1620,8 @@ fn certify_off_chain_degraded_frame_stays_authoritative() {
     std::fs::write(other.join("x.c"), b"x").unwrap();
 
     let cfg = ScanConfig::builder().recursive(true).build();
-    // The chain runs through the readable `other` subtree, off the
-    // degraded `forbidden` frame ⇒ Authoritative despite the hole.
+    // The chain runs through the readable `other` subtree, off the degraded `forbidden` frame ⇒
+    // Authoritative despite the hole.
     let mut chain = BTreeSet::new();
     chain.insert(Arc::from(other.join("x.c")));
     let outcome = probe_subtree(
@@ -1696,11 +1648,10 @@ fn certify_off_chain_degraded_frame_stays_authoritative() {
 
 #[test]
 fn certify_absent_chain_leaf_is_authoritative_not_undischarged() {
-    // A chain leaf created-then-removed within the settle window is absent
-    // from `read_dir`, so it never reaches a filter arm and never degrades
-    // a frame. `certify` must return `Authoritative` (fire), not
-    // `Undischarged`: a presence-check on chain leaves would wedge every
-    // legitimate delete (rm -rf, rename-away, editor temp) into never-fire.
+    // A chain leaf created-then-removed within the settle window is absent from `read_dir`, so it
+    // never reaches a filter arm and never degrades a frame. `certify` must return `Authoritative`
+    // (fire), not `Undischarged`: a presence-check on chain leaves would wedge every legitimate
+    // delete (rm -rf, rename-away, editor temp) into never-fire.
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("kept.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
@@ -1737,11 +1688,10 @@ fn certify_absent_chain_leaf_is_authoritative_not_undischarged() {
 
 // ---------------------------------------------------------------- pool: run_probe dispatch
 //
-// `run_probe` is the variant-dispatch glue between `WorkerProber` and the
-// three walker entry points. The cases below pin that each variant
-// reaches the right walker, and that `Descent` honours its hardcoded
-// override config (hidden=true, no exclude/pattern) regardless of any
-// config baked into the request — the variant carries no `ScanConfig`.
+// `run_probe` is the variant-dispatch glue between `WorkerProber` and the three walker entry
+// points. The cases below pin that each variant reaches the right walker, and that `Descent`
+// honours its hardcoded override config (hidden=true, no exclude/pattern) regardless of any config
+// baked into the request — the variant carries no `ScanConfig`.
 
 #[test]
 fn run_probe_dispatches_anchor_file_to_probe_anchor_file() {
@@ -1792,9 +1742,8 @@ fn run_probe_dispatches_descent_to_probe_descent() {
 #[test]
 fn probe_descent_uses_hardcoded_override_config() {
     let tmp = TempDir::new().unwrap();
-    // `.hidden` would be filtered by the default `hidden=false`;
-    // `foo.tmp` would be filtered by an exclude/pattern. Descent's
-    // hardcoded override has hidden=true with no exclude/pattern, so
+    // `.hidden` would be filtered by the default `hidden=false`; `foo.tmp` would be filtered by an
+    // exclude/pattern. Descent's hardcoded override has hidden=true with no exclude/pattern, so
     // every direct child must surface.
     std::fs::write(tmp.path().join(".hidden"), b"x").unwrap();
     std::fs::write(tmp.path().join("foo.tmp"), b"x").unwrap();
@@ -1811,12 +1760,10 @@ fn probe_descent_uses_hardcoded_override_config() {
 
 // ---------------------------------------------------------------- pool: run_worker
 
-/// Drive a synchronous run of `run_worker` until `rx` disconnects;
-/// returns every `ProbeResponse` shipped through the sink. The helper
-/// moves `out_tx` into a [`TestProberSink`] that survives `run_worker`,
-/// then explicitly drops the sink before draining `out_rx` so the
-/// receive loop terminates on `Disconnected` rather than blocking on
-/// a still-live sender.
+/// Drive a synchronous run of `run_worker` until `rx` disconnects; returns every `ProbeResponse`
+/// shipped through the sink. The helper moves `out_tx` into a [`TestProberSink`] that survives
+/// `run_worker`, then explicitly drops the sink before draining `out_rx` so the receive loop
+/// terminates on `Disconnected` rather than blocking on a still-live sender.
 fn drain_worker_with<F>(
     rx: &Receiver<ProbeRequest>,
     out_tx: Sender<Input>,
@@ -1848,8 +1795,8 @@ fn run_worker_skips_when_correlation_does_not_match() {
     let (out_tx, out_rx) = unbounded::<Input>();
     let expected = fresh_expected();
 
-    // Pre-seed expected with a different correlation than the request
-    // carries — simulates "cancel ran between submit and dequeue".
+    // Pre-seed expected with a different correlation than the request carries — simulates "cancel
+    // ran between submit and dequeue".
     seed(&expected, p, 99);
 
     in_tx.send(req_anchor(p, 1)).unwrap();
@@ -1934,8 +1881,8 @@ fn run_worker_panic_does_not_kill_loop() {
         assert!(req.owner() != panic_for, "simulated panic on first request");
         ProbeOutcome::Vanished
     });
-    // First panicked → Failed(Anchor{EIO}); second succeeded →
-    // Vanished. Both arrive — the worker survived the panic.
+    // First panicked → Failed(Anchor{EIO}); second succeeded → Vanished. Both arrive — the worker
+    // survived the panic.
     assert_eq!(responses.len(), 2);
     assert!(matches!(
         responses[0].outcome,
@@ -1981,8 +1928,8 @@ fn run_worker_post_run_cleanup_preserves_resubmit() {
 
     let inner = Arc::clone(&expected);
     let inner_for_probe = Arc::clone(&inner);
-    // Inside the probe, simulate a fresh `submit(c2)` that overwrites
-    // the expectation. Post-run cleanup must NOT clobber c2.
+    // Inside the probe, simulate a fresh `submit(c2)` that overwrites the expectation. Post-run
+    // cleanup must NOT clobber c2.
     let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, move |_req| {
         inner_for_probe
             .lock()
@@ -1999,11 +1946,10 @@ fn run_worker_post_run_cleanup_preserves_resubmit() {
 
 // ---------------------------------------------------------------- pool: run_worker sink disconnect
 //
-// The `out.send` failure path is a single branch — log at `debug!` and
-// unwind the worker loop. The bin owns whatever shutdown-cause logging
-// the operator needs (signal, panic, IPC error) at the appropriate
-// severity, on its own thread; the prober's exit is a structural
-// consequence, not a place that decides severity.
+// The `out.send` failure path is a single branch — log at `debug!` and unwind the worker loop. The
+// bin owns whatever shutdown-cause logging the operator needs (signal, panic, IPC error) at the
+// appropriate severity, on its own thread; the prober's exit is a structural consequence, not a
+// place that decides severity.
 
 #[test]
 fn run_worker_exits_cleanly_when_sink_disconnects() {
@@ -2021,16 +1967,15 @@ fn run_worker_exits_cleanly_when_sink_disconnects() {
 
     let sink = TestProberSink { tx: out_tx };
     run_worker(&in_rx, &sink, &expected, |_| ProbeOutcome::Vanished);
-    // Clean return from `run_worker` is the assertion — the worker
-    // observed sink disconnect and exited.
+    // Clean return from `run_worker` is the assertion — the worker observed sink disconnect and
+    // exited.
 }
 
 // ---------------------------------------------------------------- pool: lock_expected
 //
-// `lock_expected` is the prober's single panic-recovery primitive for
-// the expectation map. The test pins poison resilience: a worker that
-// panics while holding the lock must not bring down the rest of the
-// pool — surviving callers re-lock the map and continue.
+// `lock_expected` is the prober's single panic-recovery primitive for the expectation map. The test
+// pins poison resilience: a worker that panics while holding the lock must not bring down the rest
+// of the pool — surviving callers re-lock the map and continue.
 
 #[test]
 fn lock_expected_recovers_from_poisoned_mutex() {
@@ -2047,28 +1992,25 @@ fn lock_expected_recovers_from_poisoned_mutex() {
         "panic-in-lock must leave the mutex in poisoned state",
     );
 
-    // The helper recovers the inner state and hands back a usable
-    // guard; the caller writes through it normally.
+    // The helper recovers the inner state and hands back a usable guard; the caller writes through
+    // it normally.
     let pid = fresh_profile_ids(1)[0];
     {
         let mut guard = lock_expected(&map);
         guard.insert(ProbeOwner::Profile(pid), ProbeCorrelation::from(42));
     }
 
-    // A second call observes the post-poison write — the map is
-    // structurally consistent across the recovery boundary. Lift the
-    // value out so the guard drops at end-of-statement.
+    // A second call observes the post-poison write — the map is structurally consistent across the
+    // recovery boundary. Lift the value out so the guard drops at end-of-statement.
     let recovered = lock_expected(&map).get(&ProbeOwner::Profile(pid)).copied();
     assert_eq!(recovered, Some(ProbeCorrelation::from(42)));
 }
 
 // ---------------------------------------------------------------- pool: WorkerProber
 
-/// One-call wrapper that builds the production-shaped sink the
-/// `WorkerProber` constructor expects. Sibling tests instantiate it
-/// inline (the bin's `DriverProberSender` is the structural twin), so
-/// keeping the helper local to the test module avoids a testkit-feature
-/// dependency for one type.
+/// One-call wrapper that builds the production-shaped sink the `WorkerProber` constructor expects.
+/// Sibling tests instantiate it inline (the bin's `DriverProberSender` is the structural twin), so
+/// keeping the helper local to the test module avoids a testkit-feature dependency for one type.
 fn sink(tx: Sender<Input>) -> Arc<dyn ProberResponseSender> {
     Arc::new(TestProberSink { tx })
 }
@@ -2149,9 +2091,8 @@ fn worker_prober_resubmit_after_cancel_runs() {
     let (out_tx, out_rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(out_tx), nz(1)).unwrap();
 
-    // Submit c1, cancel, submit c2. Expect: c1 either runs or skips
-    // (race), c2 runs deterministically (its expectation is fresh and
-    // won't be cleared by anything before the worker pops it).
+    // Submit c1, cancel, submit c2. Expect: c1 either runs or skips (race), c2 runs deterministically
+    // (its expectation is fresh and won't be cleared by anything before the worker pops it).
     let mk_req = |c: u64| ProbeRequest::AnchorFile {
         owner: ProbeOwner::Profile(p),
         correlation: ProbeCorrelation::from(c),
@@ -2185,10 +2126,9 @@ fn worker_prober_concurrent_submit_is_safe() {
     let path = tmp.path().join("f.c");
     std::fs::write(&path, b"x").unwrap();
 
-    // Three sender threads × 5 submits each = 15 total. Allocate the
-    // ProfileIds up front from a single SlotMap so each request hits
-    // a distinct expectation slot — fresh per-thread SlotMaps would
-    // hand out colliding keys (each starts from `(0, 1)`).
+    // Three sender threads × 5 submits each = 15 total. Allocate the ProfileIds up front from a
+    // single SlotMap so each request hits a distinct expectation slot — fresh per-thread SlotMaps
+    // would hand out colliding keys (each starts from `(0, 1)`).
     let pids = fresh_profile_ids(15);
     let pid_chunks: Vec<Vec<ProfileId>> = pids.chunks(5).map(<[ProfileId]>::to_vec).collect();
 
@@ -2231,27 +2171,25 @@ fn worker_prober_concurrent_submit_is_safe() {
 
 // ---------------------------------------------------------------- pool: deep-tree worker stack
 //
-// The subtree walker recurses one frame-triple per directory level,
-// bounded by PATH_MAX. `PROBER_WORKER_STACK` (32 MiB) sizes each worker so
-// the deepest legal tree walks without a stack-overflow abort — including
-// in an unoptimized (debug) build, where the frame-triple is ~4 KiB/level.
+// The subtree walker recurses one frame-triple per directory level, bounded by PATH_MAX.
+// `PROBER_WORKER_STACK` (32 MiB) sizes each worker so the deepest legal tree walks without a
+// stack-overflow abort — including in an unoptimized (debug) build, where the frame-triple is ~4
+// KiB/level.
 
 #[test]
 fn deep_tree_walks_on_worker_without_stack_overflow() {
-    // Build the deepest absolute-path tree the filesystem allows (to the
-    // ENAMETOOLONG wall), then walk it on a real `WorkerProber` worker
-    // (32 MiB stack). A PATH_MAX-deep recursive walk would overflow the
-    // default 2 MiB thread stack and abort the process; this pins that the
-    // production worker stack absorbs the deepest tree the absolute-path
-    // walker can encounter. The walk MUST run on the worker (not this test
-    // thread) for the stack under test to be exercised. Meaningful on Linux
-    // (PATH_MAX ~4096 ⇒ ~2000 levels, ~8–9 MiB of stack unoptimized); a
-    // shallower smoke test on macOS (PATH_MAX 1024, ~500 levels).
+    // Build the deepest absolute-path tree the filesystem allows (to the ENAMETOOLONG wall), then
+    // walk it on a real `WorkerProber` worker (32 MiB stack). A PATH_MAX-deep recursive walk would
+    // overflow the default 2 MiB thread stack and abort the process; this pins that the production
+    // worker stack absorbs the deepest tree the absolute-path walker can encounter. The walk MUST
+    // run on the worker (not this test thread) for the stack under test to be exercised. Meaningful
+    // on Linux (PATH_MAX ~4096 ⇒ ~2000 levels, ~8–9 MiB of stack unoptimized); a shallower smoke
+    // test on macOS (PATH_MAX 1024, ~500 levels).
     let tmp = TempDir::new().unwrap();
     let mut path = tmp.path().to_path_buf();
     let mut depth = 0u32;
-    // Nest single-char dirs until the path outgrows PATH_MAX. The 6000 cap
-    // is a runaway backstop well above any real PATH_MAX.
+    // Nest single-char dirs until the path outgrows PATH_MAX. The 6000 cap is a runaway backstop
+    // well above any real PATH_MAX.
     while depth < 6000 {
         let next = path.join("d");
         match std::fs::create_dir(&next) {
@@ -2286,9 +2224,8 @@ fn deep_tree_walks_on_worker_without_stack_overflow() {
 
     let recv_result = out_rx.recv_timeout(Duration::from_secs(20));
     let _ = prober.shutdown();
-    // Tear the deep chain down bottom-up (iteratively) so neither TempDir's
-    // drop nor std's recursive remove_dir_all recurses PATH_MAX levels on
-    // this modest test-thread stack.
+    // Tear the deep chain down bottom-up (iteratively) so neither TempDir's drop nor std's
+    // recursive remove_dir_all recurses PATH_MAX levels on this modest test-thread stack.
     while path.as_path() != tmp.path() {
         let _ = std::fs::remove_dir(&path);
         if !path.pop() {

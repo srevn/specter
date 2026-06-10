@@ -1,19 +1,14 @@
-//! `ENOSPC` round-trip — the kernel's `max_user_watches` ceiling
-//! eventually rejects `inotify_add_watch` with `ENOSPC`, which the
-//! watcher classifies as [`WatchFailure::Pressure`] (per
-//! [`specter_sensor::WatchFailureExt::from_io`]). The engine clamps
-//! `watch_demand := 0` on the affected resource; the next reconcile is
-//! the natural retry path.
+//! `ENOSPC` round-trip — the kernel's `max_user_watches` ceiling eventually rejects
+//! `inotify_add_watch` with `ENOSPC`, which the watcher classifies as [`WatchFailure::Pressure`]
+//! (per [`specter_sensor::WatchFailureExt::from_io`]). The engine clamps `watch_demand := 0` on the
+//! affected resource; the next reconcile is the natural retry path.
 //!
-//! The kernel ceiling is per-user (typically `524288` on modern
-//! distros, much lower in containers). This test reads
-//! `/proc/sys/fs/inotify/max_user_watches` and adapts:
+//! The kernel ceiling is per-user (typically `524288` on modern distros, much lower in containers).
+//! This test reads `/proc/sys/fs/inotify/max_user_watches` and adapts:
 //!
-//! - If the limit is small enough to exhaust within ~10k watches, do
-//!   so and assert the failure shape.
-//! - Otherwise, skip cleanly with an informational message — exhausting
-//!   500k+ watches is too slow and would impact concurrent tests
-//!   sharing the per-user limit.
+//! - If the limit is small enough to exhaust within ~10k watches, do so and assert the failure shape.
+//! - Otherwise, skip cleanly with an informational message — exhausting 500k+ watches is too slow
+//!   and would impact concurrent tests sharing the per-user limit.
 //!
 //! Linux only.
 
@@ -33,10 +28,9 @@ fn read_max_user_watches() -> Option<usize> {
 
 #[test]
 fn watch_eventually_returns_pressure_under_low_max_user_watches() {
-    // Cap at 10000 watches: enough to exhaust the kernel's default in
-    // a tight container (typically `8192`), still bounded enough to be
-    // reasonable elapsed time on a real-disk runner. Skip if the
-    // ceiling is materially higher.
+    // Cap at 10000 watches: enough to exhaust the kernel's default in a tight container (typically
+    // `8192`), still bounded enough to be reasonable elapsed time on a real-disk runner. Skip if
+    // the ceiling is materially higher.
     const TEST_CAP: usize = 10_000;
 
     let Some(max) = read_max_user_watches() else {
@@ -58,8 +52,8 @@ fn watch_eventually_returns_pressure_under_low_max_user_watches() {
     }
 
     let tmp = TempDir::new().unwrap();
-    // Pre-create paths to watch. We need at least `max + 1` distinct
-    // inodes; create `max + 100` for headroom.
+    // Pre-create paths to watch. We need at least `max + 1` distinct inodes; create `max + 100` for
+    // headroom.
     let count = max + 100;
     let mut paths: Vec<std::path::PathBuf> = Vec::with_capacity(count);
     for i in 0..count {

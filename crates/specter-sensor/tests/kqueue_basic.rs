@@ -1,20 +1,18 @@
-//! Real-fs round-trip. Each test sets up a watcher, runs one filesystem
-//! operation, and asserts that the corresponding `FsEvent` arrives via
-//! `drain_ready` driven by a `mio::Poll` registered on the watcher's
-//! `AsFd::as_fd`. macOS / FreeBSD only — kqueue is BSD-only.
+//! Real-fs round-trip. Each test sets up a watcher, runs one filesystem operation, and asserts that
+//! the corresponding `FsEvent` arrives via `drain_ready` driven by a `mio::Poll` registered on the
+//! watcher's `AsFd::as_fd`. macOS / FreeBSD only — kqueue is BSD-only.
 //!
-//! Each test passes the minimum [`ClassSet`] needed to fire the event it
-//! asserts on (identity floor + class-aware mapping):
-//! - Terminal events (`Removed`, `Renamed`, `Revoked`) work with `EMPTY`
-//!   because `IDENTITY_FLOOR = NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE`
-//!   is OR-ed onto every registration.
+//! Each test passes the minimum [`ClassSet`] needed to fire the event it asserts on (identity floor
+//! + class-aware mapping):
+//! - Terminal events (`Removed`, `Renamed`, `Revoked`) work with `EMPTY` because `IDENTITY_FLOOR =
+//!   NOTE_DELETE | NOTE_RENAME | NOTE_REVOKE` is OR-ed onto every registration.
 //! - `StructureChanged` on a Dir needs [`ClassSet::STRUCTURE`].
 //! - `ContentChanged` on a File needs [`ClassSet::CONTENT`].
 //! - `MetadataChanged` needs [`ClassSet::METADATA`].
 
-// `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a
-// `Vec` while preserving its allocation. Required here because the helper
-// reuses the same buffer across the drain-loop's iterations.
+// `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a `Vec` while preserving its
+// allocation. Required here because the helper reuses the same buffer across the drain-loop's
+// iterations.
 #![allow(clippy::iter_with_drain)]
 #![cfg(any(target_os = "macos", target_os = "freebsd"))]
 
@@ -30,10 +28,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-/// Build a `mio::Poll` registered on the watcher's kqueue fd. The
-/// helper centralises the "register `as_fd()` for READABLE" boilerplate
-/// the drain loops below share — `drain_ready` is non-blocking by
-/// trait, so the caller blocks via the reactor.
+/// Build a `mio::Poll` registered on the watcher's kqueue fd. The helper centralises the "register
+/// `as_fd()` for READABLE" boilerplate the drain loops below share — `drain_ready` is non-blocking
+/// by trait, so the caller blocks via the reactor.
 fn poll_for(w: &KqueueWatcher) -> Poll {
     let poll = Poll::new().expect("mio Poll");
     let raw = w.as_fd().as_raw_fd();
@@ -43,18 +40,16 @@ fn poll_for(w: &KqueueWatcher) -> Poll {
     poll
 }
 
-/// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator
-/// until at least one matches `pred` or the deadline elapses. Returns
-/// the accumulated events.
+/// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator until at least one matches
+/// `pred` or the deadline elapses. Returns the accumulated events.
 ///
-/// Blocks via `mio::Poll` on the watcher's `AsFd::as_fd`; pumps every
-/// readable edge through `drain_ready`. Spurious wakes are harmless —
-/// `drain_ready` is idempotent on an empty queue (`Ok(0)`).
+/// Blocks via `mio::Poll` on the watcher's `AsFd::as_fd`; pumps every readable edge through
+/// `drain_ready`. Spurious wakes are harmless — `drain_ready` is idempotent on an empty queue
+/// (`Ok(0)`).
 ///
-/// kqueue must not emit [`WatcherEvent::Overflow`] under v1 (`EV_CLEAR`
-/// coalesces but never silently drops at the kernel level); the helper
-/// `panic!`s if it sees one so a future regression here surfaces as a
-/// loud test failure rather than silent event loss.
+/// kqueue must not emit [`WatcherEvent::Overflow`] under v1 (`EV_CLEAR` coalesces but never
+/// silently drops at the kernel level); the helper `panic!`s if it sees one so a future regression
+/// here surfaces as a loud test failure rather than silent event loss.
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     w: &mut KqueueWatcher,
     pred: F,
@@ -89,9 +84,8 @@ fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     out
 }
 
-/// Drain whatever the watcher emits for `dur`. Returns the raw
-/// [`WatcherEvent`] sequence (no `Overflow` panic — late-event tests
-/// inspect both variants in `out`).
+/// Drain whatever the watcher emits for `dur`. Returns the raw [`WatcherEvent`] sequence (no
+/// `Overflow` panic — late-event tests inspect both variants in `out`).
 fn drain_for(w: &mut KqueueWatcher, dur: Duration) -> Vec<WatcherEvent> {
     let deadline = Instant::now() + dur;
     let mut poll = poll_for(w);
@@ -265,8 +259,7 @@ fn watch_path_with_nul_byte_returns_error() {
     let bad: &OsStr = OsStrExt::from_bytes(b"/tmp/has\0nul");
     let bad_path = std::path::Path::new(bad);
 
-    // `Unknown` kind: open fails before fstat, so kind verification
-    // never runs.
+    // `Unknown` kind: open fails before fstat, so kind verification never runs.
     let res = w.watch(r, bad_path, ResourceKind::Unknown, ClassSet::EMPTY);
     assert!(res.is_err());
 }
@@ -277,8 +270,7 @@ fn watch_nonexistent_path_returns_enoent() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = fresh_id(&mut sm);
 
-    // `Unknown` kind: open fails with ENOENT before fstat, so kind
-    // verification never runs.
+    // `Unknown` kind: open fails with ENOENT before fstat, so kind verification never runs.
     let res = w.watch(
         r,
         std::path::Path::new("/this/path/does/not/exist/specter"),
@@ -302,18 +294,16 @@ fn unwatch_after_event_does_not_panic_on_subsequent_poll() {
     let mut w = KqueueWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
-    // CONTENT so the kernel actually queues an event for the write
-    // below — exercising the late-event-drain path the test's contract
-    // covers.
+    // CONTENT so the kernel actually queues an event for the write below — exercising the
+    // late-event-drain path the test's contract covers.
     w.watch(r_file, &path, ResourceKind::File, ClassSet::CONTENT)
         .unwrap();
 
     std::fs::write(&path, "changed").unwrap();
     w.unwatch(r_file);
 
-    // Late event drain — kernel may still deliver an event for the
-    // unwatched fd. Watcher emits anyway; the test's contract is
-    // "no panic / no error."
+    // Late event drain — kernel may still deliver an event for the unwatched fd. Watcher emits
+    // anyway; the test's contract is "no panic / no error."
     let _ = drain_for(&mut w, Duration::from_millis(200));
     drop(w);
 }

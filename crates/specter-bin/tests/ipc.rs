@@ -1,15 +1,12 @@
 //! Integration tests for the operator IPC surface.
 //!
-//! Each test spawns the `specter` binary as a subprocess against a
-//! per-test sandbox tempdir, then drives client behaviour over real
-//! `UnixStream` pairs. Concurrent nextest runs are isolated by binding
-//! each daemon at `--socket <sandbox>/specter.sock`, so its socket
-//! lands inside that test's own scratch space rather than the shared
-//! per-platform convention path.
+//! Each test spawns the `specter` binary as a subprocess against a per-test sandbox tempdir, then
+//! drives client behaviour over real `UnixStream` pairs. Concurrent nextest runs are isolated by
+//! binding each daemon at `--socket <sandbox>/specter.sock`, so its socket lands inside that test's
+//! own scratch space rather than the shared per-platform convention path.
 //!
-//! Tests mirror the discipline established in
-//! `config_auto_reload.rs`: one process per test, log-file polling
-//! for observation, SIGTERM-then-await for clean shutdown.
+//! Tests mirror the discipline established in `config_auto_reload.rs`: one process per test,
+//! log-file polling for observation, SIGTERM-then-await for clean shutdown.
 
 #![cfg(unix)]
 
@@ -31,16 +28,15 @@ use tempfile::TempDir;
 /// Wall-clock budget for "the daemon has come up and bound its socket."
 const STARTUP_DEADLINE: Duration = Duration::from_secs(10);
 
-/// Wall-clock budget for shutdown after SIGTERM. Matches the
-/// established convention from `config_auto_reload.rs`.
+/// Wall-clock budget for shutdown after SIGTERM. Matches the established convention from
+/// `config_auto_reload.rs`.
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(8);
 
 /// Poll cadence shared with `config_auto_reload.rs`.
 const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-/// Tempdir-bound sandbox for one IPC integration test. Holds the
-/// config + log paths and the socket path the daemon binds via
-/// `--socket` — the same path the client raw-connects to.
+/// Tempdir-bound sandbox for one IPC integration test. Holds the config + log paths and the socket
+/// path the daemon binds via `--socket` — the same path the client raw-connects to.
 struct Sandbox {
     _tmp: TempDir,
     dir: PathBuf,
@@ -56,8 +52,8 @@ impl Sandbox {
         let cfg = dir.join("specter.toml");
         let log = dir.join("specter.log");
         let socket = dir.join("specter.sock");
-        // Minimal valid config — no watches, no promoters. Tests
-        // that need watches write a richer TOML themselves.
+        // Minimal valid config — no watches, no promoters. Tests that need watches write a richer
+        // TOML themselves.
         fs::write(&cfg, "").expect("write empty config");
         Self {
             _tmp: tmp,
@@ -69,10 +65,9 @@ impl Sandbox {
     }
 }
 
-/// Spawn the workspace's `specter` binary against `sb`. `--socket
-/// sb.socket` pins the daemon's bind path inside the per-test sandbox,
-/// so concurrent nextest runs never collide on the shared per-platform
-/// convention path.
+/// Spawn the workspace's `specter` binary against `sb`. `--socket sb.socket` pins the daemon's bind
+/// path inside the per-test sandbox, so concurrent nextest runs never collide on the shared
+/// per-platform convention path.
 fn spawn_specter<I, S>(sb: &Sandbox, extra: I) -> Child
 where
     I: IntoIterator<Item = S>,
@@ -97,18 +92,15 @@ where
         .unwrap_or_else(|e| panic!("spawn specter: {e}"))
 }
 
-/// Wait until the daemon's socket file appears on disk. The bin's
-/// init order guarantees the socket exists by the time the engine
-/// driver starts the main loop — `bind_socket_atomic` runs before
+/// Wait until the daemon's socket file appears on disk. The bin's init order guarantees the socket
+/// exists by the time the engine driver starts the main loop — `bind_socket_atomic` runs before
 /// `run_initial_attach` in `App::run`.
 fn wait_for_socket(socket: &Path, deadline: Duration) -> bool {
     let stop = Instant::now() + deadline;
     while Instant::now() < stop {
         if socket.exists() {
-            // Belt-and-braces: confirm we can also actually connect.
-            // The daemon may have bound the listener but not yet
-            // spawned the accept thread; one rapid connect-and-drop
-            // proves both.
+            // Belt-and-braces: confirm we can also actually connect. The daemon may have bound the
+            // listener but not yet spawned the accept thread; one rapid connect-and-drop proves both.
             if let Ok(_s) = UnixStream::connect(socket) {
                 return true;
             }
@@ -118,8 +110,8 @@ fn wait_for_socket(socket: &Path, deadline: Duration) -> bool {
     false
 }
 
-/// Wait for a log line to appear in the daemon's log file. Mirrors
-/// the helper from `config_auto_reload.rs`.
+/// Wait for a log line to appear in the daemon's log file. Mirrors the helper from
+/// `config_auto_reload.rs`.
 fn wait_for_log<F: Fn(&str) -> bool>(log: &Path, pred: F, deadline: Duration) -> Option<String> {
     let stop = Instant::now() + deadline;
     while Instant::now() < stop {
@@ -133,8 +125,7 @@ fn wait_for_log<F: Fn(&str) -> bool>(log: &Path, pred: F, deadline: Duration) ->
     None
 }
 
-/// Wait for `child` to exit, polling at [`POLL_INTERVAL`] up to
-/// [`SHUTDOWN_DEADLINE`].
+/// Wait for `child` to exit, polling at [`POLL_INTERVAL`] up to [`SHUTDOWN_DEADLINE`].
 fn await_exit(child: &mut Child) -> io::Result<std::process::ExitStatus> {
     let stop = Instant::now() + SHUTDOWN_DEADLINE;
     while Instant::now() < stop {
@@ -159,9 +150,8 @@ fn terminate(mut child: Child) -> std::process::ExitStatus {
     await_exit(&mut child).expect("clean exit on SIGTERM")
 }
 
-/// Send one IPC request line + read one response line. The
-/// connection is closed at the end of the call; the daemon's
-/// per-connection thread terminates on EOF.
+/// Send one IPC request line + read one response line. The connection is closed at the end of the
+/// call; the daemon's per-connection thread terminates on EOF.
 fn one_shot(socket: &Path, request: &str) -> io::Result<String> {
     let mut stream = UnixStream::connect(socket)?;
     stream.set_read_timeout(Some(Duration::from_secs(5)))?;
@@ -176,21 +166,16 @@ fn one_shot(socket: &Path, request: &str) -> io::Result<String> {
     Ok(line)
 }
 
-/// Mirror of the bin's `StatusResponse` shape — defined here as a
-/// minimal `Deserialize` so the test does not depend on the bin's
-/// `pub(crate)` types. Field order mirrors the projection's
-/// `protocol::StatusResponse`; a rename or removal on the daemon
-/// side surfaces as a deserialization failure at the integration
-/// boundary.
+/// Mirror of the bin's `StatusResponse` shape — defined here as a minimal `Deserialize` so the test
+/// does not depend on the bin's `pub(crate)` types. Field order mirrors the projection's
+/// `protocol::StatusResponse`; a rename or removal on the daemon side surfaces as a deserialization
+/// failure at the integration boundary.
 ///
-/// `last_reload` flattens on the wire — the daemon emits
-/// `last_reload_at` and `last_reload_via` directly alongside the
-/// peer fields on the `Some` side, and omits both entirely on the
-/// `None` side. The snap mirrors that shape via
-/// `#[serde(flatten, default)]` over an `Option<LastReloadSnap>` so
-/// a partial wire form (one of the two keys present) fails the
-/// integration deserialize loudly, just like the daemon-side wire
-/// type.
+/// `last_reload` flattens on the wire — the daemon emits `last_reload_at` and `last_reload_via`
+/// directly alongside the peer fields on the `Some` side, and omits both entirely on the `None`
+/// side. The snap mirrors that shape via `#[serde(flatten, default)]` over an
+/// `Option<LastReloadSnap>` so a partial wire form (one of the two keys present) fails the
+/// integration deserialize loudly, just like the daemon-side wire type.
 #[derive(Debug, Deserialize)]
 struct StatusResponseSnap {
     uptime_secs: u64,
@@ -207,21 +192,18 @@ struct StatusResponseSnap {
     socket_path: PathBuf,
 }
 
-/// Mirror of [`WireLastReload`] — the wall-clock + trigger pair the
-/// daemon emits as flattened keys (`last_reload_at`,
-/// `last_reload_via`) on the `Some` side. Defined here so the
-/// integration test's wire-shape pin is independent of the
-/// daemon-side type's `pub(crate)` visibility.
+/// Mirror of [`WireLastReload`] — the wall-clock + trigger pair the daemon emits as flattened keys
+/// (`last_reload_at`, `last_reload_via`) on the `Some` side. Defined here so the integration test's
+/// wire-shape pin is independent of the daemon-side type's `pub(crate)` visibility.
 #[derive(Debug, Deserialize)]
 struct LastReloadSnap {
     last_reload_at: String,
     last_reload_via: ReloadTriggerSnap,
 }
 
-/// Mirror of `WireReloadTrigger`. Typed mirror (rather than
-/// `Option<String>`) so a rename on the wire side is a compile
-/// error at the integration boundary rather than a silently-passing
-/// equality on stale text.
+/// Mirror of `WireReloadTrigger`. Typed mirror (rather than `Option<String>`) so a rename on the
+/// wire side is a compile error at the integration boundary rather than a silently-passing equality
+/// on stale text.
 #[derive(Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum ReloadTriggerSnap {
@@ -230,8 +212,8 @@ enum ReloadTriggerSnap {
     Ipc,
 }
 
-/// Outer envelope mirror. Internally-tagged on `kind`; only the
-/// variants the read verbs exercise are modelled.
+/// Outer envelope mirror. Internally-tagged on `kind`; only the variants the read verbs exercise
+/// are modelled.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ResponseSnap {
@@ -247,10 +229,9 @@ enum ResponseSnap {
     Other,
 }
 
-/// Minimal `ListResponse` mirror — just the rows, decoded loosely.
-/// Only the fields the integration tests assert against are
-/// modelled; unknown wire fields are deserialized into `_` via
-/// `serde`'s default deny-unknown-fields-off behaviour.
+/// Minimal `ListResponse` mirror — just the rows, decoded loosely. Only the fields the integration
+/// tests assert against are modelled; unknown wire fields are deserialized into `_` via `serde`'s
+/// default deny-unknown-fields-off behaviour.
 #[derive(Debug, Deserialize)]
 struct ListResponseSnap {
     rows: Vec<ListRowSnap>,
@@ -262,8 +243,7 @@ struct ListRowSnap {
     disabled: Option<DisabledSourceSnap>,
 }
 
-/// Mirror of `DisabledSource`. Names + `snake_case` rename match the
-/// wire serialization.
+/// Mirror of `DisabledSource`. Names + `snake_case` rename match the wire serialization.
 #[derive(Debug, Deserialize, Eq, PartialEq)]
 #[serde(rename_all = "snake_case")]
 enum DisabledSourceSnap {
@@ -271,11 +251,10 @@ enum DisabledSourceSnap {
     Toml,
 }
 
-/// Minimal `ShowResponse` mirror. Internally tagged on `status`;
-/// the `name` field is read off the `Active` arm by the integration
-/// test, and the other arms' fields are kept for `Debug` output on
-/// panic — the `#[allow]` muffles dead-code warnings that the
-/// deserializer-side read does not silence.
+/// Minimal `ShowResponse` mirror. Internally tagged on `status`; the `name` field is read off the
+/// `Active` arm by the integration test, and the other arms' fields are kept for `Debug` output on
+/// panic — the `#[allow]` muffles dead-code warnings that the deserializer-side read does not
+/// silence.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 #[allow(dead_code)]
@@ -294,10 +273,9 @@ enum ShowResponseSnap {
 
 // ---------- status round-trip ----------------------------------------
 
-/// Headline test: spawn the daemon, send `{"op":"status"}` over the
-/// socket, parse a `StatusResponse`. Proves the entire IPC topology
-/// (`channels` → `ipc::hub` → `drain_ipc` → `project::status` →
-/// reply channel → wire) end-to-end.
+/// Headline test: spawn the daemon, send `{"op":"status"}` over the socket, parse a
+/// `StatusResponse`. Proves the entire IPC topology (`channels` → `ipc::hub` → `drain_ipc` →
+/// `project::status` → reply channel → wire) end-to-end.
 #[test]
 fn status_round_trip() {
     let sb = Sandbox::new();
@@ -326,9 +304,8 @@ fn status_round_trip() {
                 "start_wall projection writes a non-empty RFC 3339 token",
             );
             assert_eq!(s.config_path, sb.cfg, "projection reports config path");
-            // uptime_secs can legitimately be 0 on a fast machine.
-            // The test only proves the projection ran; the value's
-            // monotonicity is covered by the project_tests fixture.
+            // uptime_secs can legitimately be 0 on a fast machine. The test only proves the
+            // projection ran; the value's monotonicity is covered by the project_tests fixture.
             let _: u64 = s.uptime_secs;
             assert_eq!(s.socket_path, sb.socket, "projection reports bound path");
         }
@@ -341,16 +318,14 @@ fn status_round_trip() {
 
 // ---------- stale socket recovery ------------------------------------
 
-/// A pre-existing socket file at the bound path is recovered: the
-/// daemon connects-then-unlinks (no live peer holds it) and binds
-/// fresh. Tests the `sockpath::check_stale_or_remove` arm of the
+/// A pre-existing socket file at the bound path is recovered: the daemon connects-then-unlinks (no
+/// live peer holds it) and binds fresh. Tests the `sockpath::check_stale_or_remove` arm of the
 /// startup path.
 #[test]
 fn stale_socket_recovery() {
     let sb = Sandbox::new();
-    // Stage a regular file at the socket path so the daemon must
-    // recover from its presence. A regular file is the easier
-    // stand-in for a true stale socket (both look like a present-
+    // Stage a regular file at the socket path so the daemon must recover from its presence. A
+    // regular file is the easier stand-in for a true stale socket (both look like a present-
     // but-unowned path to `check_stale_or_remove`).
     fs::write(&sb.socket, b"stale daemon footprint").expect("write orphan");
     assert!(sb.socket.exists());
@@ -375,10 +350,9 @@ fn stale_socket_recovery() {
 
 // ---------- live socket conflict -------------------------------------
 
-/// Two daemons on the same socket path: the second must fail
-/// startup with ExitCode::from(1) (sockpath returns AddrInUse). The
-/// first daemon's bind is observed via `wait_for_socket` so the race
-/// is deterministic.
+/// Two daemons on the same socket path: the second must fail startup with ExitCode::from(1)
+/// (sockpath returns AddrInUse). The first daemon's bind is observed via `wait_for_socket` so the
+/// race is deterministic.
 #[test]
 fn live_socket_conflict() {
     let sb = Sandbox::new();
@@ -388,8 +362,8 @@ fn live_socket_conflict() {
         "first daemon failed to come up",
     );
 
-    // Spawn a second daemon on the same sandbox (same --socket ⇒ same
-    // socket path). It must exit non-zero.
+    // Spawn a second daemon on the same sandbox (same --socket ⇒ same socket path). It must exit
+    // non-zero.
     let mut second = spawn_specter(&sb, std::iter::empty::<&str>());
     let second_exit = await_exit(&mut second).expect("second daemon exited");
     assert!(
@@ -403,9 +377,8 @@ fn live_socket_conflict() {
 
 // ---------- socket mode is 0600 --------------------------------------
 
-/// Atomic-rename binding sets the file's mode to 0o600 before the
-/// well-known path becomes observable. The lstat-after-startup
-/// confirms the chmod ran.
+/// Atomic-rename binding sets the file's mode to 0o600 before the well-known path becomes
+/// observable. The lstat-after-startup confirms the chmod ran.
 #[test]
 fn socket_mode_is_0600() {
     let sb = Sandbox::new();
@@ -428,9 +401,8 @@ fn socket_mode_is_0600() {
 
 // ---------- unlink guard clears on graceful shutdown -----------------
 
-/// After a clean SIGTERM shutdown, the socket file must be removed
-/// from disk — the unlink guard's disarm + Drop combination owns
-/// this responsibility. Operators starting a fresh daemon shortly
+/// After a clean SIGTERM shutdown, the socket file must be removed from disk — the unlink guard's
+/// disarm + Drop combination owns this responsibility. Operators starting a fresh daemon shortly
 /// after a clean shutdown should not see the old path persist.
 #[test]
 fn unlink_guard_clears_on_graceful_shutdown() {
@@ -452,9 +424,8 @@ fn unlink_guard_clears_on_graceful_shutdown() {
 
 // ---------- malformed / unknown request ------------------------------
 
-/// A non-JSON line returns `ResponsePayload::Err { code: "malformed", .. }`
-/// without dropping the connection — the loop is ready for another
-/// request line.
+/// A non-JSON line returns `ResponsePayload::Err { code: "malformed", .. }` without dropping the
+/// connection — the loop is ready for another request line.
 #[test]
 fn malformed_request_returns_err() {
     let sb = Sandbox::new();
@@ -478,9 +449,8 @@ fn malformed_request_returns_err() {
     assert!(exit.success(), "clean exit; got {exit:?}");
 }
 
-/// An unknown `op` value is a serde parse failure (the daemon's
-/// `WireRequest` deny-list catches typos) and surfaces as the same
-/// `malformed` error — operators get a structural signal at the
+/// An unknown `op` value is a serde parse failure (the daemon's `WireRequest` deny-list catches
+/// typos) and surfaces as the same `malformed` error — operators get a structural signal at the
 /// boundary, not silent acceptance.
 #[test]
 fn unknown_op_returns_err() {
@@ -507,9 +477,8 @@ fn unknown_op_returns_err() {
 
 // ---------- reload via IPC -------------------------------------------
 
-/// `{"op":"reload"}` routes through the IPC drain to `handle_reload`
-/// and bumps `reload_count`. A follow-up `status` call carries the
-/// updated counter and `last_reload_via = "ipc"`.
+/// `{"op":"reload"}` routes through the IPC drain to `handle_reload` and bumps `reload_count`. A
+/// follow-up `status` call carries the updated counter and `last_reload_via = "ipc"`.
 #[test]
 fn reload_via_ipc_increments_counters() {
     let sb = Sandbox::new();
@@ -533,11 +502,9 @@ fn reload_via_ipc_increments_counters() {
     let reply_snap: ResponseSnap = serde_json::from_str(reply.trim_end()).expect("parse reload");
     assert!(matches!(reply_snap, ResponseSnap::Ok), "got {reply_snap:?}");
 
-    // Wait for the reload to be observed (the engine thread processes
-    // the IPC drain on its tick, and `record_reload` bumps
-    // `reload_count` inside `handle_reload`). One short retry loop
-    // covers the tick latency; the polled status carries the full
-    // post-reload attribution.
+    // Wait for the reload to be observed (the engine thread processes the IPC drain on its tick,
+    // and `record_reload` bumps `reload_count` inside `handle_reload`). One short retry loop covers
+    // the tick latency; the polled status carries the full post-reload attribution.
     let final_status = poll_status_until(
         &sb.socket,
         |s| s.reload_count > initial_reloads,
@@ -558,13 +525,10 @@ fn reload_via_ipc_increments_counters() {
         "successful reload stamps a non-empty RFC 3339 wall-clock token",
     );
 
-    // Confirm the log carries the reload-pipeline line — the
-    // `handle_reload` ran end-to-end. The sandbox's config is empty
-    // (no `[[watch]]` blocks), so the diff is empty and the log line
-    // is "config reload: no watch changes" rather than
-    // "config reload applied". Both branches converge on the same
-    // `record_reload` bump, so the assertion is for the
-    // empty-diff side.
+    // Confirm the log carries the reload-pipeline line — the `handle_reload` ran end-to-end. The
+    // sandbox's config is empty (no `[[watch]]` blocks), so the diff is empty and the log line is
+    // "config reload: no watch changes" rather than "config reload applied". Both branches converge
+    // on the same `record_reload` bump, so the assertion is for the empty-diff side.
     let log_contents = wait_for_log(
         &sb.log,
         |s| s.contains("config reload: no watch changes"),
@@ -581,17 +545,15 @@ fn reload_via_ipc_increments_counters() {
 
 // ---------- list round-trip ------------------------------------------
 
-/// End-to-end `list`: spawn the daemon against a config carrying
-/// one enabled watch, one disabled watch, and assert the response
-/// surfaces both rows alphabetically with the right `disabled` tag.
-/// Pins the entire list path: `channels` → `ipc::hub` →
-/// `drain_ipc` → `project::list` → reply channel → wire.
+/// End-to-end `list`: spawn the daemon against a config carrying one enabled watch, one disabled
+/// watch, and assert the response surfaces both rows alphabetically with the right `disabled` tag.
+/// Pins the entire list path: `channels` → `ipc::hub` → `drain_ipc` → `project::list` → reply
+/// channel → wire.
 #[test]
 fn list_round_trip_alphabetic_with_disabled_rows() {
     let sb = Sandbox::new();
-    // Anchor at the sandbox dir so the engine resolves it
-    // synchronously — eliminates the descent's probe-arming variance
-    // when the operator stats the projection.
+    // Anchor at the sandbox dir so the engine resolves it synchronously — eliminates the descent's
+    // probe-arming variance when the operator stats the projection.
     let cfg = format!(
         r#"
 [[watch]]
@@ -620,9 +582,8 @@ enabled   = false
     match resp {
         ResponseSnap::List(list) => {
             assert_eq!(list.rows.len(), 2, "two rows declared");
-            // BTreeMap-backed projection ⇒ alphabetic order:
-            // `alpha_off` (Toml-disabled) before `zebra`
-            // (engine-attached).
+            // BTreeMap-backed projection ⇒ alphabetic order: `alpha_off` (Toml-disabled) before
+            // `zebra` (engine-attached).
             assert_eq!(list.rows[0].name, "alpha_off");
             assert_eq!(list.rows[0].disabled, Some(DisabledSourceSnap::Toml));
             assert_eq!(list.rows[1].name, "zebra");
@@ -640,8 +601,7 @@ enabled   = false
 
 // ---------- show round-trip (Active) ---------------------------------
 
-/// End-to-end `show <name>` for an attached Sub. Returns
-/// `Show { status: "active", name: ... }`.
+/// End-to-end `show <name>` for an attached Sub. Returns `Show { status: "active", name: ... }`.
 #[test]
 fn show_round_trip_active_path() {
     let sb = Sandbox::new();
@@ -677,12 +637,10 @@ actions   = [{{ exec = ["true"] }}]
 
 // ---------- show client exits 1 on Unknown ---------------------------
 
-/// `specter show <unknown_name>` exits `1` so operator shell scripts
-/// can chain `specter show foo && do-thing`. Spawn the daemon, then
-/// spawn the client binary as a subprocess so we can observe its
-/// exit code through `output()`. The daemon needs no special config
-/// for this — the `Unknown` arm depends only on the in-memory state
-/// rejecting the typo.
+/// `specter show <unknown_name>` exits `1` so operator shell scripts can chain `specter show foo &&
+/// do-thing`. Spawn the daemon, then spawn the client binary as a subprocess so we can observe its
+/// exit code through `output()`. The daemon needs no special config for this — the `Unknown` arm
+/// depends only on the in-memory state rejecting the typo.
 #[test]
 fn show_round_trip_unknown_exit_code() {
     let sb = Sandbox::new();
@@ -715,28 +673,21 @@ fn show_round_trip_unknown_exit_code() {
 
 // ---------- Tail / wait integration helpers --------------------------
 //
-// `tail` and `wait` are subscribe-arm verbs — the client subscribes,
-// the daemon streams events line-by-line over the connection's
-// lifetime. The tests below need three streaming-specific helpers
-// beyond the read-verb surface:
+// `tail` and `wait` are subscribe-arm verbs — the client subscribes, the daemon streams events
+// line-by-line over the connection's lifetime. The tests below need three streaming-specific
+// helpers beyond the read-verb surface:
 //
-// 1. `watched_anchor` — a subdirectory of the sandbox the daemon
-//    does NOT itself write to. The sandbox root carries the daemon's
-//    own log + socket, so watching it directly would surface log
-//    writes as fs events; isolating the watch anchor underneath
-//    keeps the burst trigger crisp.
-// 2. `spawn_client_stream` — spawns one client subprocess (`tail` /
-//    `wait`) with its stdout piped through a `mpsc::Receiver<String>`
-//    populated by a background reader thread. Lets the main test
-//    thread `recv_timeout` for "the next streamed line" without
-//    polling.
-// 3. Reload-driven watch removal — used as one trigger for
-//    `SubDetached` in wait-detach tests; an IPC `disable` is the
-//    other (`I-disable-emits-detach` covers it).
+// 1. `watched_anchor` — a subdirectory of the sandbox the daemon does NOT itself write to. The
+//    sandbox root carries the daemon's own log + socket, so watching it directly would surface log
+//    writes as fs events; isolating the watch anchor underneath keeps the burst trigger crisp.
+// 2. `spawn_client_stream` — spawns one client subprocess (`tail` / `wait`) with its stdout piped
+//    through a `mpsc::Receiver<String>` populated by a background reader thread. Lets the main test
+//    thread `recv_timeout` for "the next streamed line" without polling.
+// 3. Reload-driven watch removal — used as one trigger for `SubDetached` in wait-detach tests; an
+//    IPC `disable` is the other (`I-disable-emits-detach` covers it).
 
-/// Make a fresh subdirectory under the sandbox dir that the daemon
-/// does not itself write to — the right anchor for a watch that
-/// must observe operator-driven touches without noise from the
+/// Make a fresh subdirectory under the sandbox dir that the daemon does not itself write to — the
+/// right anchor for a watch that must observe operator-driven touches without noise from the
 /// daemon's own logging or socket bookkeeping.
 fn watched_anchor(sb: &Sandbox) -> PathBuf {
     let p = sb.dir.join("watched");
@@ -744,9 +695,8 @@ fn watched_anchor(sb: &Sandbox) -> PathBuf {
     p
 }
 
-/// Construct a TOML config string with one `[[watch]]` whose anchor
-/// is `anchor` and whose settle is `settle_ms`. Single-source so the
-/// per-test TOML strings stay consistent.
+/// Construct a TOML config string with one `[[watch]]` whose anchor is `anchor` and whose settle is
+/// `settle_ms`. Single-source so the per-test TOML strings stay consistent.
 fn one_watch_config(name: &str, anchor: &Path, settle_ms: u32) -> String {
     format!(
         r#"
@@ -760,14 +710,12 @@ actions   = [{{ exec = ["true"] }}]
     )
 }
 
-/// Spawn a `specter <verb> [args...]` client with stdout/stderr
-/// piped. Returns the [`Child`] plus an [`mpsc::Receiver`] that
-/// yields each line of stdout (one [`String`] per line, with
-/// trailing LF stripped) as it arrives.
+/// Spawn a `specter <verb> [args...]` client with stdout/stderr piped. Returns the [`Child`] plus
+/// an [`mpsc::Receiver`] that yields each line of stdout (one [`String`] per line, with trailing LF
+/// stripped) as it arrives.
 ///
-/// A background reader thread pumps the child's stdout into the
-/// channel; the test's main thread reads via `recv_timeout`. The
-/// thread exits cleanly on child stdout EOF, which happens on the
+/// A background reader thread pumps the child's stdout into the channel; the test's main thread
+/// reads via `recv_timeout`. The thread exits cleanly on child stdout EOF, which happens on the
 /// child's clean exit or when the test calls [`Child::kill`].
 fn spawn_client_stream(
     sb: &Sandbox,
@@ -803,13 +751,11 @@ fn spawn_client_stream(
     (child, rx)
 }
 
-/// Wait up to `deadline` for `child` to exit. Returns the
-/// [`std::process::ExitStatus`] on clean exit, or kills the child
-/// and returns `Err(io::ErrorKind::TimedOut)` on overrun.
+/// Wait up to `deadline` for `child` to exit. Returns the [`std::process::ExitStatus`] on clean
+/// exit, or kills the child and returns `Err(io::ErrorKind::TimedOut)` on overrun.
 ///
-/// Distinct from [`await_exit`] (which targets the daemon under
-/// [`SHUTDOWN_DEADLINE`]) — client-side verbs have their own
-/// per-test deadlines (small for `wait --timeout`, large for the
+/// Distinct from [`await_exit`] (which targets the daemon under [`SHUTDOWN_DEADLINE`]) —
+/// client-side verbs have their own per-test deadlines (small for `wait --timeout`, large for the
 /// happy-path tests).
 fn await_client_exit(
     child: &mut Child,
@@ -831,18 +777,16 @@ fn await_client_exit(
     ))
 }
 
-/// Touch (create + close) a fresh file under the watch anchor to
-/// drive a burst. The path is unique per call so consecutive
-/// touches inside the same test do not coalesce into one filesystem
-/// event by accidental path reuse.
+/// Touch (create + close) a fresh file under the watch anchor to drive a burst. The path is unique
+/// per call so consecutive touches inside the same test do not coalesce into one filesystem event
+/// by accidental path reuse.
 fn touch_unique(anchor: &Path, label: &str) {
     let p = anchor.join(format!("{label}-{}", std::process::id()));
     fs::write(&p, b"x").unwrap_or_else(|e| panic!("touch {}: {e}", p.display()));
 }
 
-/// Wait until `rx` yields a line matching `pred`, or `deadline` is
-/// reached. Returns the matching line on success, `None` on
-/// timeout.
+/// Wait until `rx` yields a line matching `pred`, or `deadline` is reached. Returns the matching
+/// line on success, `None` on timeout.
 fn wait_for_line<F: Fn(&str) -> bool>(
     rx: &mpsc::Receiver<String>,
     pred: F,
@@ -867,11 +811,9 @@ fn wait_for_line<F: Fn(&str) -> bool>(
     }
 }
 
-/// Collect up to `n` consecutive lines from `rx` in arrival order,
-/// or fewer if `deadline` elapses first. Distinct from
-/// [`wait_for_line`], which filters by predicate and returns the
-/// first match — this preserves arrival order, the contract
-/// ordering-dependent tests pin.
+/// Collect up to `n` consecutive lines from `rx` in arrival order, or fewer if `deadline` elapses
+/// first. Distinct from [`wait_for_line`], which filters by predicate and returns the first match —
+/// this preserves arrival order, the contract ordering-dependent tests pin.
 fn collect_lines(rx: &mpsc::Receiver<String>, n: usize, deadline: Duration) -> Vec<String> {
     let stop = Instant::now() + deadline;
     let mut out = Vec::with_capacity(n);
@@ -890,9 +832,8 @@ fn collect_lines(rx: &mpsc::Receiver<String>, n: usize, deadline: Duration) -> V
 
 // ---------- tail --filter unknown exits 2 (no daemon needed) --------
 
-/// `tail --filter <unknown>` exits `2` before any connection
-/// attempt. The handler validates the filter vocabulary against the
-/// wire-side `KNOWN_WIRE_VARIANTS` list; an unknown tag fails fast
+/// `tail --filter <unknown>` exits `2` before any connection attempt. The handler validates the
+/// filter vocabulary against the wire-side `KNOWN_WIRE_VARIANTS` list; an unknown tag fails fast
 /// with the operator-visible suggestion list.
 #[test]
 fn tail_unknown_filter_exits_two() {
@@ -923,23 +864,19 @@ fn tail_unknown_filter_exits_two() {
 
 // ---------- subscribe arm shares the dial connect seam --------------
 
-/// The streaming verbs (`tail` / `wait` → `subscribe::open`) reach the
-/// daemon through the same `connect::dial` seam as the one-shot verbs
-/// (`status` → `round_trip`), so `subscribe::open` cannot grow a
-/// private connect path. Against an absent socket every verb family
-/// emits the single `dial`-owned `specter <verb>: cannot connect to
-/// <path>` diagnostic and exits `1`.
+/// The streaming verbs (`tail` / `wait` → `subscribe::open`) reach the daemon through the same
+/// `connect::dial` seam as the one-shot verbs (`status` → `round_trip`), so `subscribe::open`
+/// cannot grow a private connect path. Against an absent socket every verb family emits the single
+/// `dial`-owned `specter <verb>: cannot connect to <path>` diagnostic and exits `1`.
 ///
-/// Regression anchor: the `cannot connect to` string lives only in
-/// `dial`, so a streaming verb emitting it proves it routed through
-/// `dial` rather than re-inlining its own resolve+open. The assertions
-/// pin only the stable `cannot connect to <path>` substring (not the
-/// trailing errno), so the test survives a later enrichment of the
-/// diagnostic.
+/// Regression anchor: the `cannot connect to` string lives only in `dial`, so a streaming verb
+/// emitting it proves it routed through `dial` rather than re-inlining its own resolve+open. The
+/// assertions pin only the stable `cannot connect to <path>` substring (not the trailing errno), so
+/// the test survives a later enrichment of the diagnostic.
 #[test]
 fn subscribe_arm_shares_dial_connect_seam() {
-    // No daemon spawned — sb.socket is never bound, so every connect
-    // attempt fails at the dial seam with the same shape.
+    // No daemon spawned — sb.socket is never bound, so every connect attempt fails at the dial seam
+    // with the same shape.
     let sb = Sandbox::new();
     let bin = env!("CARGO_BIN_EXE_specter");
     let socket = sb.socket.display().to_string();
@@ -969,9 +906,8 @@ fn subscribe_arm_shares_dial_connect_seam() {
         "tail must emit the dial connect-failure diagnostic naming the socket: {tail_err}",
     );
 
-    // One-shot family: `status` flows through `round_trip` → `dial`.
-    // The byte-identical shape (modulo verb token) witnesses the shared
-    // seam.
+    // One-shot family: `status` flows through `round_trip` → `dial`. The byte-identical shape
+    // (modulo verb token) witnesses the shared seam.
     let status = run("status");
     assert_eq!(
         status.status.code(),
@@ -988,11 +924,9 @@ fn subscribe_arm_shares_dial_connect_seam() {
 
 // ---------- tail sees a SubFired arrive end-to-end ------------------
 
-/// `tail --filter sub_fired` over an attached watch + an operator
-/// file touch streams one matching line to stdout. Proves the
-/// streaming surface end-to-end: engine emits Diagnostic ⇒ broker
-/// fans out ⇒ per-conn thread writes wire JSON ⇒ tail client reads
-/// + renders.
+/// `tail --filter sub_fired` over an attached watch + an operator file touch streams one matching
+/// line to stdout. Proves the streaming surface end-to-end: engine emits Diagnostic ⇒ broker fans
+/// out ⇒ per-conn thread writes wire JSON ⇒ tail client reads + renders.
 #[test]
 fn tail_streams_sub_fired_after_touch() {
     let sb = Sandbox::new();
@@ -1010,10 +944,9 @@ fn tail_streams_sub_fired_after_touch() {
         "daemon never logged the initial attach",
     );
 
-    // tail must subscribe BEFORE the touch lands or the broker
-    // dispatches into thin air. A short sleep covers the
-    // spawn → write Subscribe → ack round trip; the wait_for_line
-    // deadline is the structural backstop if subscribe slips.
+    // tail must subscribe BEFORE the touch lands or the broker dispatches into thin air. A short
+    // sleep covers the spawn → write Subscribe → ack round trip; the wait_for_line deadline is the
+    // structural backstop if subscribe slips.
     let (mut tail, rx) = spawn_client_stream(&sb, "tail", &["--filter", "sub_fired", "-o", "json"]);
     thread::sleep(Duration::from_millis(400));
 
@@ -1039,10 +972,9 @@ fn tail_streams_sub_fired_after_touch() {
 
 // ---------- tail -o json line round-trips via serde -----------------
 
-/// `tail -o json` emits the wire shape losslessly. The streamed
-/// line parses as a JSON object carrying the `diag` tag and the
-/// expected per-Sub fields (the wire's `From<(&Diagnostic, SystemTime)>`
-/// projection survives the broker → wire → stdout round-trip).
+/// `tail -o json` emits the wire shape losslessly. The streamed line parses as a JSON object
+/// carrying the `diag` tag and the expected per-Sub fields (the wire's `From<(&Diagnostic,
+/// SystemTime)>` projection survives the broker → wire → stdout round-trip).
 #[test]
 fn tail_json_output_round_trips_via_serde() {
     let sb = Sandbox::new();
@@ -1064,8 +996,8 @@ fn tail_json_output_round_trips_via_serde() {
     )
     .expect("tail observed a SubFired line");
 
-    // Parse as a generic JSON value so the test does not duplicate
-    // the bin's pub(crate) WireDiagnostic shape.
+    // Parse as a generic JSON value so the test does not duplicate the bin's pub(crate)
+    // WireDiagnostic shape.
     let v: serde_json::Value =
         serde_json::from_str(line.trim_end()).expect("streamed line must be valid JSON");
     assert_eq!(v.get("diag").and_then(|x| x.as_str()), Some("sub_fired"));
@@ -1092,36 +1024,26 @@ fn tail_json_output_round_trips_via_serde() {
 
 // ---------- ack-ordering: subscribe_ack precedes every diagnostic ----
 
-/// `subscribe_ack` MUST be the first JSON line on the wire after a
-/// Subscribe verb, even when a fire-triggering touch races
-/// concurrently with the subscribe write. Pins the ack-before-fanout
-/// ordering in the driver's Subscribe arm: the ack bytes are pushed
-/// into the conn's `write_queue` while the conn is still in
-/// [`ConnRole::Reqs`], and only then does
-/// [`ConnState::transition_to_sub`] flip the role to `Sub`. The
-/// diagnostic fan-out (`DriverHub::dispatch_to_subscribers`) skips
-/// `Reqs` conns, so no diag can interleave between the ack enqueue
-/// and the role flip.
+/// `subscribe_ack` MUST be the first JSON line on the wire after a Subscribe verb, even when a
+/// fire-triggering touch races concurrently with the subscribe write. Pins the ack-before-fanout
+/// ordering in the driver's Subscribe arm: the ack bytes are pushed into the conn's `write_queue`
+/// while the conn is still in [`ConnRole::Reqs`], and only then does [`ConnState::transition_to_sub`]
+/// flip the role to `Sub`. The diagnostic fan-out (`DriverHub::dispatch_to_subscribers`) skips `Reqs`
+/// conns, so no diag can interleave between the ack enqueue and the role flip.
 ///
-/// **Fence, not fuzzer.** The invariant holds structurally — the
-/// fan-out's `Reqs`-skip gate is the proof — but this test bounds it
-/// against any future refactor that reorders the ack push and the
-/// role flip, or that lets the fan-out path observe a partially-
-/// transitioned conn.
+/// **Fence, not fuzzer.** The invariant holds structurally — the fan-out's `Reqs`-skip gate is the
+/// proof — but this test bounds it against any future refactor that reorders the ack push and the
+/// role flip, or that lets the fan-out path observe a partially- transitioned conn.
 ///
-/// Per-Sub Subscribe (`name = "orderwatch"`) so the post-ack wire
-/// carries only events naming that Sub: ambient Profile-keyed
-/// diagnostics (e.g. teardown `ProfileReaped`) cannot pollute the
+/// Per-Sub Subscribe (`name = "orderwatch"`) so the post-ack wire carries only events naming that
+/// Sub: ambient Profile-keyed diagnostics (e.g. teardown `ProfileReaped`) cannot pollute the
 /// assertion.
 ///
-/// **Settle sized for parallel-test load.** The settle window
-/// (300ms) is comfortably larger than the worst-case subscribe
-/// handshake under heavy `nextest` parallelism. A smaller window
-/// (e.g. the 50ms used by the per-touch happy-path tests) lets the
-/// touch's burst fire before the conn has flipped role under
-/// contention — the diagnostic is then dispatched to no one and the
-/// post-ack assertion below would fail, masking the ack-ordering
-/// fence the test is meant to express.
+/// **Settle sized for parallel-test load.** The settle window (300ms) is comfortably larger than
+/// the worst-case subscribe handshake under heavy `nextest` parallelism. A smaller window (e.g. the
+/// 50ms used by the per-touch happy-path tests) lets the touch's burst fire before the conn has
+/// flipped role under contention — the diagnostic is then dispatched to no one and the post-ack
+/// assertion below would fail, masking the ack-ordering fence the test is meant to express.
 #[test]
 fn subscribe_ack_precedes_first_diagnostic_on_wire() {
     let sb = Sandbox::new();
@@ -1144,11 +1066,9 @@ fn subscribe_ack_precedes_first_diagnostic_on_wire() {
     let mut writer = stream.try_clone().expect("try_clone for writer");
     let mut reader = BufReader::new(stream);
 
-    // Spawn the race-window toucher BEFORE the subscribe write. The
-    // thread is scheduled concurrently; the OS may run it before
-    // the subscribe lands on the daemon, during its processing, or
-    // after the ack returns. B3 says the ack must reach the wire
-    // first in every case.
+    // Spawn the race-window toucher BEFORE the subscribe write. The thread is scheduled concurrently;
+    // the OS may run it before the subscribe lands on the daemon, during its processing, or after the
+    // ack returns. B3 says the ack must reach the wire first in every case.
     let toucher = thread::spawn(move || touch_unique(&anchor, "race"));
 
     writer
@@ -1166,13 +1086,11 @@ fn subscribe_ack_precedes_first_diagnostic_on_wire() {
         "B3 ack-ordering: first line on the wire MUST be subscribe_ack; got {first}",
     );
 
-    // Next line MUST be SubFired. The per-Sub name filter on the
-    // broker drops every other variant (Profile-keyed diagnostics
-    // never match a name filter), and our setup emits no other
-    // per-Sub event in the post-ack window (SubAttached fired
-    // pre-connect; no detach/rebind/effect-complete races are in
-    // play). A back-pressure `_missed` cannot appear either: the
-    // channel is drained synchronously line-by-line.
+    // Next line MUST be SubFired. The per-Sub name filter on the broker drops every other variant
+    // (Profile-keyed diagnostics never match a name filter), and our setup emits no other per-Sub
+    // event in the post-ack window (SubAttached fired pre-connect; no detach/rebind/effect-complete
+    // races are in play). A back-pressure `_missed` cannot appear either: the channel is drained
+    // synchronously line-by-line.
     let mut second = String::new();
     reader
         .read_line(&mut second)
@@ -1197,9 +1115,8 @@ fn subscribe_ack_precedes_first_diagnostic_on_wire() {
 
 // ---------- wait --kind fire happy path ------------------------------
 
-/// `wait <name> --kind fire` against an attached watch + an
-/// operator file touch exits `0` once the burst settles and
-/// `SubFired` arrives.
+/// `wait <name> --kind fire` against an attached watch + an operator file touch exits `0` once the
+/// burst settles and `SubFired` arrives.
 #[test]
 fn wait_kind_fire_happy_path_exits_zero() {
     let sb = Sandbox::new();
@@ -1231,9 +1148,8 @@ fn wait_kind_fire_happy_path_exits_zero() {
 
 // ---------- wait --timeout exits 124 ---------------------------------
 
-/// `wait <name> --kind fire --timeout 300ms` against an attached
-/// watch with no touch exits `124` (POSIX `timeout(1)` convention)
-/// after the deadline elapses.
+/// `wait <name> --kind fire --timeout 300ms` against an attached watch with no touch exits `124`
+/// (POSIX `timeout(1)` convention) after the deadline elapses.
 #[test]
 fn wait_kind_fire_timeout_exits_124() {
     let sb = Sandbox::new();
@@ -1267,10 +1183,9 @@ fn wait_kind_fire_timeout_exits_124() {
 
 // ---------- wait <unknown> exits 1 -----------------------------------
 
-/// `wait <ghost>` against a daemon that has no such Sub exits `1`
-/// (subscribe-side `ERR_UNKNOWN_SUB`). Server-side name resolution
-/// is atomic with `add_subscriber` so the wait client cannot
-/// silently wait forever on a typo.
+/// `wait <ghost>` against a daemon that has no such Sub exits `1` (subscribe-side
+/// `ERR_UNKNOWN_SUB`). Server-side name resolution is atomic with `add_subscriber` so the wait
+/// client cannot silently wait forever on a typo.
 #[test]
 fn wait_unknown_sub_exits_one() {
     let sb = Sandbox::new();
@@ -1296,12 +1211,10 @@ fn wait_unknown_sub_exits_one() {
 
 // ---------- wait race-window closed ----------------------------------
 
-/// `specter wait <name>` invoked AFTER an IPC reload that drops the
-/// watch from the TOML exits `1` immediately. Server-side name
-/// resolution sees the empty registry and returns `ERR_UNKNOWN_SUB`;
-/// no event window can keep the client waiting. The same structural
-/// guarantee covers the disable race-window — `name → SubId` resolves
-/// on the driver thread, atomic with `add_subscriber`.
+/// `specter wait <name>` invoked AFTER an IPC reload that drops the watch from the TOML exits `1`
+/// immediately. Server-side name resolution sees the empty registry and returns `ERR_UNKNOWN_SUB`;
+/// no event window can keep the client waiting. The same structural guarantee covers the disable
+/// race-window — `name → SubId` resolves on the driver thread, atomic with `add_subscriber`.
 #[test]
 fn wait_race_window_closed_via_reload() {
     let sb = Sandbox::new();
@@ -1317,8 +1230,8 @@ fn wait_race_window_closed_via_reload() {
     let reply = one_shot(&sb.socket, r#"{"op":"reload"}"#).expect("reload request");
     let resp: ResponseSnap = serde_json::from_str(reply.trim_end()).expect("parse reload");
     assert!(matches!(resp, ResponseSnap::Ok), "got {resp:?}");
-    // Wait for the daemon to surface the detach in the log so we
-    // know the reload's prune pass ran before we subscribe.
+    // Wait for the daemon to surface the detach in the log so we know the reload's prune pass ran
+    // before we subscribe.
     assert!(
         wait_for_log(
             &sb.log,
@@ -1347,14 +1260,12 @@ fn wait_race_window_closed_via_reload() {
 
 // ---------- wait --kind fire observes SubDetached exits 2 -----------
 
-/// `wait <name> --kind fire` that observes a `SubDetached` for the
-/// target before any fire exits `2` ("target detached before
-/// fire"). Distinct from `124` (timeout) and `1` (subscribe error).
+/// `wait <name> --kind fire` that observes a `SubDetached` for the target before any fire exits `2`
+/// ("target detached before fire"). Distinct from `124` (timeout) and `1` (subscribe error).
 ///
-/// The detach is reached here via an IPC reload that drops the
-/// watch from the TOML — the classify arm doesn't care WHICH reason
-/// the engine attached to the detach; an IPC `disable` would land
-/// the same outcome.
+/// The detach is reached here via an IPC reload that drops the watch from the TOML — the classify
+/// arm doesn't care WHICH reason the engine attached to the detach; an IPC `disable` would land the
+/// same outcome.
 #[test]
 fn wait_fire_observing_detach_exits_two() {
     let sb = Sandbox::new();
@@ -1365,8 +1276,7 @@ fn wait_fire_observing_detach_exits_two() {
     assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE));
     assert!(wait_for_log(&sb.log, |s| s.contains("sub attached"), STARTUP_DEADLINE).is_some());
 
-    // Subscribe BEFORE the reload so the SubDetached lands on a
-    // live stream.
+    // Subscribe BEFORE the reload so the SubDetached lands on a live stream.
     let (mut wait_child, _rx) = spawn_client_stream(&sb, "wait", &["victim", "--kind", "fire"]);
     thread::sleep(Duration::from_millis(400));
 
@@ -1393,20 +1303,17 @@ fn wait_fire_observing_detach_exits_two() {
 
 // ---------- Disable / enable / reload integration ------------------
 //
-// Each test spawns the daemon against a config carrying one or two
-// `[[watch]]` blocks, drives the operator-mutation verbs via raw
-// IPC (`one_shot`) or as a subprocess client, and asserts the
+// Each test spawns the daemon against a config carrying one or two `[[watch]]` blocks, drives the
+// operator-mutation verbs via raw IPC (`one_shot`) or as a subprocess client, and asserts the
 // observable state changes through subsequent `status` snapshots.
 //
-// `one_shot` returns synchronously once the daemon acks: the
-// daemon's IPC drain processes a request to completion before
-// writing the reply line, so consecutive `one_shot` calls compose
-// without inter-operation polling.
+// `one_shot` returns synchronously once the daemon acks: the daemon's IPC drain processes a request
+// to completion before writing the reply line, so consecutive `one_shot` calls compose without
+// inter-operation polling.
 
-/// Helper: poll status until the response matches a predicate, or
-/// timeout. Useful when an async operation (initial attach, reload
-/// settle) needs to propagate through the daemon's tick before the
-/// projection reflects it.
+/// Helper: poll status until the response matches a predicate, or timeout. Useful when an async
+/// operation (initial attach, reload settle) needs to propagate through the daemon's tick before
+/// the projection reflects it.
 fn poll_status_until<F: Fn(&StatusResponseSnap) -> bool>(
     socket: &Path,
     pred: F,
@@ -1428,9 +1335,8 @@ fn poll_status_until<F: Fn(&StatusResponseSnap) -> bool>(
 
 // ---------- disable + enable cycle -----------------------------------
 
-/// `disable foo` flips `status.sub_disabled_runtime` 0→1; a follow-
-/// up `enable foo` flips it back to 0. The engine attaches foo
-/// initially (status.sub_total=1), the disable detaches it
+/// `disable foo` flips `status.sub_disabled_runtime` 0→1; a follow- up `enable foo` flips it back
+/// to 0. The engine attaches foo initially (status.sub_total=1), the disable detaches it
 /// (sub_total=0), the enable re-attaches it (sub_total=1).
 #[test]
 fn disable_then_enable_cycle_round_trips_through_status() {
@@ -1480,16 +1386,13 @@ fn disable_then_enable_cycle_round_trips_through_status() {
 
 // ---------- disable suppresses fires; enable restores them ----------
 
-/// The `disable_runtime ↔ engine` invariant end-to-end: a watched
-/// anchor touched while the Sub is in `disabled_runtime` produces no
-/// `SubFired`; the same anchor touched after `enable` re-attaches the
-/// Sub with a fresh baseline that fires on the next operator-driven
-/// change.
+/// The `disable_runtime ↔ engine` invariant end-to-end: a watched anchor touched while the Sub is
+/// in `disabled_runtime` produces no `SubFired`; the same anchor touched after `enable` re-attaches
+/// the Sub with a fresh baseline that fires on the next operator-driven change.
 ///
-/// Sibling to [`disable_then_enable_cycle_round_trips_through_status`]:
-/// that test pins the counter shape (`sub_total`,
-/// `sub_disabled_runtime`); this one pins the behavioural contract
-/// the counters stand for.
+/// Sibling to [`disable_then_enable_cycle_round_trips_through_status`]: that test pins the counter
+/// shape (`sub_total`, `sub_disabled_runtime`); this one pins the behavioural contract the counters
+/// stand for.
 #[test]
 fn disable_suppresses_fires_enable_restores_them() {
     let sb = Sandbox::new();
@@ -1500,16 +1403,14 @@ fn disable_suppresses_fires_enable_restores_them() {
     assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE));
     assert!(wait_for_log(&sb.log, |s| s.contains("sub attached"), STARTUP_DEADLINE).is_some());
 
-    // Subscribe once for the full cycle. A filter scoped to SubFired
-    // means the test only observes the behavioural witness — Detach /
-    // Reap / Rebound noise stays off the stream.
+    // Subscribe once for the full cycle. A filter scoped to SubFired means the test only observes
+    // the behavioural witness — Detach / Reap / Rebound noise stays off the stream.
     let (mut tail, rx) = spawn_client_stream(&sb, "tail", &["--filter", "sub_fired", "-o", "json"]);
     thread::sleep(Duration::from_millis(400));
 
-    // Disable. `one_shot` returns once the daemon's IPC drain has
-    // detached the Sub (the reply rides on the same step the detach
-    // ran on); the subsequent status-poll proves the engine-side
-    // detach landed before the test proceeds.
+    // Disable. `one_shot` returns once the daemon's IPC drain has detached the Sub (the reply rides
+    // on the same step the detach ran on); the subsequent status-poll proves the engine-side detach
+    // landed before the test proceeds.
     let reply = one_shot(&sb.socket, r#"{"op":"disable","name":"cycler"}"#).expect("disable");
     assert!(matches!(
         serde_json::from_str::<ResponseSnap>(reply.trim_end()).expect("parse"),
@@ -1522,14 +1423,12 @@ fn disable_suppresses_fires_enable_restores_them() {
     )
     .expect("disable propagated through engine");
 
-    // Touch while disabled. The Sub is gone from the engine; the
-    // Profile is reaped; the kqueue / inotify watch FD is closed by
-    // the dispatched `Unwatch` op. No fire path can reach the broker.
+    // Touch while disabled. The Sub is gone from the engine; the Profile is reaped; the kqueue /
+    // inotify watch FD is closed by the dispatched `Unwatch` op. No fire path can reach the broker.
     touch_unique(&anchor, "while-disabled");
-    // Settle window is 50ms; a fire — were one to occur — would
-    // surface well inside one second. The deadline is the upper
-    // bound on "we waited long enough for a real fire to land", not
-    // a tight latency claim.
+    // Settle window is 50ms; a fire — were one to occur — would surface well inside one second. The
+    // deadline is the upper bound on "we waited long enough for a real fire to land", not a tight
+    // latency claim.
     assert!(
         wait_for_line(
             &rx,
@@ -1540,9 +1439,8 @@ fn disable_suppresses_fires_enable_restores_them() {
         "disabled Sub must not emit SubFired on a touch",
     );
 
-    // Enable. The re-attach drives a fresh `Input::AttachSub` through
-    // the engine; the new Sub starts with `has_fired = false` and a
-    // fresh seed baseline.
+    // Enable. The re-attach drives a fresh `Input::AttachSub` through the engine; the new Sub
+    // starts with `has_fired = false` and a fresh seed baseline.
     let reply = one_shot(&sb.socket, r#"{"op":"enable","name":"cycler"}"#).expect("enable");
     assert!(matches!(
         serde_json::from_str::<ResponseSnap>(reply.trim_end()).expect("parse"),
@@ -1554,9 +1452,8 @@ fn disable_suppresses_fires_enable_restores_them() {
         Duration::from_secs(5),
     )
     .expect("enable propagated through engine");
-    // Let the seed pass complete before the touch — without this,
-    // the operator-driven event could fold into the Seed burst's
-    // probe response rather than driving a fresh Standard burst.
+    // Let the seed pass complete before the touch — without this, the operator-driven event could
+    // fold into the Seed burst's probe response rather than driving a fresh Standard burst.
     thread::sleep(Duration::from_millis(400));
 
     touch_unique(&anchor, "after-enable");
@@ -1578,16 +1475,13 @@ fn disable_suppresses_fires_enable_restores_them() {
 
 // ---------- IPC disable emission order: SubDetached then ProfileReaped ----------
 
-/// IPC `disable` of a single-Sub Profile drives two diagnostics in
-/// causal order: `SubDetached(IpcDisabled)` first, then
-/// `ProfileReaped`. The engine emits them at adjacent sites
-/// (`detach_sub_inner` → `reap_profile`) and the broker's dispatch
-/// loop preserves insertion order; the contract holds end-to-end at
-/// the streamed subscriber.
+/// IPC `disable` of a single-Sub Profile drives two diagnostics in causal order:
+/// `SubDetached(IpcDisabled)` first, then `ProfileReaped`. The engine emits them at adjacent sites
+/// (`detach_sub_inner` → `reap_profile`) and the broker's dispatch loop preserves insertion order;
+/// the contract holds end-to-end at the streamed subscriber.
 ///
-/// Distinct from the unit-level emission-order assertions in
-/// `engine`: this pin closes the wire boundary, so a future refactor
-/// that reordered the engine emissions, or one that re-sorted
+/// Distinct from the unit-level emission-order assertions in `engine`: this pin closes the wire
+/// boundary, so a future refactor that reordered the engine emissions, or one that re-sorted
 /// diagnostics in the broker fan-out, would surface here.
 #[test]
 fn disable_streams_sub_detached_before_profile_reaped() {
@@ -1599,9 +1493,8 @@ fn disable_streams_sub_detached_before_profile_reaped() {
     assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE));
     assert!(wait_for_log(&sb.log, |s| s.contains("sub attached"), STARTUP_DEADLINE).is_some());
 
-    // Filter is exhaustive over the expected emissions; any other
-    // variant arriving on this stream would be a test-environment
-    // artefact (the seed pass does not fire — a fresh Profile has no
+    // Filter is exhaustive over the expected emissions; any other variant arriving on this stream
+    // would be a test-environment artefact (the seed pass does not fire — a fresh Profile has no
     // prior `DedupKey::Subtree` hash to drift against).
     let (mut tail, rx) = spawn_client_stream(
         &sb,
@@ -1657,10 +1550,9 @@ fn disable_streams_sub_detached_before_profile_reaped() {
 
 // ---------- disable client exits 1 on unknown name -----------------
 
-/// `specter disable <ghost>` invoked as a subprocess exits `1` with
-/// stderr carrying the structured `unknown_sub:` prefix. Pins the
-/// client wiring (`lib.rs` dispatch → `ipc::client::disable::run`
-/// → `connect::one_shot_unit`) end-to-end.
+/// `specter disable <ghost>` invoked as a subprocess exits `1` with stderr carrying the structured
+/// `unknown_sub:` prefix. Pins the client wiring (`lib.rs` dispatch → `ipc::client::disable::run` →
+/// `connect::one_shot_unit`) end-to-end.
 #[test]
 fn disable_client_unknown_name_exits_one() {
     let sb = Sandbox::new();
@@ -1693,14 +1585,11 @@ fn disable_client_unknown_name_exits_one() {
 
 // ---------- disable typo with @-bearing name returns unknown_sub ----
 
-/// `disable foo@/some/path` against a daemon with no such Sub
-/// returns `Err { code: "unknown_sub" }` — a typo (an `@`-bearing
-/// name the registry doesn't index) reports the structural truth
-/// (the name does not resolve), not a misleading dynamic-sub
-/// classification. The dynamic-vs-static discrimination is a
-/// property of the resolved Sub; this case never reaches that gate
-/// because the lookup is empty. The genuine dynamic-Sub gate is
-/// exercised at the driver-handler layer.
+/// `disable foo@/some/path` against a daemon with no such Sub returns `Err { code: "unknown_sub" }`
+/// — a typo (an `@`-bearing name the registry doesn't index) reports the structural truth (the name
+/// does not resolve), not a misleading dynamic-sub classification. The dynamic-vs-static
+/// discrimination is a property of the resolved Sub; this case never reaches that gate because the
+/// lookup is empty. The genuine dynamic-Sub gate is exercised at the driver-handler layer.
 #[test]
 fn disable_unknown_dynamic_shape_name_returns_unknown_sub() {
     let sb = Sandbox::new();
@@ -1726,14 +1615,12 @@ fn disable_unknown_dynamic_shape_name_returns_unknown_sub() {
 
 /// Sequence:
 /// 1. `disable foo` records a runtime override + detaches.
-/// 2. Edit TOML to set `enabled = false` for foo, then reload.
-///    The reload-pipeline prune retains the override (TOML still
-///    carries foo, just disabled).
-/// 3. `enable foo` clears the override but returns
-///    `Err { code: "toml_disabled" }` — the runtime override is
-///    gone, but the TOML keeps foo inactive.
-/// 4. A second `enable foo` returns `Err { code: "not_disabled" }`
-///    — proves step 3 cleared the override.
+/// 2. Edit TOML to set `enabled = false` for foo, then reload. The reload-pipeline prune retains
+///    the override (TOML still carries foo, just disabled).
+/// 3. `enable foo` clears the override but returns `Err { code: "toml_disabled" }` — the runtime
+///    override is gone, but the TOML keeps foo inactive.
+/// 4. A second `enable foo` returns `Err { code: "not_disabled" }` — proves step 3 cleared the
+///    override.
 #[test]
 fn enable_toml_disabled_clears_override_then_errs() {
     let sb = Sandbox::new();
@@ -1786,8 +1673,7 @@ enabled   = false
         other => panic!("expected Err(toml_disabled), got {other:?}"),
     }
 
-    // Step 4: second enable returns not_disabled — override was
-    // cleared on step 3's failure path.
+    // Step 4: second enable returns not_disabled — override was cleared on step 3's failure path.
     let reply = one_shot(&sb.socket, r#"{"op":"enable","name":"foo"}"#).expect("enable 2");
     let resp: ResponseSnap = serde_json::from_str(reply.trim_end()).expect("parse enable 2");
     match resp {
@@ -1804,9 +1690,8 @@ enabled   = false
 
 // ---------- reload prune drops names absent from TOML ----------------
 
-/// Operator runs `disable foo`, then edits the TOML to remove foo
-/// entirely. After the next reload, the prune drops the override
-/// (no TOML row to anchor it against). A subsequent `enable foo`
+/// Operator runs `disable foo`, then edits the TOML to remove foo entirely. After the next reload,
+/// the prune drops the override (no TOML row to anchor it against). A subsequent `enable foo`
 /// returns `not_disabled`.
 #[test]
 fn reload_prune_drops_disabled_runtime_when_name_leaves_toml() {
@@ -1839,8 +1724,8 @@ fn reload_prune_drops_disabled_runtime_when_name_leaves_toml() {
         "prune dropped the override whose TOML row vanished",
     );
 
-    // Sanity: subsequent enable returns not_disabled (proves the
-    // override is gone, not merely hidden from the projection).
+    // Sanity: subsequent enable returns not_disabled (proves the override is gone, not merely
+    // hidden from the projection).
     let reply = one_shot(&sb.socket, r#"{"op":"enable","name":"foo"}"#).expect("enable");
     match serde_json::from_str::<ResponseSnap>(reply.trim_end()).expect("parse") {
         ResponseSnap::Err { code, error } => {
@@ -1856,11 +1741,9 @@ fn reload_prune_drops_disabled_runtime_when_name_leaves_toml() {
 
 // ---------- reload retains override over TOML-disabled row ----------
 
-/// Operator's "off twice" preference survives: when the TOML
-/// carries the entry as `enabled = false` (still operator-declared,
-/// just disabled), a runtime override stacked over it is preserved
-/// across the reload's prune. Only a complete removal from the
-/// TOML evaporates the override (covered by
+/// Operator's "off twice" preference survives: when the TOML carries the entry as `enabled = false`
+/// (still operator-declared, just disabled), a runtime override stacked over it is preserved across
+/// the reload's prune. Only a complete removal from the TOML evaporates the override (covered by
 /// `reload_prune_drops_disabled_runtime_when_name_leaves_toml`).
 #[test]
 fn reload_retains_disabled_runtime_when_toml_keeps_row_disabled() {
@@ -1913,10 +1796,9 @@ enabled   = false
 
 // ---------- reload filter blocks re-attach of disabled sub ----------
 
-/// A TOML edit that produces a `modified_params` diff entry for a
-/// runtime-disabled Sub gets filtered out by `compute_watch_diff`:
-/// the engine never sees the rebind, so the Sub stays detached.
-/// Pins the `compute_watch_diff` filter at the integration level.
+/// A TOML edit that produces a `modified_params` diff entry for a runtime-disabled Sub gets
+/// filtered out by `compute_watch_diff`: the engine never sees the rebind, so the Sub stays
+/// detached. Pins the `compute_watch_diff` filter at the integration level.
 #[test]
 fn reload_filter_blocks_reattach_for_runtime_disabled_sub() {
     let sb = Sandbox::new();
@@ -1933,9 +1815,8 @@ fn reload_filter_blocks_reattach_for_runtime_disabled_sub() {
         ResponseSnap::Ok,
     ));
 
-    // Edit the settle window. `settle` is a per-Sub param, so the
-    // unfiltered diff would surface `modified_params` for foo. The
-    // filter must strip it so the engine never re-attaches.
+    // Edit the settle window. `settle` is a per-Sub param, so the unfiltered diff would surface
+    // `modified_params` for foo. The filter must strip it so the engine never re-attaches.
     fs::write(&sb.cfg, one_watch_config("foo", &anchor, 200)).expect("write config v2");
     let reply = one_shot(&sb.socket, r#"{"op":"reload"}"#).expect("reload");
     assert!(matches!(
@@ -1957,8 +1838,8 @@ fn reload_filter_blocks_reattach_for_runtime_disabled_sub() {
 
 // ---------- wait --kind detach happy path ----------------------------
 
-/// `wait <name> --kind detach` matches when the engine reaps the
-/// Sub. Exit `0`, same matched-render semantics as `--kind fire`.
+/// `wait <name> --kind detach` matches when the engine reaps the Sub. Exit `0`, same matched-render
+/// semantics as `--kind fire`.
 #[test]
 fn wait_kind_detach_happy_path_exits_zero() {
     let sb = Sandbox::new();
@@ -1996,45 +1877,36 @@ fn wait_kind_detach_happy_path_exits_zero() {
 
 // ---------- bounded shutdown under wedged subscribers ----------------
 
-/// SIGTERM-driven shutdown completes within a bounded window even
-/// when every IPC connection slot is occupied by a wedged
-/// subscriber — a client that finished its Subscribe handshake and
-/// then stopped reading the socket. Pins two structural exits the
-/// teardown path depends on:
+/// SIGTERM-driven shutdown completes within a bounded window even when every IPC connection slot is
+/// occupied by a wedged subscriber — a client that finished its Subscribe handshake and then
+/// stopped reading the socket. Pins two structural exits the teardown path depends on:
 ///
-/// - Per-conn worker threads are detached. The accept loop is the
-///   only IPC thread the daemon joins; it polls `shutdown_flag`
-///   between non-blocking accepts and exits within
-///   `ACCEPT_IDLE_SLEEP` of the flag store.
-/// - The broker drops with the engine driver. Every per-subscriber
-///   `event_rx` disconnects in lockstep, releasing every blocked
-///   worker `recv` cleanly without dependence on event traffic.
+/// - Per-conn worker threads are detached. The accept loop is the only IPC thread the daemon joins;
+///   it polls `shutdown_flag` between non-blocking accepts and exits within `ACCEPT_IDLE_SLEEP` of
+///   the flag store.
+/// - The broker drops with the engine driver. Every per-subscriber `event_rx` disconnects in
+///   lockstep, releasing every blocked worker `recv` cleanly without dependence on event traffic.
 ///
-/// The chosen deadline (`MAX_IPC_CONNS × PER_CONN_WRITE_TIMEOUT +
-/// 4s headroom`, mirroring the bin's `server.rs` constants) is the
-/// conservative structural ceiling assuming a hypothetical
-/// sequential per-worker write-block; the observed latency under
-/// the broker-drop path is sub-second.
+/// The chosen deadline (`MAX_IPC_CONNS × PER_CONN_WRITE_TIMEOUT + 4s headroom`, mirroring the bin's
+/// `server.rs` constants) is the conservative structural ceiling assuming a hypothetical sequential
+/// per-worker write-block; the observed latency under the broker-drop path is sub-second.
 #[test]
 fn shutdown_with_wedged_subscribers_is_bounded() {
-    // Mirror of `ipc::server::MAX_IPC_CONNS`. The bin's constant is
-    // `pub(crate)`; this test lives at the integration boundary and
-    // pins the contract from the outside, so duplication is the
+    // Mirror of `ipc::server::MAX_IPC_CONNS`. The bin's constant is `pub(crate)`; this test lives
+    // at the integration boundary and pins the contract from the outside, so duplication is the
     // honest seam.
     const WEDGED_CLIENTS: usize = 8;
-    // Mirror of `MAX_IPC_CONNS × PER_CONN_WRITE_TIMEOUT` plus 4s
-    // headroom. Same reasoning as `WEDGED_CLIENTS`.
+    // Mirror of `MAX_IPC_CONNS × PER_CONN_WRITE_TIMEOUT` plus 4s headroom. Same reasoning as
+    // `WEDGED_CLIENTS`.
     const SHUTDOWN_BUDGET: Duration = Duration::from_secs(8 * 2 + 4);
 
     let sb = Sandbox::new();
     let mut child = spawn_specter(&sb, std::iter::empty::<&str>());
     assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE));
 
-    // Saturate the connection cap with subscribers that finish their
-    // handshake and then stop reading. The `Vec` keeps every stream
-    // alive across the SIGTERM: dropping one would close the socket
-    // and unblock the daemon's worker on EOF, defeating the
-    // wedged-subscriber premise.
+    // Saturate the connection cap with subscribers that finish their handshake and then stop
+    // reading. The `Vec` keeps every stream alive across the SIGTERM: dropping one would close the
+    // socket and unblock the daemon's worker on EOF, defeating the wedged-subscriber premise.
     let mut wedged: Vec<UnixStream> = Vec::with_capacity(WEDGED_CLIENTS);
     for i in 0..WEDGED_CLIENTS {
         let stream = UnixStream::connect(&sb.socket)
@@ -2046,9 +1918,8 @@ fn shutdown_with_wedged_subscribers_is_bounded() {
         writer
             .write_all(b"{\"op\":\"subscribe\"}\n")
             .unwrap_or_else(|e| panic!("send subscribe {i}: {e}"));
-        // Read exactly the SubscribeAck line on a cloned reader; the
-        // original stream stays in `wedged` for the rest of the test
-        // without ever consuming another byte off the socket.
+        // Read exactly the SubscribeAck line on a cloned reader; the original stream stays in
+        // `wedged` for the rest of the test without ever consuming another byte off the socket.
         let mut reader = BufReader::new(stream.try_clone().expect("try_clone for reader"));
         let mut ack = String::new();
         reader
@@ -2086,8 +1957,7 @@ fn shutdown_with_wedged_subscribers_is_bounded() {
     };
     assert!(exit.success(), "clean daemon exit; got {exit:?}");
 
-    // Holding `wedged` until here guarantees the subscriber sockets
-    // were live across the entire SIGTERM teardown; explicit drop
-    // documents the lifetime contract.
+    // Holding `wedged` until here guarantees the subscriber sockets were live across the entire
+    // SIGTERM teardown; explicit drop documents the lifetime contract.
     drop(wedged);
 }

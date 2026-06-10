@@ -1,17 +1,15 @@
 //! Scan configuration.
 //!
-//! [`compute_config_hash`] is the canonical hash of
-//! `(ScanConfig, max_settle, events)`; [`ProfileIdentity`] is its reified
-//! preimage and [`ProfileIdentity::config_hash`] the sole public route.
-//! Equal hash ⇒ Subs share one Profile (snapshot, burst lifecycle). Both
-//! fold sites destructure exhaustively, so a new identity-bearing field is
-//! a compile error until folded — the fold-completeness ratchet.
+//! [`compute_config_hash`] is the canonical hash of `(ScanConfig, max_settle, events)`;
+//! [`ProfileIdentity`] is its reified preimage and [`ProfileIdentity::config_hash`] the sole public
+//! route. Equal hash ⇒ Subs share one Profile (snapshot, burst lifecycle). Both fold sites
+//! destructure exhaustively, so a new identity-bearing field is a compile error until folded — the
+//! fold-completeness ratchet.
 //!
 //! `GlobPattern` carries the canonical `source` string alongside the compiled
-//! `globset::GlobMatcher`. Equality and ordering are over `source` only — the
-//! matcher is a transient compiled artifact. There is no `Hash` impl: the
-//! single hashing path through these types is `compute_config_hash`, which
-//! reads `source` directly via `core::hash::hasher`.
+//! `globset::GlobMatcher`. Equality and ordering are over `source` only — the matcher is a
+//! transient compiled artifact. There is no `Hash` impl: the single hashing path through these
+//! types is `compute_config_hash`, which reads `source` directly via `core::hash::hasher`.
 
 use crate::hash::hasher;
 use crate::resource::ResourceKind;
@@ -24,9 +22,9 @@ use std::time::Duration;
 
 /// A glob pattern: the canonical `source` text and its compiled matcher.
 ///
-/// `source` is the sole identity axis across `PartialEq`/`Eq`/`Ord` and
-/// the `compute_config_hash` fold. `matcher` is a transient compiled
-/// artifact derived from `source` — never key any of those four on it.
+/// `source` is the sole identity axis across `PartialEq`/`Eq`/`Ord` and the `compute_config_hash`
+/// fold. `matcher` is a transient compiled artifact derived from `source` — never key any of those
+/// four on it.
 #[derive(Clone, Debug)]
 pub struct GlobPattern {
     source: CompactString,
@@ -36,22 +34,19 @@ pub struct GlobPattern {
 impl GlobPattern {
     /// Compile a glob pattern. Two failure paths:
     ///
-    /// - [`ConfigError::UnreachableGlob`] — the source is syntactically
-    ///   *valid* per `globset` but cannot match any non-empty relative
-    ///   path under the walker's anchor-relative semantics (empty,
-    ///   `"."`/`".."`, leading `/`, trailing `/` without `**`). Rejected
-    ///   at the floor so every downstream consumer of a compiled
-    ///   `GlobPattern` is one that can potentially match something —
-    ///   the gitignore-canonical `target/` footgun in particular fails
-    ///   fast rather than silently doing nothing.
-    /// - [`ConfigError::InvalidGlob`] — `globset` rejected the source
-    ///   itself (unbalanced brackets, malformed alternation, etc.).
-    ///   The `globset::Error` is not `Clone`, so its display message is
-    ///   rendered into a `String`.
+    /// - [`ConfigError::UnreachableGlob`] — the source is syntactically *valid* per `globset` but
+    ///   cannot match any non-empty relative path under the walker's anchor-relative semantics
+    ///   (empty, `"."`/`".."`, leading `/`, trailing `/` without `**`). Rejected at the floor so
+    ///   every downstream consumer of a compiled `GlobPattern` is one that can potentially match
+    ///   something — the gitignore-canonical `target/` footgun in particular fails fast rather than
+    ///   silently doing nothing.
+    /// - [`ConfigError::InvalidGlob`] — `globset` rejected the source itself (unbalanced brackets,
+    ///   malformed alternation, etc.). The `globset::Error` is not `Clone`, so its display message
+    ///   is rendered into a `String`.
     ///
-    /// The unreachability check runs *before* `globset::Glob::new` so
-    /// the variants are unambiguous: if `globset` accepts it, the only
-    /// remaining failure is structural unreachability, and vice versa.
+    /// The unreachability check runs *before* `globset::Glob::new` so the variants are unambiguous:
+    /// if `globset` accepts it, the only remaining failure is structural unreachability, and vice
+    /// versa.
     pub fn compile(source: impl Into<CompactString>) -> Result<Self, ConfigError> {
         let source: CompactString = source.into();
         validate_source_reachability(source.as_str())?;
@@ -112,39 +107,34 @@ impl ScanConfig {
         ScanConfigBuilder::default()
     }
 
-    /// True iff an entry at cumulative relative path `rel` of `kind` at
-    /// `depth` (anchor = 0, direct child = 1, …) is in scope.
+    /// True iff an entry at cumulative relative path `rel` of `kind` at `depth` (anchor = 0, direct
+    /// child = 1, …) is in scope.
     ///
     /// The single source of the scope predicate. Two callers, one body:
-    /// - `specter_engine::coverage` tests every prefix from anchor →
-    ///   target — `kind` is in hand, single call.
-    /// - The walker (`specter-sensor::prober`) tests each dirent —
-    ///   `kind` is only known after `lstat`, so it splits the predicate
-    ///   via [`Self::accepts_structural`] (pre-`lstat`) plus the
-    ///   pattern arm of this method (post-`lstat`); see that method's
-    ///   doc for the rationale.
+    /// - `specter_engine::coverage` tests every prefix from anchor → target — `kind` is in hand,
+    ///   single call.
+    /// - The walker (`specter-sensor::prober`) tests each dirent — `kind` is only known after
+    ///   `lstat`, so it splits the predicate via [`Self::accepts_structural`] (pre-`lstat`) plus
+    ///   the pattern arm of this method (post-`lstat`); see that method's doc for the rationale.
     ///
-    /// **Depth 0 bypasses every filter.** The anchor is part of the
-    /// Profile's scope by construction. For `depth > 0` the body folds
-    /// `max_depth`, `recursive`, `hidden` (last-segment basename test),
-    /// `exclude` (full-`rel` test), and `pattern` (final-`File` only —
-    /// directories are always covered; we descend through them).
+    /// **Depth 0 bypasses every filter.** The anchor is part of the Profile's scope by
+    /// construction. For `depth > 0` the body folds `max_depth`, `recursive`, `hidden`
+    /// (last-segment basename test), `exclude` (full-`rel` test), and `pattern` (final-`File` only
+    /// — directories are always covered; we descend through them).
     ///
-    /// **Fold-completeness ratchet.** Like `compute_config_hash`, this
-    /// predicate destructures `ScanConfig` exhaustively: a new field is
-    /// a compile error here until it is folded in. The two parallel
-    /// ratchets keep the partition key and the filter semantics
-    /// co-evolving across every future axis.
+    /// **Fold-completeness ratchet.** Like `compute_config_hash`, this predicate destructures
+    /// `ScanConfig` exhaustively: a new field is a compile error here until it is folded in. The
+    /// two parallel ratchets keep the partition key and the filter semantics co-evolving across
+    /// every future axis.
     #[must_use]
     pub fn accepts(&self, rel: &Path, kind: ResourceKind, depth: u32) -> bool {
         if !self.accepts_structural(rel, depth) {
             return false;
         }
-        // Pattern applies to files only; directories are always covered
-        // (the walker descends through them, and `covers` checks them as
-        // intermediate prefixes). `ResourceKind::Unknown` is collapsed by
-        // upstream callers (`Resource::kind_or_file`, `From<EntryKind>`)
-        // before reaching this method.
+        // Pattern applies to files only; directories are always covered (the walker descends
+        // through them, and `covers` checks them as intermediate prefixes). `ResourceKind::Unknown`
+        // is collapsed by upstream callers (`Resource::kind_or_file`, `From<EntryKind>`) before
+        // reaching this method.
         if matches!(kind, ResourceKind::File)
             && let Some(pat) = &self.pattern
             && !pat.matches_path(rel)
@@ -154,31 +144,25 @@ impl ScanConfig {
         true
     }
 
-    /// The kind-independent half of [`Self::accepts`]. Folds the four
-    /// gates that don't need a `ResourceKind`: `max_depth`, `recursive`,
-    /// `hidden`, and `exclude`.
+    /// The kind-independent half of [`Self::accepts`]. Folds the four gates that don't need a
+    /// `ResourceKind`: `max_depth`, `recursive`, `hidden`, and `exclude`.
     ///
-    /// Exists for the walker, which doesn't know `is_dir` until after
-    /// the per-dirent `lstat`. Calling [`Self::accepts`] there with a
-    /// guessed kind would either skip a covered Dir (guess `File` +
-    /// `pattern.matches == false`) or admit a pattern-violating File
-    /// (guess `Dir`). Splitting lets the walker reject hidden / excluded
-    /// dirents pre-`lstat` — saving the syscall on a `target/` tree in a
-    /// Cargo project (thousands of excluded dirents) — and gate the
-    /// pattern arm post-`lstat` against the known kind. `covers` has
-    /// `kind` in hand and calls [`Self::accepts`] directly.
+    /// Exists for the walker, which doesn't know `is_dir` until after the per-dirent `lstat`.
+    /// Calling [`Self::accepts`] there with a guessed kind would either skip a covered Dir (guess
+    /// `File` + `pattern.matches == false`) or admit a pattern-violating File (guess `Dir`).
+    /// Splitting lets the walker reject hidden / excluded dirents pre-`lstat` — saving the syscall
+    /// on a `target/` tree in a Cargo project (thousands of excluded dirents) — and gate the
+    /// pattern arm post-`lstat` against the known kind. `covers` has `kind` in hand and calls
+    /// [`Self::accepts`] directly.
     ///
-    /// Destructuring is exhaustive for the same fold-completeness reason
-    /// as [`Self::accepts`]: a new structural field forces a compile
-    /// error here, not a silent bypass.
+    /// Destructuring is exhaustive for the same fold-completeness reason as [`Self::accepts`]: a
+    /// new structural field forces a compile error here, not a silent bypass.
     #[must_use]
     pub fn accepts_structural(&self, rel: &Path, depth: u32) -> bool {
-        // Exhaustive destructure — a new field is a compile error until
-        // it's folded into this body (or, if kind-dependent, into the
-        // `accepts` arm). `pattern` lives here only to discharge the
-        // destructure; the pattern gate runs in `accepts`, which means
-        // a new kind-dependent field would still need its own arm
-        // there. A new structural field gets a `&` clause below.
+        // Exhaustive destructure — a new field is a compile error until it's folded into this body
+        // (or, if kind-dependent, into the `accepts` arm). `pattern` lives here only to discharge
+        // the destructure; the pattern gate runs in `accepts`, which means a new kind-dependent
+        // field would still need its own arm there. A new structural field gets a `&` clause below.
         let Self {
             recursive,
             hidden,
@@ -212,9 +196,8 @@ impl ScanConfig {
     }
 }
 
-/// Builder for [`ScanConfig`]. Sorts `exclude` by source on `build()` so
-/// equal logical configs are byte-equal — `compute_config_hash` reads in
-/// already-sorted order.
+/// Builder for [`ScanConfig`]. Sorts `exclude` by source on `build()` so equal logical configs are
+/// byte-equal — `compute_config_hash` reads in already-sorted order.
 #[derive(Debug, Default)]
 pub struct ScanConfigBuilder {
     recursive: bool,
@@ -276,36 +259,29 @@ impl ScanConfigBuilder {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ConfigError {
-    /// `globset` rejected the glob source (e.g. unbalanced brackets,
-    /// malformed alternation). `message` is the rendered
-    /// `globset::Error` text (the original is not `Clone`).
+    /// `globset` rejected the glob source (e.g. unbalanced brackets, malformed alternation).
+    /// `message` is the rendered `globset::Error` text (the original is not `Clone`).
     InvalidGlob { source: String, message: String },
-    /// The glob is syntactically valid per `globset` but cannot match
-    /// any non-empty relative path in the walker's semantics. Surfaced
-    /// at the [`GlobPattern::compile`] floor so a typo (`target/` vs
-    /// `target/**`) or a misunderstanding (leading `/` in a relative-
-    /// path glob) fails fast rather than silently doing nothing.
-    /// `reason` is an operator-facing explanation of the specific
-    /// shape that's unreachable.
+    /// The glob is syntactically valid per `globset` but cannot match any non-empty relative path
+    /// in the walker's semantics. Surfaced at the [`GlobPattern::compile`] floor so a typo
+    /// (`target/` vs `target/**`) or a misunderstanding (leading `/` in a relative- path glob)
+    /// fails fast rather than silently doing nothing. `reason` is an operator-facing explanation of
+    /// the specific shape that's unreachable.
     UnreachableGlob { source: String, reason: String },
 }
 
-/// Reject globs that `globset` would happily compile but that cannot
-/// match any non-empty relative path the walker produces. The four
-/// shapes are empirically derived against `globset` 0.4 — each parses
-/// as a valid `Glob`, but their matchers return false on every
-/// plausible input. Catching them here is the cheapest way to give the
-/// operator a "this glob does nothing" error instead of a silent
-/// no-op.
+/// Reject globs that `globset` would happily compile but that cannot match any non-empty relative
+/// path the walker produces. The four shapes are empirically derived against `globset` 0.4 — each
+/// parses as a valid `Glob`, but their matchers return false on every plausible input. Catching
+/// them here is the cheapest way to give the operator a "this glob does nothing" error instead of a
+/// silent no-op.
 ///
-/// Universal-match globs (`**`, `**/*`) are deliberately not rejected:
-/// they're equivalent to no pattern, which is sometimes the intended
-/// shape (e.g. for the exclude list's "match everything below" form
-/// `<name>/**`).
+/// Universal-match globs (`**`, `**/*`) are deliberately not rejected: they're equivalent to no
+/// pattern, which is sometimes the intended shape (e.g. for the exclude list's "match everything
+/// below" form `<name>/**`).
 fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
-    // Bytes test on the tail-`/` arm: `ends_with(char)` is cheap, and
-    // the `!ends_with("**")` clause keeps `**` (universal-match) and
-    // `<name>/**` (a valid exclude shape) out of the rejection set.
+    // Bytes test on the tail-`/` arm: `ends_with(char)` is cheap, and the `!ends_with("**")` clause
+    // keeps `**` (universal-match) and `<name>/**` (a valid exclude shape) out of the rejection set.
     let reason = match s {
         "" => Some("glob is empty — matches no entry"),
         "." | ".." => Some(
@@ -331,29 +307,26 @@ fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
     Ok(())
 }
 
-/// Canonical hash of `(ScanConfig, max_settle, events)` — the
-/// crate-internal hashing kernel. [`ProfileIdentity::config_hash`] is
-/// the sole public route; production threads a `ProfileIdentity`
-/// through that rather than calling this directly.
+/// Canonical hash of `(ScanConfig, max_settle, events)` — the crate-internal hashing kernel.
+/// [`ProfileIdentity::config_hash`] is the sole public route; production threads a
+/// `ProfileIdentity` through that rather than calling this directly.
 ///
-/// Inputs are folded in fixed order through [`crate::hash::hasher`]:
-///   `recursive`, `hidden`, `len(exclude)` as `u32`, each `exclude.source`,
-///   pattern presence-byte plus optional source, `max_depth`,
-///   `max_settle.as_nanos()`, `events.bits()`.
+/// Inputs are folded in fixed order through [`crate::hash::hasher`]: `recursive`, `hidden`,
+/// `len(exclude)` as `u32`, each `exclude.source`, pattern presence-byte plus optional source,
+/// `max_depth`, `max_settle.as_nanos()`, `events.bits()`.
 ///
-/// `events` is folded last so two Subs differing only on event-class mask
-/// fork separate Profiles ("Profile-union infection" defence).
+/// `events` is folded last so two Subs differing only on event-class mask fork separate Profiles
+/// ("Profile-union infection" defence).
 #[must_use]
 pub(crate) fn compute_config_hash(
     scan: &ScanConfig,
     max_settle: Duration,
     events: ClassSet,
 ) -> u64 {
-    // Fold-completeness ratchet: this exhaustive destructure makes a new
-    // `ScanConfig` field a compile error (E0027) until it is folded into
-    // the digest below — promoting Profile-partition completeness from a
-    // hand-maintained test convention to a compiler invariant. Never add
-    // `..`: it silently re-opens the silent-Profile-merge hole.
+    // Fold-completeness ratchet: this exhaustive destructure makes a new `ScanConfig` field a
+    // compile error (E0027) until it is folded into the digest below — promoting Profile-partition
+    // completeness from a hand-maintained test convention to a compiler invariant. Never add `..`:
+    // it silently re-opens the silent-Profile-merge hole.
     let ScanConfig {
         recursive,
         hidden,
@@ -367,9 +340,9 @@ pub(crate) fn compute_config_hash(
     h.put_u8(u8::from(*recursive));
     h.put_u8(u8::from(*hidden));
 
-    // Canonical width: u32 for the count. Saturate on the absurd
-    // overflow case — the alternative is an explicit panic, which buys
-    // nothing for a config layer that cannot realistically reach 2^32 globs.
+    // Canonical width: u32 for the count. Saturate on the absurd overflow case — the alternative is
+    // an explicit panic, which buys nothing for a config layer that cannot realistically reach 2^32
+    // globs.
     let exclude_count = u32::try_from(exclude.len()).unwrap_or(u32::MAX);
     h.put_u32(exclude_count);
     for g in exclude {
@@ -386,14 +359,12 @@ pub(crate) fn compute_config_hash(
         }
     }
 
-    // `max_depth` is folded as a width-canonical `u64` discriminant
-    // (0 = None, 1 = Some) plus the `u32` payload. A `derive`d
-    // `Option::<u32>::hash` would fold the discriminant as an `isize`
-    // (→ `usize`-width) integer; the explicit `u64` matches that byte
-    // stream on the 64-bit target while staying stable across `usize`
-    // widths. Deliberately *not* unified with `pattern`'s 1-byte
-    // presence flag above (a distinct explicit encoding); collapsing
-    // the two is a digest re-encoding, out of scope here.
+    // `max_depth` is folded as a width-canonical `u64` discriminant (0 = None, 1 = Some) plus the
+    // `u32` payload. A `derive`d `Option::<u32>::hash` would fold the discriminant as an `isize` (→
+    // `usize`-width) integer; the explicit `u64` matches that byte stream on the 64-bit target
+    // while staying stable across `usize` widths. Deliberately *not* unified with `pattern`'s
+    // 1-byte presence flag above (a distinct explicit encoding); collapsing the two is a digest
+    // re-encoding, out of scope here.
     match max_depth {
         Some(d) => {
             h.put_u64(1);
@@ -409,11 +380,10 @@ pub(crate) fn compute_config_hash(
 
 /// The Profile partition key's config half, reified.
 ///
-/// The inputs whose canonical hash decides which Profile a Sub joins
-/// (equal hash ⇒ shared Profile/snapshot/burst). Deliberately neither
-/// `Hash` nor `Eq`/`Ord`: [`Self::config_hash`] is the sole identity
-/// operation — a structural derive would be a second identity route
-/// that could diverge from the hash the partition actually keys on.
+/// The inputs whose canonical hash decides which Profile a Sub joins (equal hash ⇒ shared
+/// Profile/snapshot/burst). Deliberately neither `Hash` nor `Eq`/`Ord`: [`Self::config_hash`] is
+/// the sole identity operation — a structural derive would be a second identity route that could
+/// diverge from the hash the partition actually keys on.
 #[derive(Clone, Debug)]
 pub struct ProfileIdentity {
     pub config: ScanConfig,
@@ -422,15 +392,12 @@ pub struct ProfileIdentity {
 }
 
 impl ProfileIdentity {
-    /// Canonical hash of this identity — the single public hashing
-    /// route for Profile partitioning.
+    /// Canonical hash of this identity — the single public hashing route for Profile partitioning.
     #[must_use]
     pub fn config_hash(&self) -> u64 {
-        // Fold-completeness ratchet, identity tier: a new axis on
-        // `ProfileIdentity` is a compile error here until it is threaded
-        // into the canonical hash below (the `ScanConfig` ratchet does
-        // not cover an axis that is neither scan-config, max_settle, nor
-        // events).
+        // Fold-completeness ratchet, identity tier: a new axis on `ProfileIdentity` is a compile
+        // error here until it is threaded into the canonical hash below (the `ScanConfig` ratchet
+        // does not cover an axis that is neither scan-config, max_settle, nor events).
         let Self {
             config,
             max_settle,
@@ -599,9 +566,8 @@ mod tests {
         );
     }
 
-    /// `events` is part of `config_hash`. Two Subs differing only on
-    /// the class mask must fork separate Profiles ("Profile-union
-    /// infection" defence).
+    /// `events` is part of `config_hash`. Two Subs differing only on the class mask must fork
+    /// separate Profiles ("Profile-union infection" defence).
     #[test]
     fn hash_distinguishes_events_mask() {
         let cfg = ScanConfig::builder().build();
@@ -619,8 +585,8 @@ mod tests {
         assert_ne!(metadata, content_meta);
     }
 
-    /// `compute_config_hash` is order-stable across `events` mask: the
-    /// canonical bit representation determines the fold, not call order.
+    /// `compute_config_hash` is order-stable across `events` mask: the canonical bit representation
+    /// determines the fold, not call order.
     #[test]
     fn hash_events_is_canonical_over_or_order() {
         let cfg = ScanConfig::builder().build();
@@ -632,21 +598,17 @@ mod tests {
         );
     }
 
-    /// Discrimination complement to the fold-completeness destructure:
-    /// the exhaustive pattern makes a new field a *compile error* until
-    /// folded; this test makes the fold *distinguish*, so the ratchet
-    /// cannot be satisfied by folding a new field as a constant.
+    /// Discrimination complement to the fold-completeness destructure: the exhaustive pattern makes
+    /// a new field a *compile error* until folded; this test makes the fold *distinguish*, so the
+    /// ratchet cannot be satisfied by folding a new field as a constant.
     ///
-    /// The base is fully-populated and non-default: toggling any single
-    /// field must move the hash. (`hash_known_good` pins a *default*
-    /// config, where a new field left at its default would never shift
-    /// the digest — this is the structural complement that closes that
-    /// gap.)
+    /// The base is fully-populated and non-default: toggling any single field must move the hash.
+    /// (`hash_known_good` pins a *default* config, where a new field left at its default would
+    /// never shift the digest — this is the structural complement that closes that gap.)
     ///
-    /// Not itself ratcheted: a new field still needs a new `assert_ne!`
-    /// line here. The compile error from the destructure is the forcing
-    /// function that drives the author to add it; this test then guards
-    /// that the fold actually discriminates.
+    /// Not itself ratcheted: a new field still needs a new `assert_ne!` line here. The compile
+    /// error from the destructure is the forcing function that drives the author to add it; this
+    /// test then guards that the fold actually discriminates.
     #[test]
     fn hash_discriminates_every_populated_field() {
         fn populated() -> ProfileIdentity {
@@ -710,9 +672,9 @@ mod tests {
         );
     }
 
-    /// Golden test — pins the canonical `compute_config_hash` encoding.
-    /// Drift here changes every Profile's `config_hash` this binary
-    /// computes; update only this constant after a deliberate review.
+    /// Golden test — pins the canonical `compute_config_hash` encoding. Drift here changes every
+    /// Profile's `config_hash` this binary computes; update only this constant after a deliberate
+    /// review.
     #[test]
     fn hash_known_good() {
         let cfg = ScanConfig::builder().build();
@@ -720,9 +682,8 @@ mod tests {
         assert_eq!(h, GOLDEN_HASH);
     }
 
-    /// The public route (`ProfileIdentity::config_hash`) and the sealed
-    /// kernel agree bit-for-bit on the golden preimage — sealing the
-    /// kernel did not perturb the canonical encoding.
+    /// The public route (`ProfileIdentity::config_hash`) and the sealed kernel agree bit-for-bit on
+    /// the golden preimage — sealing the kernel did not perturb the canonical encoding.
     #[test]
     fn profile_identity_config_hash_matches_golden() {
         let identity = ProfileIdentity {
@@ -736,18 +697,16 @@ mod tests {
     const GOLDEN_HASH: u64 = 0x35A4_7E13_BE87_7324;
 
     /// Fold-completeness ratchet for [`ScanConfig::accepts`]. Mirrors
-    /// [`hash_discriminates_every_populated_field`]: a fully-populated
-    /// `ScanConfig` plus a neutral target; toggling each filter field
-    /// must move at least one `accepts` verdict on a small test grid.
+    /// [`hash_discriminates_every_populated_field`]: a fully-populated `ScanConfig` plus a neutral
+    /// target; toggling each filter field must move at least one `accepts` verdict on a small test
+    /// grid.
     ///
-    /// The exhaustive destructure inside `accepts_structural` makes a
-    /// new field a *compile error* until folded; this test makes the
-    /// fold *discriminate*, so the ratchet cannot be satisfied by
+    /// The exhaustive destructure inside `accepts_structural` makes a new field a *compile error*
+    /// until folded; this test makes the fold *discriminate*, so the ratchet cannot be satisfied by
     /// folding a new field as a constant.
     ///
-    /// Not itself ratcheted: a new field still needs a new mutation
-    /// closure here. The compile error from the destructure is the
-    /// forcing function that drives the author to add it; this test
+    /// Not itself ratcheted: a new field still needs a new mutation closure here. The compile error
+    /// from the destructure is the forcing function that drives the author to add it; this test
     /// then guards that the fold actually discriminates.
     #[test]
     fn accepts_reads_every_field() {
@@ -776,12 +735,10 @@ mod tests {
             verdicts(cfg, probes) != base_v
         }
 
-        // Grid of probes: (rel, kind, depth). Each probe is chosen so a
-        // *single* field toggle shifts its verdict — the other fields
-        // are picked to "pass" so the predicate stops on the field
-        // under test. Verdicts overlap by design (the predicate
-        // short-circuits), so a probe that's already rejected by a
-        // *different* field cannot discriminate.
+        // Grid of probes: (rel, kind, depth). Each probe is chosen so a *single* field toggle
+        // shifts its verdict — the other fields are picked to "pass" so the predicate stops on the
+        // field under test. Verdicts overlap by design (the predicate short-circuits), so a probe
+        // that's already rejected by a *different* field cannot discriminate.
         let probes: &[(&str, ResourceKind, u32)] = &[
             ("foo.rs", ResourceKind::File, 5),
             (".hidden_dir", ResourceKind::Dir, 1),
@@ -836,26 +793,21 @@ mod tests {
             "max_depth must discriminate"
         );
 
-        // Anchor-depth (`depth == 0`) bypasses every filter
-        // unconditionally. Pinning the load-bearing "anchor is in scope
-        // by construction" property at the predicate's first line, so
-        // a future structural rewrite that drops the short-circuit
-        // surfaces as a localised failure here.
+        // Anchor-depth (`depth == 0`) bypasses every filter unconditionally. Pinning the load-bearing
+        // "anchor is in scope by construction" property at the predicate's first line, so a future
+        // structural rewrite that drops the short-circuit surfaces as a localised failure here.
         assert!(
             base.accepts(Path::new(""), ResourceKind::Dir, 0),
             "depth 0 must accept regardless of filters"
         );
     }
 
-    /// Pins the compiler-generated `Option<u32>` `derive(Hash)`
-    /// discriminant encoding that `compute_config_hash` reproduces
-    /// explicitly through the seam for `max_depth`. The blanket
-    /// `Option::hash` folds the discriminant as an `isize` (→ `usize`
-    /// width) before the inner `u32`; the seam reproduces that as a
-    /// width-canonical `u64` discriminant + `u32` payload, byte-identical
-    /// on the 64-bit target. If a future rustc changes the enum
-    /// discriminant hash shape this fires here, in isolation, rather
-    /// than as a silent `GOLDEN_HASH` drift.
+    /// Pins the compiler-generated `Option<u32>` `derive(Hash)` discriminant encoding that
+    /// `compute_config_hash` reproduces explicitly through the seam for `max_depth`. The blanket
+    /// `Option::hash` folds the discriminant as an `isize` (→ `usize` width) before the inner
+    /// `u32`; the seam reproduces that as a width-canonical `u64` discriminant + `u32` payload,
+    /// byte-identical on the 64-bit target. If a future rustc changes the enum discriminant hash
+    /// shape this fires here, in isolation, rather than as a silent `GOLDEN_HASH` drift.
     #[test]
     fn max_depth_seam_encoding_matches_option_u32_hash() {
         use crate::hash::hasher;

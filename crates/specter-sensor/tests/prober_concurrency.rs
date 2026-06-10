@@ -1,7 +1,6 @@
-//! Pool-size respect: with N workers, exactly N probes can be in
-//! flight simultaneously. We pin this through a `Barrier`-coordinated
-//! probe — but the prober is a black box, so we use a *real-fs* slow
-//! probe (a deeply-recursive walk) instead of a test seam.
+//! Pool-size respect: with N workers, exactly N probes can be in flight simultaneously. We pin this
+//! through a `Barrier`-coordinated probe — but the prober is a black box, so we use a *real-fs*
+//! slow probe (a deeply-recursive walk) instead of a test seam.
 
 #![cfg(unix)]
 
@@ -20,9 +19,8 @@ fn fresh_profile_ids(n: usize) -> Vec<ProfileId> {
     (0..n).map(|_| sm.insert(())).collect()
 }
 
-/// Mirror of the bin's `DriverProberSender` — wraps a single
-/// `Sender<Input>` clone and rewraps each `ProbeResponse` as
-/// `Input::ProbeResponse(_)` on the wire.
+/// Mirror of the bin's `DriverProberSender` — wraps a single `Sender<Input>` clone and rewraps each
+/// `ProbeResponse` as `Input::ProbeResponse(_)` on the wire.
 struct TestProberSink {
     tx: Sender<Input>,
 }

@@ -1,22 +1,17 @@
-//! `IN_Q_OVERFLOW` round-trip — when the per-instance event queue
-//! overflows, the kernel emits a synthetic record with `wd = -1` and
-//! `mask = IN_Q_OVERFLOW`. The watcher lifts it to
-//! [`WatcherEvent::Overflow`] (`scope: Global`); the bin then posts
-//! [`Input::SensorOverflow`] to the engine, which reseeds every
-//! in-scope Profile.
+//! `IN_Q_OVERFLOW` round-trip — when the per-instance event queue overflows, the kernel emits a
+//! synthetic record with `wd = -1` and `mask = IN_Q_OVERFLOW`. The watcher lifts it to
+//! [`WatcherEvent::Overflow`] (`scope: Global`); the bin then posts [`Input::SensorOverflow`] to
+//! the engine, which reseeds every in-scope Profile.
 //!
-//! The per-instance queue size is `/proc/sys/fs/inotify/max_queued_events`
-//! (default `16384`). To exercise overflow without root, we'd need to
-//! generate >16k events between drains — feasible but slow. Easier:
-//! lower the queue cap by writing to that sysctl. Both paths require
-//! some privilege (root can write `/proc/sys/...`; non-root just needs
-//! to be patient).
+//! The per-instance queue size is `/proc/sys/fs/inotify/max_queued_events` (default `16384`). To
+//! exercise overflow without root, we'd need to generate >16k events between drains — feasible but
+//! slow. Easier: lower the queue cap by writing to that sysctl. Both paths require some privilege
+//! (root can write `/proc/sys/...`; non-root just needs to be patient).
 //!
-//! This test attempts the **non-root patient** path: it generates a
-//! large burst of structural events on a Dir watch without intervening
-//! drains, expects the kernel to overflow, and asserts that
-//! [`WatcherEvent::Overflow`] is emitted. If the burst doesn't trigger
-//! overflow within reasonable bounds, we skip cleanly.
+//! This test attempts the **non-root patient** path: it generates a large burst of structural
+//! events on a Dir watch without intervening drains, expects the kernel to overflow, and asserts
+//! that [`WatcherEvent::Overflow`] is emitted. If the burst doesn't trigger overflow within
+//! reasonable bounds, we skip cleanly.
 //!
 //! Linux only.
 
@@ -41,9 +36,8 @@ fn read_max_queued_events() -> Option<usize> {
 
 #[test]
 fn massive_event_burst_emits_overflow() {
-    // Cap at 25k events generated. If `max_queued_events` is higher,
-    // skip cleanly — the test would otherwise generate millions of
-    // child files and run for minutes.
+    // Cap at 25k events generated. If `max_queued_events` is higher, skip cleanly — the test would
+    // otherwise generate millions of child files and run for minutes.
     const GEN_CAP: usize = 25_000;
 
     let Some(queue_cap) = read_max_queued_events() else {
@@ -69,20 +63,18 @@ fn massive_event_burst_emits_overflow() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_dir = sm.insert(());
 
-    // Watch the dir with STRUCTURE — every child create fires
-    // `IN_CREATE`, queueing an event into the inotify instance.
+    // Watch the dir with STRUCTURE — every child create fires `IN_CREATE`, queueing an event into
+    // the inotify instance.
     w.watch(r_dir, tmp.path(), ResourceKind::Dir, ClassSet::STRUCTURE)
         .expect("watch dir");
 
-    // Burst: create `queue_cap + headroom` files without any drain
-    // intervening. The kernel queues each `IN_CREATE` on the
-    // per-instance queue; once it crosses `max_queued_events`, the
-    // kernel drops further events and emits the synthetic
-    // `IN_Q_OVERFLOW` record.
+    // Burst: create `queue_cap + headroom` files without any drain intervening. The kernel queues
+    // each `IN_CREATE` on the per-instance queue; once it crosses `max_queued_events`, the kernel
+    // drops further events and emits the synthetic `IN_Q_OVERFLOW` record.
     let target = queue_cap + 2_000;
     for i in 0..target {
-        // `OpenOptions::create_new` minimizes per-file overhead vs
-        // `std::fs::write`. The kernel only sees `IN_CREATE`.
+        // `OpenOptions::create_new` minimizes per-file overhead vs `std::fs::write`. The kernel
+        // only sees `IN_CREATE`.
         if std::fs::OpenOptions::new()
             .create_new(true)
             .write(true)
@@ -95,8 +87,7 @@ fn massive_event_burst_emits_overflow() {
         }
     }
 
-    // Register the watcher's inotify fd with mio so the drain loop
-    // blocks via the reactor.
+    // Register the watcher's inotify fd with mio so the drain loop blocks via the reactor.
     let mut poll = Poll::new().expect("mio Poll");
     let raw = w.as_fd().as_raw_fd();
     poll.registry()
@@ -119,8 +110,7 @@ fn massive_event_burst_emits_overflow() {
             break;
         }
         if buf.is_empty() {
-            // No records this edge — keep blocking on the reactor
-            // until the deadline.
+            // No records this edge — keep blocking on the reactor until the deadline.
             continue;
         }
         for ev in buf.drain(..) {

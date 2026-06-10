@@ -3,68 +3,54 @@ use smallvec::smallvec;
 use specter_core::{ArgPart, ArgTemplate, Placeholder};
 use std::fmt;
 
-/// Namespace prefix that opens the Specter placeholder grammar. Anything
-/// not matching this exact byte sequence (including the trailing dot)
-/// falls through as a literal `$`.
+/// Namespace prefix that opens the Specter placeholder grammar. Anything not matching this exact
+/// byte sequence (including the trailing dot) falls through as a literal `$`.
 const NS_SPECTER: &str = "${specter.";
 
-/// Namespace prefix for the operator-env placeholder grammar
-/// (`${env.NAME}` / `${env.NAME:-default}`). Resolved against the
-/// actuator's `EnvSnapshot` at spawn time; the lexer's job is to
-/// distinguish a well-formed env reference from arbitrary `$`-bearing
-/// shell syntax.
+/// Namespace prefix for the operator-env placeholder grammar (`${env.NAME}` /
+/// `${env.NAME:-default}`). Resolved against the actuator's `EnvSnapshot` at spawn time; the lexer's
+/// job is to distinguish a well-formed env reference from arbitrary `$`-bearing shell syntax.
 const NS_ENV: &str = "${env.";
 
-/// `:-` is the boundary between an `${env.NAME}` and an optional literal
-/// default. Mirrors POSIX shell `${VAR:-default}` for operator
-/// familiarity. The default is a frozen literal — nested placeholders
-/// are rejected at the lexer (no `${env.HOME:-${env.USER}}`); operators
-/// wanting composition wrap with shell.
+/// `:-` is the boundary between an `${env.NAME}` and an optional literal default. Mirrors POSIX
+/// shell `${VAR:-default}` for operator familiarity. The default is a frozen literal — nested
+/// placeholders are rejected at the lexer (no `${env.HOME:-${env.USER}}`); operators wanting
+/// composition wrap with shell.
 const ENV_DEFAULT_SEP: &str = ":-";
 
-/// Failures the lexer can surface from inside a recognised namespace
-/// placeholder.
+/// Failures the lexer can surface from inside a recognised namespace placeholder.
 ///
-/// Outside the recognised namespaces (`${specter.<name>}`,
-/// `${env.<name>}`), the lexer never errors — any other `$`-bearing
-/// byte sequence passes through verbatim, freeing operators to write
-/// arbitrary shell / awk / perl `$` syntax in argv slots without a
-/// Specter typo tax.
+/// Outside the recognised namespaces (`${specter.<name>}`, `${env.<name>}`), the lexer never errors
+/// — any other `$`-bearing byte sequence passes through verbatim, freeing operators to write
+/// arbitrary shell / awk / perl `$` syntax in argv slots without a Specter typo tax.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum TemplateError {
-    /// `${specter.<name>}` where `<name>` is not in the placeholder
-    /// catalog. Catches mistypes (`${specter.ptah}`) and members of the
-    /// catalog that aren't yet implemented.
+    /// `${specter.<name>}` where `<name>` is not in the placeholder catalog. Catches mistypes
+    /// (`${specter.ptah}`) and members of the catalog that aren't yet implemented.
     UnknownPlaceholder { name: String },
-    /// A recognised namespace opener (`${specter.…}` or `${env.…}`)
-    /// reached end-of-string without a closing `}`. `partial` is the
-    /// substring from the opening `${` to end-of-input.
+    /// A recognised namespace opener (`${specter.…}` or `${env.…}`) reached end-of-string without a
+    /// closing `}`. `partial` is the substring from the opening `${` to end-of-input.
     UnterminatedPlaceholder { partial: String },
-    /// `${specter.}` or `${env.}` — the namespace was opened but no
-    /// name follows. The empty-name policy is shared across namespaces.
+    /// `${specter.}` or `${env.}` — the namespace was opened but no name follows. The empty-name
+    /// policy is shared across namespaces.
     EmptyPlaceholderName,
-    /// `${specter.<name>}` where `<name>` contains a character outside
-    /// `[a-z0-9_]`. The first offending character is reported.
+    /// `${specter.<name>}` where `<name>` contains a character outside `[a-z0-9_]`. The first
+    /// offending character is reported.
     InvalidPlaceholderChar { name: String, ch: char },
-    /// `${env.<NAME>}` where `<NAME>` is not a well-formed env-var
-    /// identifier (`[A-Za-z_][A-Za-z0-9_]*`). The first offending
-    /// character is reported.
+    /// `${env.<NAME>}` where `<NAME>` is not a well-formed env-var identifier
+    /// (`[A-Za-z_][A-Za-z0-9_]*`). The first offending character is reported.
     InvalidEnvName { name: String, ch: char },
-    /// `${env.<NAME>:-<default>}` whose default contains a reserved
-    /// single character (`$`, `{`) or any ASCII / Unicode control
-    /// character (`is_control()`). Nested substitution inside defaults
-    /// isn't supported in v1 — the default is a literal byte sequence
-    /// up to the first closing `}`. Operators wanting composition wrap
-    /// with shell. Control chars are rejected so an unintended newline
-    /// or tab in a default doesn't silently make it into argv.
+    /// `${env.<NAME>:-<default>}` whose default contains a reserved single character (`$`, `{`) or
+    /// any ASCII / Unicode control character (`is_control()`). Nested substitution inside defaults
+    /// isn't supported in v1 — the default is a literal byte sequence up to the first closing `}`.
+    /// Operators wanting composition wrap with shell. Control chars are rejected so an unintended
+    /// newline or tab in a default doesn't silently make it into argv.
     InvalidEnvDefault { default: String, ch: char },
-    /// `${env.<NAME>:-<default>}` whose default contains the literal
-    /// `:-` separator substring. The separator is reserved for the
-    /// name/default split itself; allowing it inside defaults would
-    /// invite ambiguity (`${env.X:-a:-b}` could read as name=X /
-    /// default=`a:-b` or name=X / default=`a` / trailing). v1 rejects
-    /// the case outright. Operators wanting `:-` literal wrap with
-    /// shell.
+    /// `${env.<NAME>:-<default>}` whose default contains the literal `:-` separator substring. The
+    /// separator is reserved for the name/default split itself; allowing it inside defaults would
+    /// invite ambiguity (`${env.X:-a:-b}` could read as name=X / default=`a:-b` or name=X /
+    /// default=`a` / trailing). v1 rejects the case outright. Operators wanting `:-` literal wrap
+    /// with shell.
     EnvDefaultContainsSeparator { default: String },
 }
 
@@ -95,11 +81,10 @@ impl fmt::Display for TemplateError {
                 )
             }
             Self::InvalidEnvDefault { default, ch } => {
-                // Render both the offending char and the surrounding
-                // default via `escape_default` so control chars (e.g.,
-                // `\n`, `\t`, DEL) appear as readable escapes rather
-                // than literal bytes that would wreck the log line.
-                // Printable chars like `$` / `{` pass through unchanged.
+                // Render both the offending char and the surrounding default via `escape_default`
+                // so control chars (e.g., `\n`, `\t`, DEL) appear as readable escapes rather than
+                // literal bytes that would wreck the log line. Printable chars like `$` / `{` pass
+                // through unchanged.
                 let ch_repr: String = ch.escape_default().collect();
                 let default_repr: String = default.escape_default().collect();
                 write!(
@@ -125,40 +110,33 @@ impl std::error::Error for TemplateError {}
 
 /// Parse one TOML argv string into an [`ArgTemplate`].
 ///
-/// Recognises three `$`-prefix patterns; everything else passes through
-/// as a literal:
+/// Recognises three `$`-prefix patterns; everything else passes through as a literal:
 ///
-/// - `${specter.<name>}` — the Specter placeholder namespace. `<name>`
-///   must be a non-empty `[a-z0-9_]` sequence and must match a catalog
-///   entry (`path`, `relative`, `anchor`, `watch`, `parent`, `time`,
-///   `created`, `deleted`, `modified`, `renamed_from`, `renamed_to`,
-///   `excluded`); anything else inside the namespace returns an error.
-/// - `${env.<NAME>}` or `${env.<NAME>:-<default>}` — operator-env
-///   reference resolved at spawn time against the actuator's captured
-///   `EnvSnapshot`. `<NAME>` must be a `[A-Za-z_][A-Za-z0-9_]*`
-///   identifier. Strict by default: missing env var with no default ⇒
-///   the plan fails (`EffectOutcome::Failed`). Explicit lenient opt-in
-///   via `${env.HOME:-}` (empty default) or `${env.HOME:-/tmp}`.
-/// - `$$` — escapes a literal `$`. The only way to write a single `$`
-///   that the spawned shell will not interpret as the start of an env
-///   var name; doubles up shell `$$` (PID expansion) as `$$$$`.
+/// - `${specter.<name>}` — the Specter placeholder namespace. `<name>` must be a non-empty
+///   `[a-z0-9_]` sequence and must match a catalog entry (`path`, `relative`, `anchor`, `watch`,
+///   `parent`, `time`, `created`, `deleted`, `modified`, `renamed_from`, `renamed_to`, `excluded`);
+///   anything else inside the namespace returns an error.
+/// - `${env.<NAME>}` or `${env.<NAME>:-<default>}` — operator-env reference resolved at spawn time
+///   against the actuator's captured `EnvSnapshot`. `<NAME>` must be a `[A-Za-z_][A-Za-z0-9_]*`
+///   identifier. Strict by default: missing env var with no default ⇒ the plan fails
+///   (`EffectOutcome::Failed`). Explicit lenient opt-in via `${env.HOME:-}` (empty default) or
+///   `${env.HOME:-/tmp}`.
+/// - `$$` — escapes a literal `$`. The only way to write a single `$` that the spawned shell will not
+///   interpret as the start of an env var name; doubles up shell `$$` (PID expansion) as `$$$$`.
 ///
-/// Every other `$`-bearing sequence is a literal: `$HOME`, `$path`,
-/// `$5`, `${VAR}`, `${specter}` (no dot), `${SPECTER.path}` (uppercase),
-/// `${capture.foo}` (unrecognised namespace) all pass through verbatim.
-/// The strict typo guard fires only inside the recognised namespaces;
-/// the shell can expand the rest as it likes.
+/// Every other `$`-bearing sequence is a literal: `$HOME`, `$path`, `$5`, `${VAR}`, `${specter}`
+/// (no dot), `${SPECTER.path}` (uppercase), `${capture.foo}` (unrecognised namespace) all pass
+/// through verbatim. The strict typo guard fires only inside the recognised namespaces; the shell
+/// can expand the rest as it likes.
 pub fn parse_arg(s: &str) -> Result<ArgTemplate, TemplateError> {
     let mut parts: smallvec::SmallVec<[ArgPart; 2]> = smallvec![];
     let mut buf = CompactString::new("");
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        // Fast-forward to the next `$`. Bytes are pure ASCII for `$` and
-        // `{`, so byte-level scanning is correct without char boundary
-        // checks; non-ASCII content lives in `buf` as bytes which
-        // re-assemble into valid UTF-8 because we never split a code
-        // point.
+        // Fast-forward to the next `$`. Bytes are pure ASCII for `$` and `{`, so byte-level
+        // scanning is correct without char boundary checks; non-ASCII content lives in `buf` as
+        // bytes which re-assemble into valid UTF-8 because we never split a code point.
         if bytes[i] != b'$' {
             // Push as a single char to preserve UTF-8 boundaries.
             let ch_start = i;
@@ -201,19 +179,18 @@ pub fn parse_arg(s: &str) -> Result<ArgTemplate, TemplateError> {
     Ok(ArgTemplate::new(parts))
 }
 
-/// Tag identifying which namespace `parse_arg` just opened. The match
-/// is exhaustive across the recognised set; unknown openers (e.g.
-/// `${capture.…}`, `${SCOPE.…}`) fall through to literal pass-through
-/// before this enum is ever consulted.
+/// Tag identifying which namespace `parse_arg` just opened. The match is exhaustive across the
+/// recognised set; unknown openers (e.g. `${capture.…}`, `${SCOPE.…}`) fall through to literal
+/// pass-through before this enum is ever consulted.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum NamespaceKind {
     Specter,
     Env,
 }
 
-/// Look for a recognised namespace opener at byte offset `i`. Returns
-/// `(kind, body_start)` where `body_start` is the byte index of the
-/// first character after the namespace dot (the start of `<name>`).
+/// Look for a recognised namespace opener at byte offset `i`. Returns `(kind, body_start)` where
+/// `body_start` is the byte index of the first character after the namespace dot (the start of
+/// `<name>`).
 fn try_open_namespace(s: &str, i: usize) -> Option<(NamespaceKind, usize)> {
     if s[i..].starts_with(NS_SPECTER) {
         Some((NamespaceKind::Specter, i + NS_SPECTER.len()))
@@ -224,8 +201,8 @@ fn try_open_namespace(s: &str, i: usize) -> Option<(NamespaceKind, usize)> {
     }
 }
 
-/// Parse the body of an opened namespace (everything between the
-/// namespace dot and the closing `}`) into an [`ArgPart`].
+/// Parse the body of an opened namespace (everything between the namespace dot and the closing `}`)
+/// into an [`ArgPart`].
 fn dispatch_namespace(kind: NamespaceKind, body: &str) -> Result<ArgPart, TemplateError> {
     match kind {
         NamespaceKind::Specter => parse_specter_name(body).map(ArgPart::Placeholder),
@@ -233,11 +210,10 @@ fn dispatch_namespace(kind: NamespaceKind, body: &str) -> Result<ArgPart, Templa
     }
 }
 
-/// Validate `name` against the Specter namespace grammar and resolve it
-/// to a catalog [`Placeholder`].
+/// Validate `name` against the Specter namespace grammar and resolve it to a catalog [`Placeholder`].
 ///
-/// `[a-z0-9_]+` and a catalog entry. Any deviation surfaces a typed
-/// error so the validator can render a useful operator-facing message.
+/// `[a-z0-9_]+` and a catalog entry. Any deviation surfaces a typed error so the validator can
+/// render a useful operator-facing message.
 fn parse_specter_name(name: &str) -> Result<Placeholder, TemplateError> {
     if name.is_empty() {
         return Err(TemplateError::EmptyPlaceholderName);
@@ -256,18 +232,15 @@ fn parse_specter_name(name: &str) -> Result<Placeholder, TemplateError> {
     })
 }
 
-/// Parse an `${env.…}` body: split on `:-` to separate `<NAME>` from
-/// an optional literal default, validate each side, and produce
-/// [`ArgPart::EnvVar`].
+/// Parse an `${env.…}` body: split on `:-` to separate `<NAME>` from an optional literal default,
+/// validate each side, and produce [`ArgPart::EnvVar`].
 ///
-/// `:-` is recognised on its first occurrence and consumed as the
-/// name/default split. A default body containing a second `:-` is
-/// rejected by [`validate_env_default`] as
-/// [`TemplateError::EnvDefaultContainsSeparator`] — defaults are
-/// representable as a literal byte sequence with `:-` reserved.
-/// `}` cannot appear inside a default because the closing brace
-/// terminates the placeholder before this function ever sees it; a
-/// default that wants `}` is unrepresentable in v1.
+/// `:-` is recognised on its first occurrence and consumed as the name/default split. A default
+/// body containing a second `:-` is rejected by [`validate_env_default`] as
+/// [`TemplateError::EnvDefaultContainsSeparator`] — defaults are representable as a literal byte
+/// sequence with `:-` reserved. `}` cannot appear inside a default because the closing brace
+/// terminates the placeholder before this function ever sees it; a default that wants `}` is
+/// unrepresentable in v1.
 fn parse_env_body(body: &str) -> Result<ArgPart, TemplateError> {
     let (name, default) = match body.find(ENV_DEFAULT_SEP) {
         Some(idx) => (&body[..idx], Some(&body[idx + ENV_DEFAULT_SEP.len()..])),
@@ -311,23 +284,18 @@ fn validate_env_name(name: &str) -> Result<(), TemplateError> {
 
 /// Defaults are literal-only in v1. Three reject classes:
 ///
-/// 1. The literal `:-` separator substring. The first `:-` is already
-///    consumed by `parse_env_body` as the name/default split. A second
-///    occurrence anywhere in the default body would invite the ambiguity
-///    "is that part of the default or did the operator mean to split
-///    again?", so we reject outright. `${env.X:-a:-b}` ⇒
-///    [`TemplateError::EnvDefaultContainsSeparator`].
-/// 2. `$` and `{`. Both hint at nested substitution / a stray opener —
-///    feedback to the operator that defaults are literal-only.
-/// 3. Any control character (`is_control()`). An unintended `\n` or
-///    `\t` would silently make it into argv and (worse) into log
-///    lines if the default ever appears in a diagnostic; rendering as
-///    a Rust-source escape (via Display's `escape_default`) keeps the
-///    operator-facing error readable.
+/// 1. The literal `:-` separator substring. The first `:-` is already consumed by `parse_env_body`
+///    as the name/default split. A second occurrence anywhere in the default body would invite the
+///    ambiguity "is that part of the default or did the operator mean to split again?", so we
+///    reject outright. `${env.X:-a:-b}` ⇒ [`TemplateError::EnvDefaultContainsSeparator`].
+/// 2. `$` and `{`. Both hint at nested substitution / a stray opener — feedback to the operator
+///    that defaults are literal-only.
+/// 3. Any control character (`is_control()`). An unintended `\n` or `\t` would silently make it into
+///    argv and (worse) into log lines if the default ever appears in a diagnostic; rendering as a
+///    Rust-source escape (via Display's `escape_default`) keeps the operator-facing error readable.
 ///
-/// The closing `}` cannot appear inside the default because the
-/// placeholder lexer terminates on the first one — this branch never
-/// sees it.
+/// The closing `}` cannot appear inside the default because the placeholder lexer terminates on the
+/// first one — this branch never sees it.
 fn validate_env_default(d: &str) -> Result<(), TemplateError> {
     if d.contains(ENV_DEFAULT_SEP) {
         return Err(TemplateError::EnvDefaultContainsSeparator {
@@ -343,12 +311,12 @@ fn validate_env_default(d: &str) -> Result<(), TemplateError> {
     Ok(())
 }
 
-/// Resolve a syntactically valid lowercase name to a [`Placeholder`].
-/// `None` means the name is well-formed but not in the catalog —
-/// surfaced as [`TemplateError::UnknownPlaceholder`] by the caller.
+/// Resolve a syntactically valid lowercase name to a [`Placeholder`]. `None` means the name is
+/// well-formed but not in the catalog — surfaced as [`TemplateError::UnknownPlaceholder`] by the
+/// caller.
 const fn catalog_lookup(name: &str) -> Option<Placeholder> {
-    // `match` over `&str` lets the catalog stay one source of truth; the
-    // compiler folds it to a hash-free dispatch.
+    // `match` over `&str` lets the catalog stay one source of truth; the compiler folds it to a
+    // hash-free dispatch.
     Some(match name.as_bytes() {
         b"path" => Placeholder::Path,
         b"relative" => Placeholder::Relative,
@@ -366,20 +334,18 @@ const fn catalog_lookup(name: &str) -> Option<Placeholder> {
     })
 }
 
-/// Flush the in-flight literal buffer as one [`ArgPart::Literal`] when
-/// non-empty. Adjacent literals always coalesce because every literal
-/// byte goes into the same `buf` and we only flush at placeholder
-/// boundaries / end-of-input.
+/// Flush the in-flight literal buffer as one [`ArgPart::Literal`] when non-empty. Adjacent literals
+/// always coalesce because every literal byte goes into the same `buf` and we only flush at
+/// placeholder boundaries / end-of-input.
 fn flush_literal(parts: &mut smallvec::SmallVec<[ArgPart; 2]>, buf: &mut CompactString) {
     if !buf.is_empty() {
         parts.push(ArgPart::Literal(std::mem::take(buf)));
     }
 }
 
-/// Return the byte index just past the UTF-8 character starting at `i`.
-/// `s.is_char_boundary` is the canonical Rust API; we trust the input
-/// `s` is valid UTF-8 (it came from a `&str`) so a forward scan over
-/// continuation bytes is sufficient.
+/// Return the byte index just past the UTF-8 character starting at `i`. `s.is_char_boundary` is the
+/// canonical Rust API; we trust the input `s` is valid UTF-8 (it came from a `&str`) so a forward
+/// scan over continuation bytes is sufficient.
 fn next_char_boundary(s: &str, i: usize) -> usize {
     let bytes = s.as_bytes();
     let mut j = i + 1;
@@ -455,8 +421,8 @@ mod tests {
 
     #[test]
     fn bare_dollar_name_is_literal() {
-        // Under the new grammar, `$<name>` is shell territory regardless
-        // of catalog membership. The lexer never touches it.
+        // Under the new grammar, `$<name>` is shell territory regardless of catalog membership. The
+        // lexer never touches it.
         assert_eq!(parts(&parse_arg("$path").unwrap()), vec![lit("$path")]);
         assert_eq!(parts(&parse_arg("$watch").unwrap()), vec![lit("$watch")]);
         assert_eq!(
@@ -471,19 +437,16 @@ mod tests {
 
     #[test]
     fn brace_var_outside_namespace_is_literal() {
-        // `${VAR}`, `${HOME}` — shell-style braced expansion. The lexer
-        // doesn't open a namespace here (the prefix is `${specter.`,
-        // requiring the lowercase `specter.` exactly), so the `$`
-        // becomes a single literal char and `{HOME}` follows as plain
-        // bytes.
+        // `${VAR}`, `${HOME}` — shell-style braced expansion. The lexer doesn't open a namespace
+        // here (the prefix is `${specter.`, requiring the lowercase `specter.` exactly), so the `$`
+        // becomes a single literal char and `{HOME}` follows as plain bytes.
         assert_eq!(parts(&parse_arg("${HOME}").unwrap()), vec![lit("${HOME}")]);
         assert_eq!(parts(&parse_arg("${VAR}").unwrap()), vec![lit("${VAR}")]);
     }
 
     #[test]
     fn brace_namespace_no_dot_is_literal() {
-        // `${specter}` (no dot) is NOT the namespace opener. The dot is
-        // load-bearing.
+        // `${specter}` (no dot) is NOT the namespace opener. The dot is load-bearing.
         assert_eq!(
             parts(&parse_arg("${specter}").unwrap()),
             vec![lit("${specter}")]
@@ -492,8 +455,8 @@ mod tests {
 
     #[test]
     fn uppercase_namespace_is_literal() {
-        // `${SPECTER.path}` is uppercase; the namespace prefix is
-        // lowercase only. Falls through as literal.
+        // `${SPECTER.path}` is uppercase; the namespace prefix is lowercase only. Falls through as
+        // literal.
         assert_eq!(
             parts(&parse_arg("${SPECTER.path}").unwrap()),
             vec![lit("${SPECTER.path}")]
@@ -502,8 +465,8 @@ mod tests {
 
     #[test]
     fn space_after_dollar_is_literal() {
-        // `$ {specter.path}` — must be `${` adjacent. The space breaks
-        // the prefix; lone `$` becomes literal.
+        // `$ {specter.path}` — must be `${` adjacent. The space breaks the prefix; lone `$` becomes
+        // literal.
         assert_eq!(
             parts(&parse_arg("$ {specter.path}").unwrap()),
             vec![lit("$ {specter.path}")]
@@ -520,8 +483,8 @@ mod tests {
 
     #[test]
     fn double_dollar_then_namespace_escapes_namespace() {
-        // `$${specter.path}` — `$$` consumes the leading `$`, leaving a
-        // literal `$` followed by `{specter.path}` plain bytes.
+        // `$${specter.path}` — `$$` consumes the leading `$`, leaving a literal `$` followed by
+        // `{specter.path}` plain bytes.
         assert_eq!(
             parts(&parse_arg("$${specter.path}").unwrap()),
             vec![lit("${specter.path}")]
@@ -530,9 +493,8 @@ mod tests {
 
     #[test]
     fn triple_dollar_then_namespace() {
-        // `$$$` — `$$` collapses to literal `$`, then a lone `$`
-        // followed by `{specter.path}` opens the namespace and
-        // resolves to a placeholder.
+        // `$$$` — `$$` collapses to literal `$`, then a lone `$` followed by `{specter.path}` opens
+        // the namespace and resolves to a placeholder.
         assert_eq!(
             parts(&parse_arg("$$${specter.path}").unwrap()),
             vec![lit("$"), ph(Placeholder::Path)]
@@ -559,8 +521,8 @@ mod tests {
 
     #[test]
     fn literal_around_placeholder_yields_three_parts() {
-        // The adjacent-literal coalescing invariant: one literal before,
-        // one placeholder, one literal after — exactly three parts.
+        // The adjacent-literal coalescing invariant: one literal before, one placeholder, one
+        // literal after — exactly three parts.
         assert_eq!(
             parts(&parse_arg("abc${specter.path}xyz").unwrap()),
             vec![lit("abc"), ph(Placeholder::Path), lit("xyz")]
@@ -621,9 +583,8 @@ mod tests {
 
     #[test]
     fn invalid_placeholder_char_dot() {
-        // Dots inside the name are reserved — no nested namespace
-        // (`${specter.renamed.from}` is not how `renamed_from` is
-        // spelled).
+        // Dots inside the name are reserved — no nested namespace (`${specter.renamed.from}` is not
+        // how `renamed_from` is spelled).
         let err = parse_arg("${specter.renamed.from}").unwrap_err();
         assert_eq!(
             err,
@@ -697,9 +658,8 @@ mod tests {
         );
     }
 
-    /// `${env.HOME:-}` — explicit lenient opt-in. The default is the
-    /// empty string; resolver renders empty when HOME is unset rather
-    /// than failing the plan.
+    /// `${env.HOME:-}` — explicit lenient opt-in. The default is the empty string; resolver renders
+    /// empty when HOME is unset rather than failing the plan.
     #[test]
     fn env_var_empty_default_is_explicit_lenient_opt_in() {
         assert_eq!(
@@ -718,9 +678,8 @@ mod tests {
 
     #[test]
     fn env_var_mixed_case_name_allowed() {
-        // POSIX env-var grammar is case-sensitive and case-mixed;
-        // unlike `${specter.…}` (lowercase-only), `${env.…}` accepts
-        // any well-formed identifier.
+        // POSIX env-var grammar is case-sensitive and case-mixed; unlike `${specter.…}`
+        // (lowercase-only), `${env.…}` accepts any well-formed identifier.
         assert_eq!(
             parts(&parse_arg("${env.PathSeparator2}").unwrap()),
             vec![env("PathSeparator2", None)]
@@ -734,8 +693,8 @@ mod tests {
         assert_eq!(err, TemplateError::EmptyPlaceholderName);
     }
 
-    /// `${env.}` with `:-default` — the name side is still empty,
-    /// reported as the canonical empty-name error.
+    /// `${env.}` with `:-default` — the name side is still empty, reported as the canonical
+    /// empty-name error.
     #[test]
     fn env_var_empty_name_with_default_is_empty_placeholder_name() {
         let err = parse_arg("${env.:-fallback}").unwrap_err();
@@ -779,10 +738,9 @@ mod tests {
 
     #[test]
     fn env_var_default_rejects_nested_dollar() {
-        // `${env.HOME:-${env.USER}}` — the default contains `$`,
-        // which we reject for unambiguity. The closing `}` after
-        // `USER` terminates the outer placeholder, so the lexer sees
-        // `default = "${env.USER"`.
+        // `${env.HOME:-${env.USER}}` — the default contains `$`, which we reject for unambiguity.
+        // The closing `}` after `USER` terminates the outer placeholder, so the lexer sees `default
+        // = "${env.USER"`.
         let err = parse_arg("${env.HOME:-${env.USER}}").unwrap_err();
         assert_eq!(
             err,
@@ -795,9 +753,8 @@ mod tests {
 
     #[test]
     fn env_var_default_rejects_open_brace() {
-        // Lone `{` is also reserved — even without a leading `$`,
-        // it's a signal that the operator might be confused about
-        // the literal-only contract.
+        // Lone `{` is also reserved — even without a leading `$`, it's a signal that the operator
+        // might be confused about the literal-only contract.
         let err = parse_arg("${env.HOME:-{foo}").unwrap_err();
         assert_eq!(
             err,
@@ -808,10 +765,9 @@ mod tests {
         );
     }
 
-    /// `${env.X:-a:-b}` — the first `:-` consumed as the name/default
-    /// split leaves `default = "a:-b"`. A second `:-` inside the default
-    /// body invites ambiguity ("was `b` meant as a trailing field?"),
-    /// rejected outright by the strict v1 grammar.
+    /// `${env.X:-a:-b}` — the first `:-` consumed as the name/default split leaves `default =
+    /// "a:-b"`. A second `:-` inside the default body invites ambiguity ("was `b` meant as a
+    /// trailing field?"), rejected outright by the strict v1 grammar.
     #[test]
     fn env_var_default_rejects_separator_substring() {
         let err = parse_arg("${env.X:-a:-b}").unwrap_err();
@@ -823,10 +779,9 @@ mod tests {
         );
     }
 
-    /// Control characters in defaults would silently end up in argv and
-    /// (worse) corrupt log lines if surfaced in diagnostics. Strict v1
-    /// rejects every `is_control()` char; newline and tab are the cases
-    /// an operator is most likely to typo.
+    /// Control characters in defaults would silently end up in argv and (worse) corrupt log lines
+    /// if surfaced in diagnostics. Strict v1 rejects every `is_control()` char; newline and tab are
+    /// the cases an operator is most likely to typo.
     #[test]
     fn env_var_default_rejects_control_chars() {
         for (input, expected_ch) in [
@@ -845,10 +800,9 @@ mod tests {
         }
     }
 
-    /// Display rendering for control chars uses `escape_default` so the
-    /// error message stays readable in a log stream. A literal newline
-    /// in the message would otherwise wreck downstream line-oriented
-    /// parsing.
+    /// Display rendering for control chars uses `escape_default` so the error message stays
+    /// readable in a log stream. A literal newline in the message would otherwise wreck downstream
+    /// line-oriented parsing.
     #[test]
     fn invalid_env_default_display_escapes_control_chars() {
         let msg = TemplateError::InvalidEnvDefault {
@@ -868,8 +822,8 @@ mod tests {
 
     #[test]
     fn env_var_default_allows_slash_dot_colon_etc() {
-        // Common default-path/value shapes survive: `/tmp`, `.cache`,
-        // `0`, `127.0.0.1:8080`, and unicode tokens.
+        // Common default-path/value shapes survive: `/tmp`, `.cache`, `0`, `127.0.0.1:8080`, and
+        // unicode tokens.
         for (input, expected_default) in [
             ("${env.X:-/tmp}", "/tmp"),
             ("${env.X:-.cache}", ".cache"),
@@ -890,10 +844,9 @@ mod tests {
         }
     }
 
-    /// Unknown namespaces (`${capture.foo}`, `${SCOPE.bar}`, anything
-    /// the lexer doesn't recognise) pass through verbatim — the strict
-    /// typo guard only fires inside known namespaces. Future additive
-    /// namespaces land without breaking existing TOML.
+    /// Unknown namespaces (`${capture.foo}`, `${SCOPE.bar}`, anything the lexer doesn't recognise)
+    /// pass through verbatim — the strict typo guard only fires inside known namespaces. Future
+    /// additive namespaces land without breaking existing TOML.
     #[test]
     fn unknown_namespace_passes_through_as_literal() {
         for s in [
@@ -912,16 +865,15 @@ mod tests {
 
     #[test]
     fn mixed_specter_and_env_namespaces() {
-        // Operator mixes both namespaces in one argv slot — each
-        // resolves independently into its own ArgPart.
+        // Operator mixes both namespaces in one argv slot — each resolves independently into its
+        // own ArgPart.
         assert_eq!(
             parts(&parse_arg("${specter.path}-${env.USER:-anon}").unwrap()),
             vec![ph(Placeholder::Path), lit("-"), env("USER", Some("anon")),]
         );
     }
 
-    /// Two `${env.…}` placeholders adjacent — no separator, no
-    /// confused parsing.
+    /// Two `${env.…}` placeholders adjacent — no separator, no confused parsing.
     #[test]
     fn adjacent_env_var_placeholders() {
         assert_eq!(
@@ -930,9 +882,8 @@ mod tests {
         );
     }
 
-    /// `$${env.HOME}` — the `$$` escape consumes the leading `$`,
-    /// leaving a literal `$` followed by `{env.HOME}` as plain bytes.
-    /// Matches the existing `$${specter.path}` escape contract.
+    /// `$${env.HOME}` — the `$$` escape consumes the leading `$`, leaving a literal `$` followed by
+    /// `{env.HOME}` as plain bytes. Matches the existing `$${specter.path}` escape contract.
     #[test]
     fn double_dollar_then_env_namespace_escapes_namespace() {
         assert_eq!(
@@ -950,9 +901,8 @@ mod tests {
             let _ = parse_arg(&s);
         }
 
-        /// Bare `$<name>` — regardless of casing, digits, underscores —
-        /// passes through verbatim. The lexer never opens a placeholder
-        /// without the `${specter.` prefix.
+        /// Bare `$<name>` — regardless of casing, digits, underscores — passes through verbatim.
+        /// The lexer never opens a placeholder without the `${specter.` prefix.
         #[test]
         fn prop_bare_dollar_name_literal(name in "[A-Za-z_][A-Za-z0-9_]{0,15}") {
             let s = format!("${name}");
@@ -960,8 +910,8 @@ mod tests {
             prop_assert_eq!(parts(&parsed), vec![lit(&s)]);
         }
 
-        /// `${VAR}` braced shell-style expansion is literal regardless of
-        /// content — only `${specter.…}` and `${env.…}` open a namespace.
+        /// `${VAR}` braced shell-style expansion is literal regardless of content — only
+        /// `${specter.…}` and `${env.…}` open a namespace.
         #[test]
         fn prop_brace_non_namespace_literal(name in "[A-Z_][A-Z0-9_]{0,15}") {
             let s = format!("${{{name}}}");
@@ -969,10 +919,9 @@ mod tests {
             prop_assert_eq!(parts(&parsed), vec![lit(&s)]);
         }
 
-        /// Every well-formed `${env.<NAME>}` round-trips to an
-        /// `ArgPart::EnvVar { name, default: None }`. Captures the
-        /// grammar invariant: no parse path produces a Placeholder or
-        /// Literal for these inputs.
+        /// Every well-formed `${env.<NAME>}` round-trips to an `ArgPart::EnvVar { name, default:
+        /// None }`. Captures the grammar invariant: no parse path produces a Placeholder or Literal
+        /// for these inputs.
         #[test]
         fn prop_env_var_no_default_round_trips(name in "[A-Za-z_][A-Za-z0-9_]{0,15}") {
             let s = format!("${{env.{name}}}");

@@ -15,10 +15,9 @@ fn load(name: &str) -> Config {
 
 #[test]
 fn three_watches_against_minimal_classifies_each_correctly() {
-    // minimal.toml has watch `build` with actions = [{ exec = ["echo"] }].
-    // three-watches.toml has `build` (cmd ["make"]), `lint`, `fmt`.
-    // small → big: `build`'s command changed (params-only ⇒ modified_params),
-    // `lint`+`fmt` are added.
+    // minimal.toml has watch `build` with actions = [{ exec = ["echo"] }]. three-watches.toml has
+    // `build` (cmd ["make"]), `lint`, `fmt`. small → big: `build`'s command changed (params-only ⇒
+    // modified_params), `lint`+`fmt` are added.
     let small = load("minimal.toml");
     let big = load("three-watches.toml");
 

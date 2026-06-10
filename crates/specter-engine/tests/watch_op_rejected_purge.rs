@@ -97,12 +97,10 @@ fn anchor_claim_purged_then_detach_no_panic() {
 
 #[test]
 fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
-    // Two Profiles share an anchor classified as Dir. WatchOpRejected
-    // on the anchor purges the kernel watch and runs
-    // `finalize_anchor_lost` for each anchor claimer; the helper's
-    // `discard_anchor_state` must clear `Profile.kind` on each so any
-    // subsequent recovery uses the safe Subtree fallback rather than
-    // misrouting against a recreated anchor of a different shape.
+    // Two Profiles share an anchor classified as Dir. WatchOpRejected on the anchor purges the
+    // kernel watch and runs `finalize_anchor_lost` for each anchor claimer; the helper's
+    // `discard_anchor_state` must clear `Profile.kind` on each so any subsequent recovery uses the
+    // safe Subtree fallback rather than misrouting against a recreated anchor of a different shape.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
@@ -112,9 +110,8 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
     let t_q = t_p + SETTLE * 4;
     let (_sid_q, pid_q) =
         attach_subtree_root(&mut e, "Q", root, MAX_SETTLE + Duration::from_secs(1), t_q);
-    // Each Seed burst is driven on its own settle timer (the helper
-    // steps only the named Profile's Batching id), so P and Q never
-    // cross-fire despite sharing the anchor.
+    // Each Seed burst is driven on its own settle timer (the helper steps only the named Profile's
+    // Batching id), so P and Q never cross-fire despite sharing the anchor.
     let _ = seed_to_idle(&mut e, pid_p, &dir_snap(&[]), t_p);
     let _ = seed_to_idle(&mut e, pid_q, &dir_snap(&[]), t_q);
 
@@ -144,8 +141,8 @@ fn anchor_claim_purged_for_two_profiles_clears_kind_on_both() {
         e.profiles().get(pid_q).unwrap().kind().is_none(),
         "Q's kind cleared by WatchOpRejected anchor purge",
     );
-    // Sibling assertion that the existing claim-side discipline is
-    // also intact — both anchor claims released, counter zeroed.
+    // Sibling assertion that the existing claim-side discipline is also intact — both anchor claims
+    // released, counter zeroed.
     assert_eq!(
         e.profiles().get(pid_p).unwrap().anchor_claim(),
         AnchorClaim::None,
@@ -212,13 +209,11 @@ fn anchor_claim_purged_for_two_profiles_each_no_panic() {
         },
         Instant::now(),
     );
-    // No panic. Profile P (Idle, anchor_claim=None) is left alone by
-    // covering_profiles' filter (P.state is Idle, not Pending, so it
-    // would normally route through finalize_anchor_lost). But wait —
-    // covering_profiles still includes Idle Profiles. The route is
-    // finalize_anchor_lost(P) which is a no-op because anchor_claim is
-    // already None (post-purge) and was_active is false (state is Idle,
-    // not Active). So it's a clean no-op.
+    // No panic. Profile P (Idle, anchor_claim=None) is left alone by covering_profiles' filter
+    // (P.state is Idle, not Pending, so it would normally route through finalize_anchor_lost). But
+    // wait — covering_profiles still includes Idle Profiles. The route is finalize_anchor_lost(P)
+    // which is a no-op because anchor_claim is already None (post-purge) and was_active is false
+    // (state is Idle, not Active). So it's a clean no-op.
     let _ = p_seed_vanished;
 
     // Detach P; assert clean reap.
@@ -297,10 +292,9 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
 
 #[test]
 fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
-    // Pending Profile with prefix=/foo. WatchOpRejected at /foo purges
-    // the descent. Profile transitions to Idle without an anchor;
-    // operator restart is required to recover (no automatic recovery
-    // via parent's StructureChanged because the parent watch failed).
+    // Pending Profile with prefix=/foo. WatchOpRejected at /foo purges the descent. Profile
+    // transitions to Idle without an anchor; operator restart is required to recover (no automatic
+    // recovery via parent's StructureChanged because the parent watch failed).
     let mut e = Engine::new();
     let foo = e
         .tree_mut()
@@ -417,19 +411,17 @@ const fn watch_op_rejected_input(resource: ResourceId) -> Input {
     }
 }
 
-/// `WatchOpRejected` on a Promoter's literal-prefix descent watch
-/// purges the descent claim: cancels any in-flight descent probe,
-/// transitions the Promoter to `Active{empty}`, and emits a
-/// `PromoterClaimPurged{DescentPrefix}` diagnostic. Mirrors the
-/// existing Profile-side `descent_prefix_claim_purged_*` test.
+/// `WatchOpRejected` on a Promoter's literal-prefix descent watch purges the descent claim: cancels
+/// any in-flight descent probe, transitions the Promoter to `Active{empty}`, and emits a
+/// `PromoterClaimPurged{DescentPrefix}` diagnostic. Mirrors the existing Profile-side
+/// `descent_prefix_claim_purged_*` test.
 #[test]
 fn watch_op_rejected_purges_promoter_descent_prefix() {
     let mut e = Engine::new();
     let now = Instant::now();
 
-    // Pre-place /a; attach a Promoter with literal prefix /a/b.
-    // /a/b doesn't exist, so the Promoter starts in PrefixPending(/a, [b])
-    // and emits a descent probe at /a.
+    // Pre-place /a; attach a Promoter with literal prefix /a/b. /a/b doesn't exist, so the Promoter
+    // starts in PrefixPending(/a, [b]) and emits a descent probe at /a.
     let a = pre_place_dir(&mut e, &["a"]);
     let attach_out = e.step(
         Input::AttachPromoter(promoter_req("logs", "/a/b/*.log")),
@@ -489,19 +481,17 @@ fn watch_op_rejected_purges_promoter_descent_prefix() {
     );
 }
 
-/// `WatchOpRejected` on a Promoter's `Active` proxy purges the proxy
-/// claim: clears the proxies map entry, drops the back-ref, and emits
-/// a `PromoterClaimPurged{ActiveProxy}` diagnostic. The Promoter
-/// remains `Active` (other proxies of the same Promoter, if any,
-/// stay; here the single proxy goes empty).
+/// `WatchOpRejected` on a Promoter's `Active` proxy purges the proxy claim: clears the proxies map
+/// entry, drops the back-ref, and emits a `PromoterClaimPurged{ActiveProxy}` diagnostic. The
+/// Promoter remains `Active` (other proxies of the same Promoter, if any, stay; here the single
+/// proxy goes empty).
 #[test]
 fn watch_op_rejected_purges_promoter_active_proxy() {
     let mut e = Engine::new();
     let now = Instant::now();
 
-    // Pre-place /a; attach a Promoter at `/a/*.log`. literal prefix
-    // is /a; first proxy registers at /a (immediate-Active mode);
-    // an enumeration probe is in flight.
+    // Pre-place /a; attach a Promoter at `/a/*.log`. literal prefix is /a; first proxy registers at
+    // /a (immediate-Active mode); an enumeration probe is in flight.
     let a = pre_place_dir(&mut e, &["a"]);
     let attach_out = e.step(Input::AttachPromoter(promoter_req("logs", "/a/*.log")), now);
     let qid = specter_core::testkit::first_attached_promoter(&attach_out)
@@ -512,10 +502,9 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
     }
     assert_eq!(e.tree().get(a).unwrap().watch_demand(), 1);
 
-    // Drain the initial enumeration probe so `pending_enumeration_target`
-    // is None — keeps the WatchOpRejected purge's cancel-first
-    // contract test focused on the proxy-claim path. Empty entries:
-    // no promotions, no sub-proxies.
+    // Drain the initial enumeration probe so `pending_enumeration_target` is None — keeps the
+    // WatchOpRejected purge's cancel-first contract test focused on the proxy-claim path. Empty
+    // entries: no promotions, no sub-proxies.
     let enum_corr = e
         .pending_probe_for(ProbeOwner::Promoter(qid))
         .expect("enumeration probe in flight");
@@ -560,21 +549,18 @@ fn watch_op_rejected_purges_promoter_active_proxy() {
     assert!(purged, "PromoterClaimPurged{{ActiveProxy}} emitted");
 }
 
-/// `WatchOpRejected` on a resource co-claimed by both a Profile
-/// (descent prefix) and a Promoter (Active proxy): both purge loops
-/// run; both `ProfileClaimPurged{DescentPrefix}` and
-/// `PromoterClaimPurged{ActiveProxy}` diagnostics emit; the clamp
-/// runs once. Pinning this composition closes the
-/// "anchor of P, watch-root-parent of Q, descent prefix of R, proxy
-/// of S" multi-actor co-claim story for the Promoter half of the
-/// fan-out.
+/// `WatchOpRejected` on a resource co-claimed by both a Profile (descent prefix) and a Promoter
+/// (Active proxy): both purge loops run; both `ProfileClaimPurged{DescentPrefix}` and
+/// `PromoterClaimPurged{ActiveProxy}` diagnostics emit; the clamp runs once. Pinning this
+/// composition closes the "anchor of P, watch-root-parent of Q, descent prefix of R, proxy of S"
+/// multi-actor co-claim story for the Promoter half of the fan-out.
 #[test]
 fn watch_op_rejected_purges_co_claimed_resource() {
     let mut e = Engine::new();
     let now = Instant::now();
 
-    // Pre-place /a so the Promoter goes immediate-Active with a proxy
-    // at /a. The proxy contributes +1 STRUCTURE.
+    // Pre-place /a so the Promoter goes immediate-Active with a proxy at /a. The proxy contributes
+    // +1 STRUCTURE.
     let a = pre_place_dir(&mut e, &["a"]);
     let promoter_attach_out = e.step(Input::AttachPromoter(promoter_req("logs", "/a/*.log")), now);
     let qid = specter_core::testkit::first_attached_promoter(&promoter_attach_out)
@@ -596,9 +582,8 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         now,
     );
 
-    // Attach a Profile at /a/foo. /a exists; /a/foo does not. The
-    // Profile starts in Pending(/a, ["foo"]) and bumps /a's STRUCTURE
-    // contribution to 2.
+    // Attach a Profile at /a/foo. /a exists; /a/foo does not. The Profile starts in Pending(/a,
+    // ["foo"]) and bumps /a's STRUCTURE contribution to 2.
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Path(PathBuf::from("/a/foo")),
@@ -620,9 +605,8 @@ fn watch_op_rejected_purges_co_claimed_resource() {
     ));
     assert_eq!(e.tree().get(a).unwrap().watch_demand(), 2);
 
-    // Reject the kernel watch at /a — co-claimed by Profile descent
-    // (ClaimKind::DescentPrefix) and Promoter active proxy
-    // (PromoterClaimKind::ActiveProxy).
+    // Reject the kernel watch at /a — co-claimed by Profile descent (ClaimKind::DescentPrefix) and
+    // Promoter active proxy (PromoterClaimKind::ActiveProxy).
     let purge_out = e.step(watch_op_rejected_input(a), now);
 
     // Counter zeroed; both claims released.
@@ -641,8 +625,8 @@ fn watch_op_rejected_purges_co_claimed_resource() {
         s @ PromoterState::PrefixPending(_) => panic!("expected Active, got {s:?}"),
     }
 
-    // Both diagnostics emit, exactly once each. The umbrella
-    // `WatchOpRejected` diagnostic also fires once.
+    // Both diagnostics emit, exactly once each. The umbrella `WatchOpRejected` diagnostic also
+    // fires once.
     let profile_purge = purge_out
         .diagnostics
         .iter()

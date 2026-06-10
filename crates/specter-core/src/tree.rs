@@ -1,20 +1,16 @@
 //! `Tree` — Resource container and slot semantics.
 //!
-//! `Tree` is a **single-arena** structure: a generational `SlotMap` of
-//! `Resource`s plus a flat `roots: Vec`. Each `Resource` owns its
-//! `segment` string outright, so there is no second store to keep in
-//! lockstep with the slotmap — a slot's identity and its name live and
-//! die together, and the only growth class is bounded by the live-slot
-//! count.
+//! `Tree` is a **single-arena** structure: a generational `SlotMap` of `Resource`s plus a flat
+//! `roots: Vec`. Each `Resource` owns its `segment` string outright, so there is no second store to
+//! keep in lockstep with the slotmap — a slot's identity and its name live and die together, and
+//! the only growth class is bounded by the live-slot count.
 //!
-//! Identity model: `(parent, segment)` is the slot. The same
-//! `(parent, segment)` always returns the same `ResourceId`. Recreation
-//! at a vacated-but-anchored slot reuses the id; a reaped slot mints a
-//! fresh id on the next `ensure_root` / `ensure_child`.
+//! Identity model: `(parent, segment)` is the slot. The same `(parent, segment)` always returns the
+//! same `ResourceId`. Recreation at a vacated-but-anchored slot reuses the id; a reaped slot mints
+//! a fresh id on the next `ensure_root` / `ensure_child`.
 //!
-//! The public API is `&str`-keyed; segment lookups are
-//! allocation-free (`CompactString: Borrow<str>`), and a segment string
-//! is materialised only when a slot is actually created.
+//! The public API is `&str`-keyed; segment lookups are allocation-free (`CompactString:
+//! Borrow<str>`), and a segment string is materialised only when a slot is actually created.
 
 use crate::ids::ResourceId;
 use crate::op::WatchOp;
@@ -27,49 +23,39 @@ use std::sync::Arc;
 
 /// Synthetic segment representing the filesystem root `/`.
 ///
-/// Every absolute attach decomposes to `[FS_ROOT_SEGMENT, ...real
-/// segments]` so descents have a guaranteed-existing starting ancestor;
-/// [`Tree::path_of`] reconstructs an absolute path back out because
-/// `PathBuf::push("/")` resets the buffer to absolute. The constant
-/// lives in [`Tree`] rather than in the engine because the path-parsing
-/// invariant it anchors is Tree-shape, not engine-lifecycle.
+/// Every absolute attach decomposes to `[FS_ROOT_SEGMENT, ...real segments]` so descents have a
+/// guaranteed-existing starting ancestor; [`Tree::path_of`] reconstructs an absolute path back out
+/// because `PathBuf::push("/")` resets the buffer to absolute. The constant lives in [`Tree`]
+/// rather than in the engine because the path-parsing invariant it anchors is Tree-shape, not
+/// engine-lifecycle.
 pub const FS_ROOT_SEGMENT: &str = "/";
 
-/// Reason an absolute-path attach request was rejected during
-/// [`Tree::parse_attach_path`].
+/// Reason an absolute-path attach request was rejected during [`Tree::parse_attach_path`].
 ///
-/// The engine maps each variant to
-/// [`crate::Diagnostic::AttachPathInvalid`] with the matching
-/// [`Self::hint`] string so operators see the same actionable message
-/// regardless of which caller (static config, hot reload, fuzz harness)
-/// produced the malformed path.
+/// The engine maps each variant to [`crate::Diagnostic::AttachPathInvalid`] with the matching
+/// [`Self::hint`] string so operators see the same actionable message regardless of which caller
+/// (static config, hot reload, fuzz harness) produced the malformed path.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum AttachPathError {
-    /// `is_absolute() == false`. The bin's `canonicalize_lenient`
-    /// already filters this for static config, but hot-reload diff
-    /// applies and direct test fixtures can bypass the bin's discipline.
+    /// `is_absolute() == false`. The bin's `canonicalize_lenient` already filters this for static
+    /// config, but hot-reload diff applies and direct test fixtures can bypass the bin's discipline.
     NotAbsolute,
-    /// At least one path segment is not valid UTF-8. The Tree's segment
-    /// store is `&str`-keyed; non-UTF-8 segments are unrepresentable.
+    /// At least one path segment is not valid UTF-8. The Tree's segment store is `&str`-keyed;
+    /// non-UTF-8 segments are unrepresentable.
     NonUtf8,
-    /// A `Component::Normal` payload was the empty string. Defensive
-    /// against hand-constructed `PathBuf`s — `PathBuf` itself normalises
-    /// repeated separators.
+    /// A `Component::Normal` payload was the empty string. Defensive against hand-constructed
+    /// `PathBuf`s — `PathBuf` itself normalises repeated separators.
     EmptyComponent,
-    /// `.` or `..` component. Caller must canonicalise before attach;
-    /// the Tree's `(parent, segment)` identity model has no notion of
-    /// dot navigation.
+    /// `.` or `..` component. Caller must canonicalise before attach; the Tree's `(parent,
+    /// segment)` identity model has no notion of dot navigation.
     Relative,
-    /// `Component::Prefix(_)` — a Windows path prefix (e.g. `C:`).
-    /// Unix v1 only.
+    /// `Component::Prefix(_)` — a Windows path prefix (e.g. `C:`). Unix v1 only.
     WindowsPrefix,
 }
 
 impl AttachPathError {
-    /// Static operator-facing message paired with each rejection variant.
-    /// A stable contract: the engine's
-    /// [`crate::Diagnostic::AttachPathInvalid`] hint quotes these
-    /// strings verbatim.
+    /// Static operator-facing message paired with each rejection variant. A stable contract: the
+    /// engine's [`crate::Diagnostic::AttachPathInvalid`] hint quotes these strings verbatim.
     #[must_use]
     pub const fn hint(self) -> &'static str {
         match self {
@@ -82,17 +68,14 @@ impl AttachPathError {
     }
 }
 
-/// Structural-precondition fault from [`Tree::ensure_child`] /
-/// [`Tree::ensure_path`].
+/// Structural-precondition fault from [`Tree::ensure_child`] / [`Tree::ensure_path`].
 ///
-/// Production callers reach both methods with live parents and
-/// non-empty inputs by construction and `.expect()` the `Result`; the
-/// typed variant pins which invariant the caller is claiming.
+/// Production callers reach both methods with live parents and non-empty inputs by construction and
+/// `.expect()` the `Result`; the typed variant pins which invariant the caller is claiming.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum StaleIdError {
-    /// [`Tree::ensure_child`] called with a `parent` that doesn't name
-    /// a live slot (reaped, never-existed, or the slotmap null key
-    /// `ResourceId::default()`).
+    /// [`Tree::ensure_child`] called with a `parent` that doesn't name a live slot (reaped,
+    /// never-existed, or the slotmap null key `ResourceId::default()`).
     StaleParent(ResourceId),
 
     /// [`Tree::ensure_path`] called with `components.is_empty()`.
@@ -104,13 +87,12 @@ pub enum StaleIdError {
 /// **Type invariants** (enforced by the sole constructor):
 /// - `segments()` is non-empty.
 /// - `segments()[0] == FS_ROOT_SEGMENT`.
-/// - Every other `segments()[i]` is a non-empty UTF-8 string containing
-///   no path separators, no `.` / `..`, and no Windows prefix.
+/// - Every other `segments()[i]` is a non-empty UTF-8 string containing no path separators, no `.`
+///   / `..`, and no Windows prefix.
 ///
-/// Downstream consumers (`Engine::materialize_path_or_pending`,
-/// `Engine::attach_sub_inner`'s descent setup) take `&TreePath` and
-/// rely on these invariants without re-checking. The opaque field
-/// guarantees the only producer is the parser.
+/// Downstream consumers (`Engine::materialize_path_or_pending`, `Engine::attach_sub_inner`'s
+/// descent setup) take `&TreePath` and rely on these invariants without re-checking. The opaque
+/// field guarantees the only producer is the parser.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct TreePath {
     segments: Vec<CompactString>,
@@ -129,8 +111,8 @@ impl TreePath {
         self.segments.len()
     }
 
-    /// Always `false` by type invariant. Method present for API
-    /// completeness so clippy's `len_without_is_empty` is happy.
+    /// Always `false` by type invariant. Method present for API completeness so clippy's
+    /// `len_without_is_empty` is happy.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
         false
@@ -149,41 +131,35 @@ impl Tree {
         Self::default()
     }
 
-    /// Parse an absolute, UTF-8 attach path into a validated
-    /// [`TreePath`]. `Component::RootDir` lowers to the synthetic
-    /// [`FS_ROOT_SEGMENT`] so the engine has a single shared root for
-    /// every absolute attach; [`Tree::path_of`] reconstructs an absolute
-    /// path on the way back out (`PathBuf::push("/")` resets to absolute).
+    /// Parse an absolute, UTF-8 attach path into a validated [`TreePath`]. `Component::RootDir`
+    /// lowers to the synthetic [`FS_ROOT_SEGMENT`] so the engine has a single shared root for every
+    /// absolute attach; [`Tree::path_of`] reconstructs an absolute path on the way back out
+    /// (`PathBuf::push("/")` resets to absolute).
     ///
-    /// Rejection categories (each maps to a distinct
-    /// [`AttachPathError`] variant — see [`AttachPathError::hint`]):
+    /// Rejection categories (each maps to a distinct [`AttachPathError`] variant — see
+    /// [`AttachPathError::hint`]):
     /// - non-absolute paths;
     /// - paths containing non-UTF-8 bytes;
     /// - relative components (`.` / `..`);
     /// - Windows path prefixes;
-    /// - empty path segments (defense-in-depth against hand-constructed
-    ///   `PathBuf`s — `PathBuf` itself normalises double separators).
+    /// - empty path segments (defense-in-depth against hand-constructed `PathBuf`s — `PathBuf`
+    ///   itself normalises double separators).
     ///
-    /// **Why on [`Tree`].** The validated invariants — non-empty,
-    /// root-anchored, segment shape — are Tree-shape invariants, not
-    /// engine-lifecycle invariants. The parser lives next to the type
-    /// that consumes the result (`Tree::ensure_child`, `Tree::lookup`) so a
-    /// future core-side path constructor can produce `TreePath`s without
-    /// borrowing engine code.
+    /// **Why on [`Tree`].** The validated invariants — non-empty, root-anchored, segment shape —
+    /// are Tree-shape invariants, not engine-lifecycle invariants. The parser lives next to the
+    /// type that consumes the result (`Tree::ensure_child`, `Tree::lookup`) so a future core-side
+    /// path constructor can produce `TreePath`s without borrowing engine code.
     ///
-    /// **Post-condition.** On `Ok`, `path.segments()` is non-empty and
-    /// `path.segments()[0] == FS_ROOT_SEGMENT`; downstream callers rely
-    /// on both invariants without re-checking.
+    /// **Post-condition.** On `Ok`, `path.segments()` is non-empty and `path.segments()[0] ==
+    /// FS_ROOT_SEGMENT`; downstream callers rely on both invariants without re-checking.
     pub fn parse_attach_path(path: &Path) -> Result<TreePath, AttachPathError> {
         if !path.is_absolute() {
             return Err(AttachPathError::NotAbsolute);
         }
 
-        // Single upfront UTF-8 check on the whole path. On Unix,
-        // `Path::to_str` returns `Some` iff every byte is valid UTF-8;
-        // a `Some` result means every `Component::Normal`'s byte-slice
-        // is also UTF-8. The loop body's `to_str().expect(...)` is
-        // sound under this precondition.
+        // Single upfront UTF-8 check on the whole path. On Unix, `Path::to_str` returns `Some` iff
+        // every byte is valid UTF-8; a `Some` result means every `Component::Normal`'s byte-slice
+        // is also UTF-8. The loop body's `to_str().expect(...)` is sound under this precondition.
         if path.to_str().is_none() {
             return Err(AttachPathError::NonUtf8);
         }
@@ -208,11 +184,10 @@ impl Tree {
             }
         }
 
-        // `is_absolute()` guarantees `Component::RootDir` was emitted,
-        // which puts `FS_ROOT_SEGMENT` at `segments[0]`. The TreePath
-        // type invariant rests on this; the assertion pins the contract
-        // against future regressions or hand-constructed paths that
-        // confuse the components iterator.
+        // `is_absolute()` guarantees `Component::RootDir` was emitted, which puts `FS_ROOT_SEGMENT`
+        // at `segments[0]`. The TreePath type invariant rests on this; the assertion pins the
+        // contract against future regressions or hand-constructed paths that confuse the components
+        // iterator.
         debug_assert!(
             !segments.is_empty() && segments[0].as_str() == FS_ROOT_SEGMENT,
             "Tree::parse_attach_path post-condition: absolute path → segments[0] == FS_ROOT_SEGMENT",
@@ -221,14 +196,12 @@ impl Tree {
         Ok(TreePath { segments })
     }
 
-    /// Walk `components` root-down, ensuring each segment. Non-leaf
-    /// components default to [`ResourceRole::DescentScaffold`] on
-    /// creation; the leaf takes `leaf_role`. Existing slots' roles are
-    /// preserved (role-on-creation contract).
+    /// Walk `components` root-down, ensuring each segment. Non-leaf components default to
+    /// [`ResourceRole::DescentScaffold`] on creation; the leaf takes `leaf_role`. Existing slots'
+    /// roles are preserved (role-on-creation contract).
     ///
-    /// Returns [`StaleIdError::EmptyComponents`] iff `components` is
-    /// empty. Production callers pass [`TreePath::segments`] (non-empty
-    /// by type invariant) and `.expect()` the `Result`.
+    /// Returns [`StaleIdError::EmptyComponents`] iff `components` is empty. Production callers pass
+    /// [`TreePath::segments`] (non-empty by type invariant) and `.expect()` the `Result`.
     pub fn ensure_path(
         &mut self,
         components: &[&str],
@@ -257,22 +230,18 @@ impl Tree {
         Ok(cur)
     }
 
-    /// Promote a `DescentScaffold`-roled slot to `new_role`. No-op if
-    /// the slot is already `User` / `WatchRootParent` (preserves the
-    /// existing role — never demote a real role to its scaffold
+    /// Promote a `DescentScaffold`-roled slot to `new_role`. No-op if the slot is already `User` /
+    /// `WatchRootParent` (preserves the existing role — never demote a real role to its scaffold
     /// origin) or if the slot is stale.
     ///
-    /// Captures the common attach/promoter pattern:
-    /// > "a slot that came from `ensure_path` as a scaffold has now
-    /// > acquired a real purpose (anchor of a User Profile, parent of
-    /// > one, or proxy of a Promoter) — flip its tag for diagnostic
-    /// > clarity."
+    /// Captures the common attach/promoter pattern: > "a slot that came from `ensure_path` as a
+    /// scaffold has now > acquired a real purpose (anchor of a User Profile, parent of > one, or
+    /// proxy of a Promoter) — flip its tag for diagnostic > clarity."
     ///
-    /// Role is metadata: retention runs through the structural
-    /// claimants on [`Resource::has_anchors`] (`children`, `profiles`,
-    /// `proxy_promoters`, `contributions`), so the tag mutation is
-    /// observer-only. The helper exists to keep the four-line "get +
-    /// role-match + role-write" idiom from drifting across call sites.
+    /// Role is metadata: retention runs through the structural claimants on
+    /// [`Resource::has_anchors`] (`children`, `profiles`, `proxy_promoters`, `contributions`), so
+    /// the tag mutation is observer-only. The helper exists to keep the four-line "get + role-match
+    /// + role-write" idiom from drifting across call sites.
     pub fn promote_scaffold(&mut self, id: ResourceId, new_role: ResourceRole) {
         if let Some(r) = self.nodes.get_mut(id)
             && matches!(r.role, ResourceRole::DescentScaffold)
@@ -281,49 +250,43 @@ impl Tree {
         }
     }
 
-    /// Set the probed kind on the slot. No-op for stale `id`. The engine
-    /// calls this from `reconcile::create_child`, `descent::dispatch`,
-    /// and the entry-validate path inside reconcile — every site that
-    /// has just observed the inode and classified it. Mirrors the
-    /// `Resource.kind` field's `pub(crate)` visibility (see the
-    /// rustdoc on [`crate::Resource`]).
+    /// Set the probed kind on the slot. No-op for stale `id`. The engine calls this from
+    /// `reconcile::create_child`, `descent::dispatch`, and the entry-validate path inside reconcile
+    /// — every site that has just observed the inode and classified it. Mirrors the `Resource.kind`
+    /// field's `pub(crate)` visibility (see the rustdoc on [`crate::Resource`]).
     pub fn set_kind(&mut self, id: ResourceId, kind: ResourceKind) {
         if let Some(r) = self.nodes.get_mut(id) {
             r.kind = kind;
         }
     }
 
-    /// Path of a freshly-created root: a single pushed segment built as
-    /// `PathBuf::new().push(seg)`, so `PathBuf::push`'s absolute-segment
-    /// replace semantics apply.
+    /// Path of a freshly-created root: a single pushed segment built as `PathBuf::new().push(seg)`,
+    /// so `PathBuf::push`'s absolute-segment replace semantics apply.
     fn build_root_path(seg: &str) -> Arc<Path> {
         let mut pb = PathBuf::new();
         pb.push(seg);
         Arc::from(pb.as_path())
     }
 
-    /// Path of a freshly-created child: the parent's materialised path
-    /// with `seg` pushed. Equivalent by induction to the root→child
-    /// segment join the old `path_of` walked — the parent's `path` is
-    /// itself `join(root..=parent)` by construction, so pushing `seg`
-    /// extends it to `join(root..=child)`. `parent` is guaranteed live
-    /// (the caller's stale check ran first); the `&self` borrow of the
-    /// parent slot ends at the `to_path_buf` clone, before any `&mut`.
+    /// Path of a freshly-created child: the parent's materialised path with `seg` pushed.
+    /// Equivalent by induction to the root→child segment join the old `path_of` walked — the
+    /// parent's `path` is itself `join(root..=parent)` by construction, so pushing `seg` extends it
+    /// to `join(root..=child)`. `parent` is guaranteed live (the caller's stale check ran first);
+    /// the `&self` borrow of the parent slot ends at the `to_path_buf` clone, before any `&mut`.
     fn build_child_path(&self, parent: ResourceId, seg: &str) -> Arc<Path> {
         let mut pb = self.nodes[parent].path.to_path_buf();
         pb.push(seg);
         Arc::from(pb.as_path())
     }
 
-    /// Get-or-create a root-level Resource. Idempotent on `segment`;
-    /// `role` applies only on creation. Infallible — a root has no
-    /// parent to be stale against.
+    /// Get-or-create a root-level Resource. Idempotent on `segment`; `role` applies only on
+    /// creation. Infallible — a root has no parent to be stale against.
     pub fn ensure_root(&mut self, segment: &str, role: ResourceRole) -> ResourceId {
         if let Some(id) = self.find_root(segment) {
             return id;
         }
-        // Slot creation is the only place the segment string is
-        // materialised; the idempotent hit above keys on `&str`.
+        // Slot creation is the only place the segment string is materialised; the idempotent hit
+        // above keys on `&str`.
         let path = Self::build_root_path(segment);
         let id = self.nodes.insert(Resource::new(
             None,
@@ -335,17 +298,14 @@ impl Tree {
         id
     }
 
-    /// Get-or-create a Resource at `(parent, segment)`. Idempotent;
-    /// `role` applies only on creation. Returns
-    /// [`StaleIdError::StaleParent`] iff `parent` doesn't name a live
-    /// slot (reaped, never-existed, or `ResourceId::default()`).
+    /// Get-or-create a Resource at `(parent, segment)`. Idempotent; `role` applies only on
+    /// creation. Returns [`StaleIdError::StaleParent`] iff `parent` doesn't name a live slot
+    /// (reaped, never-existed, or `ResourceId::default()`).
     ///
-    /// Production callers `.expect()` the `Result` with a panic
-    /// message pinning whichever structural invariant keeps `parent`
-    /// alive. The stale-parent check and the idempotent existing-child
-    /// hit both run before any segment string is materialised, so a
-    /// faulted or idempotent call neither allocates nor mutates the
-    /// Tree.
+    /// Production callers `.expect()` the `Result` with a panic message pinning whichever
+    /// structural invariant keeps `parent` alive. The stale-parent check and the idempotent
+    /// existing-child hit both run before any segment string is materialised, so a faulted or
+    /// idempotent call neither allocates nor mutates the Tree.
     pub fn ensure_child(
         &mut self,
         parent: ResourceId,
@@ -358,12 +318,10 @@ impl Tree {
         if let Some(child_id) = self.nodes[parent].children.get(segment).copied() {
             return Ok(child_id);
         }
-        // Slot creation — the only place the segment string is
-        // materialised. Two owned copies are structurally required:
-        // the slot owns its `segment`, and the parent's `children`
-        // map owns the key. The key cannot borrow the child's field
-        // (self-referential), so the duplication is intentional; for
-        // typical ≤24-byte segments both are inline, allocation-free.
+        // Slot creation — the only place the segment string is materialised. Two owned copies are
+        // structurally required: the slot owns its `segment`, and the parent's `children` map owns
+        // the key. The key cannot borrow the child's field (self-referential), so the duplication
+        // is intentional; for typical ≤24-byte segments both are inline, allocation-free.
         let key = CompactString::from(segment);
         let path = self.build_child_path(parent, segment);
         let id = self
@@ -373,11 +331,9 @@ impl Tree {
         Ok(id)
     }
 
-    /// Look up a Resource at `(parent, segment)`. Returns `None` when
-    /// no slot exists there — never created, or created and since
-    /// reaped. The lookup is allocation-free: `segment: &str` keys the
-    /// `BTreeMap<CompactString, _>` directly via `CompactString:
-    /// Borrow<str>`.
+    /// Look up a Resource at `(parent, segment)`. Returns `None` when no slot exists there — never
+    /// created, or created and since reaped. The lookup is allocation-free: `segment: &str` keys
+    /// the `BTreeMap<CompactString, _>` directly via `CompactString: Borrow<str>`.
     #[must_use]
     pub fn lookup(&self, parent: Option<ResourceId>, segment: &str) -> Option<ResourceId> {
         match parent {
@@ -386,9 +342,8 @@ impl Tree {
         }
     }
 
-    /// Linear scan of `roots` comparing the stored segment string.
-    /// `roots` holds one element in production (the synthetic FS
-    /// root); the scan is `&str`-vs-`&str` (`CompactString::as_str`),
+    /// Linear scan of `roots` comparing the stored segment string. `roots` holds one element in
+    /// production (the synthetic FS root); the scan is `&str`-vs-`&str` (`CompactString::as_str`),
     /// impl-independent and allocation-free.
     fn find_root(&self, segment: &str) -> Option<ResourceId> {
         self.roots.iter().copied().find(|&r| {
@@ -398,53 +353,39 @@ impl Tree {
         })
     }
 
-    /// Finalise the slot's kernel-watch protocol, emitting the closing
-    /// `Unwatch` the slot still owes, and reset `kind` to `Unknown`. The
-    /// slot is then ready for [`Tree::try_reap`] (no back-refs) or for
-    /// re-entry via [`Tree::ensure_child`] (back-refs persist).
+    /// Finalise the slot's kernel-watch protocol, emitting the closing `Unwatch` the slot still
+    /// owes, and reset `kind` to `Unknown`. The slot is then ready for [`Tree::try_reap`] (no
+    /// back-refs) or for re-entry via [`Tree::ensure_child`] (back-refs persist).
     ///
-    /// `vacate` is the **protocol terminus** for the per-Resource
-    /// contributions map: the `Unwatch` branch is the symmetric closer
-    /// for the matching `add_watch` 0→non-empty emission. Subsequent
-    /// `sub_watch` calls from co-resident bookkeeping short-circuit on
-    /// the post-clear state (absent key).
+    /// `vacate` is the **protocol terminus** for the per-Resource contributions map: the `Unwatch`
+    /// branch is the symmetric closer for the matching `add_watch` 0→non-empty emission. Subsequent
+    /// `sub_watch` calls from co-resident bookkeeping short-circuit on the post-clear state (absent
+    /// key).
     ///
     /// **Two production callers, one role for the defensive branch:**
     ///
-    /// - [`Tree::try_reap`] folds `vacate` into the slot lifecycle
-    ///   terminus, calling it for every slot entering the cascade.
-    ///   The reap precondition (`has_anchors() == false`) guarantees
-    ///   `contributions` is empty here, so the `Unwatch` branch is
-    ///   dormant — the closing op was already emitted by the per-key
-    ///   `sub_watch` that drained the slot.
-    /// - The engine's kernel-watch rejection path
-    ///   (`on_watch_op_rejected`) invokes `vacate` directly to
-    ///   atomically tear down every contribution at the rejected slot.
-    ///   The `Unwatch` branch is load-bearing here: it closes the
-    ///   kernel-watch protocol, and the per-claimer cleanup loops that
-    ///   follow run `sub_watch`, which short-circuits on the
-    ///   post-vacate state (absent key) and relies on `vacate` to have
-    ///   emitted the closing op. This is the only standalone-clamp call
-    ///   site; every other reap path flows through `try_reap`'s
-    ///   folded-in vacate.
+    /// - [`Tree::try_reap`] folds `vacate` into the slot lifecycle terminus, calling it for every
+    ///   slot entering the cascade. The reap precondition (`has_anchors() == false`) guarantees
+    ///   `contributions` is empty here, so the `Unwatch` branch is dormant — the closing op was
+    ///   already emitted by the per-key `sub_watch` that drained the slot.
+    /// - The engine's kernel-watch rejection path (`on_watch_op_rejected`) invokes `vacate` directly
+    ///   to atomically tear down every contribution at the rejected slot. The `Unwatch` branch is
+    ///   load-bearing here: it closes the kernel-watch protocol, and the per-claimer cleanup loops
+    ///   that follow run `sub_watch`, which short-circuits on the post-vacate state (absent key) and
+    ///   relies on `vacate` to have emitted the closing op. This is the only standalone-clamp call
+    ///   site; every other reap path flows through `try_reap`'s folded-in vacate.
     ///
-    /// Emitting the op unconditionally (rather than asserting on
-    /// preconditions) makes any future caller correct by construction:
-    /// misuse degrades to "one extra closing op" — the Sensor's
-    /// idempotence absorbs the duplicate — rather than to a panic or
-    /// a silent kernel-watch leak.
+    /// Emitting the op unconditionally (rather than asserting on preconditions) makes any future
+    /// caller correct by construction: misuse degrades to "one extra closing op" — the Sensor's
+    /// idempotence absorbs the duplicate — rather than to a panic or a silent kernel-watch leak.
     ///
-    /// **What survives.** Children, profiles, the `proxy_promoters`
-    /// back-ref, `role`, `parent`, and `segment` all stay untouched.
-    /// Of those, children, profiles, and `proxy_promoters` (alongside
-    /// the contributions map, which `vacate` itself just cleared)
-    /// drive [`Resource::has_anchors`] — i.e., they decide whether a
-    /// follow-on [`Tree::try_reap`] keeps the slot alive. Role is
-    /// metadata: it records *what* the slot is (User anchor /
-    /// watch-root parent / descent scaffold) for diagnostic clarity,
-    /// but does not anchor the slot. Vacated-but-anchored slots are
-    /// recreated by [`Tree::ensure_child`] returning the same
-    /// [`ResourceId`].
+    /// **What survives.** Children, profiles, the `proxy_promoters` back-ref, `role`, `parent`, and
+    /// `segment` all stay untouched. Of those, children, profiles, and `proxy_promoters` (alongside
+    /// the contributions map, which `vacate` itself just cleared) drive [`Resource::has_anchors`] —
+    /// i.e., they decide whether a follow-on [`Tree::try_reap`] keeps the slot alive. Role is
+    /// metadata: it records *what* the slot is (User anchor / watch-root parent / descent scaffold)
+    /// for diagnostic clarity, but does not anchor the slot. Vacated-but-anchored slots are
+    /// recreated by [`Tree::ensure_child`] returning the same [`ResourceId`].
     pub fn vacate(&mut self, id: ResourceId, out: &mut StepOutput) {
         let Some(r) = self.nodes.get_mut(id) else {
             return;
@@ -455,39 +396,29 @@ impl Tree {
         r.kind = ResourceKind::Unknown;
     }
 
-    /// Remove the slot iff [`Resource::has_anchors`] is `false`, then
-    /// cascade the same check up the parent chain. Returns `true` iff the
-    /// **caller's** slot was removed (the cascade past it is best-effort
-    /// hygiene); the caller's `ResourceId` becomes stale on a `true`
-    /// return.
+    /// Remove the slot iff [`Resource::has_anchors`] is `false`, then cascade the same check up the
+    /// parent chain. Returns `true` iff the **caller's** slot was removed (the cascade past it is
+    /// best-effort hygiene); the caller's `ResourceId` becomes stale on a `true` return.
     ///
-    /// **Slot lifecycle terminus.** Each cascade iteration calls
-    /// [`Tree::vacate`] as the closing-emission step before unlinking
-    /// and removing the slot. The slot is reapable here by definition
-    /// (`has_anchors() == false`), so the contributions map is empty by
-    /// invariant — `vacate`'s `Unwatch` branch is dormant (the per-key
-    /// `sub_watch` that drained the slot already emitted it). Folding
-    /// `vacate` into the terminus keeps the kernel-watch protocol
-    /// closed by construction for any future caller that reaches reap
-    /// with a stranded contribution, regardless of caller.
+    /// **Slot lifecycle terminus.** Each cascade iteration calls [`Tree::vacate`] as the
+    /// closing-emission step before unlinking and removing the slot. The slot is reapable here by
+    /// definition (`has_anchors() == false`), so the contributions map is empty by invariant —
+    /// `vacate`'s `Unwatch` branch is dormant (the per-key `sub_watch` that drained the slot
+    /// already emitted it). Folding `vacate` into the terminus keeps the kernel-watch protocol
+    /// closed by construction for any future caller that reaches reap with a stranded contribution,
+    /// regardless of caller.
     ///
-    /// **Why cascade.** Reaping a slot unlinks it from its parent's
-    /// `children` map. If the parent now has no anchors of its own —
-    /// no remaining children, no profiles, no Promoter back-refs, no
-    /// contributions — it is also orphaned and should reap. Without the
-    /// cascade, every release helper that targets a leaf slot would
-    /// silently leave its now-orphaned ancestor chain behind, since
-    /// `try_reap` is a local op. The cascade is structurally bounded by
-    /// the tree depth from `id` to its root (filesystem path depth,
-    /// single-digit in practice) and gated at every step by
-    /// `has_anchors`, so it never tears down a slot still claimed by
-    /// some live owner.
+    /// **Why cascade.** Reaping a slot unlinks it from its parent's `children` map. If the parent
+    /// now has no anchors of its own — no remaining children, no profiles, no Promoter back-refs,
+    /// no contributions — it is also orphaned and should reap. Without the cascade, every release
+    /// helper that targets a leaf slot would silently leave its now-orphaned ancestor chain behind,
+    /// since `try_reap` is a local op. The cascade is structurally bounded by the tree depth from
+    /// `id` to its root (filesystem path depth, single-digit in practice) and gated at every step
+    /// by `has_anchors`, so it never tears down a slot still claimed by some live owner.
     ///
-    /// **Cascade stop conditions.** The walk halts as soon as it
-    /// encounters a parent that still has anchors (the normal case — a
-    /// sibling child, a co-resident Profile / Promoter, or another
-    /// contribution keeps it alive) or reaches a root (parent =
-    /// `None`).
+    /// **Cascade stop conditions.** The walk halts as soon as it encounters a parent that still has
+    /// anchors (the normal case — a sibling child, a co-resident Profile / Promoter, or another
+    /// contribution keeps it alive) or reaches a root (parent = `None`).
     pub fn try_reap(&mut self, id: ResourceId, out: &mut StepOutput) -> bool {
         let Some(r) = self.nodes.get(id) else {
             return false;
@@ -498,36 +429,28 @@ impl Tree {
 
         let mut current = id;
         loop {
-            // Invariant: `nodes[current]` is live and `has_anchors() ==
-            // false`. The first iteration enters here from the gate
-            // above; subsequent iterations enter after the cascade
-            // check below.
+            // Invariant: `nodes[current]` is live and `has_anchors() == false`. The first iteration
+            // enters here from the gate above; subsequent iterations enter after the cascade check
+            // below.
             //
-            // `vacate` is the closing-emission step of the slot
-            // lifecycle terminus. `contributions` is empty here
-            // (has_anchors's contract), so the `Unwatch` branch is
-            // dormant; the `kind` reset is harmless on the
-            // about-to-be-removed slot.
+            // `vacate` is the closing-emission step of the slot lifecycle terminus. `contributions`
+            // is empty here (has_anchors's contract), so the `Unwatch` branch is dormant; the
+            // `kind` reset is harmless on the about-to-be-removed slot.
             self.vacate(current, out);
 
-            // Take ownership of the slot out of the slotmap. `parent`
-            // and `segment` are then read off the owned `Resource`
-            // with no clone — the segment string dies *with* the slot,
-            // which is exactly why there is no unbounded store of
-            // segment strings by construction. `.expect` pins the loop
-            // invariant: a
-            // panic here would mean a non-live `current` reached the
-            // body, which the gate above and the cascade re-test below
-            // structurally forbid.
+            // Take ownership of the slot out of the slotmap. `parent` and `segment` are then read off
+            // the owned `Resource` with no clone — the segment string dies *with* the slot, which is
+            // exactly why there is no unbounded store of segment strings by construction. `.expect`
+            // pins the loop invariant: a panic here would mean a non-live `current` reached the body,
+            // which the gate above and the cascade re-test below structurally forbid.
             let removed = self
                 .nodes
                 .remove(current)
                 .expect("try_reap loop invariant: `current` names a live slot");
 
-            // Unlink the removed slot from its parent's `children` map
-            // (by segment key — allocation-free via `Borrow<str>`) or
-            // from the `roots` vector. Reading the key off the owned
-            // `removed` keeps it clear of the `&mut self.nodes` borrow.
+            // Unlink the removed slot from its parent's `children` map (by segment key —
+            // allocation-free via `Borrow<str>`) or from the `roots` vector. Reading the key off
+            // the owned `removed` keeps it clear of the `&mut self.nodes` borrow.
             match removed.parent {
                 Some(p) => {
                     if let Some(parent_node) = self.nodes.get_mut(p) {
@@ -539,8 +462,8 @@ impl Tree {
                 }
             }
 
-            // Advance to the parent and re-test. Stop on roots or when
-            // the parent still carries an anchor.
+            // Advance to the parent and re-test. Stop on roots or when the parent still carries an
+            // anchor.
             let Some(parent_id) = removed.parent else {
                 return true;
             };
@@ -559,20 +482,17 @@ impl Tree {
         self.nodes.get(id)?.parent
     }
 
-    /// Iterator over strict ancestors (excludes `id` itself). Yields parent,
-    /// grandparent, ..., until a root is reached.
+    /// Iterator over strict ancestors (excludes `id` itself). Yields parent, grandparent, ...,
+    /// until a root is reached.
     pub fn ancestors(&self, id: ResourceId) -> impl Iterator<Item = ResourceId> + '_ {
         std::iter::successors(self.parent(id), move |&p| self.parent(p))
     }
 
-    /// Iterator over direct children of `id`. Order is the
-    /// `BTreeMap`'s iteration order over the child segment strings —
-    /// **lexicographic by segment**: deterministic and local to this
-    /// directory, with no dependency on global Tree attach history.
-    /// Consumers that need a different order sort at the point of use;
-    /// every current consumer is an exhaustive traversal or a
-    /// set-membership filter, so the order is correctness-irrelevant
-    /// to them.
+    /// Iterator over direct children of `id`. Order is the `BTreeMap`'s iteration order over the
+    /// child segment strings — **lexicographic by segment**: deterministic and local to this
+    /// directory, with no dependency on global Tree attach history. Consumers that need a different
+    /// order sort at the point of use; every current consumer is an exhaustive traversal or a
+    /// set-membership filter, so the order is correctness-irrelevant to them.
     pub fn children_ids(&self, id: ResourceId) -> impl Iterator<Item = ResourceId> + '_ {
         self.nodes
             .get(id)
@@ -582,23 +502,20 @@ impl Tree {
 
     /// Segment string of `id`, if the slot exists.
     ///
-    /// The returned `&str` borrows the slot's owned `segment`, so it
-    /// is invalidated by any `&mut self` Tree mutation or a reap of
-    /// `id` — the borrow checker enforces this, so a name-then-mutate
-    /// misuse is a compile error rather than a runtime hazard.
+    /// The returned `&str` borrows the slot's owned `segment`, so it is invalidated by any `&mut
+    /// self` Tree mutation or a reap of `id` — the borrow checker enforces this, so a
+    /// name-then-mutate misuse is a compile error rather than a runtime hazard.
     #[must_use]
     pub fn name(&self, id: ResourceId) -> Option<&str> {
         Some(self.nodes.get(id)?.segment.as_str())
     }
 
-    /// The slot's materialised path (`Arc::clone` of the field set at
-    /// construction). O(1): a slotmap get plus a refcount bump — no
-    /// parent walk, no allocation.
+    /// The slot's materialised path (`Arc::clone` of the field set at construction). O(1): a
+    /// slotmap get plus a refcount bump — no parent walk, no allocation.
     ///
-    /// Stays honestly `Option`: `None` iff `id` is stale. The Resource
-    /// owns its path, so a stale id has no Resource and therefore no
-    /// path — hence `None`. The empty-path-as-`Vanished` wire sentinel
-    /// is an engine-boundary concern, not this accessor's.
+    /// Stays honestly `Option`: `None` iff `id` is stale. The Resource owns its path, so a stale id
+    /// has no Resource and therefore no path — hence `None`. The empty-path-as-`Vanished` wire
+    /// sentinel is an engine-boundary concern, not this accessor's.
     #[must_use]
     pub fn path_of(&self, id: ResourceId) -> Option<Arc<Path>> {
         self.nodes.get(id).map(|r| Arc::clone(&r.path))
@@ -696,8 +613,8 @@ mod tests {
         assert_eq!(err, Err(StaleIdError::StaleParent(parent)));
     }
 
-    /// The slotmap null key collides with reaped-id semantics — surface
-    /// the disjointness hazard a sentinel return would hide.
+    /// The slotmap null key collides with reaped-id semantics — surface the disjointness hazard a
+    /// sentinel return would hide.
     #[test]
     fn ensure_child_returns_stale_parent_for_default_id() {
         let mut tree = Tree::new();
@@ -728,9 +645,8 @@ mod tests {
         assert_eq!(err, Err(StaleIdError::EmptyComponents));
     }
 
-    /// Throwaway `StepOutput` for tests that don't inspect the emitted
-    /// ops. Keeping it as a tiny helper keeps the in-file tests below
-    /// terse.
+    /// Throwaway `StepOutput` for tests that don't inspect the emitted ops. Keeping it as a tiny
+    /// helper keeps the in-file tests below terse.
     fn discard() -> StepOutput {
         StepOutput::default()
     }
@@ -817,22 +733,19 @@ mod tests {
             prop_assert_eq!(actual.as_deref(), Some(expected.as_path()));
         }
 
-        /// Forward regression guard for the segment-store growth
-        /// class. Populate N distinct-segment children under a parent
-        /// kept alive by a contribution (so the reap cascade cannot
-        /// take the parent out from under the assertion), then reap
-        /// each child. Every child slot and every children-map entry
-        /// must return to the pre-population baseline. Together with
-        /// the structural guarantee — the Tree holds no second segment
-        /// store, a compile-time fact — this pins the unbounded-growth
-        /// class shut: segment strings die with their slots by
+        /// Forward regression guard for the segment-store growth class. Populate N distinct-segment
+        /// children under a parent kept alive by a contribution (so the reap cascade cannot take
+        /// the parent out from under the assertion), then reap each child. Every child slot and
+        /// every children-map entry must return to the pre-population baseline. Together with the
+        /// structural guarantee — the Tree holds no second segment store, a compile-time fact —
+        /// this pins the unbounded-growth class shut: segment strings die with their slots by
         /// construction, with no reclaim API required.
         #[test]
         fn prop_reap_releases_segment(
             raw in proptest::collection::vec(any_segment(), 1..16),
         ) {
-            // `ensure_child` is idempotent on segment; dedup so the
-            // population count is exactly the distinct-segment count.
+            // `ensure_child` is idempotent on segment; dedup so the population count is exactly the
+            // distinct-segment count.
             let mut segs: Vec<String> = raw;
             segs.sort();
             segs.dedup();
@@ -857,18 +770,17 @@ mod tests {
                 prop_assert!(tree.try_reap(id, &mut discard()));
             }
 
-            // Every child slot released; the parent retained only by
-            // its contribution; the children map fully drained.
+            // Every child slot released; the parent retained only by its contribution; the children
+            // map fully drained.
             prop_assert_eq!(tree.len(), base_len);
             prop_assert!(tree.get(parent).unwrap().children().is_empty());
         }
     }
 
-    /// Role is metadata: a vacated `WatchRootParent` slot with no
-    /// structural anchors (children, profiles, proxy back-refs,
-    /// contributions) is reapable. The previous behavior — role alone
-    /// pinning the slot — leaked watch-root parent slots after every
-    /// Profile reap. See `has_anchors`'s rustdoc for the contract.
+    /// Role is metadata: a vacated `WatchRootParent` slot with no structural anchors (children,
+    /// profiles, proxy back-refs, contributions) is reapable. The previous behavior — role alone
+    /// pinning the slot — leaked watch-root parent slots after every Profile reap. See
+    /// `has_anchors`'s rustdoc for the contract.
     #[test]
     fn try_reap_succeeds_for_role_only_slot_post_vacate() {
         let mut tree = Tree::new();
@@ -894,12 +806,11 @@ mod tests {
         assert!(tree.get(parent).is_some());
     }
 
-    /// Reaping a leaf unlinks it from its parent's `children`, which may
-    /// orphan the parent. The cascade walks up and reaps each ancestor
-    /// that no longer has any anchors, stopping at the first ancestor
-    /// that still does. With `ensure_path`'s `DescentScaffold`
-    /// intermediates anchored only by the chain to a now-reaped leaf, the
-    /// cascade frees the whole prefix on a single `try_reap` of the leaf.
+    /// Reaping a leaf unlinks it from its parent's `children`, which may orphan the parent. The
+    /// cascade walks up and reaps each ancestor that no longer has any anchors, stopping at the
+    /// first ancestor that still does. With `ensure_path`'s `DescentScaffold` intermediates
+    /// anchored only by the chain to a now-reaped leaf, the cascade frees the whole prefix on a
+    /// single `try_reap` of the leaf.
     #[test]
     fn try_reap_cascades_through_role_only_ancestors() {
         let mut tree = Tree::new();
@@ -928,9 +839,8 @@ mod tests {
         assert!(tree.is_empty());
     }
 
-    /// The cascade stops at the first ancestor that still has any
-    /// anchor — here, a sibling subtree. The intermediate ancestor
-    /// shared by the reaped leaf and the surviving sibling stays alive.
+    /// The cascade stops at the first ancestor that still has any anchor — here, a sibling subtree.
+    /// The intermediate ancestor shared by the reaped leaf and the surviving sibling stays alive.
     #[test]
     fn try_reap_cascade_halts_at_anchored_ancestor() {
         let mut tree = Tree::new();
@@ -958,9 +868,8 @@ mod tests {
         assert!(tree.get(root).is_some());
     }
 
-    /// Multi-claimant retention: a slot anchored only by a co-resident
-    /// contribution survives the reap of one claim. The cascade does not
-    /// fire because the slot itself never becomes empty.
+    /// Multi-claimant retention: a slot anchored only by a co-resident contribution survives the
+    /// reap of one claim. The cascade does not fire because the slot itself never becomes empty.
     #[test]
     fn try_reap_refused_with_live_contribution() {
         let mut tree = Tree::new();
@@ -1002,17 +911,16 @@ mod tests {
 
     #[test]
     fn vacate_clears_kind_keeps_children_on_drained_slot() {
-        // Drained slot (no contributions): vacate's contract is "reset
-        // `kind` to Unknown on a slot whose contributions map has
-        // already been drained". Children, role, and back-refs survive.
+        // Drained slot (no contributions): vacate's contract is "reset `kind` to Unknown on a slot
+        // whose contributions map has already been drained". Children, role, and back-refs survive.
         let mut tree = Tree::new();
         let parent = tree.ensure_root("p", ResourceRole::User);
         let _child = tree
             .ensure_child(parent, "c", ResourceRole::User)
             .expect("test live parent");
         tree.set_kind(parent, crate::resource::ResourceKind::Dir);
-        // `contributions` empty by construction (no refcount edges
-        // emitted) — vacate's precondition holds.
+        // `contributions` empty by construction (no refcount edges emitted) — vacate's precondition
+        // holds.
 
         tree.vacate(parent, &mut discard());
 
@@ -1024,17 +932,14 @@ mod tests {
 
     #[test]
     fn vacate_emits_unwatch_when_contributions_nonempty() {
-        // Defensive branch: a future caller that reaches vacate
-        // without first draining the contributions map would have
-        // left a live FD orphaned at the sensor. The protocol-closer
-        // contract emits the `Unwatch` and clears the map atomically,
-        // so the misuse degrades to "one extra closing op" rather
-        // than a panic / silent kernel-watch leak.
+        // Defensive branch: a future caller that reaches vacate without first draining the
+        // contributions map would have left a live FD orphaned at the sensor. The protocol-closer
+        // contract emits the `Unwatch` and clears the map atomically, so the misuse degrades to
+        // "one extra closing op" rather than a panic / silent kernel-watch leak.
         let mut tree = Tree::new();
         let r = tree.ensure_root("x", ResourceRole::User);
-        // Simulate a stranded contribution by inserting directly via
-        // the typed mutator — the production path goes through
-        // `engine::refcounts::add_watch`.
+        // Simulate a stranded contribution by inserting directly via the typed mutator — the
+        // production path goes through `engine::refcounts::add_watch`.
         tree.get_mut(r).unwrap().insert_contribution(
             crate::resource::ContribKey::ProfileAnchor(crate::ids::ProfileId::default()),
             crate::sub::ClassSet::STRUCTURE,
@@ -1053,12 +958,10 @@ mod tests {
 
     #[test]
     fn vacate_emits_one_unwatch_for_multi_contribution_slot() {
-        // The protocol terminus clears the whole contributions map
-        // atomically and emits exactly one closing `Unwatch` on the
-        // non-empty → empty edge, regardless of how many distinct
-        // contribution keys the slot carried. Exercises the
-        // `clear_contributions() > 0` branch with a refcount of 2 —
-        // distinct from the single-key
+        // The protocol terminus clears the whole contributions map atomically and emits exactly one
+        // closing `Unwatch` on the non-empty → empty edge, regardless of how many distinct
+        // contribution keys the slot carried. Exercises the `clear_contributions() > 0` branch with
+        // a refcount of 2 — distinct from the single-key
         // `vacate_emits_unwatch_when_contributions_nonempty`.
         let mut tree = Tree::new();
         let r = tree.ensure_root("x", ResourceRole::User);
@@ -1185,19 +1088,17 @@ mod tests {
 
     #[test]
     fn promote_scaffold_flips_descent_scaffold_to_new_role() {
-        // The materialization path: a descent-walk scaffold acquires a
-        // real purpose and its tag flips for diagnostic clarity.
+        // The materialization path: a descent-walk scaffold acquires a real purpose and its tag
+        // flips for diagnostic clarity.
         let mut tree = Tree::new();
         let id = tree.ensure_root("x", ResourceRole::DescentScaffold);
         tree.promote_scaffold(id, ResourceRole::User);
         assert!(matches!(tree.get(id).unwrap().role, ResourceRole::User));
     }
 
-    /// Anchor materialization relies on this strictly-safer property: a
-    /// slot a co-resident peer already promoted to a real role (`User`
-    /// or `WatchRootParent`) is never clobbered back by a later
-    /// promotion. Pinning it keeps the conditional-promote contract
-    /// regression-protected.
+    /// Anchor materialization relies on this strictly-safer property: a slot a co-resident peer
+    /// already promoted to a real role (`User` or `WatchRootParent`) is never clobbered back by a
+    /// later promotion. Pinning it keeps the conditional-promote contract regression-protected.
     #[test]
     fn promote_scaffold_is_noop_on_an_already_real_role() {
         let mut tree = Tree::new();
@@ -1232,9 +1133,8 @@ mod tests {
 
     // ===== parse_attach_path =====
     //
-    // The parser is the seam between user-supplied `PathBuf` (bin's
-    // TOML loader, hot-reload diff, test fixtures) and the Tree's
-    // `&str` segment world. The post-condition (`segments[0] ==
+    // The parser is the seam between user-supplied `PathBuf` (bin's TOML loader, hot-reload diff,
+    // test fixtures) and the Tree's `&str` segment world. The post-condition (`segments[0] ==
     // FS_ROOT_SEGMENT`) is load-bearing for every downstream consumer.
 
     use super::{AttachPathError, FS_ROOT_SEGMENT};
@@ -1274,11 +1174,9 @@ mod tests {
 
     #[test]
     fn parse_attach_path_empty_is_not_absolute() {
-        // An empty `Path` is non-absolute on Unix; the gate fires before
-        // any component-level work — the diagnostic's hint is "absolute"
-        // rather than "empty". `EmptyComponent` is reserved for the
-        // hand-constructed paths where `Component::Normal` carries an
-        // empty `OsStr`.
+        // An empty `Path` is non-absolute on Unix; the gate fires before any component-level work —
+        // the diagnostic's hint is "absolute" rather than "empty". `EmptyComponent` is reserved for
+        // the hand-constructed paths where `Component::Normal` carries an empty `OsStr`.
         assert_eq!(
             Tree::parse_attach_path(Path::new("")),
             Err(AttachPathError::NotAbsolute),
@@ -1325,11 +1223,10 @@ mod tests {
 
     #[test]
     fn attach_path_error_hint_matches_pre_refactor_strings() {
-        // The hint strings are operator-visible (driver logs them and the
-        // engine forwards them via `Diagnostic::AttachPathInvalid.hint`).
-        // Pinning the exact substrings keeps the bin's grep / dashboard
-        // matchers stable across the move from engine::decompose_attach_path
-        // to Tree::parse_attach_path.
+        // The hint strings are operator-visible (driver logs them and the engine forwards them via
+        // `Diagnostic::AttachPathInvalid.hint`). Pinning the exact substrings keeps the bin's grep
+        // / dashboard matchers stable across the move from engine::decompose_attach_path to
+        // Tree::parse_attach_path.
         assert!(
             AttachPathError::NotAbsolute.hint().contains("absolute"),
             "NotAbsolute hint must include 'absolute'",

@@ -1,12 +1,10 @@
 //! Tmp diff file lifecycle (`SPECTER_DIFF_PATH`).
 //!
-//! Path: `temp_dir.join("specter-{actuator_pid}-{corr:016x}.diff")`.
-//! Actuator-pid is used (not the child pid; child pid isn't known until
-//! after `Command::spawn`, but the env var must be set *before* spawn).
-//! Correlation is hex-padded to 16 chars for stable lexicographic
-//! ordering. Both `temp_dir` and `actuator_pid` are captured once at
-//! actuator startup and held on `pool::state::ActuatorState` — no
-//! per-Effect `getenv` or `getpid` syscall on the spawn path.
+//! Path: `temp_dir.join("specter-{actuator_pid}-{corr:016x}.diff")`. Actuator-pid is used (not the
+//! child pid; child pid isn't known until after `Command::spawn`, but the env var must be set
+//! *before* spawn). Correlation is hex-padded to 16 chars for stable lexicographic ordering. Both
+//! `temp_dir` and `actuator_pid` are captured once at actuator startup and held on
+//! `pool::state::ActuatorState` — no per-Effect `getenv` or `getpid` syscall on the spawn path.
 //!
 //! Format (one entry per line, tab-separated, in this order):
 //!
@@ -18,72 +16,60 @@
 //! renamed_to<TAB><new-rel-path><TAB><inode>
 //! ```
 //!
-//! Each rename emits two consecutive lines (same inode in both, since
-//! renames preserve inode in v1's single-mount probes). Path is
-//! anchor-relative (`EntryRef.segment`); user scripts join with
+//! Each rename emits two consecutive lines (same inode in both, since renames preserve inode in
+//! v1's single-mount probes). Path is anchor-relative (`EntryRef.segment`); user scripts join with
 //! `$SPECTER_ANCHOR` for absolute.
 //!
 //! # Lifecycle
 //!
-//! [`DiffTmpFile::create`] is atomic from the caller's perspective:
-//! either the file is fully written and `sync_data`-flushed (`Ok`),
-//! or no file exists on disk (the `Err` arm runs a rollback unlink
-//! before returning). Callers treating `Err` as "no file to track"
-//! are correct by construction.
+//! [`DiffTmpFile::create`] is atomic from the caller's perspective: either the file is fully written
+//! and `sync_data`-flushed (`Ok`), or no file exists on disk (the `Err` arm runs a rollback unlink
+//! before returning). Callers treating `Err` as "no file to track" are correct by construction.
 //!
-//! The handle is shared across plan steps via `Arc<DiffTmpFile>`:
-//! every `pool::state::RunningJob` / `pool::state::PlanContinuation`
-//! co-owns the Arc, and the last drop — at plan terminus, after every
-//! step has reaped and `pool::state::ActuatorState::terminate_plan` has
-//! returned — fires [`DiffTmpFile::drop`], which unlinks the file
-//! (best-effort, ENOENT-silent). The leak-on-process-crash case
-//! (no `Drop` runs on `process::exit`) is acceptable — a daemon
-//! crash is rare and tmpfiles.d / periodic sweeps catch the orphan.
+//! The handle is shared across plan steps via `Arc<DiffTmpFile>`: every `pool::state::RunningJob` /
+//! `pool::state::PlanContinuation` co-owns the Arc, and the last drop — at plan terminus, after
+//! every step has reaped and `pool::state::ActuatorState::terminate_plan` has returned — fires
+//! [`DiffTmpFile::drop`], which unlinks the file (best-effort, ENOENT-silent). The
+//! leak-on-process-crash case (no `Drop` runs on `process::exit`) is acceptable — a daemon crash is
+//! rare and tmpfiles.d / periodic sweeps catch the orphan.
 //!
 //! # Embedded-delimiter limitation
 //!
-//! v1's sensor walk accepts any filename byte except `/` and NUL —
-//! including `\n` and `\t`. Segments carrying these bytes corrupt both
-//! this file's tab-separated format and the resolver's newline-joined
-//! `SPECTER_{CREATED,DELETED,MODIFIED,RENAMED_FROM,RENAMED_TO,EXCLUDED}`
-//! env vars. Operators with such filenames in watched trees should
-//! parse `SPECTER_DIFF_PATH` records defensively (e.g., a
-//! NUL-terminated reader) or constrain their watch roots. v2 will
-//! switch to NUL-separated env vars and escape-encoded tmp records.
+//! v1's sensor walk accepts any filename byte except `/` and NUL — including `\n` and `\t`.
+//! Segments carrying these bytes corrupt both this file's tab-separated format and the resolver's
+//! newline-joined `SPECTER_{CREATED,DELETED,MODIFIED,RENAMED_FROM,RENAMED_TO,EXCLUDED}` env vars.
+//! Operators with such filenames in watched trees should parse `SPECTER_DIFF_PATH` records
+//! defensively (e.g., a NUL-terminated reader) or constrain their watch roots. v2 will switch to
+//! NUL-separated env vars and escape-encoded tmp records.
 
 use specter_core::{CorrelationId, Diff, EntryRef, Rename};
 use std::io::{self, Write};
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
-/// Creation mode for the diff tmp file. `0o600` is owner read/write
-/// only: the tab-separated body discloses watched-path segments and
-/// inode numbers, and `temp_dir` is a shared location (real `/tmp` on
-/// Linux) that other local users can list. Applied at `open` time, so
-/// the file is never observable at a wider mode.
+/// Creation mode for the diff tmp file. `0o600` is owner read/write only: the tab-separated body
+/// discloses watched-path segments and inode numbers, and `temp_dir` is a shared location (real
+/// `/tmp` on Linux) that other local users can list. Applied at `open` time, so the file is never
+/// observable at a wider mode.
 const DIFF_FILE_MODE: u32 = 0o600;
 
 /// Owned handle to an actuator-materialised diff tmp file.
 ///
-/// Construction succeeds only when the file is fully written and
-/// `sync_data`-flushed; on any I/O error the partially-written file
-/// is rolled back (best-effort unlink) before [`Self::create`]
-/// returns. The handle's `Drop` impl unlinks the file (best-effort,
-/// ENOENT-silent) when the last `Arc<DiffTmpFile>` co-owner is
-/// dropped — see the module docs for the per-plan lifecycle.
+/// Construction succeeds only when the file is fully written and `sync_data`-flushed; on any I/O
+/// error the partially-written file is rolled back (best-effort unlink) before [`Self::create`]
+/// returns. The handle's `Drop` impl unlinks the file (best-effort, ENOENT-silent) when the last
+/// `Arc<DiffTmpFile>` co-owner is dropped — see the module docs for the per-plan lifecycle.
 #[derive(Debug)]
 pub(crate) struct DiffTmpFile {
     path: PathBuf,
 }
 
 impl DiffTmpFile {
-    /// Allocate a path under `temp_dir` and atomically materialise
-    /// the [`Diff`] into it. The file's name follows
-    /// `specter-{actuator_pid}-{correlation:016x}.diff` (hex-padded
-    /// correlation for stable lexicographic ordering across many
-    /// concurrent Effects in the same `temp_dir`). On any I/O error
-    /// during write or `sync_data`, the partial file is rolled back
-    /// via a best-effort unlink before `Err` returns.
+    /// Allocate a path under `temp_dir` and atomically materialise the [`Diff`] into it. The file's
+    /// name follows `specter-{actuator_pid}-{correlation:016x}.diff` (hex-padded correlation for
+    /// stable lexicographic ordering across many concurrent Effects in the same `temp_dir`). On any
+    /// I/O error during write or `sync_data`, the partial file is rolled back via a best-effort
+    /// unlink before `Err` returns.
     pub(crate) fn create(
         temp_dir: &Path,
         actuator_pid: u32,
@@ -100,11 +86,9 @@ impl DiffTmpFile {
         }
     }
 
-    /// Borrow the on-disk path. The returned `&Path` is valid for as
-    /// long as any `Arc<Self>` co-owner of `*self` is alive — the
-    /// resolver borrows for one `resolve_step` call; `Slot::running`
-    /// / `Slot::plan_continue` co-own the Arc across the rest of
-    /// the plan.
+    /// Borrow the on-disk path. The returned `&Path` is valid for as long as any `Arc<Self>`
+    /// co-owner of `*self` is alive — the resolver borrows for one `resolve_step` call;
+    /// `Slot::running` / `Slot::plan_continue` co-own the Arc across the rest of the plan.
     pub(crate) fn path(&self) -> &Path {
         &self.path
     }
@@ -116,8 +100,8 @@ impl Drop for DiffTmpFile {
     }
 }
 
-/// Build the tmp path. Pure function; the caller decides whether to
-/// create the file at the returned location.
+/// Build the tmp path. Pure function; the caller decides whether to create the file at the returned
+/// location.
 fn build_path(temp_dir: &Path, actuator_pid: u32, correlation: CorrelationId) -> PathBuf {
     temp_dir.join(format!(
         "specter-{actuator_pid}-{corr:016x}.diff",
@@ -125,10 +109,9 @@ fn build_path(temp_dir: &Path, actuator_pid: u32, correlation: CorrelationId) ->
     ))
 }
 
-/// Write the [`Diff`] to `path` in the tab-separated format
-/// documented in this module's header, creating `path` at
-/// [`DIFF_FILE_MODE`] (owner-only). The `BufWriter` coalesces the
-/// per-entry `writeln!` calls into one `write` syscall at flush time.
+/// Write the [`Diff`] to `path` in the tab-separated format documented in this module's header,
+/// creating `path` at [`DIFF_FILE_MODE`] (owner-only). The `BufWriter` coalesces the per-entry
+/// `writeln!` calls into one `write` syscall at flush time.
 fn write_inner(path: &Path, diff: &Diff) -> io::Result<()> {
     let f = std::fs::OpenOptions::new()
         .write(true)
@@ -149,8 +132,8 @@ fn write_inner(path: &Path, diff: &Diff) -> io::Result<()> {
     for r in &diff.renamed {
         write_rename(&mut buf, r)?;
     }
-    // `into_inner` flushes the buffer; an IntoInnerError carries the
-    // flush failure as its inner `io::Error`.
+    // `into_inner` flushes the buffer; an IntoInnerError carries the flush failure as its inner
+    // `io::Error`.
     let f = buf
         .into_inner()
         .map_err(std::io::IntoInnerError::into_error)?;
@@ -183,9 +166,8 @@ fn write_rename<W: Write>(w: &mut W, r: &Rename) -> io::Result<()> {
     Ok(())
 }
 
-/// Best-effort unlink. Logs at `warn` on non-`NotFound` errors;
-/// ENOENT (already gone) is silent so the [`DiffTmpFile::drop`]
-/// arm tolerates a concurrent external unlink.
+/// Best-effort unlink. Logs at `warn` on non-`NotFound` errors; ENOENT (already gone) is silent so
+/// the [`DiffTmpFile::drop`] arm tolerates a concurrent external unlink.
 fn unlink_quiet(path: &Path) {
     if let Err(e) = std::fs::remove_file(path)
         && e.kind() != io::ErrorKind::NotFound
@@ -211,12 +193,10 @@ mod tests {
         }
     }
 
-    /// Pins the tmp-dir override and filename pattern: `create` MUST
-    /// use its `temp_dir`, `actuator_pid`, and `correlation` arguments
-    /// to build the on-disk path. A regression that reads from
-    /// `std::env::temp_dir()` or `std::process::id()` would fail this
-    /// test (custom temp_dir + custom pid won't appear in the
-    /// resulting path).
+    /// Pins the tmp-dir override and filename pattern: `create` MUST use its `temp_dir`,
+    /// `actuator_pid`, and `correlation` arguments to build the on-disk path. A regression that
+    /// reads from `std::env::temp_dir()` or `std::process::id()` would fail this test (custom
+    /// temp_dir + custom pid won't appear in the resulting path).
     #[test]
     fn create_uses_provided_temp_dir_pid_and_correlation_in_path() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -299,11 +279,9 @@ mod tests {
         assert!(!body.contains("/abs"));
     }
 
-    /// The diff body discloses watched-path segments and inodes, and
-    /// `temp_dir` is a shared location other local users can list.
-    /// Pins the `0o600` creation mode — a regression to
-    /// `File::create` (mode `0o644`) would leave the file
-    /// world-readable and fail here.
+    /// The diff body discloses watched-path segments and inodes, and `temp_dir` is a shared
+    /// location other local users can list. Pins the `0o600` creation mode — a regression to
+    /// `File::create` (mode `0o644`) would leave the file world-readable and fail here.
     #[test]
     fn create_sets_owner_only_file_mode() {
         use std::os::unix::fs::PermissionsExt;
@@ -318,12 +296,10 @@ mod tests {
         assert_eq!(mode, 0o600, "diff tmp file must be owner read/write only");
     }
 
-    /// On any I/O failure during write, the `Err` arm must roll back
-    /// the partial file before returning. Without rollback, a
-    /// caller treating `Err` as "no file to track" would leak the
-    /// partial. Forcing the failure: pass a `temp_dir` whose
-    /// "directory" is a regular file — the `open` returns ENOTDIR
-    /// on the child path.
+    /// On any I/O failure during write, the `Err` arm must roll back the partial file before
+    /// returning. Without rollback, a caller treating `Err` as "no file to track" would leak the
+    /// partial. Forcing the failure: pass a `temp_dir` whose "directory" is a regular file — the
+    /// `open` returns ENOTDIR on the child path.
     #[test]
     fn create_returns_err_and_leaves_no_file_on_write_failure() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -355,9 +331,8 @@ mod tests {
         assert!(!path.exists(), "file unlinked on drop");
     }
 
-    /// ENOENT-silent contract: a concurrent external unlink between
-    /// create and drop must not panic the daemon thread. Pins the
-    /// `unlink_quiet` arm in [`DiffTmpFile::drop`].
+    /// ENOENT-silent contract: a concurrent external unlink between create and drop must not panic
+    /// the daemon thread. Pins the `unlink_quiet` arm in [`DiffTmpFile::drop`].
     #[test]
     fn drop_silent_when_file_already_unlinked() {
         let dir = tempfile::tempdir().expect("tempdir");

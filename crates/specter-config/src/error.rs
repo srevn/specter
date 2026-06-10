@@ -28,49 +28,39 @@ pub struct ValidationIssue {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum IssueKind {
-    /// User-supplied `[[watch]] name` is empty. Distinct from
-    /// [`Self::EmptyLogPath`] (the file-destination path) and
-    /// [`Self::EmptyPath`] (the watch path) so operator-triage
+    /// User-supplied `[[watch]] name` is empty. Distinct from [`Self::EmptyLogPath`] (the
+    /// file-destination path) and [`Self::EmptyPath`] (the watch path) so operator-triage
     /// categories stay one-to-one with their fields.
     EmptyName,
-    /// `[log] destination = "file"` with no `[log] path` (and no
-    /// `--log-path` CLI override). The `path` field is required iff
-    /// the destination resolves to `File`. Distinct from
+    /// `[log] destination = "file"` with no `[log] path` (and no `--log-path` CLI override). The
+    /// `path` field is required iff the destination resolves to `File`. Distinct from
     /// [`Self::EmptyName`] and [`Self::EmptyPath`].
     EmptyLogPath,
-    /// `[[watch]] path` is empty. Maps from `PathError::Empty`.
-    /// Distinct from [`Self::EmptyName`] and [`Self::EmptyLogPath`] so
-    /// operator-triage categories stay one-to-one with their fields.
+    /// `[[watch]] path` is empty. Maps from `PathError::Empty`. Distinct from [`Self::EmptyName`]
+    /// and [`Self::EmptyLogPath`] so operator-triage categories stay one-to-one with their fields.
     EmptyPath,
-    /// `[[watch]] path` contains a `..` component (anywhere). Maps
-    /// from `PathError::ContainsParentDir`. The operator must supply
-    /// a literal absolute path without parent-dir traversal — `..`
-    /// segments would silently change filesystem semantics by
+    /// `[[watch]] path` contains a `..` component (anywhere). Maps from
+    /// `PathError::ContainsParentDir`. The operator must supply a literal absolute path without
+    /// parent-dir traversal — `..` segments would silently change filesystem semantics by
     /// collapsing one symlink boundary.
     PathContainsParentDir,
-    /// `[[watch]] path` canonicalisation hit a non-`NotFound` `io::Error`
-    /// — `PermissionDenied` (EACCES), symlink loop (ELOOP), non-directory
-    /// in path (ENOTDIR), EIO, etc. Maps from `PathError::Inaccessible`.
-    /// The detail line carries the cursor at fault and the underlying
-    /// error so operators can distinguish the failure class without
-    /// reaching for `strace` / `dtruss`.
+    /// `[[watch]] path` canonicalisation hit a non-`NotFound` `io::Error` — `PermissionDenied`
+    /// (EACCES), symlink loop (ELOOP), non-directory in path (ENOTDIR), EIO, etc. Maps from
+    /// `PathError::Inaccessible`. The detail line carries the cursor at fault and the underlying
+    /// error so operators can distinguish the failure class without reaching for `strace` / `dtruss`.
     PathInaccessible,
-    /// `[[watch]] path` canonicalised to a buffer carrying non-UTF-8
-    /// segments — typically via symlink resolution onto a non-UTF-8
-    /// byte path. Maps from `PathError::NonUtf8`. The engine's
-    /// [`specter_core::Tree::parse_attach_path`] gate would reject the
-    /// path; surface up-front so the validator's contract
-    /// ("ok ⇒ engine accepts the path") holds.
+    /// `[[watch]] path` canonicalised to a buffer carrying non-UTF-8 segments — typically via
+    /// symlink resolution onto a non-UTF-8 byte path. Maps from `PathError::NonUtf8`. The engine's
+    /// [`specter_core::Tree::parse_attach_path`] gate would reject the path; surface up-front so
+    /// the validator's contract ("ok ⇒ engine accepts the path") holds.
     NonUtf8Path,
     /// `actions = []` — at least one entry required.
     EmptyActions,
-    /// `actions[i]` carries no variant (e.g., `actions = [{}]`) — none
-    /// of `exec`, `pipe`, or the conditional triple (`when` / `then` /
-    /// `else`) is set. Exactly one variant must be supplied.
+    /// `actions[i]` carries no variant (e.g., `actions = [{}]`) — none of `exec`, `pipe`, or the
+    /// conditional triple (`when` / `then` / `else`) is set. Exactly one variant must be supplied.
     ActionMissingVariant,
-    /// `actions[i]` carries multiple variants set simultaneously
-    /// (e.g., both `exec` and `pipe`, or `exec` together with the
-    /// conditional triple). The three variants are mutually exclusive.
+    /// `actions[i]` carries multiple variants set simultaneously (e.g., both `exec` and `pipe`, or
+    /// `exec` together with the conditional triple). The three variants are mutually exclusive.
     ActionAmbiguousVariant,
     EmptyArgv,
     NonAbsolute,
@@ -84,69 +74,54 @@ pub enum IssueKind {
     InvalidEnum,
     EventsEmpty,
     DuplicateEventClass,
-    /// Reserved-character violation in the user-supplied `name` field.
-    /// Currently emitted when `name` contains `@`, which the engine
-    /// reserves for the synthesized `<promoter_name>@<resolved_path>`
-    /// shape of dynamic Subs. Distinct from
-    /// [`Self::EmptyName`] (empty name) and [`Self::DuplicateName`].
+    /// Reserved-character violation in the user-supplied `name` field. Currently emitted when
+    /// `name` contains `@`, which the engine reserves for the synthesized
+    /// `<promoter_name>@<resolved_path>` shape of dynamic Subs. Distinct from [`Self::EmptyName`]
+    /// (empty name) and [`Self::DuplicateName`].
     InvalidName,
-    /// `path` of a dynamic `[[watch]]` failed `PatternSpec::parse` —
-    /// any of `**`, `.`/`..`, empty segment, non-absolute, Windows
-    /// prefix, or a malformed glob segment. Detail carries the
+    /// `path` of a dynamic `[[watch]]` failed `PatternSpec::parse` — any of `**`, `.`/`..`, empty
+    /// segment, non-absolute, Windows prefix, or a malformed glob segment. Detail carries the
     /// rendered [`specter_core::PatternError`] message.
     InvalidPattern,
-    /// `actions[i].timeout` is set on an action variant that doesn't
-    /// support a top-level timeout. v1: only `exec` accepts it. Future
-    /// variants (`pipe`, `conditional`) set timeouts on their stages /
-    /// predicate, not on the action itself; this kind catches the
-    /// "operator misread the schema" case at config-load time.
+    /// `actions[i].timeout` is set on an action variant that doesn't support a top-level timeout.
+    /// v1: only `exec` accepts it. Future variants (`pipe`, `conditional`) set timeouts on their
+    /// stages / predicate, not on the action itself; this kind catches the "operator misread the
+    /// schema" case at config-load time.
     TimeoutNotApplicable,
-    /// `actions[i].timeout` is `Some(Duration::ZERO)`. A zero-duration
-    /// timeout would SIGTERM the child before it makes any progress,
-    /// which is almost certainly a typo. Operators wanting "no
+    /// `actions[i].timeout` is `Some(Duration::ZERO)`. A zero-duration timeout would SIGTERM the
+    /// child before it makes any progress, which is almost certainly a typo. Operators wanting "no
     /// deadline" omit the field entirely.
     TimeoutZero,
-    /// `actions[i]` partially sets the conditional triple: `when`
-    /// without `then`, or `then` / `else` without `when`. The grammar
-    /// requires both `when` and `then` together; `else` is optional.
-    /// Fires before the conditional body is validated so per-branch
-    /// errors don't pile on a structurally-broken entry.
+    /// `actions[i]` partially sets the conditional triple: `when` without `then`, or `then` /
+    /// `else` without `when`. The grammar requires both `when` and `then` together; `else` is
+    /// optional. Fires before the conditional body is validated so per-branch errors don't pile on
+    /// a structurally-broken entry.
     ConditionalIncomplete,
-    /// `actions[i]` is a fully-formed conditional with both `then = []`
-    /// and `else = []` (or `else` absent). The predicate would run for
-    /// no observable effect; almost certainly an operator mistake.
-    /// Empty `then` with a non-empty `else` is allowed (equivalent to
-    /// a negated predicate).
+    /// `actions[i]` is a fully-formed conditional with both `then = []` and `else = []` (or `else`
+    /// absent). The predicate would run for no observable effect; almost certainly an operator
+    /// mistake. Empty `then` with a non-empty `else` is allowed (equivalent to a negated predicate).
     EmptyConditional,
-    /// `actions[i].pipe = []` — an empty pipe has no stages to wire,
-    /// so the actuator has nothing to spawn. Almost certainly an
-    /// operator-side typo; the validator surfaces it as a distinct
-    /// kind from [`Self::EmptyArgv`] (which refers to an empty `exec`
-    /// argv inside one slot).
+    /// `actions[i].pipe = []` — an empty pipe has no stages to wire, so the actuator has nothing to
+    /// spawn. Almost certainly an operator-side typo; the validator surfaces it as a distinct kind
+    /// from [`Self::EmptyArgv`] (which refers to an empty `exec` argv inside one slot).
     EmptyPipe,
-    /// `actions[i].pipe = [{ exec = [...] }]` — a single-stage pipe
-    /// degenerates to a plain `exec` with extra TOML structure. The
-    /// validator rejects it so the operator's intent is unambiguous;
+    /// `actions[i].pipe = [{ exec = [...] }]` — a single-stage pipe degenerates to a plain `exec`
+    /// with extra TOML structure. The validator rejects it so the operator's intent is unambiguous;
     /// `exec = [...]` at the action's top level is the right shape.
     SingleStagePipe,
-    /// `actions[i]` nests `when` / `then` / `else` past the validator's
-    /// recursion bound (see `MAX_CONDITIONAL_DEPTH` in `config.rs`).
-    /// Surfaces before any further descent at the offending level —
-    /// keeps adversarial inputs from blowing the validator's stack
-    /// without constraining sensible operator workflows (real configs
-    /// rarely exceed five levels). Independent of the underlying TOML
-    /// parser's own recursion limit (a separate, parser-version-
-    /// dependent concern).
+    /// `actions[i]` nests `when` / `then` / `else` past the validator's recursion bound (see
+    /// `MAX_CONDITIONAL_DEPTH` in `config.rs`). Surfaces before any further descent at the offending
+    /// level — keeps adversarial inputs from blowing the validator's stack without constraining
+    /// sensible operator workflows (real configs rarely exceed five levels). Independent of the
+    /// underlying TOML parser's own recursion limit (a separate, parser-version- dependent concern).
     ConditionalNestedTooDeep,
-    /// Internal lowering invariant violation — an unpatched edge, a
-    /// backward branch, or an out-of-bounds target leaked from the
-    /// lowering pass. Unreachable from a correct lowering, surfaced as
-    /// a validation issue (rather than a panic) so the operator gets a
-    /// loadable error message instead of a crashed process.
+    /// Internal lowering invariant violation — an unpatched edge, a backward branch, or an
+    /// out-of-bounds target leaked from the lowering pass. Unreachable from a correct lowering,
+    /// surfaced as a validation issue (rather than a panic) so the operator gets a loadable error
+    /// message instead of a crashed process.
     ///
-    /// The "program too large" case (> `u32::MAX` ops) is not
-    /// representable: the builder panics on emit as a precondition
-    /// failure (~128 GiB of in-memory state, physically impossible).
+    /// The "program too large" case (> `u32::MAX` ops) is not representable: the builder panics on
+    /// emit as a precondition failure (~128 GiB of in-memory state, physically impossible).
     LoweringInternal,
 }
 
@@ -170,23 +145,19 @@ impl fmt::Display for ConfigError {
                 None => write!(f, "parse error: {message}"),
             },
             Self::Validate { path, errors } => {
-                // `Path::display()` implements `Display`, so write the
-                // header through the formatter directly instead of
-                // routing through a transient `String` allocation. The
-                // `<inline>` literal stands in for the file-less
-                // (string-source) case where `Config::from_str` is the
-                // entry point.
+                // `Path::display()` implements `Display`, so write the header through the formatter
+                // directly instead of routing through a transient `String` allocation. The
+                // `<inline>` literal stands in for the file-less (string-source) case where
+                // `Config::from_str` is the entry point.
                 let n = errors.len();
                 match path {
                     Some(p) => writeln!(f, "{}: {n} validation error(s):", p.display())?,
                     None => writeln!(f, "<inline>: {n} validation error(s):")?,
                 }
-                // Trailing-newline hygiene: `writeln!` every issue except
-                // the last, which uses `write!`. The outer printer adds
-                // the final newline (println / eprintln / tracing).
-                // `split_last` returns `None` only on an empty slice — a
-                // shape the constructor never produces, but we degrade
-                // gracefully (header alone) rather than panic.
+                // Trailing-newline hygiene: `writeln!` every issue except the last, which uses
+                // `write!`. The outer printer adds the final newline (println / eprintln / tracing).
+                // `split_last` returns `None` only on an empty slice — a shape the constructor never
+                // produces, but we degrade gracefully (header alone) rather than panic.
                 if let Some((last, rest)) = errors.split_last() {
                     for e in rest {
                         writeln!(f, "  {e}")?;
@@ -283,14 +254,11 @@ const fn kind_label(k: IssueKind) -> &'static str {
 }
 
 impl ValidationIssue {
-    /// Map a [`specter_core::program::ProgramError`] into the
-    /// validation-issue surface. Every variant collapses to
-    /// [`IssueKind::LoweringInternal`] — none are reachable from a
-    /// correct lowering pass, but the validator captures them as
-    /// issues rather than panicking. The "program too large" case is
-    /// not representable on the source error (the builder panics on
-    /// emit as a precondition failure — physically impossible to
-    /// load).
+    /// Map a [`specter_core::program::ProgramError`] into the validation-issue surface. Every
+    /// variant collapses to [`IssueKind::LoweringInternal`] — none are reachable from a correct
+    /// lowering pass, but the validator captures them as issues rather than panicking. The "program
+    /// too large" case is not representable on the source error (the builder panics on emit as a
+    /// precondition failure — physically impossible to load).
     pub(crate) fn from_program_error(
         e: &specter_core::program::ProgramError,
         watch_index: Option<usize>,

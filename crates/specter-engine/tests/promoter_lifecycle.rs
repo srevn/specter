@@ -1,24 +1,18 @@
 //! Cross-cutting Promoter lifecycle.
 //!
-//! Validates the composition of attach → enumeration → promotion →
-//! anchor materialisation (the dynamic Sub's own descent) →
-//! Seed-burst baseline establishment → reap by driving one
-//! [`Engine`] through every phase in source order with synthetic
-//! [`ProbeResponse`] injections (the same pattern
-//! `crates/specter-engine/src/promoter_tests.rs` uses inline). The
-//! inline tests pin individual phases; this file pins the
-//! diagnostic ordering and registry tear-down that emerge when all
-//! phases compose in one Engine instance.
+//! Validates the composition of attach → enumeration → promotion → anchor materialisation (the
+//! dynamic Sub's own descent) → Seed-burst baseline establishment → reap by driving one [`Engine`]
+//! through every phase in source order with synthetic [`ProbeResponse`] injections (the same
+//! pattern `crates/specter-engine/src/promoter_tests.rs` uses inline). The inline tests pin
+//! individual phases; this file pins the diagnostic ordering and registry tear-down that emerge
+//! when all phases compose in one Engine instance.
 //!
-//! Effect-firing per se is **not** validated here — a fresh
-//! Profile's Seed burst establishes baseline and finishes without
-//! firing (`fire_or_seal`'s `SilentPin` arm); subsequent
-//! Standard bursts on FsEvents are what fire. The Standard-burst
-//! mechanics are exhaustively pinned by `transitions_tests.rs`,
-//! `fire_cycle.rs`, and `burst_pacing.rs`. Composing the
-//! Promoter→dynamic-Sub→Standard-burst flow into a single
-//! integration test would re-test the well-pinned Standard-burst
-//! arms; cross-cutting value is in the Promoter-specific glue.
+//! Effect-firing per se is **not** validated here — a fresh Profile's Seed burst establishes
+//! baseline and finishes without firing (`fire_or_seal`'s `SilentPin` arm); subsequent Standard
+//! bursts on FsEvents are what fire. The Standard-burst mechanics are exhaustively pinned by
+//! `transitions_tests.rs`, `fire_cycle.rs`, and `burst_pacing.rs`. Composing the
+//! Promoter→dynamic-Sub→Standard-burst flow into a single integration test would re-test the
+//! well-pinned Standard-burst arms; cross-cutting value is in the Promoter-specific glue.
 
 use compact_str::CompactString;
 use specter_core::testkit::{anchor_ok, dir_snap, empty_program, file_leaf};
@@ -39,14 +33,12 @@ use std::time::{Duration, Instant};
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 
-/// Pre-place a File leaf at `dir_segments / file_name`. The leaf is
-/// `ResourceKind::File`-typed; intermediate segments materialise as
-/// `User`-roled Dirs via `ensure_path`. Returns the leaf id.
+/// Pre-place a File leaf at `dir_segments / file_name`. The leaf is `ResourceKind::File`-typed;
+/// intermediate segments materialise as `User`-roled Dirs via `ensure_path`. Returns the leaf id.
 ///
-/// The companion to [`pre_place_dir`] for tests that need the dynamic
-/// Sub's anchor to materialise immediately (skipping descent),
-/// putting the Sub straight into `Active(Seed)` with a `BurstDeadline`
-/// timer scheduled at the engine's `now + max_settle`.
+/// The companion to [`pre_place_dir`] for tests that need the dynamic Sub's anchor to materialise
+/// immediately (skipping descent), putting the Sub straight into `Active(Seed)` with a
+/// `BurstDeadline` timer scheduled at the engine's `now + max_settle`.
 fn pre_place_file(e: &mut Engine, dir_segments: &[&str], file_name: &str) -> ResourceId {
     let mut comps = Vec::with_capacity(dir_segments.len() + 2);
     comps.push(FS_ROOT_SEGMENT);
@@ -60,30 +52,26 @@ fn pre_place_file(e: &mut Engine, dir_segments: &[&str], file_name: &str) -> Res
     r
 }
 
-/// Full Promoter lifecycle composition with pre-placed literal
-/// prefix. Validates that every phase composes correctly through
-/// one Engine, with diagnostic ordering pinned at each transition.
+/// Full Promoter lifecycle composition with pre-placed literal prefix. Validates that every phase
+/// composes correctly through one Engine, with diagnostic ordering pinned at each transition.
 ///
 /// Phases:
 /// 1. Attach (immediate-Active mode; no PrefixPending).
 /// 2. Initial enumeration → promote a single match → mint dynamic Sub.
-/// 3. Seed-burst baseline at the matched File anchor (no fire on
-///    no-drift fresh attach). The dynamic Sub's Profile attaches in
-///    Idle and goes immediately to Active(Seed): the enumeration
-///    response already confirmed `foo.log` exists on disk, so the
-///    forward-pass pre-ensures the slot, stamps its kind, and
-///    `attach_sub_inner` takes its immediate-Seed branch — Pending
-///    descent for a dynamic Sub anchor would re-probe the same
-///    prefix only to confirm what enumeration already told us.
+/// 3. Seed-burst baseline at the matched File anchor (no fire on no-drift fresh attach). The
+///    dynamic Sub's Profile attaches in Idle and goes immediately to Active(Seed): the enumeration
+///    response already confirmed `foo.log` exists on disk, so the forward-pass pre-ensures the
+///    slot, stamps its kind, and `attach_sub_inner` takes its immediate-Seed branch — Pending
+///    descent for a dynamic Sub anchor would re-probe the same prefix only to confirm what
+///    enumeration already told us.
 /// 4. Reap Promoter → cascade detach + DynamicSubReaped + PromoterReaped.
 #[test]
 fn full_lifecycle_attach_promote_seed_reap() {
     let mut e = Engine::new();
 
-    // Pre-place /var/log so attach lands in immediate-Active. The
-    // PrefixPending → descent advance path is exhaustively pinned
-    // by inline `promoter_tests.rs::descent_*`; this test focuses
-    // on the post-Active composition.
+    // Pre-place /var/log so attach lands in immediate-Active. The PrefixPending → descent advance
+    // path is exhaustively pinned by inline `promoter_tests.rs::descent_*`; this test focuses on
+    // the post-Active composition.
     let var_log = pre_place_dir(&mut e, &["var", "log"]);
 
     let now = Instant::now();
@@ -116,9 +104,8 @@ fn full_lifecycle_attach_promote_seed_reap() {
 
     // ---- enumeration response → promotion ----
     //
-    // Inject a directory listing with one *.log match (foo.log) and
-    // one non-matching entry (bar.txt). The match promotes; the
-    // non-match doesn't.
+    // Inject a directory listing with one *.log match (foo.log) and one non-matching entry
+    // (bar.txt). The match promotes; the non-match doesn't.
     let snap_var_log = dir_snap(&[
         ("foo.log", EntryKind::File, 10),
         ("bar.txt", EntryKind::File, 11),
@@ -182,19 +169,16 @@ fn full_lifecycle_attach_promote_seed_reap() {
     //
     // The forward-pass FINAL branch pre-ensured the `foo.log` slot
     // (via `tree.lookup -> tree.ensure_child(.., User)`) and stamped its
-    // kind from the enumeration's `EntryKind::File`. Then the dynamic
-    // Sub's `SubAttachAnchor::Resource` anchor routes `attach_sub_inner`
-    // through the resource-anchored branch, so the new Profile lands in
-    // `Active(PreFire(Verifying))` directly with the cold-arm probe in
-    // flight — no Pending descent. Profile.kind = File (read from the
-    // freshly-stamped slot in attach_sub_inner).
+    // kind from the enumeration's `EntryKind::File`. Then the dynamic Sub's
+    // `SubAttachAnchor::Resource` anchor routes `attach_sub_inner` through the resource-anchored
+    // branch, so the new Profile lands in `Active(PreFire(Verifying))` directly with the cold-arm
+    // probe in flight — no Pending descent. Profile.kind = File (read from the freshly-stamped slot
+    // in attach_sub_inner).
     //
-    // Under the cold-arm Verifying-first contract,
-    // `start_seed_burst(None)` arms the Verifying slot at burst
-    // construction and emits the cold-walk Probe on the `promote_out`
-    // step itself. A File-anchored Profile mints `AnchorFile` probes;
-    // the single Authoritative `AnchorOk(leaf)` response folds to
-    // `Stable` ⇒ `SilentPin` commits the baseline and finishes to Idle.
+    // Under the cold-arm Verifying-first contract, `start_seed_burst(None)` arms the Verifying slot
+    // at burst construction and emits the cold-walk Probe on the `promote_out` step itself. A
+    // File-anchored Profile mints `AnchorFile` probes; the single Authoritative `AnchorOk(leaf)`
+    // response folds to `Stable` ⇒ `SilentPin` commits the baseline and finishes to Idle.
     {
         let p = e.profiles().get(dynamic_profile).expect("Profile alive");
         assert_eq!(
@@ -220,10 +204,9 @@ fn full_lifecycle_attach_promote_seed_reap() {
         promote_out.probe_ops(),
     );
 
-    // Cold-arm Seed Verifying-first: a single Authoritative response
-    // pins the baseline → SilentPin → Idle. A fresh Seed with no drift
-    // records the baseline ("how things look right now") that future
-    // Standard bursts observe drift against.
+    // Cold-arm Seed Verifying-first: a single Authoritative response pins the baseline → SilentPin
+    // → Idle. A fresh Seed with no drift records the baseline ("how things look right now") that
+    // future Standard bursts observe drift against.
     let leaf = file_leaf(EntryKind::File, 10);
     let seed_corr = e
         .pending_probe_for(ProbeOwner::Profile(dynamic_profile))
@@ -243,9 +226,8 @@ fn full_lifecycle_attach_promote_seed_reap() {
     );
     let seed_settled = now;
 
-    // The AnchorFile probe shape is observable on the promote step
-    // itself (cold-arm Verifying-first emits the probe at burst
-    // construction).
+    // The AnchorFile probe shape is observable on the promote step itself (cold-arm Verifying-first
+    // emits the probe at burst construction).
     {
         let p = e.profiles().get(dynamic_profile).expect("Profile alive");
         assert!(
@@ -261,11 +243,9 @@ fn full_lifecycle_attach_promote_seed_reap() {
 
     // ---- reap Promoter → cascade ----
     //
-    // ConfigDiff with the Promoter id under `removed`. The cascade
-    // detaches the dynamic Sub (DynamicSubReaped), unwinds the proxy
-    // at /var/log, and drops the Promoter (PromoterReaped). Stepped
-    // strictly after the Seed's two settle windows to keep instants
-    // monotonic.
+    // ConfigDiff with the Promoter id under `removed`. The cascade detaches the dynamic Sub
+    // (DynamicSubReaped), unwinds the proxy at /var/log, and drops the Promoter (PromoterReaped).
+    // Stepped strictly after the Seed's two settle windows to keep instants monotonic.
     let reap_diff = WatchRegistryDiff {
         promoters: PromoterRegistryDiff {
             removed: vec![CompactString::from("logs")],
@@ -284,15 +264,12 @@ fn full_lifecycle_attach_promote_seed_reap() {
         "cascaded dynamic Sub detached from SubRegistry",
     );
 
-    // PromoterReaped is the canonical lifecycle signal of the
-    // ConfigDiff cascade. `DynamicSubReaped` is reserved for
-    // anchor-terminal events (the all-dynamic teardown path in
-    // `on_anchor_terminal_event` — the variant doc spells this
-    // out): a Promoter reap routes through `detach_sub_inner`
-    // directly and surfaces no per-dynamic-Sub diagnostic. The
-    // deferred-reap Profile path emits `ProfileReaped` for the same
-    // Profile when the Seed-burst-baselined snapshot is still mid-rebase
-    // at reap time.
+    // PromoterReaped is the canonical lifecycle signal of the ConfigDiff cascade.
+    // `DynamicSubReaped` is reserved for anchor-terminal events (the all-dynamic teardown path in
+    // `on_anchor_terminal_event` — the variant doc spells this out): a Promoter reap routes through
+    // `detach_sub_inner` directly and surfaces no per-dynamic-Sub diagnostic. The deferred-reap
+    // Profile path emits `ProfileReaped` for the same Profile when the Seed-burst-baselined
+    // snapshot is still mid-rebase at reap time.
     assert!(
         reap_out.diagnostics.iter().any(|d| matches!(
             d,
@@ -303,11 +280,9 @@ fn full_lifecycle_attach_promote_seed_reap() {
     );
 }
 
-/// Static-only attach lifecycle through the same `Engine`: a single
-/// `[[watch]]`-style attach emits exactly one
-/// `SubAttached(source_promoter=None)` diagnostic. Validates the
-/// shape relied on by the bin's diagnostic-driven `loader.ids`
-/// reconciliation.
+/// Static-only attach lifecycle through the same `Engine`: a single `[[watch]]`-style attach emits
+/// exactly one `SubAttached(source_promoter=None)` diagnostic. Validates the shape relied on by the
+/// bin's diagnostic-driven `loader.ids` reconciliation.
 #[test]
 fn static_attach_emits_sub_attached_with_no_source_promoter() {
     let mut e = Engine::new();
@@ -358,29 +333,24 @@ fn static_attach_emits_sub_attached_with_no_source_promoter() {
 // Cross-actor: descent vanish preserves co-resident Promoter proxy
 // ───────────────────────────────────────────────────────────────────────
 
-/// Cross-owner shared-prefix vanish (T1-1): a Profile in `Pending`
-/// descent at `/a/b` shares the slot with a Promoter `Active` proxy
-/// at `/a/b`. Pre-fix, `dispatch_descent_vanished`'s rewind branch
-/// called `Tree::vacate(prefix)` unconditionally, zeroing the
-/// Promoter's `STRUCTURE` contribution and stranding the kernel
-/// watch. Post-fix, the rewind drops only the Profile's contribution
-/// (counter 2 → 1) and the Promoter's claim survives. The matching
-/// `Unwatch` only fires on the genuine 1 → 0 edge — when the
-/// Promoter's enumeration probe later returns `Vanished`.
-// Codebase-standard PromoterId/ProfileId/SubId names; the Promoter-q ↔
-// Profile-p shared-prefix parallelism is this test's subject, not
-// accidental similarity.
+/// Cross-owner shared-prefix vanish (T1-1): a Profile in `Pending` descent at `/a/b` shares the slot
+/// with a Promoter `Active` proxy at `/a/b`. Pre-fix, `dispatch_descent_vanished`'s rewind branch
+/// called `Tree::vacate(prefix)` unconditionally, zeroing the Promoter's `STRUCTURE` contribution and
+/// stranding the kernel watch. Post-fix, the rewind drops only the Profile's contribution (counter 2
+/// → 1) and the Promoter's claim survives. The matching `Unwatch` only fires on the genuine 1 → 0
+/// edge — when the Promoter's enumeration probe later returns `Vanished`.
+// Codebase-standard PromoterId/ProfileId/SubId names; the Promoter-q ↔ Profile-p shared-prefix
+// parallelism is this test's subject, not accidental similarity.
 #[allow(clippy::similar_names)]
 #[test]
 fn descent_vanish_preserves_co_resident_promoter_proxy() {
     let mut e = Engine::new();
     let now = Instant::now();
 
-    // Pre-place /a so the Promoter's literal-prefix descent has a
-    // pre-existing prefix to land on. Pattern `/a/b/*.txt` →
-    // literal_prefix_len=2 (FS-root + a + b … wait, "/" is implicit;
-    // the literal segments are `["a", "b"]`). Promoter starts in
-    // `PrefixPending(/a, ["b"])` because /a/b doesn't yet exist.
+    // Pre-place /a so the Promoter's literal-prefix descent has a pre-existing prefix to land on.
+    // Pattern `/a/b/*.txt` → literal_prefix_len=2 (FS-root + a + b … wait, "/" is implicit; the
+    // literal segments are `["a", "b"]`). Promoter starts in `PrefixPending(/a, ["b"])` because
+    // /a/b doesn't yet exist.
     let a = pre_place_dir(&mut e, &["a"]);
     let qid = attach_promoter(&mut e, "logs", "/a/b/*.txt", now);
     assert!(matches!(
@@ -388,11 +358,9 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         PromoterState::PrefixPending(_),
     ));
 
-    // Drive the Promoter's descent into Active by completing the
-    // `/a` probe with a "b" Dir entry. The dispatcher's terminal arm
-    // calls `enter_active`, which materialises /a/b as the first proxy
-    // (User-roled, +1 STRUCTURE) and queues an enumeration probe at
-    // /a/b.
+    // Drive the Promoter's descent into Active by completing the `/a` probe with a "b" Dir entry.
+    // The dispatcher's terminal arm calls `enter_active`, which materialises /a/b as the first
+    // proxy (User-roled, +1 STRUCTURE) and queues an enumeration probe at /a/b.
     let snap_a = dir_snap(&[("b", EntryKind::Dir, 1)]);
     let _ = descent_advance(&mut e, ProbeOwner::Promoter(qid), &snap_a, now);
 
@@ -406,17 +374,16 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
     }
     assert_eq!(e.tree().get(a_b).unwrap().watch_demand(), 1);
 
-    // Capture the Promoter's enumeration probe at /a/b (set by
-    // `dispatch_next_enumeration` inside `enter_active`).
+    // Capture the Promoter's enumeration probe at /a/b (set by `dispatch_next_enumeration` inside
+    // `enter_active`).
     let enum_q_corr = e
         .pending_probe_for(ProbeOwner::Promoter(qid))
         .expect("Promoter enumeration probe at /a/b in flight");
 
-    // Attach a Profile with a recursive Sub at /a/b/c. /a/b exists
-    // (User-roled by the Promoter); /a/b/c doesn't. The Profile
-    // starts in `Pending(/a/b, ["c"])`, bumping /a/b's STRUCTURE
-    // contribution to 2. A descent probe targets /a/b under the
-    // Profile owner — distinct from the Promoter's enumeration probe.
+    // Attach a Profile with a recursive Sub at /a/b/c. /a/b exists (User-roled by the Promoter);
+    // /a/b/c doesn't. The Profile starts in `Pending(/a/b, ["c"])`, bumping /a/b's STRUCTURE
+    // contribution to 2. A descent probe targets /a/b under the Profile owner — distinct from the
+    // Promoter's enumeration probe.
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Path(PathBuf::from("/a/b/c")),
@@ -446,11 +413,9 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         ClassSet::STRUCTURE,
     );
 
-    // Send the Profile's descent probe `Vanished`. The rewind branch
-    // moves Profile's `current_prefix` to /a, releases /a/b's STRUCTURE
-    // contribution, and adds /a's. Pre-fix, the unconditional
-    // `vacate(/a/b)` would have zeroed the slot; post-fix, only the
-    // Profile's contribution drops.
+    // Send the Profile's descent probe `Vanished`. The rewind branch moves Profile's `current_prefix`
+    // to /a, releases /a/b's STRUCTURE contribution, and adds /a's. Pre-fix, the unconditional
+    // `vacate(/a/b)` would have zeroed the slot; post-fix, only the Profile's contribution drops.
     let vanish_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),
@@ -485,10 +450,9 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
         }
     }
 
-    // Now the Promoter's enumeration probe at /a/b returns Vanished.
-    // `unregister_proxy` → `release_promoter_proxy_claim` removes the
-    // last contribution; `sub_watch` emits Unwatch on the non-empty
-    // → empty edge.
+    // Now the Promoter's enumeration probe at /a/b returns Vanished. `unregister_proxy` →
+    // `release_promoter_proxy_claim` removes the last contribution; `sub_watch` emits Unwatch on
+    // the non-empty → empty edge.
     let promoter_vanish_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
@@ -520,26 +484,22 @@ fn descent_vanish_preserves_co_resident_promoter_proxy() {
 // Cross-Promoter: shared proxy unwinds independently (T3-1)
 // ───────────────────────────────────────────────────────────────────────
 
-/// Two Promoters with overlapping patterns share a proxy at /shared.
-/// Releasing one Promoter's claim (via its enumeration's `Vanished`
-/// response) preserves the other's. Asserts the recompute walks the
-/// Promoter registry correctly across the 2 → 1 edge — pre-fix this
-/// path was not the bug surface (the bug was Profile-side `vacate`),
-/// but the test pins the multi-Promoter symmetry that's load-bearing
-/// for the post-fix correctness story.
-// Codebase-standard q1/q2 parallel PromoterId names; the two-Promoter
-// shared-proxy symmetry is this test's subject, not accidental
-// similarity.
+/// Two Promoters with overlapping patterns share a proxy at /shared. Releasing one Promoter's claim
+/// (via its enumeration's `Vanished` response) preserves the other's. Asserts the recompute walks
+/// the Promoter registry correctly across the 2 → 1 edge — pre-fix this path was not the bug
+/// surface (the bug was Profile-side `vacate`), but the test pins the multi-Promoter symmetry
+/// that's load-bearing for the post-fix correctness story.
+// Codebase-standard q1/q2 parallel PromoterId names; the two-Promoter shared-proxy symmetry is this
+// test's subject, not accidental similarity.
 #[allow(clippy::similar_names)]
 #[test]
 fn two_promoters_sharing_proxy_unwind_independently() {
     let mut e = Engine::new();
     let now = Instant::now();
 
-    // Pre-place /shared so both Promoters land in immediate-Active at
-    // the same proxy slot. Both patterns have `/shared` as their
-    // literal prefix and a single glob component matching anything;
-    // the first proxy at `enter_active` is /shared with index = lpl.
+    // Pre-place /shared so both Promoters land in immediate-Active at the same proxy slot. Both
+    // patterns have `/shared` as their literal prefix and a single glob component matching
+    // anything; the first proxy at `enter_active` is /shared with index = lpl.
     let shared = pre_place_dir(&mut e, &["shared"]);
     let q1 = attach_promoter(&mut e, "q1", "/shared/*.log", now);
     let q2 = attach_promoter(&mut e, "q2", "/shared/*.txt", now);
@@ -553,8 +513,8 @@ fn two_promoters_sharing_proxy_unwind_independently() {
             }
         }
     }
-    // /shared.watch_demand == 2 (one contribution per Promoter), and
-    // proxy_promoters carries both ids.
+    // /shared.watch_demand == 2 (one contribution per Promoter), and proxy_promoters carries both
+    // ids.
     assert_eq!(e.tree().get(shared).unwrap().watch_demand(), 2);
     {
         let bv = e.tree().get(shared).unwrap().proxy_promoters();
@@ -562,21 +522,17 @@ fn two_promoters_sharing_proxy_unwind_independently() {
         assert!(bv.contains(&q2));
     }
 
-    // Q1's enumeration probe at /shared is in flight (single-slot
-    // dispatch from the first Promoter's `enter_active`). Q2's
-    // enumeration is queued behind it via `pending_enumerations`
-    // because the second `attach_promoter`'s `dispatch_next_enumeration`
-    // saw a probe in flight... but Q1 and Q2 have independent owner
-    // slots, so Q2's probe should also be in flight on its own owner.
+    // Q1's enumeration probe at /shared is in flight (single-slot dispatch from the first Promoter's
+    // `enter_active`). Q2's enumeration is queued behind it via `pending_enumerations` because the
+    // second `attach_promoter`'s `dispatch_next_enumeration` saw a probe in flight... but Q1 and Q2
+    // have independent owner slots, so Q2's probe should also be in flight on its own owner.
     let q1_enum_corr = e
         .pending_probe_for(ProbeOwner::Promoter(q1))
         .expect("Q1 enumeration probe in flight");
 
-    // Vanish Q1's enumeration. `unregister_proxy_subtree` →
-    // `unregister_proxy` → `release_promoter_proxy_claim`:
-    // counter-aware sub on /shared. The recompute walks the registry
-    // and finds Q2 still contributes STRUCTURE; counter drops 2 → 1
-    // and the union stays STRUCTURE.
+    // Vanish Q1's enumeration. `unregister_proxy_subtree` → `unregister_proxy` →
+    // `release_promoter_proxy_claim`: counter-aware sub on /shared. The recompute walks the registry
+    // and finds Q2 still contributes STRUCTURE; counter drops 2 → 1 and the union stays STRUCTURE.
     let q1_vanish_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(q1),
@@ -609,8 +565,8 @@ fn two_promoters_sharing_proxy_unwind_independently() {
         assert!(bv.contains(&q2), "Q2 back-ref intact");
     }
 
-    // Vanish Q2's enumeration. Now /shared has only Q2's contribution;
-    // the release drives the counter to 0 and emits Unwatch.
+    // Vanish Q2's enumeration. Now /shared has only Q2's contribution; the release drives the
+    // counter to 0 and emits Unwatch.
     let q2_enum_corr = e
         .pending_probe_for(ProbeOwner::Promoter(q2))
         .expect("Q2 enumeration probe in flight");
@@ -629,8 +585,7 @@ fn two_promoters_sharing_proxy_unwind_independently() {
         .filter(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == shared))
         .count();
     assert_eq!(unwatch_count, 1, "Unwatch fires on the genuine 1 → 0 edge");
-    // /shared has no User Profile attached and no remaining children;
-    // `try_reap` succeeds.
+    // /shared has no User Profile attached and no remaining children; `try_reap` succeeds.
     assert!(
         e.tree().get(shared).is_none(),
         "/shared reaped after both proxies released",
@@ -641,40 +596,34 @@ fn two_promoters_sharing_proxy_unwind_independently() {
 // Sensor overflow reseeds Promoters (T1-3)
 // ───────────────────────────────────────────────────────────────────────
 
-/// `Active` Promoter with multiple proxies: an `Input::SensorOverflow`
-/// re-enqueues every proxy and the single-slot dispatcher drains the
-/// first into a probe; the rest queue. One
+/// `Active` Promoter with multiple proxies: an `Input::SensorOverflow` re-enqueues every proxy and
+/// the single-slot dispatcher drains the first into a probe; the rest queue. One
 /// `PromoterReseededForOverflow` diagnostic surfaces.
 #[test]
 fn sensor_overflow_reseeds_active_promoter() {
     let mut e = Engine::new();
     let now = Instant::now();
 
-    // Pre-place /var/log; attach a Promoter with `/var/log/*`. The
-    // first proxy at /var/log is registered immediately; we then
-    // drain the initial enumeration so the Promoter has multiple
+    // Pre-place /var/log; attach a Promoter with `/var/log/*`. The first proxy at /var/log is
+    // registered immediately; we then drain the initial enumeration so the Promoter has multiple
     // proxies (one per matched Dir entry).
     let var_log = pre_place_dir(&mut e, &["var", "log"]);
     let qid = attach_promoter(&mut e, "logs", "/var/log/*", now);
 
-    // Inject a multi-Dir snapshot so the enumeration registers two
-    // sub-proxies. The Promoter pattern's final component is `*`
-    // (glob) — non-final position requires Dir entries; final
-    // position `try_promote`s. `*` IS the final component in this
-    // pattern, so each match calls `try_promote` (mints dynamic
-    // Subs). To get sub-proxies we'd need a multi-component pattern
+    // Inject a multi-Dir snapshot so the enumeration registers two sub-proxies. The Promoter
+    // pattern's final component is `*` (glob) — non-final position requires Dir entries; final
+    // position `try_promote`s. `*` IS the final component in this pattern, so each match calls
+    // `try_promote` (mints dynamic Subs). To get sub-proxies we'd need a multi-component pattern
     // with a non-final glob. Use `/var/log/*/access.log` instead.
     let _ = descent_advance(&mut e, ProbeOwner::Promoter(qid), &dir_snap(&[]), now);
 
-    // For this test we only need at least one proxy to demonstrate
-    // the reseed path. The Active{empty proxies} case is also valid
-    // to test (it's a no-op except for the diagnostic emission).
-    // Add a second proxy by simulating a fresh enumeration that
-    // matches a Dir... but the pattern is final-glob, so any Dir
-    // entry would `try_promote` rather than register sub-proxy.
+    // For this test we only need at least one proxy to demonstrate the reseed path. The
+    // Active{empty proxies} case is also valid to test (it's a no-op except for the diagnostic
+    // emission). Add a second proxy by simulating a fresh enumeration that matches a Dir... but the
+    // pattern is final-glob, so any Dir entry would `try_promote` rather than register sub-proxy.
     //
-    // Instead: assert the Active{single proxy at /var/log} reseed —
-    // overflow re-enqueues /var/log and dispatches one probe at it.
+    // Instead: assert the Active{single proxy at /var/log} reseed — overflow re-enqueues /var/log
+    // and dispatches one probe at it.
 
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(qid)).is_none(),
@@ -704,9 +653,8 @@ fn sensor_overflow_reseeds_active_promoter() {
         "one PromoterReseededForOverflow per Promoter"
     );
 
-    // /var/log was re-enqueued and the single-slot dispatcher
-    // emitted one enumeration probe at it. The probe is in flight
-    // on the Promoter owner.
+    // /var/log was re-enqueued and the single-slot dispatcher emitted one enumeration probe at it.
+    // The probe is in flight on the Promoter owner.
     assert!(
         e.pending_probe_for(ProbeOwner::Promoter(qid)).is_some(),
         "fresh enumeration probe in flight after overflow reseed",
@@ -722,17 +670,15 @@ fn sensor_overflow_reseeds_active_promoter() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `PrefixPending` Promoter with no in-flight probe: an
-/// `Input::SensorOverflow` re-emits a descent probe at the current
-/// descent prefix.
+/// `PrefixPending` Promoter with no in-flight probe: an `Input::SensorOverflow` re-emits a descent
+/// probe at the current descent prefix.
 #[test]
 fn sensor_overflow_reseeds_prefix_pending_promoter() {
     let mut e = Engine::new();
     let now = Instant::now();
 
-    // Pre-place /a so the descent's first prefix is /a (not /). The
-    // Promoter's literal prefix is /a/b which doesn't yet exist;
-    // `materialize_path_or_pending` returns Pending(/a, [b]).
+    // Pre-place /a so the descent's first prefix is /a (not /). The Promoter's literal prefix is
+    // /a/b which doesn't yet exist; `materialize_path_or_pending` returns Pending(/a, [b]).
     let a = pre_place_dir(&mut e, &["a"]);
     let (qid, attach_out) = attach_promoter_returning(&mut e, "logs", "/a/b/*.log", now);
     let descent_corr = first_probe_correlation(&attach_out).expect("descent probe in flight");
@@ -741,11 +687,10 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
         PromoterState::PrefixPending(_),
     ));
 
-    // Resolve the descent probe with a `Failed` response so the
-    // descent retains state (current_prefix=/a) but closes the
-    // probe channel. The `Failed` arm is exactly "retain in-descent
-    // state; await next event at the prefix" — which is the precondition
-    // we want for the overflow reseed test.
+    // Resolve the descent probe with a `Failed` response so the descent retains state
+    // (current_prefix=/a) but closes the probe channel. The `Failed` arm is exactly "retain
+    // in-descent state; await next event at the prefix" — which is the precondition we want for the
+    // overflow reseed test.
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(qid),
@@ -797,18 +742,15 @@ fn sensor_overflow_reseeds_prefix_pending_promoter() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `PrefixPending` Promoter with in-flight descent probe: the
-/// reseed skips the probe emission (the in-flight probe's response
-/// will reflect the post-overflow state) but still emits the
-/// `PromoterReseededForOverflow` diagnostic — the engine's signal
-/// that the reseed was attempted.
+/// `PrefixPending` Promoter with in-flight descent probe: the reseed skips the probe emission (the
+/// in-flight probe's response will reflect the post-overflow state) but still emits the
+/// `PromoterReseededForOverflow` diagnostic — the engine's signal that the reseed was attempted.
 #[test]
 fn sensor_overflow_skips_promoter_with_in_flight_probe() {
     let mut e = Engine::new();
     let now = Instant::now();
 
-    // Same setup as the prefix-pending test, but leave the descent
-    // probe IN FLIGHT (no response).
+    // Same setup as the prefix-pending test, but leave the descent probe IN FLIGHT (no response).
     let _a = pre_place_dir(&mut e, &["a"]);
     let qid = attach_promoter(&mut e, "logs", "/a/b/*.log", now);
     let in_flight_corr = e
@@ -856,21 +798,18 @@ fn sensor_overflow_skips_promoter_with_in_flight_probe() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Regression for the dynamic-Sub burst-clock divergence: `try_promote`
-/// MUST consume the step's `now`, not read `Instant::now()` directly.
+/// Regression for the dynamic-Sub burst-clock divergence: `try_promote` MUST consume the step's
+/// `now`, not read `Instant::now()` directly.
 ///
-/// Reading the system clock inside `try_promote` desynchronises the
-/// minted dynamic Sub's `BurstDeadline` from the engine's step clock.
-/// To make the divergence trivially observable, the test fixes a
-/// far-future `frozen` instant as `now`; any wall-clock leak inside
-/// the promote path would schedule a `BurstDeadline` near the system
-/// time rather than `frozen + MAX_SETTLE`. With the fix in place,
-/// exact equality holds.
+/// Reading the system clock inside `try_promote` desynchronises the minted dynamic Sub's
+/// `BurstDeadline` from the engine's step clock. To make the divergence trivially observable, the
+/// test fixes a far-future `frozen` instant as `now`; any wall-clock leak inside the promote path
+/// would schedule a `BurstDeadline` near the system time rather than `frozen + MAX_SETTLE`. With
+/// the fix in place, exact equality holds.
 ///
-/// Setup pre-places both `/var/log` (so the Promoter lands in
-/// immediate-`Active`) and `/var/log/foo.log` (so `attach_sub_inner`
-/// materialises and runs `start_seed_burst` synchronously, scheduling
-/// the only `BurstDeadline` in flight after the step).
+/// Setup pre-places both `/var/log` (so the Promoter lands in immediate-`Active`) and
+/// `/var/log/foo.log` (so `attach_sub_inner` materialises and runs `start_seed_burst`
+/// synchronously, scheduling the only `BurstDeadline` in flight after the step).
 #[test]
 fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
     let mut e = Engine::new();
@@ -878,30 +817,25 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
     let _var_log = pre_place_dir(&mut e, &["var", "log"]);
     let _ = pre_place_file(&mut e, &["var", "log"], "foo.log");
 
-    // Far enough into the future that any accidental `Instant::now()`
-    // read produces a `BurstDeadline` thousands of seconds before
-    // `frozen + MAX_SETTLE`. The exact-equality check below catches
-    // sub-second clock skew too — the divergence between engine `now`
-    // and system `now` is the failure signature, regardless of
-    // magnitude.
+    // Far enough into the future that any accidental `Instant::now()` read produces a
+    // `BurstDeadline` thousands of seconds before `frozen + MAX_SETTLE`. The exact-equality check
+    // below catches sub-second clock skew too — the divergence between engine `now` and system
+    // `now` is the failure signature, regardless of magnitude.
     let frozen = Instant::now() + Duration::from_secs(1_000_000);
 
     let pid = attach_promoter(&mut e, "logs", "/var/log/*.log", frozen);
 
-    // Drive the enumeration response containing `foo.log`. The
-    // pre-placed leaf makes `attach_sub_inner` go immediate-Materialize,
-    // which calls `start_seed_burst(None, now)`. Under the cold-arm
-    // Verifying-first contract, `start_seed_burst(None)` schedules
-    // ONLY the `BurstDeadline` at `now + MAX_SETTLE` (no `Settle`
-    // timer — the cold path arms `Verifying` at construction and
-    // emits the probe directly). The single timer must derive from
-    // the threaded engine `now`, which is the property under test.
+    // Drive the enumeration response containing `foo.log`. The pre-placed leaf makes
+    // `attach_sub_inner` go immediate-Materialize, which calls `start_seed_burst(None, now)`. Under
+    // the cold-arm Verifying-first contract, `start_seed_burst(None)` schedules ONLY the
+    // `BurstDeadline` at `now + MAX_SETTLE` (no `Settle` timer — the cold path arms `Verifying` at
+    // construction and emits the probe directly). The single timer must derive from the threaded
+    // engine `now`, which is the property under test.
     let snap = dir_snap(&[("foo.log", EntryKind::File, 10)]);
     let _ = descent_advance(&mut e, ProbeOwner::Promoter(pid), &snap, frozen);
 
-    // The new dynamic Sub registered and its Profile is
-    // `Active(PreFire(Verifying))` with the cold-arm Seed's single
-    // `BurstDeadline` timer scheduled.
+    // The new dynamic Sub registered and its Profile is `Active(PreFire(Verifying))` with the
+    // cold-arm Seed's single `BurstDeadline` timer scheduled.
     let dynamic_sub_id = {
         let promoted = dynamic_subs_of(&e, pid);
         assert_eq!(promoted.len(), 1, "exactly one dynamic Sub minted");
@@ -913,13 +847,11 @@ fn try_promote_threads_engine_now_to_dynamic_sub_burst_deadline() {
         "dynamic Sub minted, not a sentinel",
     );
 
-    // Under the cold-arm path there is exactly one timer in flight for
-    // the dynamic Sub's Profile: the `BurstDeadline` at
-    // `frozen + MAX_SETTLE`. Before the fix the deadline was
-    // `Instant::now() + MAX_SETTLE` (near real time, ~1_000_000 s
-    // earlier than the assertion expects); the exact-equality check
-    // catches sub-second skew too. The BurstDeadline must derive from
-    // the step's `now`.
+    // Under the cold-arm path there is exactly one timer in flight for the dynamic Sub's Profile:
+    // the `BurstDeadline` at `frozen + MAX_SETTLE`. Before the fix the deadline was `Instant::now()
+    // + MAX_SETTLE` (near real time, ~1_000_000 s earlier than the assertion expects); the
+    // exact-equality check catches sub-second skew too. The BurstDeadline must derive from the
+    // step's `now`.
     let next_deadline = e
         .next_deadline()
         .expect("BurstDeadline scheduled by start_seed_burst");

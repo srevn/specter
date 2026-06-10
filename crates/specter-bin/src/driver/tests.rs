@@ -1,16 +1,13 @@
-//! Engine-driver unit tests — single-tick drive of [`EngineDriver`]
-//! over the [`TestRig`] mio-integrated harness.
+//! Engine-driver unit tests — single-tick drive of [`EngineDriver`] over the [`TestRig`]
+//! mio-integrated harness.
 //!
-//! Wired by `#[cfg(test)] mod tests;` in `driver.rs`. The rig
-//! constructs a real [`mio::Poll`] via [`Reactor::new`] and mints the
-//! Hub's [`Registry`] clone through [`Reactor::registry_clone`]; it
-//! runs against the sensor crate's [`MockFsWatcher`] (whose
-//! socketpair-backed `AsFd` surface lets reactor-integration tests
-//! run against a real reactor without any platform watcher backend).
-//! Tests inject `FsEvent`s through `reactor.watcher_mut().inject(...)`,
-//! drive signals through [`EngineDriver::dispatch_signal`] directly
-//! (real signals would race nextest's process-wide handlers), and
-//! exercise IPC through a real bound socket on a tempdir path.
+//! Wired by `#[cfg(test)] mod tests;` in `driver.rs`. The rig constructs a real [`mio::Poll`] via
+//! [`Reactor::new`] and mints the Hub's [`Registry`] clone through [`Reactor::registry_clone`]; it
+//! runs against the sensor crate's [`MockFsWatcher`] (whose socketpair-backed `AsFd` surface lets
+//! reactor-integration tests run against a real reactor without any platform watcher backend).
+//! Tests inject `FsEvent`s through `reactor.watcher_mut().inject(...)`, drive signals through
+//! [`EngineDriver::dispatch_signal`] directly (real signals would race nextest's process-wide
+//! handlers), and exercise IPC through a real bound socket on a tempdir path.
 
 use super::WakeHandle;
 use super::ipc::conns::{ACCEPT_CAP, ConnRole, MissedWindow};
@@ -40,14 +37,11 @@ use std::time::{Duration, Instant, SystemTime};
 // Fixtures + rig
 // ============================================================
 
-/// Sentinel meta used in fixtures whose config file may not exist
-/// on disk. Inode 0 is reserved by every supported kernel and
-/// `mode = 0` cannot occur in a real lstat (the kernel always sets
-/// file-type bits); this value never compares equal to a real
-/// [`FileMeta::from_path`] capture, so tests that *do* exercise the
-/// meta-rotation path can assert "rotated to a real value" by
-/// comparing against a fresh [`FileMeta::from_path`] (which differs
-/// from this sentinel in every field).
+/// Sentinel meta used in fixtures whose config file may not exist on disk. Inode 0 is reserved by
+/// every supported kernel and `mode = 0` cannot occur in a real lstat (the kernel always sets
+/// file-type bits); this value never compares equal to a real [`FileMeta::from_path`] capture, so
+/// tests that *do* exercise the meta-rotation path can assert "rotated to a real value" by comparing
+/// against a fresh [`FileMeta::from_path`] (which differs from this sentinel in every field).
 fn dummy_meta() -> FileMeta {
     FileMeta {
         inode: 0,
@@ -61,64 +55,52 @@ fn dummy_meta() -> FileMeta {
     }
 }
 
-/// Bundle of handles a test holds to drive [`EngineDriver`] without
-/// the [`crate::app`] orchestration layer.
+/// Bundle of handles a test holds to drive [`EngineDriver`] without the [`crate::app`]
+/// orchestration layer.
 ///
-/// Field order is the drop order — the driver (owning the Hub
-/// and Reactor) drops before `_tmp`, so the listener fd closes before
-/// the tempdir reaps the socket file.
+/// Field order is the drop order — the driver (owning the Hub and Reactor) drops before `_tmp`, so
+/// the listener fd closes before the tempdir reaps the socket file.
 struct TestRig {
     driver: EngineDriver<MockFsWatcher>,
-    /// Held so the actuator-thread side of the bundle survives —
-    /// `ActuatorIO::pair` returns the consumer halves here; without
-    /// holding them, the driver's `effects_tx` senders would observe
+    /// Held so the actuator-thread side of the bundle survives — `ActuatorIO::pair` returns the
+    /// consumer halves here; without holding them, the driver's `effects_tx` senders would observe
     /// Disconnected on the first `try_send`.
     actuator_side: RunWiring,
-    /// Shared `Arc<MockProber>` clone the driver received as the
-    /// `Arc<dyn Prober>`. Tests use this clone to drain `take_submitted` /
-    /// `take_cancelled` recordings.
+    /// Shared `Arc<MockProber>` clone the driver received as the `Arc<dyn Prober>`. Tests use this
+    /// clone to drain `take_submitted` / `take_cancelled` recordings.
     prober: Arc<MockProber>,
-    /// Producer-side handle for the prober response channel. Tests
-    /// `send` here followed by `waker.wake()` to simulate the
-    /// production [`crate::app::WakingProberResponseSender`]'s
+    /// Producer-side handle for the prober response channel. Tests `send` here followed by
+    /// `waker.wake()` to simulate the production [`crate::app::WakingProberResponseSender`]'s
     /// send-then-wake protocol.
     prober_response_tx: Sender<Input>,
-    /// Producer-side handle for the effect completion channel. Same
-    /// send-then-wake protocol as `prober_response_tx`.
+    /// Producer-side handle for the effect completion channel. Same send-then-wake protocol as
+    /// `prober_response_tx`.
     ///
-    /// Wrapped in [`Option`] so [`TestRig::drop_effect_complete_tx`]
-    /// can take the sender out — simulating the production
-    /// `WakingSink::Drop` close-then-wake edge that closes the channel
-    /// when the actuator thread exits. Production code reaches via
-    /// [`TestRig::effect_complete_tx`]; the take helper drops the
-    /// only sender so the reactor's `effect_complete_rx` observes
+    /// Wrapped in [`Option`] so [`TestRig::drop_effect_complete_tx`] can take the sender out —
+    /// simulating the production `WakingSink::Drop` close-then-wake edge that closes the channel
+    /// when the actuator thread exits. Production code reaches via [`TestRig::effect_complete_tx`];
+    /// the take helper drops the only sender so the reactor's `effect_complete_rx` observes
     /// Disconnected on the next `try_recv`.
     effect_complete_tx: Option<Sender<Input>>,
-    /// Shared [`WakeHandle`] clone minted via
-    /// [`Reactor::wake_handle`]. The Reactor's `waker` field is the
-    /// canonical anchor; the rig holds this clone, the prober +
-    /// effect sinks (when wired by individual tests) hold further
-    /// clones. Tests fire `waker.wake()` after writing to
-    /// `prober_response_tx` / `effect_complete_tx` to mirror the
-    /// production wake-after-send semantics.
+    /// Shared [`WakeHandle`] clone minted via [`Reactor::wake_handle`]. The Reactor's `waker` field
+    /// is the canonical anchor; the rig holds this clone, the prober + effect sinks (when wired by
+    /// individual tests) hold further clones. Tests fire `waker.wake()` after writing to
+    /// `prober_response_tx` / `effect_complete_tx` to mirror the production wake-after-send
+    /// semantics.
     waker: WakeHandle,
-    /// Bound socket path. Tests may [`UnixStream::connect`] here to
-    /// drive IPC clients. Lives through the rig's lifetime so the
-    /// socket file survives until `_tmp` drops.
+    /// Bound socket path. Tests may [`UnixStream::connect`] here to drive IPC clients. Lives
+    /// through the rig's lifetime so the socket file survives until `_tmp` drops.
     socket_path: PathBuf,
-    /// Tempdir guard — last field so the driver (and its Hub's
-    /// listener fd) drops before the tempdir reaps the socket file.
+    /// Tempdir guard — last field so the driver (and its Hub's listener fd) drops before the
+    /// tempdir reaps the socket file.
     _tmp: tempfile::TempDir,
 }
 
-/// Build a [`TestRig`] for the supplied config + config_path. Every
-/// kernel-side resource is freshly allocated per call: a bound
-/// `UnixListener`, a fresh `mio::Poll` (via [`Reactor::new`]), the
-/// Hub's `Registry` clone (via [`Reactor::registry_clone`]), a
-/// [`WakeHandle`] clone (via [`Reactor::wake_handle`]), a fresh
-/// `Signals` iterator, two unbounded crossbeam channels for the
-/// wake'd Input streams, and a fresh `MockFsWatcher` with its
-/// socketpair-backed readiness substrate.
+/// Build a [`TestRig`] for the supplied config + config_path. Every kernel-side resource is freshly
+/// allocated per call: a bound `UnixListener`, a fresh `mio::Poll` (via [`Reactor::new`]), the Hub's
+/// `Registry` clone (via [`Reactor::registry_clone`]), a [`WakeHandle`] clone (via
+/// [`Reactor::wake_handle`]), a fresh `Signals` iterator, two unbounded crossbeam channels for the
+/// wake'd Input streams, and a fresh `MockFsWatcher` with its socketpair-backed readiness substrate.
 fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let socket_path = tmp.path().join("specter-test.sock");
@@ -136,9 +118,8 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
         effect_complete_rx,
     )
     .expect("reactor init");
-    // Mint the Registry clone + WakeHandle BEFORE the reactor moves
-    // into the driver constructor — once moved, the borrows are no
-    // longer reachable.
+    // Mint the Registry clone + WakeHandle BEFORE the reactor moves into the driver constructor —
+    // once moved, the borrows are no longer reachable.
     let registry_for_ipc = reactor.registry_clone().expect("registry clone");
     let waker = reactor.wake_handle();
     let ipc = Hub::new(listener, registry_for_ipc).expect("ipc server init");
@@ -146,9 +127,8 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
     let (actuator_io, actuator_side) = ActuatorIO::pair();
 
     let log_cfg = config.log.clone();
-    // `noop()` avoids racing every rig on the global tracing
-    // subscriber slot — tests assert on the driver's reload-pipeline
-    // behaviour, not the subscriber's filter state.
+    // `noop()` avoids racing every rig on the global tracing subscriber slot — tests assert on the
+    // driver's reload-pipeline behaviour, not the subscriber's filter state.
     let obs_handle = crate::observability::ObservabilityHandle::noop();
     let loader = Loader::new(config, log_cfg, dummy_meta());
 
@@ -178,26 +158,21 @@ fn rig_for(config: Config, config_path: PathBuf) -> TestRig {
 }
 
 impl TestRig {
-    /// Borrow the effect-complete sender for test injection. Panics
-    /// if the sender has already been taken via
-    /// [`Self::drop_effect_complete_tx`].
+    /// Borrow the effect-complete sender for test injection. Panics if the sender has already been
+    /// taken via [`Self::drop_effect_complete_tx`].
     fn effect_complete_tx(&self) -> &Sender<Input> {
         self.effect_complete_tx
             .as_ref()
             .expect("effect_complete_tx already taken")
     }
 
-    /// Simulate the actuator-thread closure exiting: drop the rig's
-    /// `effect_complete_tx` clone, the same edge the production
-    /// [`super::WakingSink::Drop`] lands. The Reactor's
-    /// `effect_complete_rx` observes
-    /// [`crossbeam::channel::TryRecvError::Disconnected`] on the next
-    /// `try_recv`, surfacing as
-    /// [`super::reactor::DrainedTick::actuator_gone`] `== true`.
+    /// Simulate the actuator-thread closure exiting: drop the rig's `effect_complete_tx` clone, the
+    /// same edge the production [`super::WakingSink::Drop`] lands. The Reactor's
+    /// `effect_complete_rx` observes [`crossbeam::channel::TryRecvError::Disconnected`] on the next
+    /// `try_recv`, surfacing as [`super::reactor::DrainedTick::actuator_gone`] `== true`.
     ///
-    /// Call [`super::WakeHandle::wake`] (via `rig.waker.wake()`)
-    /// after this to mirror the Drop-fired wake edge that production's
-    /// `WakingSink::Drop` pulses post-close. Panics if already taken.
+    /// Call [`super::WakeHandle::wake`] (via `rig.waker.wake()`) after this to mirror the Drop-fired
+    /// wake edge that production's `WakingSink::Drop` pulses post-close. Panics if already taken.
     fn drop_effect_complete_tx(&mut self) {
         self.effect_complete_tx
             .take()
@@ -223,9 +198,8 @@ settle    = "50ms"
     Config::from_str(&toml).expect("test config parses")
 }
 
-/// Dynamic single-watch config. Brace expansion makes `is_dynamic`
-/// auto-detect; the literal prefix is the supplied tempdir so the
-/// validator's path-canonicalisation pass succeeds.
+/// Dynamic single-watch config. Brace expansion makes `is_dynamic` auto-detect; the literal prefix
+/// is the supplied tempdir so the validator's path-canonicalisation pass succeeds.
 fn config_with_one_promoter(path: &std::path::Path) -> Config {
     let toml = format!(
         r#"
@@ -243,11 +217,10 @@ settle    = "50ms"
     Config::from_str(&toml).expect("test config parses")
 }
 
-/// Connect a [`UnixStream`] client to the rig's bound socket. The
-/// stream is left in blocking mode by default (callers can flip it
-/// non-blocking if they want to interleave reads with `tick`s) and
-/// carries a short read timeout so a non-arriving response surfaces
-/// as a `WouldBlock`-style error rather than hanging the test.
+/// Connect a [`UnixStream`] client to the rig's bound socket. The stream is left in blocking mode
+/// by default (callers can flip it non-blocking if they want to interleave reads with `tick`s) and
+/// carries a short read timeout so a non-arriving response surfaces as a `WouldBlock`-style error
+/// rather than hanging the test.
 fn ipc_connect(rig: &TestRig) -> UnixStream {
     let client = UnixStream::connect(&rig.socket_path).expect("connect to rig socket");
     client
@@ -256,21 +229,18 @@ fn ipc_connect(rig: &TestRig) -> UnixStream {
     client
 }
 
-/// Pre-arm a zero-duration block timeout on the next `tick` by
-/// flagging `config_settle_until = Some(now)`. The settle-expiry
-/// helper consumes the slot once the tick passes its expiry check, so
-/// each call covers exactly one tick — the timeout collapses to
-/// `Duration::ZERO`, `mio::Poll::poll` returns immediately, and the
-/// drain pass runs without waiting on a real deadline.
+/// Pre-arm a zero-duration block timeout on the next `tick` by flagging `config_settle_until =
+/// Some(now)`. The settle-expiry helper consumes the slot once the tick passes its expiry check, so
+/// each call covers exactly one tick — the timeout collapses to `Duration::ZERO`, `mio::Poll::poll`
+/// returns immediately, and the drain pass runs without waiting on a real deadline.
 fn arm_zero_timeout(rig: &mut TestRig) {
     rig.driver.config_settle_until = Some(Instant::now());
 }
 
-/// Drive the rig's tick to the deadline, polling for a complete
-/// LF-delimited JSON response on `client`. Returns the parsed
-/// [`ResponsePayload`] or `None` on timeout. Each loop iteration arms
-/// a zero-duration block timeout (so `tick` returns promptly) and
-/// reads whatever bytes the kernel has buffered.
+/// Drive the rig's tick to the deadline, polling for a complete LF-delimited JSON response on
+/// `client`. Returns the parsed [`ResponsePayload`] or `None` on timeout. Each loop iteration arms
+/// a zero-duration block timeout (so `tick` returns promptly) and reads whatever bytes the kernel
+/// has buffered.
 fn run_until_response(rig: &mut TestRig, client: &mut UnixStream) -> Option<ResponsePayload> {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut buf: Vec<u8> = Vec::new();
@@ -305,9 +275,8 @@ fn write_request(client: &mut UnixStream, req: &WireRequest) {
     client.write_all(&bytes).expect("write request");
 }
 
-/// Round-trip a single request → response over `client`, driving the
-/// rig's tick loop until the response surfaces. Panics on timeout
-/// (every covered verb completes within milliseconds).
+/// Round-trip a single request → response over `client`, driving the rig's tick loop until the
+/// response surfaces. Panics on timeout (every covered verb completes within milliseconds).
 fn ipc_round_trip(
     rig: &mut TestRig,
     client: &mut UnixStream,
@@ -321,17 +290,14 @@ fn ipc_round_trip(
 // Empty-tick + shutdown semantics
 // ============================================================
 
-/// First SIGTERM dispatched directly via [`EngineDriver::dispatch_signal`]
-/// returns [`ControlFlow::Continue`] (NOT `Break`) and arms
-/// [`EngineDriver::first_term`]. The first termination signal keeps
-/// the loop running — the actuator's grace pipeline runs to
-/// completion, and the loop only closes via the actuator-gone signal
-/// ([`super::reactor::DrainedTick::actuator_gone`]),
-/// surfaced when the actuator-thread's `WakingSink::Drop` closes the
-/// effect-completion channel and `try_recv` observes Disconnected.
-/// The pure dispatch-classification path is also pinned by
-/// `dispatch_signal_inner_tests` below; this test covers the
-/// method-level wrapper from the rig's surface.
+/// First SIGTERM dispatched directly via [`EngineDriver::dispatch_signal`] returns
+/// [`ControlFlow::Continue`] (NOT `Break`) and arms [`EngineDriver::first_term`]. The first
+/// termination signal keeps the loop running — the actuator's grace pipeline runs to completion,
+/// and the loop only closes via the actuator-gone signal
+/// ([`super::reactor::DrainedTick::actuator_gone`]), surfaced when the actuator-thread's
+/// `WakingSink::Drop` closes the effect-completion channel and `try_recv` observes Disconnected.
+/// The pure dispatch-classification path is also pinned by `dispatch_signal_inner_tests` below;
+/// this test covers the method-level wrapper from the rig's surface.
 #[test]
 fn dispatch_signal_first_sigterm_continues_loop_and_arms_first_term() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -347,9 +313,8 @@ fn dispatch_signal_first_sigterm_continues_loop_and_arms_first_term() {
         rig.driver.first_term.is_some(),
         "first SIGTERM arms first_term (the IPC-mutating-verb gate)",
     );
-    // Probe drain has no work (no Sub attached). begin_shutdown is
-    // safe to call regardless — pins that the cancel-first drain is
-    // idempotent when no probes are armed and silences the linear
+    // Probe drain has no work (no Sub attached). begin_shutdown is safe to call regardless — pins
+    // that the cancel-first drain is idempotent when no probes are armed and silences the linear
     // ProbeSlot Drop tripwire on rig teardown.
     let _ = rig.driver.begin_shutdown();
 }
@@ -358,13 +323,12 @@ fn dispatch_signal_first_sigterm_continues_loop_and_arms_first_term() {
 // Shutdown lifecycle — driver-owns-grace
 // ============================================================
 
-/// The first SIGINT keeps the loop running. After [`EngineDriver::dispatch_signal`]
-/// arms `first_term` and pulses `shutdown_actuator_tx`, a subsequent
-/// [`EngineDriver::tick`] returns [`TickOutcome::Continue`] (NOT
-/// `Shutdown`) — the driver stays alive through the actuator's grace
-/// pipeline. The shutdown only closes the loop via the actuator-gone
-/// signal ([`super::reactor::DrainedTick::actuator_gone`]), exercised
-/// by [`effect_complete_disconnect_with_wake_surfaces_tick_outcome_shutdown`].
+/// The first SIGINT keeps the loop running. After [`EngineDriver::dispatch_signal`] arms
+/// `first_term` and pulses `shutdown_actuator_tx`, a subsequent [`EngineDriver::tick`] returns
+/// [`TickOutcome::Continue`] (NOT `Shutdown`) — the driver stays alive through the actuator's grace
+/// pipeline. The shutdown only closes the loop via the actuator-gone signal
+/// ([`super::reactor::DrainedTick::actuator_gone`]), exercised by
+/// [`effect_complete_disconnect_with_wake_surfaces_tick_outcome_shutdown`].
 #[test]
 fn first_sigint_does_not_close_tick_loop() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -392,15 +356,13 @@ fn first_sigint_does_not_close_tick_loop() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// After the driver observes a SIGINT, mutating IPC verbs (`Reload`,
-/// `Disable`, `Enable`) refuse with [`WireErrorCode::ShuttingDown`].
-/// Read-only verbs and `Subscribe` continue working — verifies the
-/// gate is precisely scoped to mutating verbs.
+/// After the driver observes a SIGINT, mutating IPC verbs (`Reload`, `Disable`, `Enable`) refuse
+/// with [`WireErrorCode::ShuttingDown`]. Read-only verbs and `Subscribe` continue working —
+/// verifies the gate is precisely scoped to mutating verbs.
 ///
-/// The gate lives at the top of `handle_ipc_line` on
-/// `first_term.is_some()`; the test arms first_term via
-/// `dispatch_signal` then issues a `Reload` request and asserts the
-/// structured `ShuttingDown` reply.
+/// The gate lives at the top of `handle_ipc_line` on `first_term.is_some()`; the test arms
+/// first_term via `dispatch_signal` then issues a `Reload` request and asserts the structured
+/// `ShuttingDown` reply.
 #[test]
 fn ipc_reload_refused_mid_shutdown_with_shutting_down_code() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -429,14 +391,12 @@ fn ipc_reload_refused_mid_shutdown_with_shutting_down_code() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// `Disable` and `Enable` mid-shutdown both refuse with
-/// [`WireErrorCode::ShuttingDown`]. Pinned together with `Reload`
-/// because the gate matches on the same `WireRequest` variant tuple;
-/// a regression splitting that tuple would surface here.
+/// `Disable` and `Enable` mid-shutdown both refuse with [`WireErrorCode::ShuttingDown`]. Pinned
+/// together with `Reload` because the gate matches on the same `WireRequest` variant tuple; a
+/// regression splitting that tuple would surface here.
 ///
-/// Setup attaches a real `build` watch so `Disable` has a concrete
-/// target (the gate runs before any name resolution, but pinning
-/// against an attached Sub keeps the test honest against future
+/// Setup attaches a real `build` watch so `Disable` has a concrete target (the gate runs before any
+/// name resolution, but pinning against an attached Sub keeps the test honest against future
 /// refactors that might invert the order).
 #[test]
 fn ipc_disable_and_enable_refused_mid_shutdown_with_shutting_down_code() {
@@ -470,8 +430,7 @@ fn ipc_disable_and_enable_refused_mid_shutdown_with_shutting_down_code() {
         }
         other => panic!("expected Err(WireErrorCode::ShuttingDown) for Disable, got {other:?}"),
     }
-    // The Sub stayed attached — the gate refused the verb before the
-    // engine surface mutated.
+    // The Sub stayed attached — the gate refused the verb before the engine surface mutated.
     assert!(
         rig.driver.engine.subs().find_by_name("build").is_some(),
         "Disable refused without touching engine state",
@@ -502,15 +461,12 @@ fn ipc_disable_and_enable_refused_mid_shutdown_with_shutting_down_code() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// The actuator-gone signal: dropping the effect-completion channel's
-/// last sender (the production `WakingSink::Drop` close edge) and
-/// firing the wake (the production Drop-fired wake edge) surfaces as
-/// [`super::reactor::DrainedTick::actuator_gone`] `== true` on the
-/// next tick, which routes through [`EngineDriver::begin_shutdown`]
-/// and returns [`TickOutcome::Shutdown`]. This is the load-bearing
-/// close edge that makes [`EngineDriver::run`] exit when the actuator
-/// thread terminates — the structural foundation of the
-/// driver-owns-shutdown-lifecycle refactor.
+/// The actuator-gone signal: dropping the effect-completion channel's last sender (the production
+/// `WakingSink::Drop` close edge) and firing the wake (the production Drop-fired wake edge)
+/// surfaces as [`super::reactor::DrainedTick::actuator_gone`] `== true` on the next tick, which
+/// routes through [`EngineDriver::begin_shutdown`] and returns [`TickOutcome::Shutdown`]. This is
+/// the load-bearing close edge that makes [`EngineDriver::run`] exit when the actuator thread
+/// terminates — the structural foundation of the driver-owns-shutdown-lifecycle refactor.
 #[test]
 fn effect_complete_disconnect_with_wake_surfaces_tick_outcome_shutdown() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -528,8 +484,8 @@ fn effect_complete_disconnect_with_wake_surfaces_tick_outcome_shutdown() {
         TickOutcome::Shutdown,
         "actuator-gone via channel-disconnect resolves to Shutdown",
     );
-    // No `begin_shutdown` call: `TickOutcome::Shutdown` already ran
-    // the cancel-first probe drain inside the tick body.
+    // No `begin_shutdown` call: `TickOutcome::Shutdown` already ran the cancel-first probe drain
+    // inside the tick body.
 }
 
 // ============================================================
@@ -538,11 +494,10 @@ fn effect_complete_disconnect_with_wake_surfaces_tick_outcome_shutdown() {
 
 #[test]
 fn drain_accept_bound_and_rearm_drains_burst_across_ticks() {
-    // 24 clients = 3x MAX_IPC_CONNS — exceeds the per-tick bound (16
-    // iterations) so the cap-hit re-arm path runs. First tick hits
-    // the bound after 16 accepts (8 inserts + 8 Busy refusals against
-    // the now-full conn map); reregister re-fires TOKEN_LISTENER for
-    // the next tick, which drains the remaining 8 (all Busy).
+    // 24 clients = 3x MAX_IPC_CONNS — exceeds the per-tick bound (16 iterations) so the cap-hit
+    // re-arm path runs. First tick hits the bound after 16 accepts (8 inserts + 8 Busy refusals
+    // against the now-full conn map); reregister re-fires TOKEN_LISTENER for the next tick, which
+    // drains the remaining 8 (all Busy).
     const N_CLIENTS: usize = 24;
 
     let tmp = tempfile::TempDir::new().unwrap();
@@ -552,9 +507,8 @@ fn drain_accept_bound_and_rearm_drains_burst_across_ticks() {
 
     let clients: Vec<_> = (0..N_CLIENTS).map(|_| ipc_connect(&rig)).collect();
 
-    // Drive a bounded number of ticks; the cap-hit re-arm guarantees
-    // forward progress within O(N_CLIENTS / MAX_IPC_CONNS) ticks.
-    // Generous deadline because mio's poll latency varies in CI.
+    // Drive a bounded number of ticks; the cap-hit re-arm guarantees forward progress within
+    // O(N_CLIENTS / MAX_IPC_CONNS) ticks. Generous deadline because mio's poll latency varies in CI.
     let mut spins = 0;
     while spins < 16 {
         arm_zero_timeout(&mut rig);
@@ -562,8 +516,7 @@ fn drain_accept_bound_and_rearm_drains_burst_across_ticks() {
         spins += 1;
     }
 
-    // Conn map is bounded by MAX_IPC_CONNS — extra accepts went
-    // through the Busy-then-drop path.
+    // Conn map is bounded by MAX_IPC_CONNS — extra accepts went through the Busy-then-drop path.
     assert!(
         rig.driver.ipc.conn_count() <= MAX_IPC_CONNS,
         "conn count {} exceeds cap {}",
@@ -597,8 +550,8 @@ fn drain_accept_bound_and_rearm_drains_burst_across_ticks() {
 
 #[test]
 fn arm_writable_interests_signature_returns_unit_not_io_result() {
-    // Structural contract: the type system enforces that per-conn
-    // rearm failures CANNOT propagate as daemon shutdown. A regression
+    // Structural contract: the type system enforces that per-conn rearm failures CANNOT propagate
+    // as daemon shutdown. A regression
     // that restored `-> io::Result<()>` would fail to type-check at
     // the assignment below.
     let tmp = tempfile::TempDir::new().unwrap();
@@ -614,12 +567,10 @@ fn arm_writable_interests_signature_returns_unit_not_io_result() {
 #[cfg(target_os = "linux")]
 #[test]
 fn arm_writable_interests_per_conn_failure_terminates_only_failing_conn() {
-    // Linux-only: relies on `EPOLL_CTL_MOD` returning ENOENT for an
-    // unregistered fd. macOS's kqueue `EV_ADD | EV_CLEAR` is add-or-
-    // modify (silently succeeds), so the failure path is unreachable
-    // there via deregister-then-rearm. The cross-platform contract
-    // is enforced by the signature change pinned by
-    // `arm_writable_interests_signature_returns_unit_not_io_result`.
+    // Linux-only: relies on `EPOLL_CTL_MOD` returning ENOENT for an unregistered fd. macOS's kqueue
+    // `EV_ADD | EV_CLEAR` is add-or- modify (silently succeeds), so the failure path is unreachable
+    // there via deregister-then-rearm. The cross-platform contract is enforced by the signature
+    // change pinned by `arm_writable_interests_signature_returns_unit_not_io_result`.
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
@@ -648,9 +599,8 @@ fn arm_writable_interests_per_conn_failure_terminates_only_failing_conn() {
         .write_queue
         .push_back(b'x');
 
-    // Force a registry inconsistency on conn A: deregister its stream
-    // out-of-band, leaving the conn entry in the map. The next
-    // `reregister` syscall returns ENOENT, exercising the defer-
+    // Force a registry inconsistency on conn A: deregister its stream out-of-band, leaving the conn
+    // entry in the map. The next `reregister` syscall returns ENOENT, exercising the defer-
     // terminate path.
     rig.driver.ipc.force_deregister_conn_for_test(token_a);
 
@@ -669,10 +619,9 @@ fn arm_writable_interests_per_conn_failure_terminates_only_failing_conn() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// `Subscribe` stays accessible after the driver observes shutdown
-/// — its mutation is bin-local (flipping `conn.role`) and does not
-/// touch engine state. Operators can `specter tail` a wind-down to
-/// observe the actuator's grace + reap-drain diagnostics.
+/// `Subscribe` stays accessible after the driver observes shutdown — its mutation is bin-local
+/// (flipping `conn.role`) and does not touch engine state. Operators can `specter tail` a wind-down
+/// to observe the actuator's grace + reap-drain diagnostics.
 #[test]
 fn ipc_subscribe_allowed_mid_shutdown() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -721,20 +670,18 @@ fn run_initial_attach_attaches_static_sub_and_emits_watch_op() {
         .expect("static Sub 'build' attached");
     assert!(rig.driver.engine.subs().get(sid).is_some());
 
-    // The attach emitted a Watch op inline (via `forward`'s
-    // `apply_watch_ops`). The Seed burst emitted a probe forwarded to
-    // the prober's `submit` recording.
+    // The attach emitted a Watch op inline (via `forward`'s `apply_watch_ops`). The Seed burst
+    // emitted a probe forwarded to the prober's `submit` recording.
     let submitted = rig.prober.take_submitted();
     assert_eq!(submitted.len(), 1, "Seed burst emits one probe");
 
-    // begin_shutdown drains the armed Seed probe so the rig drops
-    // silently; production loops to a Shutdown tick which would do
-    // the same.
+    // begin_shutdown drains the armed Seed probe so the rig drops silently; production loops to a
+    // Shutdown tick which would do the same.
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Static-only config attaches one Sub per `[[watch]]` into the
-/// engine's `by_name` index and leaves the Promoter registry empty.
+/// Static-only config attaches one Sub per `[[watch]]` into the engine's `by_name` index and leaves
+/// the Promoter registry empty.
 #[test]
 fn run_initial_attach_attaches_static_only_config() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -756,9 +703,8 @@ fn run_initial_attach_attaches_static_only_config() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// A config with a dynamic `[[watch]]` routes through
-/// `attach_promoter` and registers the Promoter in the engine's
-/// registry.
+/// A config with a dynamic `[[watch]]` routes through `attach_promoter` and registers the Promoter
+/// in the engine's registry.
 #[test]
 fn run_initial_attach_registers_promoter_for_dynamic_watch() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -780,8 +726,8 @@ fn run_initial_attach_registers_promoter_for_dynamic_watch() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Mixed static + dynamic config: the initial-attach loop walks both
-/// spec lists and populates both maps in one run.
+/// Mixed static + dynamic config: the initial-attach loop walks both spec lists and populates both
+/// maps in one run.
 #[test]
 fn run_initial_attach_handles_mixed_static_and_dynamic() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -816,9 +762,8 @@ settle    = "50ms"
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Disabled entries on either side are skipped at initial attach —
-/// neither the engine's Sub registry nor its Promoter registry sees
-/// the disabled rows.
+/// Disabled entries on either side are skipped at initial attach — neither the engine's Sub
+/// registry nor its Promoter registry sees the disabled rows.
 #[test]
 fn run_initial_attach_skips_disabled_entries() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -877,12 +822,12 @@ enabled   = false
 // Reload pipeline: SIGHUP → dispatch_reload
 // ============================================================
 
-/// Reload against an invalid path keeps the running config — the
-/// parse early-return preserves `loader.current_config`.
+/// Reload against an invalid path keeps the running config — the parse early-return preserves
+/// `loader.current_config`.
 #[test]
 fn reload_with_invalid_path_logs_and_keeps_config() {
-    // `/dev/null/no/such` returns ENOTDIR on lstat; the parse never
-    // sees the bytes; the early-return preserves running state.
+    // `/dev/null/no/such` returns ENOTDIR on lstat; the parse never sees the bytes; the
+    // early-return preserves running state.
     let cfg_path = PathBuf::from("/dev/null/no/such/file.toml");
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config.clone(), cfg_path);
@@ -894,9 +839,8 @@ fn reload_with_invalid_path_logs_and_keeps_config() {
     assert_eq!(rig.driver.loader.current_config(), &config);
 }
 
-/// Empty-diff reload preserves Sub identity: re-saving the same TOML
-/// bytes runs the reload pipeline but the engine's `by_name` resolves
-/// to the same SubId across the rotation.
+/// Empty-diff reload preserves Sub identity: re-saving the same TOML bytes runs the reload pipeline
+/// but the engine's `by_name` resolves to the same SubId across the rotation.
 #[test]
 fn reload_with_no_changes_rotates_config_silently() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -938,8 +882,7 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Reload that adds a Sub attaches it through the diff-driven
-/// `Input::ConfigDiff` step.
+/// Reload that adds a Sub attaches it through the diff-driven `Input::ConfigDiff` step.
 #[test]
 fn reload_added_watch_attaches_in_engine() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1097,8 +1040,7 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Reload modifying a dynamic [[watch]] mints a fresh PromoterId
-/// under the same name.
+/// Reload modifying a dynamic [[watch]] mints a fresh PromoterId under the same name.
 #[test]
 fn reload_modified_promoter_replaces_id_in_engine() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1149,8 +1091,8 @@ actions   = [{{ exec = ["echo"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Static→dynamic migration via path edit. Diff emits
-/// `subs.removed + promoters.added`; engine registries swap.
+/// Static→dynamic migration via path edit. Diff emits `subs.removed + promoters.added`; engine
+/// registries swap.
 #[test]
 fn reload_static_to_dynamic_migration_swaps_engine_registries() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1238,9 +1180,8 @@ actions   = [{{ exec = ["true"] }}]
 // read_and_parse_config + meta rotation discipline
 // ============================================================
 
-/// `read_and_parse_config` on a valid file returns
-/// `Some((Config, FileMeta))` whose meta matches a fresh
-/// path-level lstat.
+/// `read_and_parse_config` on a valid file returns `Some((Config, FileMeta))` whose meta matches a
+/// fresh path-level lstat.
 #[test]
 fn read_and_parse_config_returns_some_on_valid_file() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1271,8 +1212,8 @@ actions = [{{ exec = ["true"] }}]
     assert_ne!(parsed_meta, dummy_meta());
 }
 
-/// Apply-branch reload rotates `loader.config_meta` to the post-edit
-/// lstat AND attaches the added Sub.
+/// Apply-branch reload rotates `loader.config_meta` to the post-edit lstat AND attaches the added
+/// Sub.
 #[test]
 fn reload_rotates_config_meta_on_apply_branch() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1321,9 +1262,8 @@ settle    = "100ms"
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Empty-diff reload must still rotate `loader.config_meta` —
-/// otherwise the auto-reload settle filter would loop against an
-/// already-applied edit.
+/// Empty-diff reload must still rotate `loader.config_meta` — otherwise the auto-reload settle
+/// filter would loop against an already-applied edit.
 #[test]
 fn reload_rotates_config_meta_on_empty_diff_branch() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1370,8 +1310,8 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Parse-fail with a successful post-fail lstat rotates
-/// `loader.config_meta` (closes the chmod-EACCES recovery loop).
+/// Parse-fail with a successful post-fail lstat rotates `loader.config_meta` (closes the
+/// chmod-EACCES recovery loop).
 #[test]
 fn reload_parse_failure_rotates_meta_when_post_fail_lstat_succeeds() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1392,8 +1332,8 @@ actions   = [{{ exec = ["true"] }}]
     let mut rig = rig_for(v1_config.clone(), cfg_path.clone());
     rig.driver.loader.rotate_meta_only(v1_meta);
 
-    // Sleep so mtime advances at least one nanosecond past `v1_meta`
-    // on coarse-resolution filesystems.
+    // Sleep so mtime advances at least one nanosecond past `v1_meta` on coarse-resolution
+    // filesystems.
     std::thread::sleep(Duration::from_millis(10));
     std::fs::write(&cfg_path, "not valid toml [[[").unwrap();
     let v2_lstat = FileMeta::from_path(&cfg_path).expect("v2 lstat ok");
@@ -1407,9 +1347,8 @@ actions   = [{{ exec = ["true"] }}]
     assert_eq!(rig.driver.loader.current_config(), &v1_config);
 }
 
-/// Destination mismatch on reload preserves the running log shape
-/// in `loader.current_log` — the appender doesn't hot-reload, so
-/// the rotation must reflect what is applied.
+/// Destination mismatch on reload preserves the running log shape in `loader.current_log` — the
+/// appender doesn't hot-reload, so the rotation must reflect what is applied.
 #[test]
 fn reload_with_destination_mismatch_preserves_running_log() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1494,8 +1433,7 @@ fn apply_config_settle_expiry_no_op_within_window() {
     assert_eq!(rig.driver.config_settle_until, Some(deadline));
 }
 
-/// `now == deadline` is the boundary case. The deadline is consumed
-/// and the lstat filter then runs.
+/// `now == deadline` is the boundary case. The deadline is consumed and the lstat filter then runs.
 #[test]
 fn apply_config_settle_expiry_fires_at_exact_deadline() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1516,8 +1454,8 @@ fn apply_config_settle_expiry_fires_at_exact_deadline() {
     assert_eq!(rig.driver.loader.config_meta(), real_meta);
 }
 
-/// Settle expiry whose lstat agrees with `loader.config_meta` silently
-/// drops the pulse — the kqueue-parent-spillover case.
+/// Settle expiry whose lstat agrees with `loader.config_meta` silently drops the pulse — the
+/// kqueue-parent-spillover case.
 #[test]
 fn apply_config_settle_expiry_skips_reload_on_unchanged_meta() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1565,8 +1503,7 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Settle expiry whose lstat detects drift triggers `dispatch_reload`,
-/// rotating config and meta.
+/// Settle expiry whose lstat detects drift triggers `dispatch_reload`, rotating config and meta.
 #[test]
 fn apply_config_settle_expiry_triggers_reload_on_meta_drift() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1624,9 +1561,8 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Lstat error routes through the "treat-as-changed" branch:
-/// `dispatch_reload` runs but fails to read; loader state preserved.
-/// Settle slot consumed regardless.
+/// Lstat error routes through the "treat-as-changed" branch: `dispatch_reload` runs but fails to
+/// read; loader state preserved. Settle slot consumed regardless.
 #[test]
 fn apply_config_settle_expiry_treats_missing_path_as_changed() {
     let cfg_path = PathBuf::from("/dev/null/no/such/file.toml");
@@ -1702,8 +1638,7 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Auto-reload settle expiry threads `AutoReload` into
-/// `dispatch_reload`.
+/// Auto-reload settle expiry threads `AutoReload` into `dispatch_reload`.
 #[test]
 fn dispatch_reload_via_auto_reload_bumps_counters_with_auto_reload_trigger() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1762,8 +1697,8 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Parse-fail reload does NOT bump the counters — the early return
-/// short-circuits before `record_reload`.
+/// Parse-fail reload does NOT bump the counters — the early return short-circuits before
+/// `record_reload`.
 #[test]
 fn dispatch_reload_does_not_bump_counters_on_parse_fail() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1781,32 +1716,24 @@ fn dispatch_reload_does_not_bump_counters_on_parse_fail() {
 }
 
 // ============================================================
-// Boot-order lifecycle — initial-attach BEFORE startup-TOCTOU
-// dispatch_reload
+// Boot-order lifecycle — initial-attach BEFORE startup-TOCTOU dispatch_reload
 // ============================================================
 
-/// [`EngineDriver::run_initial_attach`] runs against the loader's
-/// initial config *before* any [`EngineDriver::dispatch_reload`]
-/// (`Startup`) call. Initial-attach observes an empty engine and
-/// attaches each Sub / Promoter directly. A subsequent
-/// `dispatch_reload(Startup)` then sees an engine in sync with the
-/// loader — the diff's `added` bucket attaches new entries cleanly,
-/// neither colliding in [`specter_core::SubRegistry::insert`]'s
-/// `by_name` index nor in
-/// [`specter_core::PromoterRegistry::insert`]'s when the TOCTOU
-/// drift added a dynamic `[[watch]]`.
+/// [`EngineDriver::run_initial_attach`] runs against the loader's initial config *before* any
+/// [`EngineDriver::dispatch_reload`] (`Startup`) call. Initial-attach observes an empty engine and
+/// attaches each Sub / Promoter directly. A subsequent `dispatch_reload(Startup)` then sees an
+/// engine in sync with the loader — the diff's `added` bucket attaches new entries cleanly, neither
+/// colliding in [`specter_core::SubRegistry::insert`]'s `by_name` index nor in
+/// [`specter_core::PromoterRegistry::insert`]'s when the TOCTOU drift added a dynamic `[[watch]]`.
 ///
-/// Reversing the order would attach the diff's `added` Subs /
-/// Promoters against an empty engine, rotate the loader to the
-/// post-TOCTOU config, and then `run_initial_attach` would walk the
-/// rotated loader and double-attach those entries — tripping both
-/// registries' `debug_assert!` on the duplicate `by_name` insert.
+/// Reversing the order would attach the diff's `added` Subs / Promoters against an empty engine,
+/// rotate the loader to the post-TOCTOU config, and then `run_initial_attach` would walk the
+/// rotated loader and double-attach those entries — tripping both registries' `debug_assert!` on
+/// the duplicate `by_name` insert.
 ///
-/// The test exercises both registry sites in one pass: the initial
-/// config holds one static Sub; the on-disk drift adds another
-/// static Sub AND a dynamic `[[watch]]` (a Promoter). The
-/// `last_reload_via = Startup` assertion is the secondary behavioural
-/// pin on the `Startup` attribution.
+/// The test exercises both registry sites in one pass: the initial config holds one static Sub; the
+/// on-disk drift adds another static Sub AND a dynamic `[[watch]]` (a Promoter). The `last_reload_via
+/// = Startup` assertion is the secondary behavioural pin on the `Startup` attribution.
 #[test]
 fn startup_drift_after_initial_attach_does_not_double_attach() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1824,10 +1751,9 @@ actions   = [{{ exec = ["true"] }}]
     );
     let boot_config = Config::from_str(&boot_text).expect("boot config parses");
 
-    // On-disk config — TOCTOU drift adds a static Sub `bar` AND a
-    // dynamic `[[watch]]` `logs` (lowered to a Promoter). Both kinds
-    // exercise their respective registry `debug_assert!` site under
-    // a buggy boot order.
+    // On-disk config — TOCTOU drift adds a static Sub `bar` AND a dynamic `[[watch]]` `logs`
+    // (lowered to a Promoter). Both kinds exercise their respective registry `debug_assert!` site
+    // under a buggy boot order.
     let drift_text = format!(
         r#"
 [[watch]]
@@ -1850,18 +1776,17 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(boot_config, cfg_path);
 
-    // Step 1 — initial-attach against the loader's boot config.
-    // Engine ends with just `foo` attached; Promoter registry empty.
+    // Step 1 — initial-attach against the loader's boot config. Engine ends with just `foo`
+    // attached; Promoter registry empty.
     let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.subs().find_by_name("foo").is_some());
     assert!(rig.driver.engine.subs().find_by_name("bar").is_none());
     assert_eq!(rig.driver.engine.subs().len(), 1);
     assert!(rig.driver.engine.promoters().is_empty());
 
-    // Step 2 — startup-TOCTOU dispatch_reload sees the drifted file,
-    // computes `diff(boot, drift)` = `{added: [bar], promoters_added:
-    // [logs]}`, and applies. With the engine in sync with the loader's
-    // pre-rotation boot state, the `added` buckets dispatch cleanly.
+    // Step 2 — startup-TOCTOU dispatch_reload sees the drifted file, computes `diff(boot, drift)` =
+    // `{added: [bar], promoters_added: [logs]}`, and applies. With the engine in sync with the
+    // loader's pre-rotation boot state, the `added` buckets dispatch cleanly.
     let _ = rig
         .driver
         .dispatch_reload(ReloadTrigger::Startup, Instant::now());
@@ -1880,9 +1805,8 @@ actions   = [{{ exec = ["true"] }}]
         "logs Promoter registered exactly once",
     );
 
-    // The trigger surfaces as `Startup` on the next `status` query —
-    // operators distinguish boot-time drift apply from a later
-    // SIGHUP / IPC reload.
+    // The trigger surfaces as `Startup` on the next `status` query — operators distinguish
+    // boot-time drift apply from a later SIGHUP / IPC reload.
     let lr = rig
         .driver
         .driver_state
@@ -1897,9 +1821,8 @@ actions   = [{{ exec = ["true"] }}]
 // forward: effects + cancel ordering
 // ============================================================
 
-/// `forward` dispatches `cancel_effects` ahead of `effects` over the
-/// same `effects_tx` channel. The same-step collision is
-/// unconstructable in production but the ordering pins the contract.
+/// `forward` dispatches `cancel_effects` ahead of `effects` over the same `effects_tx` channel. The
+/// same-step collision is unconstructable in production but the ordering pins the contract.
 #[test]
 fn forward_dispatches_cancel_before_submit_on_effects_tx() {
     use slotmap::KeyData;
@@ -1972,12 +1895,10 @@ fn forward_dispatches_cancel_before_submit_on_effects_tx() {
 // Drop-order discipline + initial-attach probe drain
 // ============================================================
 
-/// Drop-order test: probe armed via initial-attach, begin_shutdown
-/// drains it, then dropping the rig is silent. A rig drop with an
-/// armed probe would trip `ProbeSlot::drop`'s linear-edge tripwire
-/// (panic in every build) — the test asserts the cancel-first drain
-/// holds even when the Profile started its life with a Seed-Verifying
-/// burst.
+/// Drop-order test: probe armed via initial-attach, begin_shutdown drains it, then dropping the rig
+/// is silent. A rig drop with an armed probe would trip `ProbeSlot::drop`'s linear-edge tripwire
+/// (panic in every build) — the test asserts the cancel-first drain holds even when the Profile
+/// started its life with a Seed-Verifying burst.
 #[test]
 fn drop_after_begin_shutdown_is_silent_with_armed_probe() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2017,8 +1938,7 @@ fn drop_after_begin_shutdown_is_silent_with_armed_probe() {
         "begin_shutdown drained the probe",
     );
 
-    // Drop is silent — no `ProbeSlot::drop` tripwire panic. Test
-    // passing IS the assertion.
+    // Drop is silent — no `ProbeSlot::drop` tripwire panic. Test passing IS the assertion.
     drop(rig);
 }
 
@@ -2026,12 +1946,10 @@ fn drop_after_begin_shutdown_is_silent_with_armed_probe() {
 // Deferred-input queue: WatchOpRejected replay
 // ============================================================
 
-/// A rejected watch op queues into `deferred_inputs` and replays on
-/// the next tick before the mio Poll re-blocks. The replay drives
-/// the engine's claim-purge path in the SAME tick the original
-/// `forward` cycle ran, so an `Input::WatchOpRejected` never lingers
-/// across the block boundary even though the watcher's rejection is
-/// observed synchronously inside `apply_watch_ops`.
+/// A rejected watch op queues into `deferred_inputs` and replays on the next tick before the mio
+/// Poll re-blocks. The replay drives the engine's claim-purge path in the SAME tick the original
+/// `forward` cycle ran, so an `Input::WatchOpRejected` never lingers across the block boundary even
+/// though the watcher's rejection is observed synchronously inside `apply_watch_ops`.
 #[test]
 fn watch_op_rejection_queues_deferred_input_and_replays_next_tick() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2039,9 +1957,9 @@ fn watch_op_rejection_queues_deferred_input_and_replays_next_tick() {
     let config = config_with_one_watch(tmp.path());
     let mut rig = rig_for(config, cfg_path);
 
-    // Arm a one-shot Watch failure on the MockFsWatcher. The next
-    // `WatchOp::Watch` returns `Err(Pressure { errno: 24 (EMFILE) })`,
-    // forward queues an `Input::WatchOpRejected` onto deferred_inputs.
+    // Arm a one-shot Watch failure on the MockFsWatcher. The next `WatchOp::Watch` returns
+    // `Err(Pressure { errno: 24 (EMFILE) })`, forward queues an `Input::WatchOpRejected` onto
+    // deferred_inputs.
     rig.driver
         .reactor
         .watcher_mut()
@@ -2062,9 +1980,8 @@ fn watch_op_rejection_queues_deferred_input_and_replays_next_tick() {
         other => panic!("expected Input::WatchOpRejected, got {other:?}"),
     }
 
-    // Drive one tick. `replay_deferred_inputs` runs first, consuming
-    // the queued `WatchOpRejected`; the engine's claim-purge fires.
-    // Pre-arm `config_settle_until` so the tick's block timeout is
+    // Drive one tick. `replay_deferred_inputs` runs first, consuming the queued `WatchOpRejected`;
+    // the engine's claim-purge fires. Pre-arm `config_settle_until` so the tick's block timeout is
     // ZERO and we don't wait on an actual deadline.
     arm_zero_timeout(&mut rig);
     let _ = rig.driver.tick();
@@ -2270,10 +2187,9 @@ actions   = [{{ exec = ["true"] }}]
 // IPC verb dispatch — over real UnixStream clients
 // ============================================================
 
-/// `Status` round-trips: write a Status request, drive ticks until
-/// the response surfaces, parse it back into `ResponsePayload::Status`,
-/// and assert the projection observed the driver's actual socket
-/// path.
+/// `Status` round-trips: write a Status request, drive ticks until the response surfaces, parse it
+/// back into `ResponsePayload::Status`, and assert the projection observed the driver's actual
+/// socket path.
 #[test]
 fn ipc_status_replies_with_projection() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2296,9 +2212,8 @@ fn ipc_status_replies_with_projection() {
     }
 }
 
-/// Subscribe { name: None } enqueues an unfiltered-tail ack and
-/// flips the conn role to `Sub`. The `conn_count` reflects the
-/// surviving conn (one entry).
+/// Subscribe { name: None } enqueues an unfiltered-tail ack and flips the conn role to `Sub`. The
+/// `conn_count` reflects the surviving conn (one entry).
 #[test]
 fn ipc_subscribe_unfiltered_acks_and_registers_subscriber() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2316,14 +2231,13 @@ fn ipc_subscribe_unfiltered_acks_and_registers_subscriber() {
         ResponsePayload::SubscribeAck { sub: None } => {}
         other => panic!("expected SubscribeAck(None), got {other:?}"),
     }
-    // The Sub-role conn is still in the conn map — the new
-    // subscriber storage (one ConnRole::Sub conn ≡ one subscriber).
+    // The Sub-role conn is still in the conn map — the new subscriber storage (one ConnRole::Sub
+    // conn ≡ one subscriber).
     assert_eq!(rig.driver.ipc.conn_count(), 1);
 }
 
-/// Subscribe { name: Some("nope") } against an empty engine returns
-/// `Err { code: WireErrorCode::UnknownSub }` and DOES NOT flip the
-/// conn role.
+/// Subscribe { name: Some("nope") } against an empty engine returns `Err { code:
+/// WireErrorCode::UnknownSub }` and DOES NOT flip the conn role.
 #[test]
 fn ipc_subscribe_unknown_name_errors_without_registering() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2349,14 +2263,12 @@ fn ipc_subscribe_unknown_name_errors_without_registering() {
         }
         other => panic!("expected Err(WireErrorCode::UnknownSub), got {other:?}"),
     }
-    // The conn stays alive as a Reqs conn (no role flip happened),
-    // so conn_count is still 1.
+    // The conn stays alive as a Reqs conn (no role flip happened), so conn_count is still 1.
     assert_eq!(rig.driver.ipc.conn_count(), 1);
 }
 
-/// Subscribe { name: Some("build") } against a config with a `build`
-/// watch attached resolves the name to a `SubId` and acks carrying
-/// the resolved `WireId`.
+/// Subscribe { name: Some("build") } against a config with a `build` watch attached resolves the
+/// name to a `SubId` and acks carrying the resolved `WireId`.
 #[test]
 fn ipc_subscribe_known_name_resolves_and_acks() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2391,15 +2303,12 @@ fn ipc_subscribe_known_name_resolves_and_acks() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// A second `Subscribe` on a conn that already flipped to
-/// [`ConnRole::Sub`] is a precondition violation. The handler gate
-/// refuses with [`WireErrorCode::AlreadySubscribed`] before reaching
-/// `transition_to_sub`, so the first subscription's `filter` and
-/// `missed` window survive unchanged.
+/// A second `Subscribe` on a conn that already flipped to [`ConnRole::Sub`] is a precondition
+/// violation. The handler gate refuses with [`WireErrorCode::AlreadySubscribed`] before reaching
+/// `transition_to_sub`, so the first subscription's `filter` and `missed` window survive unchanged.
 ///
-/// Pins the fix structurally: the wire surface carries an `Err`
-/// for the second Subscribe, and the conn's role inspection shows
-/// the first subscription's state intact.
+/// Pins the fix structurally: the wire surface carries an `Err` for the second Subscribe, and the
+/// conn's role inspection shows the first subscription's state intact.
 #[test]
 fn subscribe_twice_returns_err_already_subscribed() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2410,9 +2319,8 @@ fn subscribe_twice_returns_err_already_subscribed() {
 
     let mut client = ipc_connect(&rig);
 
-    // First Subscribe: `name = None` → unfiltered tail. The handler
-    // acks with `sub = None` and flips the conn role to
-    // `Sub { filter: None, missed: MissedWindow::Closed }`.
+    // First Subscribe: `name = None` → unfiltered tail. The handler acks with `sub = None` and
+    // flips the conn role to `Sub { filter: None, missed: MissedWindow::Closed }`.
     let reply1 = ipc_round_trip(
         &mut rig,
         &mut client,
@@ -2443,9 +2351,8 @@ fn subscribe_twice_returns_err_already_subscribed() {
         );
     }
 
-    // Second Subscribe on the SAME conn: `name = Some("build")`. The
-    // gate refuses with WireErrorCode::AlreadySubscribed before reaching
-    // `transition_to_sub`.
+    // Second Subscribe on the SAME conn: `name = Some("build")`. The gate refuses with
+    // WireErrorCode::AlreadySubscribed before reaching `transition_to_sub`.
     let reply2 = ipc_round_trip(
         &mut rig,
         &mut client,
@@ -2464,8 +2371,8 @@ fn subscribe_twice_returns_err_already_subscribed() {
         other => panic!("expected Err(WireErrorCode::AlreadySubscribed); got {other:?}"),
     }
 
-    // The first subscription's role is untouched — `filter == None`
-    // (not `Some(sid_build)`), missed window still `Closed` (none opened).
+    // The first subscription's role is untouched — `filter == None` (not `Some(sid_build)`), missed
+    // window still `Closed` (none opened).
     let conn = rig
         .driver
         .ipc
@@ -2486,11 +2393,10 @@ fn subscribe_twice_returns_err_already_subscribed() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Regression sibling of [`subscribe_twice_returns_err_already_subscribed`]:
-/// when a missed window has accumulated on the first subscription,
-/// a refused second Subscribe must NOT reset the open `missed`
-/// window. The handler gate fires before any state mutation, so
-/// the back-pressure accounting carries through unchanged.
+/// Regression sibling of [`subscribe_twice_returns_err_already_subscribed`]: when a missed window
+/// has accumulated on the first subscription, a refused second Subscribe must NOT reset the open
+/// `missed` window. The handler gate fires before any state mutation, so the back-pressure
+/// accounting carries through unchanged.
 #[test]
 fn subscribe_after_err_does_not_overwrite_prior_subscription() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2507,9 +2413,8 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
     );
     let token = mio::Token(TOKEN_CONN_BASE);
 
-    // Synthesize a pre-existing missed window on the conn. Direct
-    // mutation lets the test pin gate behavior without driving the
-    // full fan-out throttle path.
+    // Synthesize a pre-existing missed window on the conn. Direct mutation lets the test pin gate
+    // behavior without driving the full fan-out throttle path.
     let stamped_at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
     {
         let conn = rig
@@ -2541,8 +2446,8 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
         "second Subscribe is refused; got {reply:?}",
     );
 
-    // The missed bookkeeping survives the refusal: gate fires
-    // before `transition_to_sub` runs, so the window is not reset.
+    // The missed bookkeeping survives the refusal: gate fires before `transition_to_sub` runs, so
+    // the window is not reset.
     let conn = rig
         .driver
         .ipc
@@ -2565,28 +2470,22 @@ fn subscribe_after_err_does_not_overwrite_prior_subscription() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// An oversize response refused against a previously-empty queue
-/// queues the structured [`WireErrorCode::ResponseTooBig`] Err line
-/// into the per-conn reserve, arms `close_after_flush`, and then
-/// flushes-then-terminates on the next WRITABLE drain — the cap-class
-/// signal lands on the wire ahead of the close.
+/// An oversize response refused against a previously-empty queue queues the structured
+/// [`WireErrorCode::ResponseTooBig`] Err line into the per-conn reserve, arms `close_after_flush`,
+/// and then flushes-then-terminates on the next WRITABLE drain — the cap-class signal lands on the
+/// wire ahead of the close.
 ///
-/// The convergence: with the Err line in the queue,
-/// `try_terminate_if_idle`'s queue-empty precondition does not hold
-/// even when the prior queue was empty, so the empty-queue refusal
-/// case takes the same flush-then-terminate path as the
-/// non-empty-queue case ([`oversize_response_arms_close_then_flushes_then_terminates`]).
+/// The convergence: with the Err line in the queue, `try_terminate_if_idle`'s queue-empty
+/// precondition does not hold even when the prior queue was empty, so the empty-queue refusal case
+/// takes the same flush-then-terminate path as the non-empty-queue case
+/// ([`oversize_response_arms_close_then_flushes_then_terminates`]).
 ///
-/// Synthesises the oversize payload via a `ResponsePayload::Err`
-/// whose `error: String` is padded past the cap; the serialized JSON
-/// envelope adds ~50 bytes of `{"kind":"err","code":"…","error":"…"}`
-/// framing, so the padded payload comfortably exceeds the cap with
-/// no need for a custom carrier or a `cfg(test)` constant override.
-/// The pre-padding code value [`WireErrorCode::Busy`] is incidental —
-/// the test pins the cap-refusal mechanism, not the inner Err
-/// vocabulary; the structured signal the Refused arm emits is a
-/// separate `WireErrorCode::ResponseTooBig` line, asserted at the
-/// wire below.
+/// Synthesises the oversize payload via a `ResponsePayload::Err` whose `error: String` is padded past
+/// the cap; the serialized JSON envelope adds ~50 bytes of `{"kind":"err","code":"…","error":"…"}`
+/// framing, so the padded payload comfortably exceeds the cap with no need for a custom carrier or a
+/// `cfg(test)` constant override. The pre-padding code value [`WireErrorCode::Busy`] is incidental —
+/// the test pins the cap-refusal mechanism, not the inner Err vocabulary; the structured signal the
+/// Refused arm emits is a separate `WireErrorCode::ResponseTooBig` line, asserted at the wire below.
 #[test]
 fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2595,9 +2494,8 @@ fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
     let mut rig = rig_for(config, cfg_path);
 
     let mut client = ipc_connect(&rig);
-    // The client is in blocking mode by default (50ms read timeout).
-    // Tests below want to read the structured Err line from the wire,
-    // so leave blocking but tighten the deadline through the
+    // The client is in blocking mode by default (50ms read timeout). Tests below want to read the
+    // structured Err line from the wire, so leave blocking but tighten the deadline through the
     // run_until_response polling loop.
     arm_zero_timeout(&mut rig);
     let _ = rig.driver.tick();
@@ -2621,8 +2519,8 @@ fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
         "oversize response is refused by the capacity gate",
     );
 
-    // Convergence: conn lives, queue holds the structured
-    // ResponseTooBig Err line, close_after_flush is armed.
+    // Convergence: conn lives, queue holds the structured ResponseTooBig Err line,
+    // close_after_flush is armed.
     assert_eq!(
         rig.driver.ipc.conn_count(),
         1,
@@ -2638,9 +2536,8 @@ fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
         );
     }
 
-    // Read the Err line off the wire — drives ticks until the bytes
-    // surface on the client end. The response is the structured Err
-    // the Refused arm built; assert on `code` so a rename of the
+    // Read the Err line off the wire — drives ticks until the bytes surface on the client end. The
+    // response is the structured Err the Refused arm built; assert on `code` so a rename of the
     // wire token would fail loudly here.
     let reply = run_until_response(&mut rig, &mut client)
         .expect("ResponseTooBig Err line within test deadline");
@@ -2659,8 +2556,7 @@ fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
         other => panic!("expected Err(ResponseTooBig), got {other:?}"),
     }
 
-    // Drive ticks: the flush completes, close_after_flush observed,
-    // conn terminates.
+    // Drive ticks: the flush completes, close_after_flush observed, conn terminates.
     for _ in 0..5 {
         arm_zero_timeout(&mut rig);
         let _ = rig.driver.tick();
@@ -2681,18 +2577,15 @@ fn oversize_response_emits_response_too_big_then_flushes_then_terminates() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// An oversize response refused against a queue that already holds
-/// bytes (a normal response from a prior verb) takes the
-/// flush-then-terminate path: the queue holds the prior bytes plus
-/// the structured [`WireErrorCode::ResponseTooBig`] Err line the
-/// Refused arm appended, `close_after_flush` is armed, and the next
-/// WRITABLE drain flushes both lines before observing the close.
+/// An oversize response refused against a queue that already holds bytes (a normal response from a
+/// prior verb) takes the flush-then-terminate path: the queue holds the prior bytes plus the
+/// structured [`WireErrorCode::ResponseTooBig`] Err line the Refused arm appended,
+/// `close_after_flush` is armed, and the next WRITABLE drain flushes both lines before observing
+/// the close.
 ///
-/// Together with
-/// [`oversize_response_emits_response_too_big_then_flushes_then_terminates`]
-/// the two tests cover both starting-queue shapes
-/// (queue-empty-at-arm and queue-non-empty-at-arm); both shapes
-/// converge on the same flush-then-terminate teardown.
+/// Together with [`oversize_response_emits_response_too_big_then_flushes_then_terminates`] the two
+/// tests cover both starting-queue shapes (queue-empty-at-arm and queue-non-empty-at-arm); both
+/// shapes converge on the same flush-then-terminate teardown.
 #[test]
 fn oversize_response_arms_close_then_flushes_then_terminates() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2705,8 +2598,8 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
     let _ = rig.driver.tick();
     let token = mio::Token(TOKEN_CONN_BASE);
 
-    // Queue a normal-sized response first so the write_queue is
-    // non-empty when the oversize one is refused.
+    // Queue a normal-sized response first so the write_queue is non-empty when the oversize one is
+    // refused.
     let small = ResponsePayload::Ok;
     assert_eq!(
         rig.driver.ipc.enqueue_response(token, &small),
@@ -2723,8 +2616,8 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
         EnqueueOutcome::Refused,
     );
 
-    // Inline-terminate did NOT fire — queue still holds the small
-    // response. close_after_flush is armed for the next drain.
+    // Inline-terminate did NOT fire — queue still holds the small response. close_after_flush is
+    // armed for the next drain.
     assert_eq!(
         rig.driver.ipc.conn_count(),
         1,
@@ -2736,9 +2629,8 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
         assert!(!conn.write_queue.is_empty(), "small response queued");
     }
 
-    // Drive ticks: arm_writable_interests adds WRITABLE; drain_writable
-    // flushes the small response; queue empties; close_after_flush
-    // observed; terminate fires.
+    // Drive ticks: arm_writable_interests adds WRITABLE; drain_writable flushes the small response;
+    // queue empties; close_after_flush observed; terminate fires.
     for _ in 0..5 {
         arm_zero_timeout(&mut rig);
         let _ = rig.driver.tick();
@@ -2755,19 +2647,14 @@ fn oversize_response_arms_close_then_flushes_then_terminates() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// End-to-end witness: the Missed marker carries the FIRST-DROP
-/// timestamp, not the flush-time stamp. Operators reading a
-/// `_missed` line on the wire see when the drops began (the
-/// start-of-window time), which is the load-bearing detail for
-/// incident forensics — the marker reaches the wire well after the
-/// drops happened, so a flush-time stamp would point at the wrong
-/// part of the timeline.
+/// End-to-end witness: the Missed marker carries the FIRST-DROP timestamp, not the flush-time stamp.
+/// Operators reading a `_missed` line on the wire see when the drops began (the start-of-window
+/// time), which is the load-bearing detail for incident forensics — the marker reaches the wire well
+/// after the drops happened, so a flush-time stamp would point at the wrong part of the timeline.
 ///
-/// Drives the full fan-out path via
-/// [`super::Hub::dispatch_to_subscribers`]: a saturated
-/// queue throttles the diag (missed window opens with `count = 1`,
-/// `since = at_drop`), the queue clears (simulating drain), a second
-/// dispatch lands at at_flush AND flushes the marker. The marker's
+/// Drives the full fan-out path via [`super::Hub::dispatch_to_subscribers`]: a saturated queue
+/// throttles the diag (missed window opens with `count = 1`, `since = at_drop`), the queue clears
+/// (simulating drain), a second dispatch lands at at_flush AND flushes the marker. The marker's
 /// wire `at` is at_drop.
 #[test]
 fn missed_marker_uses_first_dropped_at_when_flushed() {
@@ -2801,8 +2688,7 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
         assert!(matches!(conn.role, ConnRole::Sub { .. }));
     }
 
-    // Pre-fill the queue near high-water so the next dispatch
-    // overflows the capacity gate.
+    // Pre-fill the queue near high-water so the next dispatch overflows the capacity gate.
     {
         let conn = rig.driver.ipc.conn_mut(token).expect("conn lives");
         let fill = ACCEPT_CAP - 10;
@@ -2836,15 +2722,14 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
         }
     }
 
-    // Simulate the wire draining — clear the queue so the next
-    // dispatch fits the marker + diag.
+    // Simulate the wire draining — clear the queue so the next dispatch fits the marker + diag.
     {
         let conn = rig.driver.ipc.conn_mut(token).expect("conn lives");
         conn.write_queue.clear();
     }
 
-    // Dispatch a fresh diag at at_flush — fits, AND the marker
-    // flushes ahead of it carrying at_drop as its `at`.
+    // Dispatch a fresh diag at at_flush — fits, AND the marker flushes ahead of it carrying at_drop
+    // as its `at`.
     let at_flush = SystemTime::UNIX_EPOCH + Duration::from_secs(500);
     let wire_at_flush = WireTime::from(at_flush);
     rig.driver
@@ -2889,15 +2774,12 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// IPC `Reload` routes through the driver-side reload pipeline and
-/// records `last_reload_via = Ipc`.
+/// IPC `Reload` routes through the driver-side reload pipeline and records `last_reload_via = Ipc`.
 ///
-/// Seeds `loader.config_meta` with the on-disk lstat so the
-/// per-tick `apply_config_settle_expiry` (driven by the test rig's
-/// zero-timeout arming) is a silent drop. Without this seed the
-/// settle-expiry's lstat filter would observe drift against the
-/// rig's `dummy_meta()` placeholder and fire an extra reload via
-/// `AutoReload`, inflating `reload_count`.
+/// Seeds `loader.config_meta` with the on-disk lstat so the per-tick `apply_config_settle_expiry`
+/// (driven by the test rig's zero-timeout arming) is a silent drop. Without this seed the
+/// settle-expiry's lstat filter would observe drift against the rig's `dummy_meta()` placeholder
+/// and fire an extra reload via `AutoReload`, inflating `reload_count`.
 #[test]
 fn ipc_reload_via_pipeline_records_ipc_trigger() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -2922,8 +2804,7 @@ fn ipc_reload_via_pipeline_records_ipc_trigger() {
     assert_eq!(lr.via, ReloadTrigger::Ipc);
 }
 
-/// Disable happy path over IPC: removes the Sub from the engine
-/// and records the runtime override.
+/// Disable happy path over IPC: removes the Sub from the engine and records the runtime override.
 #[test]
 fn ipc_disable_static_sub_detaches_and_records_override() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3003,9 +2884,8 @@ fn ipc_disable_unknown_dynamic_shape_name_returns_unknown_sub() {
     assert!(rig.driver.disabled_runtime.is_empty());
 }
 
-/// Disable against a real dynamic (promoter-spawned) Sub returns
-/// [`WireErrorCode::DynamicSubNoOp`]. Inject a dynamic Sub directly
-/// so the gate (which reads `source_promoter`) fires.
+/// Disable against a real dynamic (promoter-spawned) Sub returns [`WireErrorCode::DynamicSubNoOp`].
+/// Inject a dynamic Sub directly so the gate (which reads `source_promoter`) fires.
 #[test]
 fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
@@ -3112,8 +2992,7 @@ fn ipc_disable_already_disabled_returns_err() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Enable happy path: clears the override AND re-attaches via
-/// Input::AttachSub.
+/// Enable happy path: clears the override AND re-attaches via Input::AttachSub.
 #[test]
 fn ipc_enable_clears_override_and_reattaches() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3122,9 +3001,8 @@ fn ipc_enable_clears_override_and_reattaches() {
     let mut rig = rig_for(config, cfg_path);
     let _ = rig.driver.run_initial_attach();
 
-    // Drive a real disable round-trip first so the override is
-    // recorded by the production path, mirroring the lifecycle a
-    // disable→enable client sees.
+    // Drive a real disable round-trip first so the override is recorded by the production path,
+    // mirroring the lifecycle a disable→enable client sees.
     let mut client_a = ipc_connect(&rig);
     let _ = ipc_round_trip(
         &mut rig,
@@ -3172,8 +3050,8 @@ fn ipc_enable_not_disabled_returns_err() {
     }
 }
 
-/// Enable against a runtime-disabled name whose TOML entry no longer
-/// exists clears the override AND returns [`WireErrorCode::TomlDisabled`].
+/// Enable against a runtime-disabled name whose TOML entry no longer exists clears the override AND
+/// returns [`WireErrorCode::TomlDisabled`].
 #[test]
 fn ipc_enable_toml_disabled_clears_override_returns_err() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3199,9 +3077,8 @@ fn ipc_enable_toml_disabled_clears_override_returns_err() {
     assert!(rig.driver.disabled_runtime.is_empty());
 }
 
-/// `absorb` against a name absent from the engine registry refuses
-/// with [`WireErrorCode::UnknownSub`] — the same name-resolution gate
-/// `disable` carries, minus the `disabled_runtime` interaction.
+/// `absorb` against a name absent from the engine registry refuses with [`WireErrorCode::UnknownSub`]
+/// — the same name-resolution gate `disable` carries, minus the `disabled_runtime` interaction.
 #[test]
 fn ipc_absorb_unknown_name_returns_unknown_sub() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3227,11 +3104,9 @@ fn ipc_absorb_unknown_name_returns_unknown_sub() {
     }
 }
 
-/// `absorb` against a promoter-spawned dynamic Sub refuses with
-/// [`WireErrorCode::DynamicSubNoOp`] — the synthesised name is
-/// unstable across reloads, the same reason `disable` refuses it. The
-/// dynamic Sub is injected directly so the `source_promoter` gate
-/// fires.
+/// `absorb` against a promoter-spawned dynamic Sub refuses with [`WireErrorCode::DynamicSubNoOp`] —
+/// the synthesised name is unstable across reloads, the same reason `disable` refuses it. The
+/// dynamic Sub is injected directly so the `source_promoter` gate fires.
 #[test]
 fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
@@ -3295,9 +3170,8 @@ fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// `absorb` against a live static Sub acks `Ok` and arms a window on
-/// the Sub's Profile — the engine step lands an `AbsorbWindow` the
-/// `show` projection can later surface.
+/// `absorb` against a live static Sub acks `Ok` and arms a window on the Sub's Profile — the engine
+/// step lands an `AbsorbWindow` the `show` projection can later surface.
 #[test]
 fn ipc_absorb_static_sub_acks_ok_and_arms_window() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3353,10 +3227,9 @@ fn ipc_absorb_static_sub_acks_ok_and_arms_window() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// `absorb` is shutdown-gated: after a SIGINT arms `first_term`, the
-/// verb refuses with [`WireErrorCode::ShuttingDown`] and leaves engine
-/// state untouched — the same mutating-verb gate `Reload` / `Disable`
-/// / `Enable` sit behind.
+/// `absorb` is shutdown-gated: after a SIGINT arms `first_term`, the verb refuses with
+/// [`WireErrorCode::ShuttingDown`] and leaves engine state untouched — the same mutating-verb gate
+/// `Reload` / `Disable` / `Enable` sit behind.
 #[test]
 fn ipc_absorb_refused_mid_shutdown_with_shutting_down_code() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3417,23 +3290,19 @@ fn ipc_absorb_refused_mid_shutdown_with_shutting_down_code() {
 // Subscribe ack-ordering on the wire
 // ============================================================
 
-/// Subscribe → diag emission → ack-before-diag on the wire. The
-/// handler enqueues ack bytes BEFORE flipping the conn role, so a
-/// same-tick diag pushed via `forward` AFTER the role flip lands
-/// AFTER the ack on the wire.
+/// Subscribe → diag emission → ack-before-diag on the wire. The handler enqueues ack bytes BEFORE
+/// flipping the conn role, so a same-tick diag pushed via `forward` AFTER the role flip lands AFTER
+/// the ack on the wire.
 ///
 /// Sequencing:
 /// 1. Client writes Subscribe.
-/// 2. Drive ticks until the conn is accepted AND `handle_subscribe`
-///    has run (ack bytes enqueued, role flipped to Sub). We detect
-///    this by polling `ipc.conn_count() == 1` AND a per-tick check
-///    on the role through the wire (the ack bytes must be queued —
-///    not yet flushed if WRITABLE hasn't fired, but the role is the
-///    structural witness). Easier surrogate: drive ticks until the
-///    client's `read` returns the ack bytes.
-/// 3. Once the ack is on the wire (so the role HAS flipped),
-///    `forward` the diagnostic. The diag's bytes land after the ack
-///    bytes that were just consumed; they enter the conn's empty
+/// 2. Drive ticks until the conn is accepted AND `handle_subscribe` has run (ack bytes enqueued,
+///    role flipped to Sub). We detect this by polling `ipc.conn_count() == 1` AND a per-tick check
+///    on the role through the wire (the ack bytes must be queued — not yet flushed if WRITABLE
+///    hasn't fired, but the role is the structural witness). Easier surrogate: drive ticks until
+///    the client's `read` returns the ack bytes.
+/// 3. Once the ack is on the wire (so the role HAS flipped), `forward` the diagnostic. The diag's
+///    bytes land after the ack bytes that were just consumed; they enter the conn's empty
 ///    write_queue.
 /// 4. Drive ticks to flush the diag.
 /// 5. Assert both lines parsed, ack first, diag second.
@@ -3457,9 +3326,8 @@ fn subscribe_ack_precedes_diag_on_wire() {
         .expect("set read timeout");
     write_request(&mut client, &WireRequest::Subscribe { name: None });
 
-    // Drive ticks until the ack lands on the wire. The presence of
-    // the ack proves the role flipped to Sub — only then can the
-    // diag enqueue against this conn.
+    // Drive ticks until the ack lands on the wire. The presence of the ack proves the role flipped
+    // to Sub — only then can the diag enqueue against this conn.
     let mut ack_bytes: Vec<u8> = Vec::new();
     let deadline_ack = Instant::now() + Duration::from_secs(2);
     while Instant::now() < deadline_ack {
@@ -3493,9 +3361,8 @@ fn subscribe_ack_precedes_diag_on_wire() {
         "first wire line is the SubscribeAck; got {resp0:?}",
     );
 
-    // Role has flipped to Sub by now (ack proved it). Synthesize a
-    // diag and route it through `forward` — production fan-out path
-    // sees role=Sub and pushes the diag bytes into write_queue.
+    // Role has flipped to Sub by now (ack proved it). Synthesize a diag and route it through
+    // `forward` — production fan-out path sees role=Sub and pushes the diag bytes into write_queue.
     let mut out = StepOutput::default();
     out.diagnostics.push(specter_core::Diagnostic::SubAttached {
         sub: sid,
@@ -3546,10 +3413,9 @@ fn subscribe_ack_precedes_diag_on_wire() {
 // Channel wake-after-send: prober + effect senders
 // ============================================================
 
-/// The prober/effect senders' send-then-wake protocol is provable
-/// through the rig's `prober_response_tx` + `waker.wake()` pair: a
-/// send-then-wake fires the `TOKEN_WAKER` edge and the next
-/// `next_inputs` call drains the message.
+/// The prober/effect senders' send-then-wake protocol is provable through the rig's
+/// `prober_response_tx` + `waker.wake()` pair: a send-then-wake fires the `TOKEN_WAKER` edge and
+/// the next `next_inputs` call drains the message.
 #[test]
 fn prober_response_send_then_wake_drains_through_token_waker() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3574,13 +3440,12 @@ fn prober_response_send_then_wake_drains_through_token_waker() {
         elapsed < Duration::from_millis(500),
         "wake should unblock immediately, took {elapsed:?}",
     );
-    // The message is consumed by `tick`'s drain pass; the rig's
-    // prober_response_tx clone keeps the channel alive.
+    // The message is consumed by `tick`'s drain pass; the rig's prober_response_tx clone keeps the
+    // channel alive.
 }
 
-/// The effect-complete sender protocol mirrors the prober one. Pin
-/// the channel routing — send-then-wake delivers an
-/// `Input::EffectComplete` through the Reactor's `TOKEN_WAKER` arm.
+/// The effect-complete sender protocol mirrors the prober one. Pin the channel routing —
+/// send-then-wake delivers an `Input::EffectComplete` through the Reactor's `TOKEN_WAKER` arm.
 #[test]
 fn effect_complete_send_then_wake_drains_through_token_waker() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3602,29 +3467,23 @@ fn effect_complete_send_then_wake_drains_through_token_waker() {
 
     arm_zero_timeout(&mut rig);
     let _ = rig.driver.tick();
-    // No panic / no hang ⇒ the tick consumed the EffectComplete via
-    // the Reactor's TOKEN_WAKER arm.
+    // No panic / no hang ⇒ the tick consumed the EffectComplete via the Reactor's TOKEN_WAKER arm.
 }
 
 // ============================================================
 // Drain order: sensor inputs precede effect completions
 // ============================================================
 
-/// Sensor inputs drain BEFORE effect completions: pre-arm the
-/// fs-event queue + the effect-complete channel, drive one tick, and
-/// observe that the FsEvent reached engine.step first (via the
-/// MockProber recording — an unknown FsEvent produces no probe; an
-/// EffectComplete for an unknown sub emits no probe either; the
-/// drain order itself is what we pin via the routing pattern).
+/// Sensor inputs drain BEFORE effect completions: pre-arm the fs-event queue + the effect-complete
+/// channel, drive one tick, and observe that the FsEvent reached engine.step first (via the
+/// MockProber recording — an unknown FsEvent produces no probe; an EffectComplete for an unknown
+/// sub emits no probe either; the drain order itself is what we pin via the routing pattern).
 ///
-/// We can't directly observe step ordering from the engine surface
-/// (no per-tick `last_input` accessor), but we CAN observe that
-/// neither input crashes the engine and the tick returns Continue —
-/// any drain-order regression that tried to handle effect_complete
-/// first against an FsEvent-bearing resource would surface as a
-/// state-machine routing bug. The structural ordering is enforced
-/// in `tick.rs`; this test is a regression smoke that the wiring
-/// reaches both inputs.
+/// We can't directly observe step ordering from the engine surface (no per-tick `last_input`
+/// accessor), but we CAN observe that neither input crashes the engine and the tick returns
+/// Continue — any drain-order regression that tried to handle effect_complete first against an
+/// FsEvent-bearing resource would surface as a state-machine routing bug. The structural ordering
+/// is enforced in `tick.rs`; this test is a regression smoke that the wiring reaches both inputs.
 #[test]
 fn fs_event_and_effect_complete_both_drain_in_one_tick() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -3632,8 +3491,8 @@ fn fs_event_and_effect_complete_both_drain_in_one_tick() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
 
-    // Inject an FsEvent via the MockFsWatcher (sets a readable edge
-    // on the watcher fd; drain_watcher reads it on the next poll).
+    // Inject an FsEvent via the MockFsWatcher (sets a readable edge on the watcher fd;
+    // drain_watcher reads it on the next poll).
     let r = ResourceId::default();
     rig.driver
         .reactor
@@ -3652,10 +3511,8 @@ fn fs_event_and_effect_complete_both_drain_in_one_tick() {
         .expect("queue effect complete");
     rig.waker.wake().expect("wake");
 
-    // Both inputs reach the engine in one tick. The drain order
-    // (sensor before effects) is enforced inside `tick`; observation
-    // is the absence of a panic / hang and the tick returning
-    // Continue.
+    // Both inputs reach the engine in one tick. The drain order (sensor before effects) is enforced
+    // inside `tick`; observation is the absence of a panic / hang and the tick returning Continue.
     arm_zero_timeout(&mut rig);
     let outcome = rig.driver.tick();
     assert_eq!(outcome, TickOutcome::Continue);
@@ -3673,22 +3530,18 @@ mod dispatch_signal_inner_tests {
     use std::sync::Mutex;
     use std::time::Duration;
 
-    /// Fixture: fresh [`ActuatorIO`] paired with the receiver halves
-    /// the test asserts against. The actuator-thread side is held by
-    /// the test rather than a real actuator so each pulse the inner
+    /// Fixture: fresh [`ActuatorIO`] paired with the receiver halves the test asserts against. The
+    /// actuator-thread side is held by the test rather than a real actuator so each pulse the inner
     /// function fires is locally observable.
     struct ActuatorFixture {
         io: ActuatorIO,
-        // Held so the sender side stays connected; tests don't read
-        // it (no test sends an effect), but its receiver lifetime
-        // anchors the channel.
+        // Held so the sender side stays connected; tests don't read it (no test sends an effect),
+        // but its receiver lifetime anchors the channel.
         _effects_rx: Receiver<EffectOp>,
         shutdown_actuator_rx: Receiver<()>,
         hard_shutdown_actuator_rx: Receiver<()>,
-        // Held so the receiver clone on the ActuatorIO can observe
-        // `Ok(())` when the test plants a pulse. The actuator-side
-        // sender lives here so the test stays in control of pulse
-        // delivery.
+        // Held so the receiver clone on the ActuatorIO can observe `Ok(())` when the test plants a
+        // pulse. The actuator-side sender lives here so the test stays in control of pulse delivery.
         hard_shutdown_done_tx: Sender<()>,
     }
 
@@ -3711,10 +3564,9 @@ mod dispatch_signal_inner_tests {
         }
     }
 
-    /// Recording closure for the injectable `exit_fn` — the test
-    /// asserts the code recorded here matches `HARD_EXIT_CODE`. The
-    /// `Mutex` guards against multi-threaded tests; the
-    /// inner function runs synchronously so there is no contention.
+    /// Recording closure for the injectable `exit_fn` — the test asserts the code recorded here
+    /// matches `HARD_EXIT_CODE`. The `Mutex` guards against multi-threaded tests; the inner
+    /// function runs synchronously so there is no contention.
     struct ExitRecorder {
         code: Mutex<Option<i32>>,
     }
@@ -3733,9 +3585,8 @@ mod dispatch_signal_inner_tests {
         }
     }
 
-    /// SIGHUP returns `Reload` without touching the actuator-coord
-    /// channels — the inner function defers the apply effect to the
-    /// caller; the only side effect inside the inner function is the
+    /// SIGHUP returns `Reload` without touching the actuator-coord channels — the inner function
+    /// defers the apply effect to the caller; the only side effect inside the inner function is the
     /// `tracing::info!` log.
     #[test]
     fn sighup_returns_reload_without_pulsing_actuator() {
@@ -3753,9 +3604,8 @@ mod dispatch_signal_inner_tests {
         assert_eq!(recorder.taken(), None, "exit_fn not invoked on SIGHUP");
     }
 
-    /// First SIGTERM: arms `first_term`, pulses
-    /// `shutdown_actuator_tx`, returns `Shutdown`. Does NOT pulse
-    /// `hard_shutdown_actuator_tx` or invoke `exit_fn`.
+    /// First SIGTERM: arms `first_term`, pulses `shutdown_actuator_tx`, returns `Shutdown`. Does
+    /// NOT pulse `hard_shutdown_actuator_tx` or invoke `exit_fn`.
     #[test]
     fn first_sigterm_arms_first_term_and_pulses_shutdown() {
         let fixture = fixture();
@@ -3778,9 +3628,8 @@ mod dispatch_signal_inner_tests {
         assert_eq!(recorder.taken(), None);
     }
 
-    /// First SIGINT mirrors first SIGTERM — pinned separately because
-    /// the dispatch branches on both signums identically; a future
-    /// refactor that accidentally limited the arm to SIGTERM would
+    /// First SIGINT mirrors first SIGTERM — pinned separately because the dispatch branches on both
+    /// signums identically; a future refactor that accidentally limited the arm to SIGTERM would
     /// fail this test.
     #[test]
     fn first_sigint_arms_first_term_and_pulses_shutdown() {
@@ -3796,17 +3645,14 @@ mod dispatch_signal_inner_tests {
         assert!(!fixture.shutdown_actuator_rx.is_empty());
     }
 
-    /// Second SIGINT within the hard-exit window: pulses
-    /// `hard_shutdown_actuator_tx`, waits for the planted confirm
-    /// pulse, and invokes `exit_fn(HARD_EXIT_CODE)`. Returns
-    /// `HardExit`.
+    /// Second SIGINT within the hard-exit window: pulses `hard_shutdown_actuator_tx`, waits for the
+    /// planted confirm pulse, and invokes `exit_fn(HARD_EXIT_CODE)`. Returns `HardExit`.
     #[test]
     fn second_sigint_within_window_triggers_hard_exit() {
         let fixture = fixture();
         let recorder = ExitRecorder::new();
-        // Plant the actuator's "phase 3 done" pulse so the inner
-        // function's `recv_timeout` returns `Ok(())` immediately
-        // rather than waiting the full HARD_SHUTDOWN_CONFIRM_TIMEOUT.
+        // Plant the actuator's "phase 3 done" pulse so the inner function's `recv_timeout` returns
+        // `Ok(())` immediately rather than waiting the full HARD_SHUTDOWN_CONFIRM_TIMEOUT.
         fixture
             .hard_shutdown_done_tx
             .try_send(())
@@ -3831,9 +3677,8 @@ mod dispatch_signal_inner_tests {
         );
     }
 
-    /// Second SIGTERM *outside* the hard-exit window does NOT
-    /// escalate — it re-arms `first_term` as if it were the first
-    /// observation, and pulses `shutdown_actuator_tx` again.
+    /// Second SIGTERM *outside* the hard-exit window does NOT escalate — it re-arms `first_term` as
+    /// if it were the first observation, and pulses `shutdown_actuator_tx` again.
     #[test]
     fn second_sigterm_outside_window_does_not_escalate() {
         let fixture = fixture();
@@ -3844,8 +3689,7 @@ mod dispatch_signal_inner_tests {
         let _ = dispatch_signal_inner(SIGTERM, t0, &mut first_term, &fixture.io, |c| {
             recorder.record(c);
         });
-        // Drain the first shutdown pulse so the channel has room for
-        // the second (bounded(1)).
+        // Drain the first shutdown pulse so the channel has room for the second (bounded(1)).
         let _ = fixture.shutdown_actuator_rx.try_recv();
 
         // 3s later — outside the 2s HARD_EXIT_WINDOW.
@@ -3860,10 +3704,9 @@ mod dispatch_signal_inner_tests {
         assert_eq!(recorder.taken(), None);
     }
 
-    /// An unknown signal value returns `None` without side effects —
-    /// the production signal-hook handler only registers
-    /// `HANDLED_SIGNALS`, but the inner function defends against a
-    /// future addition that wires through an unexpected signum.
+    /// An unknown signal value returns `None` without side effects — the production signal-hook
+    /// handler only registers `HANDLED_SIGNALS`, but the inner function defends against a future
+    /// addition that wires through an unexpected signum.
     #[test]
     fn unknown_signum_returns_none() {
         let fixture = fixture();

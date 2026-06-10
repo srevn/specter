@@ -1,29 +1,23 @@
-//! Downstream dispatch — the terminal-consumer drain of a
-//! [`StepOutput`], the [`Diagnostic`] → tracing map, and the
-//! diagnostic fan-out to operator-IPC subscribers.
+//! Downstream dispatch — the terminal-consumer drain of a [`StepOutput`], the [`Diagnostic`] →
+//! tracing map, and the diagnostic fan-out to operator-IPC subscribers.
 //!
-//! [`EngineDriver::forward`] ships every [`StepOutput`] onward:
-//! `watch_ops` → [`crate::driver::Reactor::apply_watch_ops`] (inline
-//! against the owned watcher; rejected ops queue as
-//! [`Input::WatchOpRejected`] in the deferred-input replay queue);
-//! `probe_ops` → `prober.submit` / `cancel`; `cancel_effects` +
-//! `effects` → `actuator_io.effects_tx` (lifted to
-//! [`EffectOp::Cancel`] / [`EffectOp::Submit`], cancels first so a
-//! defensive same-step cancel + submit for one profile would kill
-//! stale before spawn new); `diagnostics` → [`log_diagnostic`] AND
-//! [`crate::driver::Hub::dispatch_to_subscribers`] (fan-out
-//! to live IPC subscribers, with a single `SystemTime::now()` capture
-//! per `StepOutput` so every subscriber sees byte-identical `at` for
-//! the same emission).
+//! [`EngineDriver::forward`] ships every [`StepOutput`] onward: `watch_ops` →
+//! [`crate::driver::Reactor::apply_watch_ops`] (inline against the owned watcher; rejected ops
+//! queue as [`Input::WatchOpRejected`] in the deferred-input replay queue); `probe_ops` →
+//! `prober.submit` / `cancel`; `cancel_effects` + `effects` → `actuator_io.effects_tx` (lifted to
+//! [`EffectOp::Cancel`] / [`EffectOp::Submit`], cancels first so a defensive same-step cancel +
+//! submit for one profile would kill stale before spawn new); `diagnostics` → [`log_diagnostic`]
+//! AND [`crate::driver::Hub::dispatch_to_subscribers`] (fan-out to live IPC subscribers, with a
+//! single `SystemTime::now()` capture per `StepOutput` so every subscriber sees byte-identical `at`
+//! for the same emission).
 //!
-//! **No `shutdown_engine_rx` arm.** Signals dispatch inline on the
-//! reactor thread via [`super::EngineDriver::dispatch_signal`], and a
-//! wedged effects channel surfaces through `try_send` rather than
-//! blocking the reactor mid-tick. Per-channel disconnect policy is
-//! explicit at the call site; the rationale lives on the method.
+//! **No `shutdown_engine_rx` arm.** Signals dispatch inline on the reactor thread via
+//! [`super::EngineDriver::dispatch_signal`], and a wedged effects channel surfaces through
+//! `try_send` rather than blocking the reactor mid-tick. Per-channel disconnect policy is explicit
+//! at the call site; the rationale lives on the method.
 //!
-//! `log_diagnostic` is the per-variant hand-mapping of a [`Diagnostic`]
-//! to a tracing event; its severities are the operator-facing catalogue.
+//! `log_diagnostic` is the per-variant hand-mapping of a [`Diagnostic`] to a tracing event; its
+//! severities are the operator-facing catalogue.
 
 use super::EngineDriver;
 use crate::ipc::wire::WireTime;
@@ -36,52 +30,39 @@ use std::time::SystemTime;
 impl<W: FsWatcher> EngineDriver<W> {
     /// Push a [`StepOutput`] to its downstream consumers.
     ///
-    /// **`watch_ops` dispatch inline against the owned watcher.** The
-    /// driver thread owns [`crate::driver::Reactor`]'s watcher
-    /// directly — no channel, no consumer-side disconnect to race.
-    /// Rejected ops surface as `(resource, failure)` pairs which we
-    /// queue into [`super::EngineDriver::deferred_inputs`] as
-    /// [`Input::WatchOpRejected`]; the next tick's
-    /// `replay_deferred_inputs` runs each rejection through
-    /// `engine.step` BEFORE the mio Poll re-blocks, so the engine's
-    /// claim-purge fires this tick's cycle.
+    /// **`watch_ops` dispatch inline against the owned watcher.** The driver thread owns
+    /// [`crate::driver::Reactor`]'s watcher directly — no channel, no consumer-side disconnect to
+    /// race. Rejected ops surface as `(resource, failure)` pairs which we queue into
+    /// [`super::EngineDriver::deferred_inputs`] as [`Input::WatchOpRejected`]; the next tick's
+    /// `replay_deferred_inputs` runs each rejection through `engine.step` BEFORE the mio Poll
+    /// re-blocks, so the engine's claim-purge fires this tick's cycle.
     ///
-    /// **`effects_tx` is `try_send` with advisory drop on `Full`.**
-    /// The engine's `gate_deadline` recovery contract covers a missed
-    /// Submit identically to "actuator wedged" — both produce a
-    /// `EffectComplete` that never arrives, so the burst force-
-    /// transitions `Awaiting → Rebasing` on the same timer. Advisory
-    /// drop on `Full` is therefore safe; the cost is a single missed
-    /// effect, recovered through the same path operators already
-    /// observe under actuator pressure. `Disconnected` remains terminal
-    /// (actuator thread is gone — no recovery possible).
+    /// **`effects_tx` is `try_send` with advisory drop on `Full`.** The engine's `gate_deadline`
+    /// recovery contract covers a missed Submit identically to "actuator wedged" — both produce a
+    /// `EffectComplete` that never arrives, so the burst force- transitions `Awaiting → Rebasing`
+    /// on the same timer. Advisory drop on `Full` is therefore safe; the cost is a single missed
+    /// effect, recovered through the same path operators already observe under actuator pressure.
+    /// `Disconnected` remains terminal (actuator thread is gone — no recovery possible).
     ///
-    /// **Probe ops dispatch directly.** [`StepOutput::into_parts`]
-    /// yields an owner-keyed map (at most one op per owner by
-    /// construction), the producer-side image of the prober's own
-    /// `expected` map. So the prober's non-commuting `submit` /
-    /// `cancel` never see a superseded same-owner pair: the shape
-    /// collapses it before the wire. Probe *correctness* is the
-    /// engine's — a stale or superseded response folds to
-    /// `StaleProbeResponse` at its response gate, never this drain's.
+    /// **Probe ops dispatch directly.** [`StepOutput::into_parts`] yields an owner-keyed map (at most
+    /// one op per owner by construction), the producer-side image of the prober's own `expected` map.
+    /// So the prober's non-commuting `submit` / `cancel` never see a superseded same-owner pair: the
+    /// shape collapses it before the wire. Probe *correctness* is the engine's — a stale or
+    /// superseded response folds to `StaleProbeResponse` at its response gate, never this drain's.
     ///
-    /// **Diagnostic fan-out lives on [`Self::forward_diagnostics`].**
-    /// The wall-clock + per-subscriber byte-identical `at` contract
-    /// is documented there; the call site below is one line so the
-    /// terminal-drain ordering above is unobstructed by it.
+    /// **Diagnostic fan-out lives on [`Self::forward_diagnostics`].** The wall-clock +
+    /// per-subscriber byte-identical `at` contract is documented there; the call site below is one
+    /// line so the terminal-drain ordering above is unobstructed by it.
     pub(super) fn forward(&mut self, out: StepOutput) -> ControlFlow<()> {
-        // Terminal-consumer drain: `out` is already resealed (every
-        // `StepOutput`-returning entry point sorts before returning), so
-        // a single by-value destructure preserves the sort and the
-        // dispatch order below without one clone per Effect.
+        // Terminal-consumer drain: `out` is already resealed (every `StepOutput`-returning entry
+        // point sorts before returning), so a single by-value destructure preserves the sort and
+        // the dispatch order below without one clone per Effect.
         let (watch_ops, probe_ops, effects, cancel_effects, diagnostics) = out.into_parts();
 
-        // Apply watch ops inline against the Reactor-owned watcher.
-        // The rejected list is the producer side of the
-        // `Input::WatchOpRejected` replay queue — every rejection runs
-        // through `engine.step` on the next tick's
-        // `replay_deferred_inputs` pass, so the engine's claim-purge
-        // dispatch fires within one tick of the failure.
+        // Apply watch ops inline against the Reactor-owned watcher. The rejected list is the
+        // producer side of the `Input::WatchOpRejected` replay queue — every rejection runs through
+        // `engine.step` on the next tick's `replay_deferred_inputs` pass, so the engine's
+        // claim-purge dispatch fires within one tick of the failure.
         for (resource, failure) in self.reactor.apply_watch_ops(&watch_ops) {
             self.deferred_inputs
                 .push_back(Input::WatchOpRejected { resource, failure });
@@ -94,17 +75,14 @@ impl<W: FsWatcher> EngineDriver<W> {
             }
         }
 
-        // Cancel-effects dispatch BEFORE submits over the same
-        // `effects_tx`. Defense in depth: by construction a same-step
-        // cancel + submit for one profile cannot occur
-        // (`handle_gate_deadline` emits no Effects; the post-fire
-        // stable verdict path emits no cancel), but if a future
-        // emission site ever introduced the cross-stream race, "kill
-        // stale before spawn new" is the right ordering and is
-        // structural here, not a documented convention. The single
-        // `effects_tx` channel keeps the engine→actuator FIFO single,
-        // so causal order between same-profile cancel and a later
-        // submit (in a later step) is preserved automatically.
+        // Cancel-effects dispatch BEFORE submits over the same `effects_tx`. Defense in depth: by
+        // construction a same-step cancel + submit for one profile cannot occur
+        // (`handle_gate_deadline` emits no Effects; the post-fire stable verdict path emits no
+        // cancel), but if a future emission site ever introduced the cross-stream race, "kill stale
+        // before spawn new" is the right ordering and is structural here, not a documented
+        // convention. The single `effects_tx` channel keeps the engine→actuator FIFO single, so
+        // causal order between same-profile cancel and a later submit (in a later step) is
+        // preserved automatically.
         for profile in cancel_effects {
             match self
                 .actuator_io
@@ -147,38 +125,29 @@ impl<W: FsWatcher> EngineDriver<W> {
         ControlFlow::Continue(())
     }
 
-    /// Log each [`Diagnostic`] via tracing AND fan it out to live
-    /// IPC subscribers through
+    /// Log each [`Diagnostic`] via tracing AND fan it out to live IPC subscribers through
     /// [`crate::driver::Hub::dispatch_to_subscribers`].
     ///
-    /// **Wall-clock capture is once per call.** A single
-    /// [`SystemTime::now`] threads into every `dispatch_to_subscribers`
-    /// call — every subscriber sees byte-identical `at` for one engine
-    /// emission, regardless of per-client delivery cadence. A slow
-    /// client cannot rewrite history; a fast client cannot observe a
-    /// slower client's `at`.
+    /// **Wall-clock capture is once per call.** A single [`SystemTime::now`] threads into every
+    /// `dispatch_to_subscribers` call — every subscriber sees byte-identical `at` for one engine
+    /// emission, regardless of per-client delivery cadence. A slow client cannot rewrite history; a
+    /// fast client cannot observe a slower client's `at`.
     ///
-    /// **`WireTime` projection is also once per call.** The
-    /// `humantime::format_rfc3339_seconds` allocation runs once here;
-    /// every per-diag [`crate::ipc::wire::WireDiagnostic::from`]
-    /// projection bumps the `Arc<str>` refcount instead of
-    /// re-formatting. For a high-fanout `StepOutput` (e.g., a
-    /// 256-fanout `PromoterFanoutThreshold` burst) this collapses N
-    /// format calls into 1 + N atomic refcount bumps.
+    /// **`WireTime` projection is also once per call.** The `humantime::format_rfc3339_seconds`
+    /// allocation runs once here; every per-diag [`crate::ipc::wire::WireDiagnostic::from`]
+    /// projection bumps the `Arc<str>` refcount instead of re-formatting. For a high-fanout
+    /// `StepOutput` (e.g., a 256-fanout `PromoterFanoutThreshold` burst) this collapses N format
+    /// calls into 1 + N atomic refcount bumps.
     ///
-    /// **Empty-slice short-circuit.** Most ticks emit zero
-    /// diagnostics; the early return keeps the [`SystemTime::now`]
-    /// syscall and the `WireTime` projection off the common path.
+    /// **Empty-slice short-circuit.** Most ticks emit zero diagnostics; the early return keeps the
+    /// [`SystemTime::now`] syscall and the `WireTime` projection off the common path.
     ///
-    /// **Subscriber-empty short-circuit.** When no operator is
-    /// subscribed ([`crate::driver::Hub::has_any_subscriber`] →
-    /// `false`), only [`log_diagnostic`] runs per diag — the per-
-    /// emission [`SystemTime::now`] / [`WireTime::from`] /
-    /// [`diag_sub_id`] / `dispatch_to_subscribers` work is skipped
-    /// entirely. For a `StepOutput` carrying N diags on a quiet
-    /// daemon this collapses to N tracing emits plus one conn-map
-    /// walk, rather than N times the same walk inside the dispatch
-    /// path's defensive inner gate.
+    /// **Subscriber-empty short-circuit.** When no operator is subscribed
+    /// ([`crate::driver::Hub::has_any_subscriber`] → `false`), only [`log_diagnostic`] runs per
+    /// diag — the per- emission [`SystemTime::now`] / [`WireTime::from`] / [`diag_sub_id`] /
+    /// `dispatch_to_subscribers` work is skipped entirely. For a `StepOutput` carrying N diags on a
+    /// quiet daemon this collapses to N tracing emits plus one conn-map walk, rather than N times
+    /// the same walk inside the dispatch path's defensive inner gate.
     fn forward_diagnostics(&mut self, diagnostics: &[Diagnostic]) {
         if diagnostics.is_empty() {
             return;
@@ -202,19 +171,17 @@ impl<W: FsWatcher> EngineDriver<W> {
 
 /// Map a [`Diagnostic`] to a tracing event.
 ///
-/// Most variants are `warn` (drops + race conditions). With auto-reload
-/// landed, `EffectCompleteForUnknownSub` is `warn` too — the auto-reload
-/// path makes the detach-during-effect race routine; engine bugs surface
-/// via test assertions on the `Diagnostic::` variant rather than via log
-/// severity. `ProfileReaped` and `ReapPendingCancelled` are `info`
-/// (informational; the Profile was reaped — see `via` for the
-/// trigger — or the deferred reap was pre-empted by a revival).
+/// Most variants are `warn` (drops + race conditions). With auto-reload landed,
+/// `EffectCompleteForUnknownSub` is `warn` too — the auto-reload path makes the
+/// detach-during-effect race routine; engine bugs surface via test assertions on the `Diagnostic::`
+/// variant rather than via log severity. `ProfileReaped` and `ReapPendingCancelled` are `info`
+/// (informational; the Profile was reaped — see `via` for the trigger — or the deferred reap was
+/// pre-empted by a revival).
 ///
-/// These per-variant levels are also the client-side severity
-/// catalogue: `specter tail` colours each line by the same judgment in
-/// `crate::ipc::render::diag::severity` (`error!`→red, `warn!`→yellow,
-/// `info!`/`debug!`/`trace!`→unstyled, with `SubFired` elevated to
-/// green). Re-judging a variant means moving it in both places.
+/// These per-variant levels are also the client-side severity catalogue: `specter tail` colours
+/// each line by the same judgment in `crate::ipc::render::diag::severity` (`error!`→red,
+/// `warn!`→yellow, `info!`/`debug!`/`trace!`→unstyled, with `SubFired` elevated to green).
+/// Re-judging a variant means moving it in both places.
 pub(super) fn log_diagnostic(d: &Diagnostic) {
     match d {
         Diagnostic::StaleProbeResponse { owner, correlation } => tracing::warn!(
@@ -279,9 +246,8 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             tracing::warn!(?resource, "FsEvent on unwatched resource (race; dropped)");
         }
         Diagnostic::EventNoConsumer { resource } => {
-            // Benign: a watched resource (typically a `WatchRootParent`)
-            // fired an event no Profile cared about this step. Logging at
-            // TRACE so it doesn't pollute operator logs.
+            // Benign: a watched resource (typically a `WatchRootParent`) fired an event no Profile
+            // cared about this step. Logging at TRACE so it doesn't pollute operator logs.
             tracing::trace!(
                 ?resource,
                 "FsEvent had no consumer (watched, but no covering Profile / descent / recovery)"
@@ -481,15 +447,12 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             name,
             source_promoter,
         } => match source_promoter {
-            // Static (operator-declared) attach: high signal, low rate
-            // (one per `[[watch]]` block per reload). INFO is the
-            // operator-facing default per the catalog severity table.
+            // Static (operator-declared) attach: high signal, low rate (one per `[[watch]]` block
+            // per reload). INFO is the operator-facing default per the catalog severity table.
             None => tracing::info!(?sub, %name, "sub attached"),
-            // Dynamic (Promoter-spawned) attach: same lifecycle event
-            // but emitted once per pattern match, which can be many
-            // per enumeration. DEBUG keeps operator logs uncluttered;
-            // `PromotionKindObserved` already carries the path-level
-            // signal at the same severity.
+            // Dynamic (Promoter-spawned) attach: same lifecycle event but emitted once per pattern
+            // match, which can be many per enumeration. DEBUG keeps operator logs uncluttered;
+            // `PromotionKindObserved` already carries the path-level signal at the same severity.
             Some(promoter) => tracing::debug!(
                 ?sub,
                 %name,
@@ -619,26 +582,19 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
 
 /// Project a [`Diagnostic`] to the [`SubId`] it names, if any.
 ///
-/// Called by [`EngineDriver::forward`] once per emitted diagnostic to
-/// resolve the `diag_sub` filter argument
-/// [`super::Hub::dispatch_to_subscribers`] consumes — the
-/// projection lives on the engine-output side of the boundary, the
-/// reactor module never names [`Diagnostic`] internals.
+/// Called by [`EngineDriver::forward`] once per emitted diagnostic to resolve the `diag_sub` filter
+/// argument [`super::Hub::dispatch_to_subscribers`] consumes — the projection lives on the
+/// engine-output side of the boundary, the reactor module never names [`Diagnostic`] internals.
 ///
-/// Total over the [`Diagnostic`] enum — a new core variant is a
-/// compile error here (the exhaustive `match` is the structural
-/// wall, same discipline as
-/// [`crate::ipc::wire::WireDiagnostic::from`]).
+/// Total over the [`Diagnostic`] enum — a new core variant is a compile error here (the exhaustive
+/// `match` is the structural wall, same discipline as [`crate::ipc::wire::WireDiagnostic::from`]).
 ///
-/// Per-Sub variants project to their `sub`. Profile-keyed variants
-/// (`ProfileReaped`, `ReapPendingCancelled`, etc.) return `None`
-/// and reach unfiltered subscribers only.
+/// Per-Sub variants project to their `sub`. Profile-keyed variants (`ProfileReaped`,
+/// `ReapPendingCancelled`, etc.) return `None` and reach unfiltered subscribers only.
 ///
-/// The verbose `None`-arm enumeration is deliberate: a future
-/// [`Diagnostic`] variant carrying a [`SubId`] that this function
-/// silently projects to `None` would be a per-Sub `wait` bug; the
-/// exhaustive `match` forces the author to pick a side at the point
-/// of variant introduction.
+/// The verbose `None`-arm enumeration is deliberate: a future [`Diagnostic`] variant carrying a
+/// [`SubId`] that this function silently projects to `None` would be a per-Sub `wait` bug; the
+/// exhaustive `match` forces the author to pick a side at the point of variant introduction.
 pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
     use Diagnostic as D;
     match d {
@@ -709,9 +665,8 @@ mod tests {
         BurstIntent, DetachReason, Diagnostic, ProbeCorrelation, ProbeOwner, ProfileId, SubId,
     };
 
-    /// Mint a non-default [`SubId`] from a raw FFI value — the
-    /// fan-out filter keys on `Some(sid)` vs `None`, so a slotmap
-    /// default would be indistinguishable from an absent id.
+    /// Mint a non-default [`SubId`] from a raw FFI value — the fan-out filter keys on `Some(sid)`
+    /// vs `None`, so a slotmap default would be indistinguishable from an absent id.
     fn sid(raw: u64) -> SubId {
         SubId::from(KeyData::from_ffi(raw))
     }
@@ -720,9 +675,8 @@ mod tests {
         ProfileId::from(KeyData::from_ffi(raw))
     }
 
-    /// Every per-Sub [`Diagnostic`] variant projects to its `sub`.
-    /// Pins the load-bearing arms of [`diag_sub_id`]; a regression
-    /// here is a `wait <name>` bug.
+    /// Every per-Sub [`Diagnostic`] variant projects to its `sub`. Pins the load-bearing arms of
+    /// [`diag_sub_id`]; a regression here is a `wait <name>` bug.
     #[test]
     fn diag_sub_id_per_sub_variants() {
         let s = sid(1);
@@ -770,10 +724,9 @@ mod tests {
         );
     }
 
-    /// Profile-keyed and metadata-only variants project to `None` —
-    /// they reach unfiltered subscribers, never per-Sub filtered
-    /// ones. Catches a future variant that carries a [`SubId`] but
-    /// lands in the wrong arm.
+    /// Profile-keyed and metadata-only variants project to `None` — they reach unfiltered
+    /// subscribers, never per-Sub filtered ones. Catches a future variant that carries a [`SubId`]
+    /// but lands in the wrong arm.
     #[test]
     fn diag_sub_id_profile_keyed_returns_none() {
         let p = pid(0xAA);

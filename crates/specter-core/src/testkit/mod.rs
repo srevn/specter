@@ -1,8 +1,7 @@
 //! Pure test fixtures.
 //!
-//! Gated behind the `testkit` feature so the module never leaks into
-//! release builds. Inherits `unsafe_code = forbid` from `specter-core`
-//! — the fixtures here are pure too.
+//! Gated behind the `testkit` feature so the module never leaks into release builds. Inherits
+//! `unsafe_code = forbid` from `specter-core` — the fixtures here are pure too.
 
 pub mod builders;
 pub mod diagnostics;

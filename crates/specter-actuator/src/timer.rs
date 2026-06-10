@@ -1,64 +1,51 @@
 //! Per-step deadline timer threads.
 //!
-//! When an [`specter_core::ExecAction`] carries `timeout: Some(d)`, the
-//! actuator spawns a one-shot timer thread alongside the wait thread.
-//! The timer thread shares the child's [`crate::spawner::ChildSignaler`]
-//! via `Arc<dyn ChildSignaler>` and enforces the deadline:
+//! When an [`specter_core::ExecAction`] carries `timeout: Some(d)`, the actuator spawns a one-shot
+//! timer thread alongside the wait thread. The timer thread shares the child's
+//! [`crate::spawner::ChildSignaler`] via `Arc<dyn ChildSignaler>` and enforces the deadline:
 //!
 //! 1. Sleep `deadline`.
-//! 2. If the child completed naturally (the wait thread set the shared
-//!    `dead` flag), exit silently — the SIGTERM/SIGKILL pair would race
-//!    a pid-reusing process.
+//! 2. If the child completed naturally (the wait thread set the shared `dead` flag), exit silently
+//!    — the SIGTERM/SIGKILL pair would race a pid-reusing process.
 //! 3. Otherwise send SIGTERM.
 //! 4. Sleep `grace` (the actuator's `shutdown_grace`).
 //! 5. If still alive, send SIGKILL.
 //!
-//! The thread is **detached**: there is no join handle, no shared
-//! cancellation channel. Natural completion is observed via the same
-//! `dead` flag the wait thread sets before sending `Reaped`; that flag
-//! is the single seam between the two threads. Worst case (child runs
-//! exactly to its deadline, then dies of natural causes between the
-//! `is_dead` check and the syscall) the kernel SIGTERMs an already-
-//! reaped pid — the production signaler short-circuits via the same
-//! flag, plus the syscall layer ESRCH-collapses. Either path makes the
-//! signal a no-op.
+//! The thread is **detached**: there is no join handle, no shared cancellation channel. Natural
+//! completion is observed via the same `dead` flag the wait thread sets before sending `Reaped`;
+//! that flag is the single seam between the two threads. Worst case (child runs exactly to its
+//! deadline, then dies of natural causes between the `is_dead` check and the syscall) the kernel
+//! SIGTERMs an already- reaped pid — the production signaler short-circuits via the same flag, plus
+//! the syscall layer ESRCH-collapses. Either path makes the signal a no-op.
 //!
 //! # Why one thread per step
 //!
-//! v1 uses a thread-per-step to mirror the existing wait-thread shape:
-//! same lifetime, same ownership model, same `Arc<dyn ChildSignaler>`
-//! sharing pattern. A consolidated timer heap would amortise OS thread
-//! cost at high pid volumes but reintroduces a single coordination point
-//! that v1 doesn't need.
+//! v1 uses a thread-per-step to mirror the existing wait-thread shape: same lifetime, same ownership
+//! model, same `Arc<dyn ChildSignaler>` sharing pattern. A consolidated timer heap would amortise OS
+//! thread cost at high pid volumes but reintroduces a single coordination point that v1 doesn't need.
 //!
 //! # Spawn-failure policy
 //!
-//! `thread::Builder::spawn` can fail (OOM, EAGAIN, ulimit) — extremely
-//! rare. [`arm_timer`] treats this as **best-effort**: logs at
-//! `tracing::error!` and proceeds without timer enforcement for that
-//! single step. The alternative (kill the child to fail the plan) would
-//! race the wait thread that's already alive, risking a double-
-//! `EffectComplete` for the same Effect. The user-visible regression is
-//! "this one step ran without its deadline"; the plan otherwise completes
-//! normally. The policy lives at one site (this module) — callers don't
-//! choose it per call.
+//! `thread::Builder::spawn` can fail (OOM, EAGAIN, ulimit) — extremely rare. [`arm_timer`] treats
+//! this as **best-effort**: logs at `tracing::error!` and proceeds without timer enforcement for
+//! that single step. The alternative (kill the child to fail the plan) would race the wait thread
+//! that's already alive, risking a double- `EffectComplete` for the same Effect. The user-visible
+//! regression is "this one step ran without its deadline"; the plan otherwise completes normally.
+//! The policy lives at one site (this module) — callers don't choose it per call.
 //!
 //! # Thread name budget
 //!
-//! Linux `pthread_setname_np` truncates to 15 bytes plus a null; macOS
-//! allows 64. The names built by [`TimerContext::os_thread_name`] are
-//! shaped around what `ps -T` / `gdb info threads` can render:
+//! Linux `pthread_setname_np` truncates to 15 bytes plus a null; macOS allows 64. The names built by
+//! [`TimerContext::os_thread_name`] are shaped around what `ps -T` / `gdb info threads` can render:
 //!
-//! - Exec: `act-timer-c{cursor}-pid{pid}` — fits a 9-char pid unscathed
-//!   at `cursor=0`.
-//! - PipeStage: `act-timer-pipe-c{cursor}-s{stage}-pid{pid}` — exceeds
-//!   the Linux ceiling at any non-trivial stage/pid, so live-system
-//!   inspection on Linux must cross-reference via the `tracing` log
-//!   keyed on the same `pid` (the spawn-failure error line and the
+//! - Exec: `act-timer-c{cursor}-pid{pid}` — fits a 9-char pid unscathed at `cursor=0`.
+//! - PipeStage: `act-timer-pipe-c{cursor}-s{stage}-pid{pid}` — exceeds the Linux ceiling at any
+//!   non-trivial stage/pid, so live-system inspection on Linux must cross-reference via the
+//!   `tracing` log keyed on the same `pid` (the spawn-failure error line and the
 //!   `tracing::debug!("spawned …")` line both carry `?key` + `pid`).
 //!
-//! The sub identifier is intentionally omitted — adding it would push
-//! even the Exec name past the Linux ceiling.
+//! The sub identifier is intentionally omitted — adding it would push even the Exec name past the
+//! Linux ceiling.
 
 use crate::spawner::ChildSignaler;
 use specter_core::DedupKey;
@@ -67,12 +54,10 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-/// Observability identity for a timer arm — the structured fields the
-/// spawn-failure log emits and the typed parts the OS thread name is
-/// built from. Kept as a typed enum (rather than loose `&str` + opaque
-/// log payload) so the two variants — exec single-process and pipe
-/// per-stage — share one shape at the seam and the variant-specific
-/// name / log differences are encapsulated in this module.
+/// Observability identity for a timer arm — the structured fields the spawn-failure log emits and the
+/// typed parts the OS thread name is built from. Kept as a typed enum (rather than loose `&str` +
+/// opaque log payload) so the two variants — exec single-process and pipe per-stage — share one shape
+/// at the seam and the variant-specific name / log differences are encapsulated in this module.
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum TimerContext {
     /// Single-process [`specter_core::program::SpawnBody::Exec`] step.
@@ -81,8 +66,7 @@ pub(crate) enum TimerContext {
         cursor: u32,
         pid: u32,
     },
-    /// One stage of a multi-stage
-    /// [`specter_core::program::SpawnBody::Pipe`] step. `stage` is the
+    /// One stage of a multi-stage [`specter_core::program::SpawnBody::Pipe`] step. `stage` is the
     /// index inside the pipe's stage list; `pid` is the per-stage pid.
     PipeStage {
         key: DedupKey,
@@ -93,9 +77,8 @@ pub(crate) enum TimerContext {
 }
 
 impl TimerContext {
-    /// Build the OS thread name from typed parts. Single allocation per
-    /// arm. The Linux 15-byte ceiling lives in the module docs, not at
-    /// the call site.
+    /// Build the OS thread name from typed parts. Single allocation per arm. The Linux 15-byte
+    /// ceiling lives in the module docs, not at the call site.
     fn os_thread_name(&self) -> String {
         match *self {
             Self::Exec { cursor, pid, .. } => format!("act-timer-c{cursor}-pid{pid}"),
@@ -105,10 +88,9 @@ impl TimerContext {
         }
     }
 
-    /// Emit the spawn-failure log at `tracing::error!`. The deadline is
-    /// included so an operator triaging "this step ran past its declared
-    /// timeout" can correlate; `?e` carries the kernel error
-    /// (typically `EAGAIN` / `ENOMEM` / a ulimit).
+    /// Emit the spawn-failure log at `tracing::error!`. The deadline is included so an operator
+    /// triaging "this step ran past its declared timeout" can correlate; `?e` carries the kernel
+    /// error (typically `EAGAIN` / `ENOMEM` / a ulimit).
     fn log_spawn_failure(&self, deadline: Duration, e: &io::Error) {
         match *self {
             Self::Exec { key, cursor, pid } => tracing::error!(
@@ -137,20 +119,17 @@ impl TimerContext {
     }
 }
 
-/// Arm a detached one-shot timer thread that enforces `deadline` against
-/// the child paired with `signaler`. See module docs for the algorithm,
-/// the spawn-failure contract, and the thread-name budget.
+/// Arm a detached one-shot timer thread that enforces `deadline` against the child paired with
+/// `signaler`. See module docs for the algorithm, the spawn-failure contract, and the thread-name
+/// budget.
 ///
-/// No return value: the thread is detached (nothing useful to await) and
-/// the `thread::Builder::spawn` outcome is policy-handled inside this
-/// function — log at `tracing::error!` via [`TimerContext::log_spawn_failure`]
-/// and proceed. Pinning the policy here means the two production call
-/// sites (exec / pipe stage) can't drift on log severity or structured
-/// fields.
+/// No return value: the thread is detached (nothing useful to await) and the `thread::Builder::spawn`
+/// outcome is policy-handled inside this function — log at `tracing::error!` via
+/// [`TimerContext::log_spawn_failure`] and proceed. Pinning the policy here means the two production
+/// call sites (exec / pipe stage) can't drift on log severity or structured fields.
 ///
-/// `deadline > Duration::ZERO` is upheld by config validation
-/// (`IssueKind::TimeoutZero`); the `debug_assert!` is defense-in-depth
-/// for a future regression in that layer.
+/// `deadline > Duration::ZERO` is upheld by config validation (`IssueKind::TimeoutZero`); the
+/// `debug_assert!` is defense-in-depth for a future regression in that layer.
 pub(crate) fn arm_timer(
     deadline: Duration,
     grace: Duration,
@@ -170,22 +149,18 @@ pub(crate) fn arm_timer(
     }
 }
 
-/// Timer-thread body. Extracted for direct unit testing without
-/// standing up a `thread::Builder::spawn` call (the spawned variant
-/// would race the test's polling).
+/// Timer-thread body. Extracted for direct unit testing without standing up a
+/// `thread::Builder::spawn` call (the spawned variant would race the test's polling).
 ///
-/// Takes the signaler as `&dyn` rather than `Arc<dyn>` so the unit test
-/// can construct it on the stack against a custom impl. The production
-/// caller [`arm_timer`] passes `&*signaler` (the `Arc::deref`) into this
-/// function from the spawned closure.
+/// Takes the signaler as `&dyn` rather than `Arc<dyn>` so the unit test can construct it on the
+/// stack against a custom impl. The production caller [`arm_timer`] passes `&*signaler` (the
+/// `Arc::deref`) into this function from the spawned closure.
 ///
-/// Signal-failure logs at `tracing::warn!`: the production
-/// [`crate::spawner::ChildSignaler`] impl ESRCH-collapses and re-checks
-/// `is_dead` internally, so a `signal_term`/`signal_kill` `Err`
-/// surfacing here is a non-ESRCH, non-already-dead kernel boundary
-/// error (e.g. EPERM after PID-reuse landing on another user's process).
-/// An operator triaging "child never terminated despite SIGKILL" needs
-/// this surfaced.
+/// Signal-failure logs at `tracing::warn!`: the production [`crate::spawner::ChildSignaler`] impl
+/// ESRCH-collapses and re-checks `is_dead` internally, so a `signal_term`/`signal_kill` `Err`
+/// surfacing here is a non-ESRCH, non-already-dead kernel boundary error (e.g. EPERM after
+/// PID-reuse landing on another user's process). An operator triaging "child never terminated
+/// despite SIGKILL" needs this surfaced.
 fn run_timer(deadline: Duration, grace: Duration, signaler: &dyn ChildSignaler) {
     thread::sleep(deadline);
     if signaler.is_dead() {
@@ -212,9 +187,8 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
     use std::time::{Duration, Instant};
 
-    /// Test signaler with controllable `dead` and call-count recording.
-    /// Used by every unit test in this module — keeps the assertions
-    /// declarative.
+    /// Test signaler with controllable `dead` and call-count recording. Used by every unit test in
+    /// this module — keeps the assertions declarative.
     struct Probe {
         dead: AtomicBool,
         term_count: AtomicU32,
@@ -264,8 +238,8 @@ mod tests {
         }
     }
 
-    /// Natural completion before the deadline: timer wakes, sees
-    /// `dead == true`, exits without signalling.
+    /// Natural completion before the deadline: timer wakes, sees `dead == true`, exits without
+    /// signalling.
     #[test]
     fn timer_short_circuits_on_natural_completion() {
         let probe = Probe::new();
@@ -275,8 +249,7 @@ mod tests {
         assert_eq!(probe.kill_calls(), 0, "no SIGKILL after natural completion");
     }
 
-    /// Child still alive at deadline: timer sends SIGTERM, then SIGKILL
-    /// after the grace.
+    /// Child still alive at deadline: timer sends SIGTERM, then SIGKILL after the grace.
     #[test]
     fn timer_sigterms_then_sigkills_when_child_stays_alive() {
         let probe = Probe::new();
@@ -285,15 +258,15 @@ mod tests {
         assert_eq!(probe.kill_calls(), 1, "SIGKILL after grace");
     }
 
-    /// Child dies during the grace window after SIGTERM: timer wakes
-    /// from the grace sleep, observes `dead`, and skips SIGKILL.
+    /// Child dies during the grace window after SIGTERM: timer wakes from the grace sleep, observes
+    /// `dead`, and skips SIGKILL.
     #[test]
     fn timer_skips_sigkill_when_child_dies_during_grace() {
         let probe = Probe::new();
         std::thread::scope(|s| {
             s.spawn(|| {
-                // Wait for the observable SIGTERM before marking dead —
-                // racing two wall-clock sleeps flakes under scheduler skew.
+                // Wait for the observable SIGTERM before marking dead — racing two wall-clock
+                // sleeps flakes under scheduler skew.
                 while probe.term_calls() == 0 {
                     std::thread::sleep(Duration::from_millis(1));
                 }

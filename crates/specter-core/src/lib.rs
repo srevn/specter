@@ -1,9 +1,8 @@
-//! `specter-core` — types and traits shared by the engine, the actors, and
-//! the binary. I1: zero I/O, no syscalls, no time except `Instant` passed in.
+//! `specter-core` — types and traits shared by the engine, the actors, and the binary. I1: zero
+//! I/O, no syscalls, no time except `Instant` passed in.
 
-// Stricter than the workspace default (`deny`). `forbid` cannot be lifted
-// at any inner scope, making I1 a compile-time guarantee for this crate
-// (and for `core::testkit`, which inherits).
+// Stricter than the workspace default (`deny`). `forbid` cannot be lifted at any inner scope,
+// making I1 a compile-time guarantee for this crate (and for `core::testkit`, which inherits).
 #![forbid(unsafe_code)]
 
 pub mod effect;

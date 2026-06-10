@@ -1,5 +1,4 @@
-//! Shared test fixtures for the integration suite. Real subprocesses
-//! via [`OsSpawner`].
+//! Shared test fixtures for the integration suite. Real subprocesses via [`OsSpawner`].
 
 #![allow(
     dead_code,
@@ -30,11 +29,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-/// Test adapter that lifts the actuator's `(sub, key, outcome)` triple
-/// into the engine-side `Input::EffectComplete` envelope so the test's
-/// `Receiver<Input>` continues to observe completions in the
-/// pre-trait shape. Mirrors the bin's `DriverEffectSender` without
-/// dragging in the bin's transport identity.
+/// Test adapter that lifts the actuator's `(sub, key, outcome)` triple into the engine-side
+/// `Input::EffectComplete` envelope so the test's `Receiver<Input>` continues to observe
+/// completions in the pre-trait shape. Mirrors the bin's `DriverEffectSender` without dragging in
+/// the bin's transport identity.
 struct TestEngineIn(Sender<Input>);
 
 impl EffectCompleteSender for TestEngineIn {
@@ -45,10 +43,9 @@ impl EffectCompleteSender for TestEngineIn {
     }
 }
 
-/// Process-wide monotonic correlation counter for tests. Production
-/// correlations come from the engine; tests need their own unique
-/// stream so parallel tests within one binary don't collide on the
-/// actuator's `(pid, correlation)`-keyed tmp file path.
+/// Process-wide monotonic correlation counter for tests. Production correlations come from the
+/// engine; tests need their own unique stream so parallel tests within one binary don't collide on
+/// the actuator's `(pid, correlation)`-keyed tmp file path.
 static NEXT_CORR: AtomicU64 = AtomicU64::new(0xdead_0000);
 
 pub fn next_corr() -> u64 {
@@ -160,14 +157,12 @@ impl Drop for Harness {
     }
 }
 
-/// Wrap a `Vec<String>` argv as a literal-only single-op
-/// [`ActionProgram`].
+/// Wrap a `Vec<String>` argv as a literal-only single-op [`ActionProgram`].
 ///
-/// The resolver renders each `ArgTemplate(Literal(s))` as the slot `s`,
-/// so `literal_program(["foo", "bar"])` resolves to `argv = ["foo",
-/// "bar"]` byte-for-byte. Used by the integration helpers below to
-/// satisfy `Effect.program: Arc<ActionProgram>` while keeping fixture
-/// call sites' `Vec<String>` ergonomics intact.
+/// The resolver renders each `ArgTemplate(Literal(s))` as the slot `s`, so `literal_program(["foo",
+/// "bar"])` resolves to `argv = ["foo", "bar"]` byte-for-byte. Used by the integration helpers
+/// below to satisfy `Effect.program: Arc<ActionProgram>` while keeping fixture call sites'
+/// `Vec<String>` ergonomics intact.
 fn literal_program(argv: Vec<String>) -> Arc<ActionProgram> {
     single_exec_program(
         argv.into_iter()
@@ -175,10 +170,9 @@ fn literal_program(argv: Vec<String>) -> Arc<ActionProgram> {
     )
 }
 
-/// Wrap a sequence of literal argvs as a multi-op [`ActionProgram`] —
-/// one `Exec` op per inner vec, chained on `on_ok = Continue` with the
-/// final op `on_ok = Escape`; every `on_failed` is `Terminate`. The
-/// actuator walks them sequentially with stop-on-failure semantics.
+/// Wrap a sequence of literal argvs as a multi-op [`ActionProgram`] — one `Exec` op per inner vec,
+/// chained on `on_ok = Continue` with the final op `on_ok = Escape`; every `on_failed` is
+/// `Terminate`. The actuator walks them sequentially with stop-on-failure semantics.
 pub fn literal_multi_program(steps: Vec<Vec<String>>) -> Arc<ActionProgram> {
     assert!(!steps.is_empty(), "literal_multi_program requires >=1 step");
     let mut b = ProgramBuilder::new();
@@ -203,11 +197,9 @@ pub fn literal_multi_program(steps: Vec<Vec<String>>) -> Arc<ActionProgram> {
     Arc::new(b.build().unwrap())
 }
 
-/// PerFile Effect with an arbitrary (possibly multi-instruction)
-/// program. Mirrors [`perfile_effect`] but lets the caller supply a
-/// pre-built `Arc<ActionProgram>` directly — needed for tests that
-/// need to assert program-snapshot invariants by re-using the same
-/// `Arc` across multiple fixtures.
+/// PerFile Effect with an arbitrary (possibly multi-instruction) program. Mirrors [`perfile_effect`]
+/// but lets the caller supply a pre-built `Arc<ActionProgram>` directly — needed for tests that need
+/// to assert program-snapshot invariants by re-using the same `Arc` across multiple fixtures.
 pub fn perfile_effect_with_program(
     sub_seed: u64,
     profile_seed: u64,
@@ -240,16 +232,14 @@ pub fn perfile_effect_with_program(
 
 /// Build a PerFile Effect with a literal `argv` and the given correlation.
 ///
-/// `profile_seed` mints the `DedupKey::PerFile.profile` field via
-/// [`unique_profile_id`]; tests that don't care about Profile identity can
-/// pass any stable value (e.g., the same as `sub_seed`).
+/// `profile_seed` mints the `DedupKey::PerFile.profile` field via [`unique_profile_id`]; tests that
+/// don't care about Profile identity can pass any stable value (e.g., the same as `sub_seed`).
 ///
-/// `cwd` is mapped onto `anchor_path` with `anchor_kind = Dir`, so the
-/// actuator's `compute_cwd` returns the same path. The fixture leaves
-/// `target_relative` empty — `SPECTER_PATH` then mirrors `anchor_path`
-/// (the resolver derives `target_path` from `anchor_path` when
-/// `target_relative` is empty). Tests asserting on `SPECTER_PATH` set
-/// `target_relative` directly to introduce a per-file segment.
+/// `cwd` is mapped onto `anchor_path` with `anchor_kind = Dir`, so the actuator's `compute_cwd`
+/// returns the same path. The fixture leaves `target_relative` empty — `SPECTER_PATH` then mirrors
+/// `anchor_path` (the resolver derives `target_path` from `anchor_path` when `target_relative` is
+/// empty). Tests asserting on `SPECTER_PATH` set `target_relative` directly to introduce a per-file
+/// segment.
 pub fn perfile_effect(
     sub_seed: u64,
     profile_seed: u64,
@@ -282,9 +272,8 @@ pub fn perfile_effect(
 
 /// Build a Subtree Effect with a literal `argv`.
 ///
-/// The actuator does not consult `target`; the field is set to a
-/// stable per-Profile sentinel (`unique_resource_id(profile_seed)`) so
-/// fixtures remain comparable across calls without leaking
+/// The actuator does not consult `target`; the field is set to a stable per-Profile sentinel
+/// (`unique_resource_id(profile_seed)`) so fixtures remain comparable across calls without leaking
 /// engine-internal anchor identity into the actuator's tests.
 pub fn subtree_effect(
     sub_seed: u64,

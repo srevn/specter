@@ -1,14 +1,11 @@
 //! Regression suite for the settle-timer pacing contract.
 //!
-//! These cases capture the failure mode that motivated splitting
-//! the pre-fire re-Batch into `event_drives_batching` (driven by an
-//! `FsEvent`) and `retry_drives_batching` (driven by a
-//! `QuiescenceVerdict::Retry` verify response): a dense storm of
-//! `FsEvent`s used
-//! to inflate the settle backoff curve, eventually pegging the timer at
-//! `burst_deadline` and forcing the Effect to fire `forced = true`. The
-//! current contract is "every event re-arms `now + settle`," so the
-//! burst converges naturally once the storm stops.
+//! These cases capture the failure mode that motivated splitting the pre-fire re-Batch into
+//! `event_drives_batching` (driven by an `FsEvent`) and `retry_drives_batching` (driven by a
+//! `QuiescenceVerdict::Retry` verify response): a dense storm of `FsEvent`s used to inflate the
+//! settle backoff curve, eventually pegging the timer at `burst_deadline` and forcing the Effect to
+//! fire `forced = true`. The current contract is "every event re-arms `now + settle`," so the burst
+//! converges naturally once the storm stops.
 
 use compact_str::CompactString;
 use specter_core::testkit::{dir_snap, empty_program};
@@ -54,13 +51,12 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         "cold-arm Seed: probe emitted at burst construction",
     );
     let snap = dir_snap(&[]);
-    // Drive the cold-arm Seed burst to Idle; the Standard burst under
-    // test starts strictly after the Seed's settle window to keep
-    // instants monotonic.
+    // Drive the cold-arm Seed burst to Idle; the Standard burst under test starts strictly after
+    // the Seed's settle window to keep instants monotonic.
     let seed_settled = seed_to_idle(&mut e, pid, &snap, now);
 
-    // Storm: 8 modify events at 100 ms intervals, rebased past the
-    // Seed-establishment window so the Profile is Idle when it begins.
+    // Storm: 8 modify events at 100 ms intervals, rebased past the Seed-establishment window so the
+    // Profile is Idle when it begins.
     let storm_start = seed_settled + Duration::from_millis(10);
     let storm_step = Duration::from_millis(100);
     let storm_count = 8;
@@ -76,9 +72,9 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     }
     let last_event = storm_start + storm_step * (storm_count - 1);
 
-    // Each event re-armed the settle timer to `last_event + settle`.
-    // Drain timers from there onward; the next probe must fire close to
-    // `last_event + SETTLE` (well below `burst_deadline = now + MAX_SETTLE`).
+    // Each event re-armed the settle timer to `last_event + settle`. Drain timers from there
+    // onward; the next probe must fire close to `last_event + SETTLE` (well below `burst_deadline =
+    // now + MAX_SETTLE`).
     let probe_emit = last_event + SETTLE;
     let probe_correlation = loop {
         let Some(entry) = e.pop_expired(probe_emit) else {
@@ -100,8 +96,8 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
         }
     };
 
-    // The verify response folds to `Stable(StableReason::Natural)`
-    // on the first sample — single dispatch fires the Effect.
+    // The verify response folds to `Stable(StableReason::Natural)` on the first sample — single
+    // dispatch fires the Effect.
     let resp_t = probe_emit + Duration::from_millis(1);
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -125,13 +121,11 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
          `forced = true` would mean the regression is back",
     );
 
-    // The Effect must arrive well below the Standard burst's
-    // `burst_deadline`. The Seed runs first (its own burst, single
-    // settle window); the Standard burst under test starts at its
-    // first storm event (`storm_start`), so its deadline is
-    // `storm_start + MAX_SETTLE`. Natural convergence costs one
-    // settle cycle; the bound tracks `last_event + SETTLE` with a
-    // 0.5×SETTLE slop margin, well below the forced `burst_deadline`.
+    // The Effect must arrive well below the Standard burst's `burst_deadline`. The Seed runs first
+    // (its own burst, single settle window); the Standard burst under test starts at its first
+    // storm event (`storm_start`), so its deadline is `storm_start + MAX_SETTLE`. Natural
+    // convergence costs one settle cycle; the bound tracks `last_event + SETTLE` with a 0.5×SETTLE
+    // slop margin, well below the forced `burst_deadline`.
     let burst_deadline = storm_start + MAX_SETTLE;
     let upper_bound = last_event + SETTLE + SETTLE / 2 + Duration::from_millis(2);
     assert!(
@@ -147,15 +141,12 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
 
 #[test]
 fn sustained_undischarged_response_storm_paces_at_settle() {
-    // Verify the second leg of the conflation fix: the
-    // `QuiescenceVerdict::Retry` path (here driven by walker-refused
-    // `Undischarged !terminal` authority responses) routes via
-    // `retry_drives_batching`, which schedules the next attempt
-    // at `now + settle`, not at the exponential-backoff curve. We
-    // reproduce a sustained-undischarged burst: every probe response
-    // refuses the obligation; no events arrive in between. Each cycle's
-    // next-probe deadline must equal `last_response + settle`,
-    // regardless of how many cycles preceded.
+    // Verify the second leg of the conflation fix: the `QuiescenceVerdict::Retry` path (here driven
+    // by walker-refused `Undischarged !terminal` authority responses) routes via
+    // `retry_drives_batching`, which schedules the next attempt at `now + settle`, not at the
+    // exponential-backoff curve. We reproduce a sustained-undischarged burst: every probe response
+    // refuses the obligation; no events arrive in between. Each cycle's next-probe deadline must
+    // equal `last_response + settle`, regardless of how many cycles preceded.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -184,13 +175,11 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
         first_probe_correlation(&attach_out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
     );
-    // Drive the cold-arm Seed burst to Idle; the Standard burst under
-    // test starts strictly after the Seed's settle window to keep
-    // instants monotonic.
+    // Drive the cold-arm Seed burst to Idle; the Standard burst under test starts strictly after
+    // the Seed's settle window to keep instants monotonic.
     let seed_settled = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
-    // Kick off a Standard burst with one event, rebased past the
-    // Seed-establishment window.
+    // Kick off a Standard burst with one event, rebased past the Seed-establishment window.
     let t_event = seed_settled + Duration::from_millis(10);
     let _ = e.step(
         Input::FsEvent {
@@ -200,10 +189,9 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
         t_event,
     );
 
-    // Three consecutive `ProofAuthority::Undischarged` !terminal probe
-    // responses (each folding to `QuiescenceVerdict::Retry`). After
-    // each, the next probe should fire at `last_response + SETTLE`, not
-    // amplified.
+    // Three consecutive `ProofAuthority::Undischarged` !terminal probe responses (each folding to
+    // `QuiescenceVerdict::Retry`). After each, the next probe should fire at `last_response +
+    // SETTLE`, not amplified.
     let mut response_at = t_event + SETTLE;
     let unread: std::sync::Arc<std::path::Path> =
         std::sync::Arc::from(std::path::Path::new("src/opaque"));
@@ -224,10 +212,9 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
             }
         };
 
-        // Reply with an Undischarged !terminal authority. This folds to
-        // `QuiescenceVerdict::Retry`, which routes via
-        // `retry_drives_batching` — the surviving retry path that
-        // schedules the next attempt at `now + settle`.
+        // Reply with an Undischarged !terminal authority. This folds to `QuiescenceVerdict::Retry`,
+        // which routes via `retry_drives_batching` — the surviving retry path that schedules the
+        // next attempt at `now + settle`.
         let mut entries = BTreeMap::<CompactString, ChildEntry>::new();
         entries.insert(
             CompactString::new("file"),

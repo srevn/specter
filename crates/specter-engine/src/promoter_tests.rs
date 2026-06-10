@@ -1,19 +1,16 @@
-//! Inline tests for `engine::promoter`. Compose `Engine` with synthetic
-//! `Input::ProbeResponse` injection — the same pattern `descent_tests.rs`
-//! uses to exercise descent state machines without involving a real
-//! Sensor.
+//! Inline tests for `engine::promoter`. Compose `Engine` with synthetic `Input::ProbeResponse`
+//! injection — the same pattern `descent_tests.rs` uses to exercise descent state machines without
+//! involving a real Sensor.
 //!
 //! Coverage focuses on the load-bearing transitions:
-//! - `attach_promoter_inner`'s two materialisation arms (immediate
-//!   `Active` vs `PrefixPending`).
+//! - `attach_promoter_inner`'s two materialisation arms (immediate `Active` vs `PrefixPending`).
 //! - `enter_active`'s 5a → 5b carrier-preservation walkthrough.
 //! - `register_proxy` idempotence ([H-5]).
 //! - `dispatch_descent_ok` advance + materialise (Promoter owner).
-//! - `dispatch_promoter_enumeration_ok` forward pass (sub-proxy
-//!   registration + final-position promotion).
+//! - `dispatch_promoter_enumeration_ok` forward pass (sub-proxy registration + final-position
+//!   promotion).
 //! - `try_promote` dedup.
-//! - Event routing: `on_promoter_proxy_event` enqueue + dispatch +
-//!   stale-event diagnostic.
+//! - Event routing: `on_promoter_proxy_event` enqueue + dispatch + stale-event diagnostic.
 //! - `dispatch_descent_vanished` rewind (Promoter owner).
 
 #![allow(
@@ -70,9 +67,8 @@ fn req_for(name: &str, pattern: &str) -> PromoterAttachRequest {
     }
 }
 
-/// Build an `Arc<DirSnapshot>` with the supplied children. The walker
-/// speaks paths; engine identity stays engine-side, so the snapshot
-/// carries pure content.
+/// Build an `Arc<DirSnapshot>` with the supplied children. The walker speaks paths; engine identity
+/// stays engine-side, so the snapshot carries pure content.
 fn dir_snap_at(children: &[(&str, EntryKind, u64)]) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children.iter().copied() {
@@ -94,8 +90,8 @@ fn dir_snap_at(children: &[(&str, EntryKind, u64)]) -> Arc<DirSnapshot> {
     ))
 }
 
-/// Resolve a `/var/log` chain (or any existing path) under the FS-root.
-/// Helper for setup blocks that pre-place a Dir on the Tree.
+/// Resolve a `/var/log` chain (or any existing path) under the FS-root. Helper for setup blocks
+/// that pre-place a Dir on the Tree.
 fn ensure_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     let mut comps = Vec::with_capacity(segments.len() + 1);
     comps.push(FS_ROOT_SEGMENT);
@@ -108,9 +104,8 @@ fn ensure_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     r
 }
 
-/// Read the descent probe target-path from a probe-ops list (the latest
-/// outstanding descent/subtree probe in emission order). The wire is
-/// path-only; tests compare via `e.tree().path_of(<id>)`.
+/// Read the descent probe target-path from a probe-ops list (the latest outstanding descent/subtree
+/// probe in emission order). The wire is path-only; tests compare via `e.tree().path_of(<id>)`.
 fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf> {
     out.probe_ops().iter().rev().find_map(|op| match op {
         ProbeOp::Probe { request } => Some(request.target_path().to_path_buf()),
@@ -118,8 +113,8 @@ fn last_probe_path(out: &specter_core::StepOutput) -> Option<std::path::PathBuf>
     })
 }
 
-/// Read the `pending_enumerations` BTreeSet from a Promoter — convenience
-/// for tests asserting on queue contents.
+/// Read the `pending_enumerations` BTreeSet from a Promoter — convenience for tests asserting on
+/// queue contents.
 fn pending_enumerations(e: &Engine, pid: PromoterId) -> Vec<ResourceId> {
     e.promoters
         .get(pid)
@@ -127,8 +122,7 @@ fn pending_enumerations(e: &Engine, pid: PromoterId) -> Vec<ResourceId> {
         .unwrap_or_default()
 }
 
-/// Read the `Active { proxies }` map from a Promoter (panicking if the
-/// state is `PrefixPending`).
+/// Read the `Active { proxies }` map from a Promoter (panicking if the state is `PrefixPending`).
 fn active_proxies(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, specter_core::ProxyState> {
     match e.promoters.get(pid).map(Promoter::state) {
         Some(PromoterState::Active { proxies, .. }) => proxies.clone(),
@@ -136,11 +130,9 @@ fn active_proxies(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, specter_c
     }
 }
 
-/// Registry-derived view of the live `(anchor_resource → SubId)` set
-/// for `pid`, reconstructed from `SubRegistry` truth (the single
-/// source). A live dynamic Sub's `Profile.resource` *is* the anchor it
-/// was promoted at, so this round-trips exactly that set; the Promoter
-/// holds no parallel map.
+/// Registry-derived view of the live `(anchor_resource → SubId)` set for `pid`, reconstructed from
+/// `SubRegistry` truth (the single source). A live dynamic Sub's `Profile.resource` *is* the anchor
+/// it was promoted at, so this round-trips exactly that set; the Promoter holds no parallel map.
 fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubId> {
     e.subs
         .iter()
@@ -179,8 +171,8 @@ fn attach_immediate_active_at_existing_prefix() {
         "first proxy carries pattern.literal_prefix_len()",
     );
 
-    // Watch_demand on /var/log: User Profile-less Dir starts at 0; the
-    // proxy registration bumps to 1 with STRUCTURE.
+    // Watch_demand on /var/log: User Profile-less Dir starts at 0; the proxy registration bumps to
+    // 1 with STRUCTURE.
     assert_eq!(e.tree().get(var_log).unwrap().watch_demand(), 1);
     assert!(
         e.tree()
@@ -231,8 +223,8 @@ fn attach_pending_when_literal_prefix_missing() {
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     assert_ne!(pid, PromoterId::default());
 
-    // State: PrefixPending(d). d.current_prefix() == FS-root slot;
-    // remaining_components = ["var", "log"].
+    // State: PrefixPending(d). d.current_prefix() == FS-root slot; remaining_components = ["var",
+    // "log"].
     let q = e.promoters.get(pid).expect("promoter registered");
     let PromoterState::PrefixPending(d) = q.state() else {
         panic!("expected PrefixPending, got {:?}", q.state());
@@ -279,8 +271,8 @@ fn descent_advances_one_segment_on_partial_response() {
         "first probe at /var"
     );
 
-    // Inject DirEnumerated: /var contains "log" as a Dir. Descent should
-    // advance to /var/log; remaining = [].
+    // Inject DirEnumerated: /var contains "log" as a Dir. Descent should advance to /var/log;
+    // remaining = [].
     let snap = dir_snap_at(&[("log", EntryKind::Dir, 1)]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -291,8 +283,8 @@ fn descent_advances_one_segment_on_partial_response() {
         Instant::now(),
     );
 
-    // Last literal segment ("log") materialised → enter_active. State
-    // is Active, with the new /var/log slot as the first proxy.
+    // Last literal segment ("log") materialised → enter_active. State is Active, with the new
+    // /var/log slot as the first proxy.
     let proxies = active_proxies(&e, pid);
     assert_eq!(proxies.len(), 1);
     let new_proxy = *proxies.keys().next().unwrap();
@@ -326,8 +318,7 @@ fn enumeration_ok_promotes_final_match() {
         e.tree().path_of(var_log).as_deref()
     );
 
-    // Inject enumeration response listing two files: one matches *.log,
-    // one doesn't.
+    // Inject enumeration response listing two files: one matches *.log, one doesn't.
     let snap = dir_snap_at(&[
         ("foo.log", EntryKind::File, 1),
         ("bar.txt", EntryKind::File, 2),
@@ -341,8 +332,7 @@ fn enumeration_ok_promotes_final_match() {
         Instant::now(),
     );
 
-    // The derived dynamic-Sub set contains the matched anchor; bar.txt
-    // is absent.
+    // The derived dynamic-Sub set contains the matched anchor; bar.txt is absent.
     let promoted_resources: Vec<ResourceId> = dynamic_subs_of(&e, pid).into_keys().collect();
     assert_eq!(promoted_resources.len(), 1);
     let promoted_path = e
@@ -380,9 +370,8 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
-    // Inject /srv listing: two child Dirs ("alpha", "beta") and a stray
-    // File ("noisy.cfg") that the glob would match but should be
-    // skipped at non-final position (only Dir matches descend).
+    // Inject /srv listing: two child Dirs ("alpha", "beta") and a stray File ("noisy.cfg") that the
+    // glob would match but should be skipped at non-final position (only Dir matches descend).
     let snap = dir_snap_at(&[
         ("alpha", EntryKind::Dir, 1),
         ("beta", EntryKind::Dir, 2),
@@ -397,9 +386,8 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
         Instant::now(),
     );
 
-    // proxies should now include the original /srv plus two sub-proxies
-    // at /srv/alpha and /srv/beta. Each sub-proxy carries
-    // pattern_component_index = 3 (idx of `site` literal).
+    // proxies should now include the original /srv plus two sub-proxies at /srv/alpha and
+    // /srv/beta. Each sub-proxy carries pattern_component_index = 3 (idx of `site` literal).
     let proxies = active_proxies(&e, pid);
     assert_eq!(proxies.len(), 3, "/srv + alpha + beta = 3 proxies");
     let alpha = e
@@ -415,8 +403,8 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
     assert_eq!(alpha_state.pattern_component_index, 3);
     assert_eq!(beta_state.pattern_component_index, 3);
 
-    // No promotion: /srv/alpha/site and /srv/beta/site enumerations are
-    // queued, not yet probed. No dynamic Subs minted.
+    // No promotion: /srv/alpha/site and /srv/beta/site enumerations are queued, not yet probed. No
+    // dynamic Subs minted.
     assert!(
         dynamic_subs_of(&e, pid).is_empty(),
         "no promotions at intermediate level",
@@ -433,9 +421,8 @@ fn enumeration_ok_registers_subproxy_for_intermediate_glob() {
 
 #[test]
 fn try_promote_is_idempotent_on_repeated_match() {
-    // Two enumeration cycles (e.g., a parent's StructureChanged refire)
-    // for the same path do NOT mint two dynamic Subs. The contains-check
-    // dedup gate fires at try_promote.
+    // Two enumeration cycles (e.g., a parent's StructureChanged refire) for the same path do NOT
+    // mint two dynamic Subs. The contains-check dedup gate fires at try_promote.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
@@ -460,9 +447,8 @@ fn try_promote_is_idempotent_on_repeated_match() {
     let dynamic_count_after_cycle_1 = dynamic_subs_of(&e, pid).len();
     assert_eq!(dynamic_count_after_cycle_1, 1);
 
-    // Re-trigger enumeration via FsEvent at the proxy. Inject the same
-    // snapshot — same entry, same path. The derived set should still
-    // have exactly one entry (no duplicate Sub minted).
+    // Re-trigger enumeration via FsEvent at the proxy. Inject the same snapshot — same entry, same
+    // path. The derived set should still have exactly one entry (no duplicate Sub minted).
     let _ = e.step(
         Input::FsEvent {
             resource: var_log,
@@ -488,10 +474,9 @@ fn try_promote_is_idempotent_on_repeated_match() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// The derived gate must equal the independently-observed fact: a live
-/// dynamic Sub for `pid` keyed at `anchor` in the registry-reconstructed
-/// set. `dynamic_subs_of` resolves Sub → Profile → resource; the gate
-/// resolves (anchor, config_hash) → Profile → Subs — distinct paths, so
+/// The derived gate must equal the independently-observed fact: a live dynamic Sub for `pid` keyed
+/// at `anchor` in the registry-reconstructed set. `dynamic_subs_of` resolves Sub → Profile →
+/// resource; the gate resolves (anchor, config_hash) → Profile → Subs — distinct paths, so
 /// agreement is a real equivalence, not a tautology.
 fn assert_gate_matches_observable(e: &Engine, pid: PromoterId, anchor: ResourceId) {
     let observed = dynamic_subs_of(e, pid).contains_key(&anchor);
@@ -502,11 +487,9 @@ fn assert_gate_matches_observable(e: &Engine, pid: PromoterId, anchor: ResourceI
     );
 }
 
-/// Derived-gate equivalence. `promoter_already_promoted` agrees with
-/// the observable "a live dynamic Sub for this Promoter is anchored
-/// here" across promote → anchor-loss-reap → re-promote orderings.
-/// With no mirror map, a stale gate is unrepresentable by
-/// construction.
+/// Derived-gate equivalence. `promoter_already_promoted` agrees with the observable "a live dynamic
+/// Sub for this Promoter is anchored here" across promote → anchor-loss-reap → re-promote
+/// orderings. With no mirror map, a stale gate is unrepresentable by construction.
 #[test]
 fn derived_gate_equivalence_across_attach_reap_orderings() {
     let mut e = Engine::new();
@@ -519,8 +502,8 @@ fn derived_gate_equivalence_across_attach_reap_orderings() {
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
     let corr = e.pending_probe_for(ProbeOwner::Promoter(pid)).unwrap();
 
-    // State 0 — nothing promoted: gate false, and false at an anchor
-    // (var_log) that carries a proxy but never a Profile.
+    // State 0 — nothing promoted: gate false, and false at an anchor (var_log) that carries a proxy
+    // but never a Profile.
     assert!(
         !e.promoter_already_promoted(pid, var_log),
         "no promotion yet ⇒ gate false",
@@ -552,8 +535,8 @@ fn derived_gate_equivalence_across_attach_reap_orderings() {
     assert_gate_matches_observable(&e, pid, anchor);
     assert_gate_matches_observable(&e, pid, var_log);
 
-    // State 2 — anchor lost (all-dynamic teardown reaps Profile + Sub):
-    // the gate returns false with no mirror to leave a stale entry.
+    // State 2 — anchor lost (all-dynamic teardown reaps Profile + Sub): the gate returns false with
+    // no mirror to leave a stale entry.
     let _ = e.step(
         Input::FsEvent {
             resource: anchor,
@@ -571,8 +554,8 @@ fn derived_gate_equivalence_across_attach_reap_orderings() {
     );
     assert_gate_matches_observable(&e, pid, anchor);
 
-    // State 3 — re-promote on reappearance: gate true again, freshly
-    // derived (no resurrected stale state).
+    // State 3 — re-promote on reappearance: gate true again, freshly derived (no resurrected stale
+    // state).
     let _ = e.step(
         Input::FsEvent {
             resource: var_log,
@@ -602,12 +585,10 @@ fn derived_gate_equivalence_across_attach_reap_orderings() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Re-enumeration allocation shape. Re-enumerating a stable fan-out
-/// plus one new sibling promotes only the new entry: the read-only
-/// fast-path skips the already-promoted siblings before any
-/// `ensure_child` / `set_kind` / `try_promote`, so exactly one
-/// `PromotionKindObserved` is emitted and the existing dynamic Subs
-/// keep their identity (no churn).
+/// Re-enumeration allocation shape. Re-enumerating a stable fan-out plus one new sibling promotes
+/// only the new entry: the read-only fast-path skips the already-promoted siblings before any
+/// `ensure_child` / `set_kind` / `try_promote`, so exactly one `PromotionKindObserved` is emitted
+/// and the existing dynamic Subs keep their identity (no churn).
 #[test]
 fn reenumeration_of_stable_fanout_promotes_only_the_new_sibling() {
     fn promotions_for(out: &specter_core::StepOutput, pid: PromoterId) -> usize {
@@ -654,8 +635,7 @@ fn reenumeration_of_stable_fanout_promotes_only_the_new_sibling() {
     let before = dynamic_subs_of(&e, pid);
     assert_eq!(before.len(), 3, "three dynamic Subs minted");
 
-    // Re-enumerate (parent StructureChanged refire) with the same three
-    // entries plus one new sibling.
+    // Re-enumerate (parent StructureChanged refire) with the same three entries plus one new sibling.
     let _ = e.step(
         Input::FsEvent {
             resource: var_log,
@@ -750,22 +730,20 @@ fn proxy_event_enqueues_and_dispatches() {
 
 #[test]
 fn proxy_event_for_unregistered_promoter_emits_stale_diagnostic() {
-    // Register a phantom back-ref via the typed `insert_proxy_promoter`
-    // mutator for a Promoter id that never registered at that slot
-    // through the engine — the on_promoter_proxy_event safety check
-    // must catch this and emit PromoterProxyStaleEvent rather than
-    // enqueue garbage.
+    // Register a phantom back-ref via the typed `insert_proxy_promoter` mutator for a Promoter id
+    // that never registered at that slot through the engine — the on_promoter_proxy_event safety
+    // check must catch this and emit PromoterProxyStaleEvent rather than enqueue garbage.
     use specter_core::PromoterId;
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("phantom", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
-    // Synthesise a Promoter id that's NOT in the registry; register it
-    // onto the back-ref via the typed mutator.
+    // Synthesise a Promoter id that's NOT in the registry; register it onto the back-ref via the
+    // typed mutator.
     let phantom = PromoterId::default();
 
-    // Bump watch_demand so the on_fs_event head guard doesn't drop the
-    // event with EventOnUnwatchedResource.
+    // Bump watch_demand so the on_fs_event head guard doesn't drop the event with
+    // EventOnUnwatchedResource.
     let mut out = specter_core::StepOutput::default();
     crate::refcounts::add_watch(
         e.tree_mut(),
@@ -835,9 +813,8 @@ fn descent_vanished_rewinds_to_parent() {
         "vanished diagnostic emitted",
     );
 
-    // Descent rewinds to /var's parent (the FS-root). State stays
-    // PrefixPending; current_prefix is now FS-root; remaining starts
-    // with "var" (prepended) and ends with "log" (the original
+    // Descent rewinds to /var's parent (the FS-root). State stays PrefixPending; current_prefix is
+    // now FS-root; remaining starts with "var" (prepended) and ends with "log" (the original
     // remaining segment).
     let q = e.promoters.get(pid).expect("Promoter still alive");
     let PromoterState::PrefixPending(d) = q.state() else {
@@ -861,11 +838,9 @@ fn descent_vanished_rewinds_to_parent() {
         e.tree().path_of(fs_root).as_deref()
     );
 
-    // The vanished /var slot was vacated. Vacate clears
-    // watch_demand and kind; the slot itself is retained while it
-    // still has children (the still-existing /var/log
-    // DescentScaffold the original descent created). Asserting on
-    // vacate's observable effect:
+    // The vanished /var slot was vacated. Vacate clears watch_demand and kind; the slot itself is
+    // retained while it still has children (the still-existing /var/log DescentScaffold the
+    // original descent created). Asserting on vacate's observable effect:
     assert_eq!(
         e.tree().get(var).unwrap().watch_demand(),
         0,
@@ -876,18 +851,15 @@ fn descent_vanished_rewinds_to_parent() {
 
 // ---- PrefixPending events at the prefix re-trigger descent.
 //
-// `classify_event_carriers` walks Promoter `PrefixPending` descents as
-// well as Profiles, so an FsEvent at the prefix re-probes the descent
-// instead of routing to `EventNoConsumer` and stranding the Promoter
-// waiting for a segment it never re-probes. These four tests pin that
-// owner-polymorphic dispatch — `on_descent_event` is owner-polymorphic
-// and `EventCarriers.descents` carries `ProbeOwner::Promoter(_)`s
-// alongside Profiles.
+// `classify_event_carriers` walks Promoter `PrefixPending` descents as well as Profiles, so an
+// FsEvent at the prefix re-probes the descent instead of routing to `EventNoConsumer` and stranding
+// the Promoter waiting for a segment it never re-probes. These four tests pin that
+// owner-polymorphic dispatch — `on_descent_event` is owner-polymorphic and `EventCarriers.descents`
+// carries `ProbeOwner::Promoter(_)`s alongside Profiles.
 
-/// Drained-probe + StructureChanged at the prefix → fresh descent probe.
-/// Mirror of `descent_tests.rs::descent_event_at_prefix_emits_fresh_probe`
-/// for the Promoter side. Without this dispatch the Promoter would
-/// never re-probe after the next segment first appeared.
+/// Drained-probe + StructureChanged at the prefix → fresh descent probe. Mirror of
+/// `descent_tests.rs::descent_event_at_prefix_emits_fresh_probe` for the Promoter side. Without
+/// this dispatch the Promoter would never re-probe after the next segment first appeared.
 #[test]
 fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
     let mut e = Engine::new();
@@ -903,8 +875,8 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
         .pending_probe_for(ProbeOwner::Promoter(pid))
         .expect("descent probe in flight after attach");
 
-    // Drain the in-flight probe with an empty response (segment not
-    // yet present; descent stays PrefixPending awaiting the next event).
+    // Drain the in-flight probe with an empty response (segment not yet present; descent stays
+    // PrefixPending awaiting the next event).
     let snap = dir_snap_at(&[]);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -955,9 +927,8 @@ fn prefix_pending_event_at_prefix_emits_fresh_descent_probe() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// I5 guard: while a descent probe is in flight, an FsEvent at the
-/// prefix drops without minting a second probe (the in-flight probe
-/// will pick up the new segment in its response). Mirror of
+/// I5 guard: while a descent probe is in flight, an FsEvent at the prefix drops without minting a
+/// second probe (the in-flight probe will pick up the new segment in its response). Mirror of
 /// `descent_tests.rs::descent_event_during_in_flight_probe_drops`.
 #[test]
 fn prefix_pending_event_during_in_flight_probe_drops() {
@@ -995,13 +966,10 @@ fn prefix_pending_event_during_in_flight_probe_drops() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Terminal events at the prefix (Removed / Renamed / Revoked) must
-/// also re-trigger descent — this covers more than the non-terminal
-/// `StructureChanged` case. Without dispatch, a `mv /var /var.old`
-/// mid-descent would
-/// strand the Promoter with a dangling watch on a non-existent path
-/// (the next probe response would clean up via `Vanished` rewind, but
-/// only if the dispatch fires).
+/// Terminal events at the prefix (Removed / Renamed / Revoked) must also re-trigger descent — this
+/// covers more than the non-terminal `StructureChanged` case. Without dispatch, a `mv /var
+/// /var.old` mid-descent would strand the Promoter with a dangling watch on a non-existent path
+/// (the next probe response would clean up via `Vanished` rewind, but only if the dispatch fires).
 #[test]
 fn prefix_pending_terminal_event_at_prefix_emits_fresh_descent_probe() {
     let mut e = Engine::new();
@@ -1024,8 +992,7 @@ fn prefix_pending_terminal_event_at_prefix_emits_fresh_descent_probe() {
         Instant::now(),
     );
 
-    // Inject a terminal event at the prefix — `Removed` (e.g.,
-    // `mv /var /var.old`).
+    // Inject a terminal event at the prefix — `Removed` (e.g., `mv /var /var.old`).
     let out = e.step(
         Input::FsEvent {
             resource: var,
@@ -1050,14 +1017,11 @@ fn prefix_pending_terminal_event_at_prefix_emits_fresh_descent_probe() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Failed descent + event-driven retry: after a `Failed { errno }`
-/// response retains `PrefixPending` state, the next event at the
-/// prefix must re-trigger descent. Without unified dispatch this
-/// retry path was unreachable — `Failed` is documented as "await
-/// next event at prefix" (Promoter-side `dispatch_descent_failed`
-/// arm) but no event dispatch existed for the Promoter side
-/// pre-unification, so failed Promoter descents would stall
-/// permanently.
+/// Failed descent + event-driven retry: after a `Failed { errno }` response retains `PrefixPending`
+/// state, the next event at the prefix must re-trigger descent. Without unified dispatch this retry
+/// path was unreachable — `Failed` is documented as "await next event at prefix" (Promoter-side
+/// `dispatch_descent_failed` arm) but no event dispatch existed for the Promoter side
+/// pre-unification, so failed Promoter descents would stall permanently.
 #[test]
 fn prefix_pending_event_after_failed_descent_emits_fresh_descent_probe() {
     let mut e = Engine::new();
@@ -1116,8 +1080,8 @@ fn prefix_pending_event_after_failed_descent_emits_fresh_descent_probe() {
 
 #[test]
 fn register_proxy_is_idempotent_on_re_registration() {
-    // Re-registering the same proxy at the same idx must NOT
-    // double-bump watch_demand or duplicate the queue entry. [H-5]
+    // Re-registering the same proxy at the same idx must NOT double-bump watch_demand or duplicate
+    // the queue entry. [H-5]
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
@@ -1154,12 +1118,10 @@ fn register_proxy_is_idempotent_on_re_registration() {
 
 #[test]
 fn register_then_release_proxy_clears_both_halves_of_the_join() {
-    // The proxy join is two-sided: `Resource.proxy_promoters` holds
-    // the back-ref to the Promoter, and `Promoter.state.proxies`
-    // holds the forward entry to the Resource. Releasing a registered
-    // proxy must tear down BOTH halves — neither a dangling back-ref
-    // on the slot nor a stale forward entry on the Promoter may
-    // survive the round-trip.
+    // The proxy join is two-sided: `Resource.proxy_promoters` holds the back-ref to the Promoter,
+    // and `Promoter.state.proxies` holds the forward entry to the Resource. Releasing a registered
+    // proxy must tear down BOTH halves — neither a dangling back-ref on the slot nor a stale
+    // forward entry on the Promoter may survive the round-trip.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
@@ -1170,8 +1132,8 @@ fn register_then_release_proxy_clears_both_halves_of_the_join() {
     let pid =
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
 
-    // `attach` materialised an immediate proxy at the existing prefix:
-    // both halves of the join are present.
+    // `attach` materialised an immediate proxy at the existing prefix: both halves of the join are
+    // present.
     assert!(
         active_proxies(&e, pid).contains_key(&var_log),
         "forward entry present in Promoter.proxies pre-release",
@@ -1185,10 +1147,9 @@ fn register_then_release_proxy_clears_both_halves_of_the_join() {
         "back-ref present on the slot pre-release",
     );
 
-    // `attach` left an enumeration probe in flight at the proxy.
-    // `unregister_proxy`'s cancel-first contract requires the
-    // owner probe be disarmed before release — the same ordering
-    // every production release path observes.
+    // `attach` left an enumeration probe in flight at the proxy. `unregister_proxy`'s cancel-first
+    // contract requires the owner probe be disarmed before release — the same ordering every
+    // production release path observes.
     let mut out = specter_core::StepOutput::default();
     e.cancel_owner_probe(ProbeOwner::Promoter(pid), &mut out);
 
@@ -1196,16 +1157,14 @@ fn register_then_release_proxy_clears_both_halves_of_the_join() {
     let mut out = specter_core::StepOutput::default();
     e.unregister_proxy(pid, var_log, &mut out);
 
-    // Forward half: the Promoter's `proxies` map no longer carries the
-    // resource.
+    // Forward half: the Promoter's `proxies` map no longer carries the resource.
     assert!(
         !active_proxies(&e, pid).contains_key(&var_log),
         "forward entry cleared from Promoter.proxies after release",
     );
-    // Back-ref half: the slot's `proxy_promoters` no longer points at
-    // the Promoter. The User-roled, promoter-only slot reaps once the
-    // back-ref drops, so the slot may be absent entirely — either way
-    // no dangling back-ref survives.
+    // Back-ref half: the slot's `proxy_promoters` no longer points at the Promoter. The User-roled,
+    // promoter-only slot reaps once the back-ref drops, so the slot may be absent entirely — either
+    // way no dangling back-ref survives.
     assert!(
         e.tree()
             .get(var_log)
@@ -1218,9 +1177,8 @@ fn register_then_release_proxy_clears_both_halves_of_the_join() {
 
 #[test]
 fn dispatch_next_enumeration_records_pending_target() {
-    // The in-flight proxy resource is tagged on the state-resident
-    // enumeration slot at probe-emit time so `Vanished` / `Failed`
-    // responses (which carry no payload) can identify the proxy.
+    // The in-flight proxy resource is tagged on the state-resident enumeration slot at probe-emit
+    // time so `Vanished` / `Failed` responses (which carry no payload) can identify the proxy.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
 
@@ -1230,8 +1188,8 @@ fn dispatch_next_enumeration_records_pending_target() {
     );
     let pid =
         specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
-    // Initial enumeration was dispatched by `enter_active`; the
-    // enumeration slot's tag carries the in-flight proxy resource.
+    // Initial enumeration was dispatched by `enter_active`; the enumeration slot's tag carries the
+    // in-flight proxy resource.
     let target = e
         .promoters
         .get(pid)
@@ -1253,9 +1211,8 @@ fn dispatch_next_enumeration_records_pending_target() {
 
 #[test]
 fn pending_enumeration_target_clears_on_response() {
-    // The enumeration slot disarms on response — both the correlation
-    // and the proxy-target tag go away atomically (single `take_probe`
-    // / `disarm` on the state-resident slot).
+    // The enumeration slot disarms on response — both the correlation and the proxy-target tag go
+    // away atomically (single `take_probe` / `disarm` on the state-resident slot).
     let mut e = Engine::new();
     let _var_log = ensure_dir(&mut e, &["var", "log"]);
     let out = e.step(
@@ -1293,9 +1250,8 @@ fn pending_enumeration_target_clears_on_response() {
 
 #[test]
 fn cancel_owner_probe_clears_promoter_enumeration_slot() {
-    // `cancel_owner_probe` is the canonical disarm-on-cancel path. For
-    // a Promoter owner with an armed enumeration slot it disarms the
-    // slot and emits a Cancel op.
+    // `cancel_owner_probe` is the canonical disarm-on-cancel path. For a Promoter owner with an
+    // armed enumeration slot it disarms the slot and emits a Cancel op.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let out = e.step(
@@ -1345,12 +1301,10 @@ fn cancel_owner_probe_clears_promoter_enumeration_slot() {
 
 #[test]
 fn enumeration_vanished_unregisters_proxy_and_emits_diagnostic() {
-    // Pattern /var/log/*.log; proxy at /var/log. Inject a Vanished
-    // response — the proxy's directory is gone. The dispatcher
-    // emits PromoterEnumerationVanished {proxy: /var/log} and
-    // cascades unregister_proxy_subtree(/var/log) which clears the
-    // proxy's back-ref, watch_demand contribution, and removes it
-    // from `Promoter.state.proxies`.
+    // Pattern /var/log/*.log; proxy at /var/log. Inject a Vanished response — the proxy's directory
+    // is gone. The dispatcher emits PromoterEnumerationVanished {proxy: /var/log} and cascades
+    // unregister_proxy_subtree(/var/log) which clears the proxy's back-ref, watch_demand
+    // contribution, and removes it from `Promoter.state.proxies`.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let out = e.step(
@@ -1400,11 +1354,9 @@ fn enumeration_vanished_unregisters_proxy_and_emits_diagnostic() {
         "old descent variant must not fire on enumeration vanish",
     );
 
-    // Proxy unregistered: removed from Active.proxies. Whether the
-    // Tree slot survives depends on its retention signals — for a
-    // User-roled slot with no children/profiles/other-promoters,
-    // `try_reap` collects it; we only assert the Promoter-side
-    // invariant (back-ref absent, proxies map empty).
+    // Proxy unregistered: removed from Active.proxies. Whether the Tree slot survives depends on its
+    // retention signals — for a User-roled slot with no children/profiles/other-promoters, `try_reap`
+    // collects it; we only assert the Promoter-side invariant (back-ref absent, proxies map empty).
     let q = e.promoters.get(pid).expect("promoter alive");
     let proxies = match q.state() {
         PromoterState::Active { proxies, .. } => proxies,
@@ -1423,9 +1375,8 @@ fn enumeration_vanished_unregisters_proxy_and_emits_diagnostic() {
 
 #[test]
 fn enumeration_vanished_cascades_subproxies() {
-    // Pattern /srv/*/site — sub-proxy at /srv/alpha after a forward
-    // pass. A Vanished at /srv (impossible in production but lets us
-    // unit-test the cascade scope) clears /srv AND /srv/alpha.
+    // Pattern /srv/*/site — sub-proxy at /srv/alpha after a forward pass. A Vanished at /srv
+    // (impossible in production but lets us unit-test the cascade scope) clears /srv AND /srv/alpha.
     let mut e = Engine::new();
     let srv = ensure_dir(&mut e, &["srv"]);
     let out = e.step(
@@ -1496,8 +1447,8 @@ fn enumeration_vanished_cascades_subproxies() {
 
 #[test]
 fn enumeration_failed_retains_proxy_state_with_diagnostic() {
-    // Failed responses preserve proxy state (next event re-triggers
-    // enumeration); only the diagnostic emits.
+    // Failed responses preserve proxy state (next event re-triggers enumeration); only the
+    // diagnostic emits.
     let mut e = Engine::new();
     let var_log = ensure_dir(&mut e, &["var", "log"]);
     let out = e.step(
@@ -1568,9 +1519,8 @@ fn reap_promoter_active_with_proxy_unregisters_and_removes() {
     // Promoter removed from registry.
     assert!(e.promoters.get(pid).is_none(), "Promoter removed");
 
-    // The proxy slot's contribution was released. The slot itself
-    // may have been reaped (User-roled with no other anchors) — read
-    // both the surviving and reaped cases through `Option`.
+    // The proxy slot's contribution was released. The slot itself may have been reaped (User-roled
+    // with no other anchors) — read both the surviving and reaped cases through `Option`.
     let post_reap_demand = e
         .tree()
         .get(var_log)
@@ -1643,8 +1593,8 @@ fn reap_promoter_prefix_pending_releases_prefix() {
 
 #[test]
 fn reap_promoter_detaches_dynamic_subs() {
-    // Promoter with one dynamic Sub. `reap_promoter`'s registry scan
-    // (`source_promoter == pid`) detaches the Sub from `SubRegistry`.
+    // Promoter with one dynamic Sub. `reap_promoter`'s registry scan (`source_promoter == pid`)
+    // detaches the Sub from `SubRegistry`.
     let mut e = Engine::new();
     let _var_log = ensure_dir(&mut e, &["var", "log"]);
     let out = e.step(
@@ -1696,9 +1646,8 @@ fn reap_promoter_stale_id_is_silent_noop() {
 
 #[test]
 fn reap_promoter_active_with_subproxies_clears_all() {
-    // Pattern /srv/*/site with one sub-proxy registered. reap_promoter
-    // unregisters every proxy (including sub-proxies) and clears all
-    // back-refs.
+    // Pattern /srv/*/site with one sub-proxy registered. reap_promoter unregisters every proxy
+    // (including sub-proxies) and clears all back-refs.
     let mut e = Engine::new();
     let srv = ensure_dir(&mut e, &["srv"]);
     let out = e.step(
@@ -1725,12 +1674,10 @@ fn reap_promoter_active_with_subproxies_clears_all() {
     let _ = e.reap_promoter(pid);
 
     assert!(e.promoters.get(pid).is_none(), "Promoter removed");
-    // With the Promoter as their sole claim, both `/srv` and
-    // `/srv/alpha` cascade-reap when `unregister_proxy` drops the last
-    // proxy contribution and back-ref at each slot. Assert the
-    // back-ref is cleared (or the slot is gone) at every involved
-    // resource — the production contract is "no live `proxy_promoters`
-    // entry naming this Promoter survives the reap."
+    // With the Promoter as their sole claim, both `/srv` and `/srv/alpha` cascade-reap when
+    // `unregister_proxy` drops the last proxy contribution and back-ref at each slot. Assert the
+    // back-ref is cleared (or the slot is gone) at every involved resource — the production
+    // contract is "no live `proxy_promoters` entry naming this Promoter survives the reap."
     for r in [srv, alpha] {
         assert!(
             e.tree()
@@ -1743,11 +1690,10 @@ fn reap_promoter_active_with_subproxies_clears_all() {
 
 // ---- recovery split (on_anchor_terminal_event dispatcher) ----
 
-/// Pre-materialise the leaf File slot at `parent_segs/leaf` so the
-/// Promoter's enumeration mints a Sub against an *existing* anchor
-/// (the dynamic Sub's Profile attaches in `Idle`, not `Pending` —
-/// the anchor's `watch_demand` is bumped, and a subsequent
-/// FsEvent::Removed reaches `on_anchor_terminal_event`).
+/// Pre-materialise the leaf File slot at `parent_segs/leaf` so the Promoter's enumeration mints a
+/// Sub against an *existing* anchor (the dynamic Sub's Profile attaches in `Idle`, not `Pending` —
+/// the anchor's `watch_demand` is bumped, and a subsequent FsEvent::Removed reaches
+/// `on_anchor_terminal_event`).
 fn ensure_file(e: &mut Engine, parent_segs: &[&str], leaf: &str) -> ResourceId {
     let mut comps: Vec<&str> = Vec::with_capacity(parent_segs.len() + 2);
     comps.push(FS_ROOT_SEGMENT);
@@ -1761,8 +1707,8 @@ fn ensure_file(e: &mut Engine, parent_segs: &[&str], leaf: &str) -> ResourceId {
     r
 }
 
-/// Promote one match into a dynamic Sub against a pre-materialised
-/// leaf. Returns `(promoter_id, sub_id, anchor_resource)`.
+/// Promote one match into a dynamic Sub against a pre-materialised leaf. Returns `(promoter_id,
+/// sub_id, anchor_resource)`.
 fn promote_one(
     e: &mut Engine,
     pattern: &str,
@@ -1793,10 +1739,9 @@ fn promote_one(
 
 #[test]
 fn anchor_terminal_all_dynamic_reaps_profile_and_notifies_promoter() {
-    // Promoter `/var/log/*.log` mints a dynamic Sub at /var/log/foo.log.
-    // The Sub is the only attachment on the Profile (all_dynamic=true).
-    // FsEvent::Removed at the anchor → reap Profile, notify Promoter
-    // (DynamicSubReaped + PromoterReap-like teardown sequence).
+    // Promoter `/var/log/*.log` mints a dynamic Sub at /var/log/foo.log. The Sub is the only
+    // attachment on the Profile (all_dynamic=true). FsEvent::Removed at the anchor → reap Profile,
+    // notify Promoter (DynamicSubReaped + PromoterReap-like teardown sequence).
     let mut e = Engine::new();
     let (pid, sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
     assert_eq!(
@@ -1850,9 +1795,8 @@ fn anchor_terminal_all_dynamic_reaps_profile_and_notifies_promoter() {
 
 #[test]
 fn anchor_terminal_mixed_profile_preserves_recovery() {
-    // Promoter `/var/log/*.log` mints a dynamic Sub at /var/log/foo.log.
-    // A static Sub at the same anchor joins via Profile dedup.
-    // FsEvent::Removed at the anchor: NOT all_dynamic ⇒ falls to
+    // Promoter `/var/log/*.log` mints a dynamic Sub at /var/log/foo.log. A static Sub at the same
+    // anchor joins via Profile dedup. FsEvent::Removed at the anchor: NOT all_dynamic ⇒ falls to
     // finalize_anchor_lost (Profile lives, watch_root_parent retained).
     let mut e = Engine::new();
     let (pid, dyn_sid, anchor) = promote_one(&mut e, "/var/log/*.log", &["var", "log"], "foo.log");
@@ -1903,9 +1847,8 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
         ),
         "anchor_claim cleared by finalize_anchor_lost",
     );
-    // No DynamicSubReaped — the dynamic Sub remains attached; on path
-    // reappearance the derived gate (`promoter_already_promoted`) sees
-    // the still-attached Sub and suppresses a duplicate mint.
+    // No DynamicSubReaped — the dynamic Sub remains attached; on path reappearance the derived gate
+    // (`promoter_already_promoted`) sees the still-attached Sub and suppresses a duplicate mint.
     assert!(
         !out.diagnostics.iter().any(|d| matches!(
             d,
@@ -1924,12 +1867,10 @@ fn anchor_terminal_mixed_profile_preserves_recovery() {
 
 #[test]
 fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
-    // Defense-in-depth: a Profile with empty subs (structurally
-    // unreachable in production) routes to finalize_anchor_lost.
-    // We can't construct an empty-subs Profile cleanly via public
-    // API, so this test exercises the predicate via a static-only
-    // Profile (which also picks the finalize_anchor_lost branch
-    // because all_dynamic is false).
+    // Defense-in-depth: a Profile with empty subs (structurally unreachable in production) routes
+    // to finalize_anchor_lost. We can't construct an empty-subs Profile cleanly via public API, so
+    // this test exercises the predicate via a static-only Profile (which also picks the
+    // finalize_anchor_lost branch because all_dynamic is false).
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("anchor", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -1975,9 +1916,8 @@ fn anchor_terminal_no_subs_falls_back_to_finalize_anchor_lost() {
     );
 }
 
-/// Pin the predicate: `subs.iter().all(s.source_promoter.is_some())` —
-/// a single static Sub (source_promoter=None) flips all_dynamic to
-/// false.
+/// Pin the predicate: `subs.iter().all(s.source_promoter.is_some())` — a single static Sub
+/// (source_promoter=None) flips all_dynamic to false.
 #[test]
 fn anchor_terminal_predicate_static_sub_makes_mixed() {
     let mut e = Engine::new();
@@ -2014,17 +1954,14 @@ fn anchor_terminal_predicate_static_sub_makes_mixed() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Walker contract (Promoter descent): a `PrefixPending` literal-prefix
-/// descent probes a Dir prefix, so the walker returns `DirEnumerated` /
-/// `Vanished`. An `AnchorOk` proof is a walker-side bug — descent never
-/// queries an anchor's `lstat` shape. After the owner-split the Promoter
-/// handler parses through `DescentOutcome::try_from` (uniform with the
-/// Profile descent) and routes the violation to the owner-polymorphic
-/// `walker_contract_violated_descent`, which fires a `debug_assert!` in
-/// dev/CI and, in release, emits the honest `WalkerContractViolated` and
-/// abandons the prefix — no lying `StaleProbeResponse`. The test pins the
-/// dev/CI panic; the parse rejection itself is pinned release-safe by
-/// `probe::tests::descent_outcome_try_from_*`.
+/// Walker contract (Promoter descent): a `PrefixPending` literal-prefix descent probes a Dir
+/// prefix, so the walker returns `DirEnumerated` / `Vanished`. An `AnchorOk` proof is a walker-side
+/// bug — descent never queries an anchor's `lstat` shape. After the owner-split the Promoter
+/// handler parses through `DescentOutcome::try_from` (uniform with the Profile descent) and routes
+/// the violation to the owner-polymorphic `walker_contract_violated_descent`, which fires a
+/// `debug_assert!` in dev/CI and, in release, emits the honest `WalkerContractViolated` and
+/// abandons the prefix — no lying `StaleProbeResponse`. The test pins the dev/CI panic; the parse
+/// rejection itself is pinned release-safe by `probe::tests::descent_outcome_try_from_*`.
 #[test]
 #[cfg_attr(
     not(debug_assertions),
@@ -2044,9 +1981,8 @@ fn promoter_descent_with_anchor_outcome_is_walker_contract_violation() {
         .pending_probe_for(ProbeOwner::Promoter(pid))
         .expect("descent probe in flight at the literal prefix");
 
-    // `AnchorOk` from a Descent probe is structurally impossible from the
-    // production walker; synthesise the breach to exercise the
-    // walker-contract debug_assert.
+    // `AnchorOk` from a Descent probe is structurally impossible from the production walker;
+    // synthesise the breach to exercise the walker-contract debug_assert.
     let leaf = LeafEntry::synthetic(EntryKind::File, 0, UNIX_EPOCH, FsIdentity::synthetic(1, 0));
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -2058,18 +1994,14 @@ fn promoter_descent_with_anchor_outcome_is_walker_contract_violation() {
     );
 }
 
-/// Walker contract (Promoter enumeration): an `Active` proxy enumeration
-/// probes a Dir proxy, so the walker returns `DirEnumerated` /
-/// `Vanished`. A `SubtreeProven` proof is a walker-side bug — an
-/// enumeration queries a directory listing, never a subtree proof. After
-/// the owner-split the Promoter handler parses through
-/// `DescentOutcome::try_from` and routes the violation to the new
-/// `walker_contract_violated_enumeration`, which fires a `debug_assert!`
-/// in dev/CI and, in release, emits the honest `WalkerContractViolated`
-/// and drops the offending proxy (the enumeration analog of the descent
-/// abandon) — no lying `StaleProbeResponse`. The test pins the dev/CI
-/// panic; the parse rejection is pinned release-safe by
-/// `probe::tests::descent_outcome_try_from_*`.
+/// Walker contract (Promoter enumeration): an `Active` proxy enumeration probes a Dir proxy, so the
+/// walker returns `DirEnumerated` / `Vanished`. A `SubtreeProven` proof is a walker-side bug — an
+/// enumeration queries a directory listing, never a subtree proof. After the owner-split the
+/// Promoter handler parses through `DescentOutcome::try_from` and routes the violation to the new
+/// `walker_contract_violated_enumeration`, which fires a `debug_assert!` in dev/CI and, in release,
+/// emits the honest `WalkerContractViolated` and drops the offending proxy (the enumeration analog
+/// of the descent abandon) — no lying `StaleProbeResponse`. The test pins the dev/CI panic; the
+/// parse rejection is pinned release-safe by `probe::tests::descent_outcome_try_from_*`.
 #[test]
 #[cfg_attr(
     not(debug_assertions),
@@ -2079,8 +2011,7 @@ fn promoter_descent_with_anchor_outcome_is_walker_contract_violation() {
 fn promoter_enumeration_with_proof_outcome_is_walker_contract_violation() {
     let mut e = Engine::new();
     let _var_log = ensure_dir(&mut e, &["var", "log"]);
-    // Existing prefix → immediate Active, enumeration probe in flight at
-    // the proxy.
+    // Existing prefix → immediate Active, enumeration probe in flight at the proxy.
     let out = e.step(
         Input::AttachPromoter(req_for("logs", "/var/log/*.log")),
         Instant::now(),
@@ -2091,9 +2022,8 @@ fn promoter_enumeration_with_proof_outcome_is_walker_contract_violation() {
         .pending_probe_for(ProbeOwner::Promoter(pid))
         .expect("enumeration probe in flight at the proxy");
 
-    // `SubtreeProven` from an enumeration probe is structurally
-    // impossible from the production walker; synthesise the breach to
-    // exercise the walker-contract debug_assert.
+    // `SubtreeProven` from an enumeration probe is structurally impossible from the production
+    // walker; synthesise the breach to exercise the walker-contract debug_assert.
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Promoter(pid),

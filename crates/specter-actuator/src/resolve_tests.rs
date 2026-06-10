@@ -1,5 +1,4 @@
-//! Sibling unit tests for [`super::resolve`]. Pure data work — all
-//! fixtures are inline; no I/O.
+//! Sibling unit tests for [`super::resolve`]. Pure data work — all fixtures are inline; no I/O.
 
 #![allow(
     clippy::items_after_statements,
@@ -24,28 +23,25 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::SystemTime;
 
-/// Empty env snapshot used by tests that don't exercise `${env.<NAME>}`
-/// resolution. Constructed once via `OnceLock` and threaded through the
-/// `resolve` helper.
+/// Empty env snapshot used by tests that don't exercise `${env.<NAME>}` resolution. Constructed
+/// once via `OnceLock` and threaded through the `resolve` helper.
 fn empty_env() -> EnvSnapshot {
     EnvSnapshot::from_map::<_, &str, &str>([])
 }
 
-/// Convenience wrapper for tests that don't exercise `${specter.time}` /
-/// `SPECTER_TIME` rendering — pins `now` to the Unix epoch, omits the
-/// diff tmp file, and uses an empty env snapshot. Time-sensitive tests
-/// call [`super::resolve_step`] directly with the instant they want;
-/// diff-tmp-aware tests pass `diff_path: Some(_)` directly; env-aware
-/// tests build a fresh snapshot inline.
+/// Convenience wrapper for tests that don't exercise `${specter.time}` / `SPECTER_TIME` rendering —
+/// pins `now` to the Unix epoch, omits the diff tmp file, and uses an empty env snapshot.
+/// Time-sensitive tests call [`super::resolve_step`] directly with the instant they want;
+/// diff-tmp-aware tests pass `diff_path: Some(_)` directly; env-aware tests build a fresh snapshot
+/// inline.
 fn resolve(e: &Effect) -> (CommandResolved, Vec<EnvVar<'_>>) {
     let exec = exec_of(e);
     super::resolve_step(e, exec, SystemTime::UNIX_EPOCH, None, &empty_env())
         .expect("test fixtures don't exercise the strict-env failure path")
 }
 
-/// Borrow the single [`ExecAction`] inside an [`Effect`]'s program. Tests
-/// build effects with exactly one `SpawnBody::Exec` op; this is a
-/// fixture-side accessor, not a production API.
+/// Borrow the single [`ExecAction`] inside an [`Effect`]'s program. Tests build effects with
+/// exactly one `SpawnBody::Exec` op; this is a fixture-side accessor, not a production API.
 fn exec_of(e: &Effect) -> &ExecAction {
     match &e.program.ops()[0].body() {
         SpawnBody::Exec(exec) => exec,
@@ -53,13 +49,11 @@ fn exec_of(e: &Effect) -> &ExecAction {
     }
 }
 
-/// The resolver derives `target_path` from `(anchor_path, relative())`
-/// at spawn time. Tests pass the anchor + relative pair; the helper
-/// does no extra dispatch.
+/// The resolver derives `target_path` from `(anchor_path, relative())` at spawn time. Tests pass
+/// the anchor + relative pair; the helper does no extra dispatch.
 ///
-/// `scope` selects the `EffectTarget` shape (Subtree ⇒ no per-file
-/// segment, PerStableFile ⇒ per-file segment); the resolver then
-/// derives `SPECTER_EVENT_KIND` from the shape.
+/// `scope` selects the `EffectTarget` shape (Subtree ⇒ no per-file segment, PerStableFile ⇒
+/// per-file segment); the resolver then derives `SPECTER_EVENT_KIND` from the shape.
 fn make_effect(
     sub_name: &str,
     scope: EffectScope,
@@ -86,10 +80,9 @@ fn make_effect(
     match scope {
         EffectScope::SubtreeRoot => Effect::subtree(common, diff),
         EffectScope::PerStableFile => {
-            // PerFile diff is mandatory. Callers that passed `None` did
-            // not reference a diff-derived placeholder; an empty
-            // `Diff::default()` renders those placeholders identically
-            // to the old absent-diff path.
+            // PerFile diff is mandatory. Callers that passed `None` did not reference a
+            // diff-derived placeholder; an empty `Diff::default()` renders those placeholders
+            // identically to the old absent-diff path.
             let diff = diff.unwrap_or_else(|| Arc::new(Diff::default()));
             Effect::per_file(
                 common,
@@ -192,8 +185,8 @@ fn resolve_with_anchor_placeholder() {
 
 #[test]
 fn resolve_excluded_one_arg_per_pattern() {
-    // `--exclude=${specter.excluded}` tiles the literal prefix per pattern,
-    // mirroring the diff-derived multi-value behaviour.
+    // `--exclude=${specter.excluded}` tiles the literal prefix per pattern, mirroring the
+    // diff-derived multi-value behaviour.
     let mut e = make_effect(
         "rsync",
         EffectScope::SubtreeRoot,
@@ -229,8 +222,8 @@ fn resolve_excluded_one_arg_per_pattern() {
 
 #[test]
 fn resolve_excluded_empty_drops_slot() {
-    // Empty exclude list mirrors empty-diff: drop the entire
-    // `--exclude=${specter.excluded}` slot rather than emit `--exclude=`.
+    // Empty exclude list mirrors empty-diff: drop the entire `--exclude=${specter.excluded}` slot
+    // rather than emit `--exclude=`.
     let e = make_effect(
         "rsync",
         EffectScope::SubtreeRoot,
@@ -256,9 +249,8 @@ fn resolve_excluded_empty_drops_slot() {
 
 #[test]
 fn env_exclude_newline_separated() {
-    // Newline-separated source strings, no trailing newline. Survives
-    // any pattern content (commas, spaces, apostrophes) that's legal in
-    // glob source strings.
+    // Newline-separated source strings, no trailing newline. Survives any pattern content (commas,
+    // spaces, apostrophes) that's legal in glob source strings.
     let mut e = make_effect(
         "x",
         EffectScope::SubtreeRoot,
@@ -311,8 +303,8 @@ fn env_exclude_empty_is_empty_string() {
 
 // ---------- ${specter.time} / SPECTER_TIME ----------
 
-/// Unix timestamp 1_700_000_000 = 2023-11-14T22:13:20Z. Chosen for
-/// readability in the assert; the format is RFC 3339 second-precision.
+/// Unix timestamp 1_700_000_000 = 2023-11-14T22:13:20Z. Chosen for readability in the assert; the
+/// format is RFC 3339 second-precision.
 const FIXED_NOW_SECS: u64 = 1_700_000_000;
 const FIXED_NOW_RFC3339: &str = "2023-11-14T22:13:20Z";
 
@@ -357,10 +349,9 @@ fn env_specter_time_uses_injected_now() {
 
 #[test]
 fn format_now_clamps_pre_epoch() {
-    // humantime::format_rfc3339_seconds panics on pre-epoch SystemTime.
-    // Production never sees pre-epoch on a sane Unix host, but tests can
-    // construct one. The resolver clamps to UNIX_EPOCH so the spawn path
-    // can't panic on a hostile clock.
+    // humantime::format_rfc3339_seconds panics on pre-epoch SystemTime. Production never sees
+    // pre-epoch on a sane Unix host, but tests can construct one. The resolver clamps to UNIX_EPOCH
+    // so the spawn path can't panic on a hostile clock.
     let pre = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
     let e = make_effect(
         "x",
@@ -387,8 +378,8 @@ fn format_now_clamps_pre_epoch() {
 
 #[test]
 fn resolve_parent_is_target_dir_for_perfile() {
-    // PerFile target = anchor.join(segment); ${specter.parent} = the directory
-    // immediately containing the file that triggered the fire.
+    // PerFile target = anchor.join(segment); ${specter.parent} = the directory immediately
+    // containing the file that triggered the fire.
     let e = make_effect(
         "x",
         EffectScope::PerStableFile,
@@ -405,8 +396,8 @@ fn resolve_parent_is_target_dir_for_perfile() {
 
 #[test]
 fn resolve_parent_is_anchor_parent_for_subtree() {
-    // Subtree target_path == anchor_path; ${specter.parent} = parent of the anchor
-    // (one level above the watch root).
+    // Subtree target_path == anchor_path; ${specter.parent} = parent of the anchor (one level above
+    // the watch root).
     let e = make_effect(
         "x",
         EffectScope::SubtreeRoot,
@@ -423,9 +414,8 @@ fn resolve_parent_is_anchor_parent_for_subtree() {
 
 #[test]
 fn resolve_parent_for_perfile_at_root_is_root() {
-    // Filesystem-root anchor with PerFile scope: target_path = "/foo.rs",
-    // parent = "/" (NOT empty). Guards against the easy misreading that
-    // any anchor at root yields empty ${specter.parent}.
+    // Filesystem-root anchor with PerFile scope: target_path = "/foo.rs", parent = "/" (NOT empty).
+    // Guards against the easy misreading that any anchor at root yields empty ${specter.parent}.
     let e = make_effect(
         "x",
         EffectScope::PerStableFile,
@@ -442,8 +432,8 @@ fn resolve_parent_for_perfile_at_root_is_root() {
 
 #[test]
 fn resolve_parent_empty_only_for_subtree_at_root() {
-    // The only configuration that yields an empty ${specter.parent}: Subtree scope
-    // anchored at filesystem root (target_path = "/", which has no parent).
+    // The only configuration that yields an empty ${specter.parent}: Subtree scope anchored at
+    // filesystem root (target_path = "/", which has no parent).
     let e = make_effect(
         "x",
         EffectScope::SubtreeRoot,
@@ -455,16 +445,15 @@ fn resolve_parent_empty_only_for_subtree_at_root() {
         None,
     );
     let (cmd, _) = resolve(&e);
-    // Empty parent → ArgTemplate produces a single empty argv slot
-    // (single-value placeholders never drop the slot, only multi-values
-    // with zero entries do).
+    // Empty parent → ArgTemplate produces a single empty argv slot (single-value placeholders never
+    // drop the slot, only multi-values with zero entries do).
     assert_eq!(cmd.argv, vec![String::new()]);
 }
 
 #[test]
 fn env_parent_empty_only_for_subtree_at_root() {
-    // SPECTER_PARENT mirrors ${specter.parent}: empty string only at fs root for
-    // Subtree scope; "/" everywhere else at the root level.
+    // SPECTER_PARENT mirrors ${specter.parent}: empty string only at fs root for Subtree scope; "/"
+    // everywhere else at the root level.
     let e = make_effect(
         "x",
         EffectScope::SubtreeRoot,
@@ -509,8 +498,8 @@ fn env_parent_for_perfile_is_target_directory() {
 
 #[test]
 fn resolve_substitutes_watch_name() {
-    // `${specter.watch}` substitutes `effect.sub_name` — mirrors `$SPECTER_WATCH`
-    // env value but in argv form.
+    // `${specter.watch}` substitutes `effect.sub_name` — mirrors `$SPECTER_WATCH` env value but in
+    // argv form.
     let e = make_effect(
         "build",
         EffectScope::SubtreeRoot,
@@ -765,9 +754,9 @@ fn resolve_with_multivalue_having_prefix_and_empty_diff_yields_zero_slots() {
 
 #[test]
 fn env_specter_created_newline_separated() {
-    // Diff-derived multi-value env var mirrors the argv form: each entry's
-    // segment, joined by `\n`, no trailing newline. Empty list ⇒ empty
-    // string (asserted in env_diff_lists_*); populated list ⇒ the segments.
+    // Diff-derived multi-value env var mirrors the argv form: each entry's segment, joined by `\n`,
+    // no trailing newline. Empty list ⇒ empty string (asserted in env_diff_lists_*); populated list
+    // ⇒ the segments.
     let diff = Diff {
         created: smallvec![
             entry_ref("a.rs", 1),
@@ -799,9 +788,8 @@ fn env_specter_created_newline_separated() {
 
 #[test]
 fn env_specter_deleted_and_modified_render_their_categories() {
-    // One Diff carrying entries for two categories; each env var pulls
-    // from its own list. Asserts the dispatch in `diff_env_segs` doesn't
-    // cross-contaminate.
+    // One Diff carrying entries for two categories; each env var pulls from its own list. Asserts
+    // the dispatch in `diff_env_segs` doesn't cross-contaminate.
     let diff = Diff {
         deleted: smallvec![entry_ref("d1", 1), entry_ref("d2", 2)],
         modified: smallvec![entry_ref("m1", 3)],
@@ -844,9 +832,9 @@ fn env_specter_deleted_and_modified_render_their_categories() {
 
 #[test]
 fn env_specter_renamed_from_and_to_use_correct_sides() {
-    // Two renames, each with distinct from/to segments. The two env vars
-    // must each pull their respective side; cross-contamination would
-    // mean the from/to projection in `diff_env_renames` is broken.
+    // Two renames, each with distinct from/to segments. The two env vars must each pull their
+    // respective side; cross-contamination would mean the from/to projection in `diff_env_renames`
+    // is broken.
     let diff = Diff {
         renamed: smallvec![
             Rename {
@@ -889,13 +877,11 @@ fn env_specter_renamed_from_and_to_use_correct_sides() {
 
 #[test]
 fn env_diff_lists_empty_when_no_diff() {
-    // `Effect.diff = None` (Sub doesn't reference any diff-derived
-    // placeholder and isn't `per-stable-file`). All five list env vars
-    // emit as empty strings — always-emit policy mirrors SPECTER_EXCLUDED
-    // and avoids `set -u` surprises in the spawned shell. The
-    // `Some(Diff::default())` variant exits the same way through
-    // `join_with_newlines`'s empty-iter branch (already pinned by
-    // `env_exclude_empty_is_empty_string`).
+    // `Effect.diff = None` (Sub doesn't reference any diff-derived placeholder and isn't
+    // `per-stable-file`). All five list env vars emit as empty strings — always-emit policy mirrors
+    // SPECTER_EXCLUDED and avoids `set -u` surprises in the spawned shell. The
+    // `Some(Diff::default())` variant exits the same way through `join_with_newlines`'s empty-iter
+    // branch (already pinned by `env_exclude_empty_is_empty_string`).
     let e = make_effect(
         "x",
         EffectScope::SubtreeRoot,
@@ -1208,10 +1194,9 @@ fn env_order_is_alphabetical() {
 
 #[test]
 fn env_order_with_diff_path_is_alphabetical() {
-    // With `diff_path: Some(_)`, SPECTER_DIFF_PATH joins the env in
-    // alphabetical position (between SPECTER_DELETED and
-    // SPECTER_EVENT_KIND), keeping a total order across the spawn-time
-    // set the child observes.
+    // With `diff_path: Some(_)`, SPECTER_DIFF_PATH joins the env in alphabetical position (between
+    // SPECTER_DELETED and SPECTER_EVENT_KIND), keeping a total order across the spawn-time set the
+    // child observes.
     let e = make_effect(
         "watch",
         EffectScope::SubtreeRoot,
@@ -1264,15 +1249,12 @@ fn env_order_with_diff_path_is_alphabetical() {
 
 // ---------- Cow borrow discipline ----------
 //
-// When `Effect::target_path` is `Cow::Borrowed` (Subtree fire),
-// `SPECTER_PATH` / `SPECTER_PARENT` propagate the borrow into
-// `Cow::Borrowed` on the UTF-8 fast path; when it is `Cow::Owned`
-// (PerFile fire), both fields own. The two assertions below pin one
-// Subtree case (path + parent in one resolve) and one PerFile case so
-// a future regression that forces an unconditional `into_owned()` on
-// either field surfaces in the test suite. The empty-multivalue
-// short-circuit gets its own small assertion since the borrow-vs-owned
-// property there is independent of `target_path`.
+// When `Effect::target_path` is `Cow::Borrowed` (Subtree fire), `SPECTER_PATH` / `SPECTER_PARENT`
+// propagate the borrow into `Cow::Borrowed` on the UTF-8 fast path; when it is `Cow::Owned` (PerFile
+// fire), both fields own. The two assertions below pin one Subtree case (path + parent in one
+// resolve) and one PerFile case so a future regression that forces an unconditional `into_owned()` on
+// either field surfaces in the test suite. The empty-multivalue short-circuit gets its own small
+// assertion since the borrow-vs-owned property there is independent of `target_path`.
 
 #[test]
 fn env_specter_path_and_parent_borrow_for_subtree() {
@@ -1303,9 +1285,8 @@ fn env_specter_path_and_parent_borrow_for_subtree() {
 
 #[test]
 fn env_specter_path_and_parent_own_for_perfile() {
-    // PerFile `target_path = anchor.join(segment)` is a freshly-joined
-    // `PathBuf` living only on the resolve stack; both fields must own
-    // their bytes for the env vec to outlive the resolve call.
+    // PerFile `target_path = anchor.join(segment)` is a freshly-joined `PathBuf` living only on the
+    // resolve stack; both fields must own their bytes for the env vec to outlive the resolve call.
     let e = make_effect(
         "x",
         EffectScope::PerStableFile,
@@ -1327,12 +1308,10 @@ fn env_specter_path_and_parent_own_for_perfile() {
 
 #[test]
 fn env_multivalue_borrows_empty_string_when_no_entries() {
-    // `env_multivalue` short-circuits the empty case to
-    // `Cow::Borrowed("")` instead of allocating an empty `String`. The
-    // no-diff resolve emits six empty multi-value env vars; this saves
-    // six `String::new()` allocations per resolve on the common path
-    // for Subs that don't reference diff placeholders. One probe per
-    // category is enough — they all route through the same helper.
+    // `env_multivalue` short-circuits the empty case to `Cow::Borrowed("")` instead of allocating
+    // an empty `String`. The no-diff resolve emits six empty multi-value env vars; this saves six
+    // `String::new()` allocations per resolve on the common path for Subs that don't reference diff
+    // placeholders. One probe per category is enough — they all route through the same helper.
     let e = make_effect(
         "x",
         EffectScope::SubtreeRoot,
@@ -1362,9 +1341,8 @@ fn env_multivalue_borrows_empty_string_when_no_entries() {
 
 // ---------- ${env.<NAME>} ----------
 
-/// `${env.NAME}` resolves to the snapshot's value when present.
-/// Default-bearing form is exercised below; together they cover both
-/// lexer branches in the resolver pass.
+/// `${env.NAME}` resolves to the snapshot's value when present. Default-bearing form is exercised
+/// below; together they cover both lexer branches in the resolver pass.
 #[test]
 fn resolve_env_var_substitutes_from_snapshot() {
     let env = EnvSnapshot::from_map([("HOME", "/home/op")]);
@@ -1386,9 +1364,8 @@ fn resolve_env_var_substitutes_from_snapshot() {
     assert_eq!(cmd.argv, vec!["/home/op".to_string()]);
 }
 
-/// Strict default: unset env var with no `:-` default fails the resolve
-/// — the caller maps `ResolveError::UnsetEnvVar` to
-/// `EffectOutcome::Failed`.
+/// Strict default: unset env var with no `:-` default fails the resolve — the caller maps
+/// `ResolveError::UnsetEnvVar` to `EffectOutcome::Failed`.
 #[test]
 fn resolve_env_var_unset_without_default_returns_unset_env_var_error() {
     let env = EnvSnapshot::from_map::<_, &str, &str>([]);
@@ -1415,8 +1392,8 @@ fn resolve_env_var_unset_without_default_returns_unset_env_var_error() {
     );
 }
 
-/// Unset env var with a `:-default` renders the default literal —
-/// explicit lenient opt-in. Empty default (`${env.X:-}`) renders empty.
+/// Unset env var with a `:-default` renders the default literal — explicit lenient opt-in. Empty
+/// default (`${env.X:-}`) renders empty.
 #[test]
 fn resolve_env_var_unset_with_default_renders_default() {
     let env = EnvSnapshot::from_map::<_, &str, &str>([]);

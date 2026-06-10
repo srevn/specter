@@ -1,74 +1,59 @@
 //! Refcount-edge helpers for the per-Resource contributions map.
 //!
-//! One refcount: the **contributions map** (`Resource.contributions`)
-//! gates FD lifetime — a Resource is Watched iff the map is non-empty.
-//! The map is a `BTreeMap<ContribKey, ClassSet>`: each key identifies a
-//! single contributor (Profile anchor / parent / descent / descendant,
-//! or Promoter prefix / proxy); the value is that contributor's
-//! `ClassSet` mask. The per-Resource events union is the OR fold over
-//! the map's values.
+//! One refcount: the **contributions map** (`Resource.contributions`) gates FD lifetime — a
+//! Resource is Watched iff the map is non-empty. The map is a `BTreeMap<ContribKey, ClassSet>`:
+//! each key identifies a single contributor (Profile anchor / parent / descent / descendant, or
+//! Promoter prefix / proxy); the value is that contributor's `ClassSet` mask. The per-Resource
+//! events union is the OR fold over the map's values.
 //!
 //! Each primitive emits `WatchOp` ops as follows:
-//! - [`add_watch`]: `Watch` on the empty → non-empty edge OR on any
-//!   union change at non-empty.
-//! - [`sub_watch`]: `Unwatch` on the non-empty → empty edge; `Watch`
-//!   on any union change at non-empty.
+//! - [`add_watch`]: `Watch` on the empty → non-empty edge OR on any union change at non-empty.
+//! - [`sub_watch`]: `Unwatch` on the non-empty → empty edge; `Watch` on any union change at
+//!   non-empty.
 //!
 //! **Two release paths.**
-//! - [`sub_watch_then_try_reap`] is the **routine per-key release** —
-//!   drop one contributor at `(r, key)` and free the slot iff this
-//!   release zeroed `Resource::has_anchors()`. Co-resident
+//! - [`sub_watch_then_try_reap`] is the **routine per-key release** — drop one contributor at `(r,
+//!   key)` and free the slot iff this release zeroed `Resource::has_anchors()`. Co-resident
 //!   contributions at other keys keep the slot watched.
-//! - [`specter_core::Tree::vacate`] is the **protocol terminus** — clear the
-//!   whole contributions map atomically, emitting the closing `Unwatch`
-//!   in one step. Used when every contribution at the slot is being
-//!   abandoned at once (kernel-watch rejection, or
-//!   `reconcile::delete_child` on a fully-drained slot).
+//! - [`specter_core::Tree::vacate`] is the **protocol terminus** — clear the whole contributions
+//!   map atomically, emitting the closing `Unwatch` in one step. Used when every contribution at
+//!   the slot is being abandoned at once (kernel-watch rejection, or `reconcile::delete_child` on a
+//!   fully-drained slot).
 //!
-//! **Idempotent absent-key sub.** Calling [`sub_watch`] for a key that
-//! is not in the map is a silent no-op. This makes the helper safe to
-//! invoke against post-vacate slots ([`specter_core::Tree::vacate`] cleared
-//! the map) and slots drained by a prior sub-walk in the same step
-//! (e.g., [`crate::Engine::release_descendant_claim`]'s take-and-walk pass).
+//! **Idempotent absent-key sub.** Calling [`sub_watch`] for a key that is not in the map is a
+//! silent no-op. This makes the helper safe to invoke against post-vacate slots
+//! ([`specter_core::Tree::vacate`] cleared the map) and slots drained by a prior sub-walk in the
+//! same step (e.g., [`crate::Engine::release_descendant_claim`]'s take-and-walk pass).
 //!
-//! **Source of truth.** Contribution attribution is **data**: each
-//! caller passes the explicit [`ContribKey`] for the role it owns.
-//! There is no walk-the-registry recompute; the union is the OR fold
-//! over the map's current values, computed lazily by
-//! [`specter_core::Resource::events_union`]. Adding a new contributor
-//! kind is a [`ContribKey`] variant + its sole call site, with no
-//! engine-wide propagation.
+//! **Source of truth.** Contribution attribution is **data**: each caller passes the explicit
+//! [`ContribKey`] for the role it owns. There is no walk-the-registry recompute; the union is the
+//! OR fold over the map's current values, computed lazily by
+//! [`specter_core::Resource::events_union`]. Adding a new contributor kind is a [`ContribKey`]
+//! variant + its sole call site, with no engine-wide propagation.
 //!
-//! Stale `ResourceId`: the lookup short-circuits with no mutation and
-//! no op emission. The Engine maintains "non-empty contributions ⇒
-//! live slot" by attaching contributions only at live Resources, so a
-//! stale id here means a logic bug elsewhere; the silent return is
-//! defence-in-depth.
+//! Stale `ResourceId`: the lookup short-circuits with no mutation and no op emission. The Engine
+//! maintains "non-empty contributions ⇒ live slot" by attaching contributions only at live Resources,
+//! so a stale id here means a logic bug elsewhere; the silent return is defence-in-depth.
 
 use crate::path::empty_path;
 use specter_core::{ClassSet, ContribKey, ResourceId, StepOutput, Tree, WatchOp};
 
-/// Install or update the contribution at `(r, key)` with `mask`,
-/// emitting `WatchOp::Watch` on the existence edge or when the
-/// per-Resource union widens (or otherwise changes).
+/// Install or update the contribution at `(r, key)` with `mask`, emitting `WatchOp::Watch` on the
+/// existence edge or when the per-Resource union widens (or otherwise changes).
 ///
-/// **No registry walk.** Signature is purely Resource-local —
-/// `(&mut Tree, ResourceId, ContribKey, ClassSet, &mut StepOutput)`.
+/// **No registry walk.** Signature is purely Resource-local — `(&mut Tree, ResourceId, ContribKey,
+/// ClassSet, &mut StepOutput)`.
 ///
-/// **Idempotent.** Re-inserting the same `(key, mask)` is a no-op
-/// (the map already contains it; no union change; no emission).
-/// Re-inserting `key` with a *different* `mask` overwrites and emits
+/// **Idempotent.** Re-inserting the same `(key, mask)` is a no-op (the map already contains it; no
+/// union change; no emission). Re-inserting `key` with a *different* `mask` overwrites and emits
 /// `Watch` iff the union changes.
 ///
-/// `mask == EMPTY` is legitimate (e.g., a defensive call from a
-/// fixture that hasn't wired its mask yet); the Sensor degrades to
-/// identity-floor-only registration on the resulting `WatchOp::Watch`.
+/// `mask == EMPTY` is legitimate (e.g., a defensive call from a fixture that hasn't wired its mask
+/// yet); the Sensor degrades to identity-floor-only registration on the resulting `WatchOp::Watch`.
 ///
-/// The `WatchOp`'s `path` is resolved at emission via [`Tree::path_of`];
-/// if path resolution fails (the slot exists but a segment doesn't
-/// resolve — unreachable for live slots), the op carries
-/// `PathBuf::new()` and the Sensor reports `WatchOpRejected` on
-/// attempt.
+/// The `WatchOp`'s `path` is resolved at emission via [`Tree::path_of`]; if path resolution fails
+/// (the slot exists but a segment doesn't resolve — unreachable for live slots), the op carries
+/// `PathBuf::new()` and the Sensor reports `WatchOpRejected` on attempt.
 pub(crate) fn add_watch(
     tree: &mut Tree,
     r: ResourceId,
@@ -86,11 +71,10 @@ pub(crate) fn add_watch(
 
     let emit = was_empty || new_union != prev_union;
     if emit {
-        // Sample `kind` and resolve the path only when actually
-        // emitting — saves the `kind_raw` field read and `path_of`
-        // walk for every idempotent re-insert (same key, same mask).
-        // Reborrow `tree` for `path_of` once the `res` borrow ends
-        // (the `kind_raw` read above is the last `res` use).
+        // Sample `kind` and resolve the path only when actually emitting — saves the `kind_raw`
+        // field read and `path_of` walk for every idempotent re-insert (same key, same mask).
+        // Reborrow `tree` for `path_of` once the `res` borrow ends (the `kind_raw` read above is
+        // the last `res` use).
         let kind = res.kind_raw();
         let path = tree.path_of(r).unwrap_or_else(empty_path);
         out.watch_ops.push(WatchOp::Watch {
@@ -102,22 +86,19 @@ pub(crate) fn add_watch(
     }
 }
 
-/// Remove the contribution at `(r, key)`. Emits `WatchOp::Unwatch` on
-/// the non-empty → empty edge; emits a fresh `WatchOp::Watch` when
-/// the per-Resource union changes but contributions remain.
+/// Remove the contribution at `(r, key)`. Emits `WatchOp::Unwatch` on the non-empty → empty edge;
+/// emits a fresh `WatchOp::Watch` when the per-Resource union changes but contributions remain.
 ///
-/// **No registry walk.** Removal is by key; no Profile / Promoter
-/// state is read.
+/// **No registry walk.** Removal is by key; no Profile / Promoter state is read.
 ///
-/// **No release-of-state contract.** The caller's bookkeeping
-/// (`Profile.anchor_claim`, `Profile.watch_root_parent`,
-/// `Profile.state`, `Promoter.state`, etc.) can be cleared in either
-/// order relative to this call — the contribution map is the source
-/// of truth for refcounting, independent of owner state.
+/// **No release-of-state contract.** The caller's bookkeeping (`Profile.anchor_claim`,
+/// `Profile.watch_root_parent`, `Profile.state`, `Promoter.state`, etc.) can be cleared in either
+/// order relative to this call — the contribution map is the source of truth for refcounting,
+/// independent of owner state.
 ///
-/// **Idempotent.** Absent key ⇒ silent no-op. Reachable post-vacate
-/// ([`specter_core::Tree::vacate`] cleared the map) or post-prior-sub-walk
-/// (a sister helper drained this slot earlier in the same step).
+/// **Idempotent.** Absent key ⇒ silent no-op. Reachable post-vacate ([`specter_core::Tree::vacate`]
+/// cleared the map) or post-prior-sub-walk (a sister helper drained this slot earlier in the same
+/// step).
 pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &mut StepOutput) {
     let Some(res) = tree.get_mut(r) else {
         return;
@@ -145,55 +126,42 @@ pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &m
     }
 }
 
-/// Remove the contribution at `(r, key)` and try-reap the slot.
-/// Returns `true` iff the slot was reaped.
+/// Remove the contribution at `(r, key)` and try-reap the slot. Returns `true` iff the slot was
+/// reaped.
 ///
-/// Composes the two halves of the **routine per-key release**:
-/// [`sub_watch`] drains the contribution from
-/// `Resource.contributions` (idempotent on absent key — safe against
-/// post-vacate slots and slots a prior sub-walk in this step already
-/// drained); [`Tree::try_reap`] then removes the slot iff
-/// `Resource::has_anchors() == false`.
+/// Composes the two halves of the **routine per-key release**: [`sub_watch`] drains the
+/// contribution from `Resource.contributions` (idempotent on absent key — safe against post-vacate
+/// slots and slots a prior sub-walk in this step already drained); [`Tree::try_reap`] then removes
+/// the slot iff `Resource::has_anchors() == false`.
 ///
-/// **Anchors and contributions.** [`specter_core::Resource::has_anchors`]
-/// reads four retention sources: `children`, `profiles` back-ref,
-/// `proxy_promoters`, and the contributions map itself. The map is
-/// canonical for "this slot holds a live kernel-watch claim";
-/// removing the last contribution at a slot zeroes that source, and
-/// the slot reaps iff none of the three back-ref vectors still
-/// reaches into it. The role tag (`User` / `WatchRootParent` /
-/// `DescentScaffold`) is metadata and never gates retention.
+/// **Anchors and contributions.** [`specter_core::Resource::has_anchors`] reads four retention
+/// sources: `children`, `profiles` back-ref, `proxy_promoters`, and the contributions map itself.
+/// The map is canonical for "this slot holds a live kernel-watch claim"; removing the last
+/// contribution at a slot zeroes that source, and the slot reaps iff none of the three back-ref
+/// vectors still reaches into it. The role tag (`User` / `WatchRootParent` / `DescentScaffold`) is
+/// metadata and never gates retention.
 ///
-/// In every production call site, at least one *other* claim is
-/// structurally certain to keep the slot alive across this release —
-/// for the descent-prefix release, the prefix's child chain toward the
-/// anchor; for the watch-root parent release, the anchor child slot;
-/// for the proxy release, the contribution's own removal is gated by
-/// `proxy_promoters` having been cleared by the caller first.
-/// [`specter_core::Tree::try_reap`] cascades upward when its own
-/// reap orphans a parent, so a single release helper at a leaf-most
-/// slot transparently frees the whole prefix chain it owned.
+/// In every production call site, at least one *other* claim is structurally certain to keep the
+/// slot alive across this release — for the descent-prefix release, the prefix's child chain toward
+/// the anchor; for the watch-root parent release, the anchor child slot; for the proxy release, the
+/// contribution's own removal is gated by `proxy_promoters` having been cleared by the caller
+/// first. [`specter_core::Tree::try_reap`] cascades upward when its own reap orphans a parent, so a
+/// single release helper at a leaf-most slot transparently frees the whole prefix chain it owned.
 ///
-/// **Distinct from [`Tree::vacate`].** Vacate is the protocol
-/// terminus: it clears the entire contribution map in one atomic
-/// step, emitting the closing `Unwatch`. Use vacate when every
-/// contribution at the slot is being abandoned at once (kernel-watch
-/// rejection routed through `on_watch_op_rejected`, or
-/// `reconcile::delete_child` on a fully-drained slot). Use this helper
-/// for the **routine per-key release path** where one contributor
-/// releases its single key.
+/// **Distinct from [`Tree::vacate`].** Vacate is the protocol terminus: it clears the entire
+/// contribution map in one atomic step, emitting the closing `Unwatch`. Use vacate when every
+/// contribution at the slot is being abandoned at once (kernel-watch rejection routed through
+/// `on_watch_op_rejected`, or `reconcile::delete_child` on a fully-drained slot). Use this helper
+/// for the **routine per-key release path** where one contributor releases its single key.
 ///
 /// Caller discipline:
-/// - Owner-side bookkeeping (state flag, snapshot field, etc.) is
-///   the caller's responsibility — this helper only mutates the
-///   contributions map and the slot lifecycle.
-/// - Cancel-first preconditions are the caller's responsibility. For
-///   the descent-prefix `release_*_claim` helpers in [`crate::claims`]
-///   / [`crate::promoter_claims`] this is enforced structurally: their
-///   state-discard drops an armed `ProbeSlot` and trips its Drop
-///   tripwire. (`release_promoter_proxy_claim` keeps a `debug_assert!`
-///   for its distinct "enumeration must not target the released proxy"
-///   invariant, which the linear-slot guard does not cover.)
+/// - Owner-side bookkeeping (state flag, snapshot field, etc.) is the caller's responsibility —
+///   this helper only mutates the contributions map and the slot lifecycle.
+/// - Cancel-first preconditions are the caller's responsibility. For the descent-prefix
+///   `release_*_claim` helpers in [`crate::claims`] / [`crate::promoter_claims`] this is enforced
+///   structurally: their state-discard drops an armed `ProbeSlot` and trips its Drop tripwire.
+///   (`release_promoter_proxy_claim` keeps a `debug_assert!` for its distinct "enumeration must not
+///   target the released proxy" invariant, which the linear-slot guard does not cover.)
 pub(crate) fn sub_watch_then_try_reap(
     tree: &mut Tree,
     r: ResourceId,
@@ -245,9 +213,8 @@ mod tests {
 
     #[test]
     fn add_watch_distinct_keys_widen_union_and_emit_watch() {
-        // Two distinct keys at the same resource ⇒ refcount 2, union
-        // is the OR of the two masks. Each `add_watch` past the
-        // empty edge emits a `Watch` iff the union widens.
+        // Two distinct keys at the same resource ⇒ refcount 2, union is the OR of the two masks.
+        // Each `add_watch` past the empty edge emits a `Watch` iff the union widens.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         let key_a = ContribKey::ProfileAnchor(ProfileId::default());
@@ -280,9 +247,8 @@ mod tests {
 
     #[test]
     fn add_watch_with_empty_mask_at_zero_emits_identity_floor_watch() {
-        // 0→1 with EMPTY mask: still emits Watch (existence edge),
-        // but `opts.events == EMPTY` ⇒ Sensor degrades to identity
-        // floor.
+        // 0→1 with EMPTY mask: still emits Watch (existence edge), but `opts.events == EMPTY` ⇒
+        // Sensor degrades to identity floor.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         let key = ContribKey::ProfileAnchor(ProfileId::default());
@@ -313,9 +279,8 @@ mod tests {
 
     #[test]
     fn sub_watch_with_remaining_contributors_emits_narrowing_watch() {
-        // Two distinct contributors with different masks; removing
-        // one narrows the union and emits a Watch with the narrower
-        // mask.
+        // Two distinct contributors with different masks; removing one narrows the union and emits
+        // a Watch with the narrower mask.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         let key_a = ContribKey::ProfileAnchor(ProfileId::default());
@@ -344,8 +309,8 @@ mod tests {
 
     #[test]
     fn sub_watch_no_emit_when_union_unchanged() {
-        // Two contributors with overlapping masks: removing one
-        // leaves the union unchanged, so no Watch op is emitted.
+        // Two contributors with overlapping masks: removing one leaves the union unchanged, so no
+        // Watch op is emitted.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         let key_a = ContribKey::ProfileAnchor(ProfileId::default());
@@ -366,9 +331,8 @@ mod tests {
 
     #[test]
     fn sub_watch_absent_key_is_silent_noop() {
-        // Map missing the key: no underflow, no emission. Reachable
-        // post-vacate or after a prior sub-walk drained this slot in
-        // the same step.
+        // Map missing the key: no underflow, no emission. Reachable post-vacate or after a prior
+        // sub-walk drained this slot in the same step.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         sub_watch(
@@ -414,9 +378,8 @@ mod tests {
 
     #[test]
     fn sub_watch_then_try_reap_last_contributor_reaps_slot() {
-        // Sole contributor drops: the sub_watch step empties the
-        // contributions map, the try_reap step frees the slot.
-        // Returns true.
+        // Sole contributor drops: the sub_watch step empties the contributions map, the try_reap
+        // step frees the slot. Returns true.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         let key = ContribKey::ProfileAnchor(ProfileId::default());
@@ -436,12 +399,10 @@ mod tests {
 
     #[test]
     fn sub_watch_then_try_reap_role_only_slot_emits_unwatch_and_reaps() {
-        // Production parallel to `release_watch_root_parent_claim` and
-        // the `release_*_descent_prefix_claim` family: the role tag is
-        // metadata, so a slot whose only retention claim was the just-
-        // dropped contribution reaps in the same step. `sub_watch`
-        // emits `Unwatch` on the empty edge; `try_reap` returns `true`
-        // and the slot is gone.
+        // Production parallel to `release_watch_root_parent_claim` and the
+        // `release_*_descent_prefix_claim` family: the role tag is metadata, so a slot whose only
+        // retention claim was the just- dropped contribution reaps in the same step. `sub_watch`
+        // emits `Unwatch` on the empty edge; `try_reap` returns `true` and the slot is gone.
         let mut tree = Tree::new();
         let r = tree.ensure_root("parent", ResourceRole::WatchRootParent);
         let mut out = StepOutput::default();
@@ -465,13 +426,10 @@ mod tests {
 
     #[test]
     fn sub_watch_then_try_reap_narrows_union_with_coresident_key() {
-        // Two distinct contributors at the same slot: dropping one
-        // narrows the events union but the surviving co-resident
-        // contribution itself anchors the slot. `sub_watch` emits the
-        // narrowing `Watch` (not `Unwatch`) since the map stays
-        // non-empty; `try_reap` is a no-op because the slot still has
-        // a live contribution (one of `has_anchors`'s four retention
-        // sources).
+        // Two distinct contributors at the same slot: dropping one narrows the events union but the
+        // surviving co-resident contribution itself anchors the slot. `sub_watch` emits the narrowing
+        // `Watch` (not `Unwatch`) since the map stays non-empty; `try_reap` is a no-op because the
+        // slot still has a live contribution (one of `has_anchors`'s four retention sources).
         let mut tree = Tree::new();
         let r = tree.ensure_root("prefix", ResourceRole::DescentScaffold);
         let mut out = StepOutput::default();
@@ -499,12 +457,10 @@ mod tests {
 
     #[test]
     fn sub_watch_then_try_reap_role_only_slot_with_child_survives() {
-        // A `WatchRootParent`-roled slot whose retention also includes
-        // a sibling child stays alive: dropping the contribution
-        // empties the contributions map but `children` still anchors.
-        // Mirrors the live `release_watch_root_parent_claim` path,
-        // where the anchor child has not yet been reaped at the call
-        // moment; the subsequent anchor reap then cascades through and
+        // A `WatchRootParent`-roled slot whose retention also includes a sibling child stays alive:
+        // dropping the contribution empties the contributions map but `children` still anchors.
+        // Mirrors the live `release_watch_root_parent_claim` path, where the anchor child has not
+        // yet been reaped at the call moment; the subsequent anchor reap then cascades through and
         // frees the parent in the same step.
         let mut tree = Tree::new();
         let parent = tree.ensure_root("parent", ResourceRole::WatchRootParent);
@@ -529,10 +485,9 @@ mod tests {
 
     #[test]
     fn sub_watch_then_try_reap_absent_key_is_silent_release() {
-        // Absent key: sub_watch is a silent no-op (no emission).
-        // try_reap still runs and frees the slot iff has_anchors() is
-        // false. Reachable post-vacate or after a prior sub-walk in
-        // the same step.
+        // Absent key: sub_watch is a silent no-op (no emission). try_reap still runs and frees the
+        // slot iff has_anchors() is false. Reachable post-vacate or after a prior sub-walk in the
+        // same step.
         let (mut tree, r) = fresh();
         let mut out = StepOutput::default();
         let reaped = sub_watch_then_try_reap(

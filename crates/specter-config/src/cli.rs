@@ -28,11 +28,9 @@ fn banner() -> String {
 
 /// Top-level CLI parser — subcommand dispatcher.
 ///
-/// `specter run` is the daemon (the historical flat invocation, now
-/// under a subcommand). The other verbs are operator clients that
-/// connect to the running daemon over a UNIX socket. The client
-/// surface is declared here so `--help` exposes it; verbs without a
-/// live handler exit `2`.
+/// `specter run` is the daemon (the historical flat invocation, now under a subcommand). The other
+/// verbs are operator clients that connect to the running daemon over a UNIX socket. The client
+/// surface is declared here so `--help` exposes it; verbs without a live handler exit `2`.
 #[derive(Debug, Parser)]
 #[command(
     name = "specter",
@@ -50,9 +48,8 @@ pub struct Cli {
 
 /// One-of-N top-level subcommand.
 ///
-/// `Run` carries the daemon arguments; every other variant carries a
-/// client-side argument struct (always including [`ClientArgs`] via
-/// `#[command(flatten)]` for `--socket`).
+/// `Run` carries the daemon arguments; every other variant carries a client-side argument struct
+/// (always including [`ClientArgs`] via `#[command(flatten)]` for `--socket`).
 #[derive(Debug, Subcommand)]
 pub enum Command {
     /// Run the specter daemon.
@@ -77,8 +74,7 @@ pub enum Command {
     Wait(WaitArgs),
 }
 
-/// Daemon arguments — the historical flat `Cli` fields, preserved under
-/// `Command::Run`.
+/// Daemon arguments — the historical flat `Cli` fields, preserved under `Command::Run`.
 #[derive(Debug, Args)]
 #[must_use]
 pub struct DaemonArgs {
@@ -88,8 +84,8 @@ pub struct DaemonArgs {
 
     /// IPC socket path to bind.
     ///
-    /// Omitted ⇒ the per-platform convention; `$SPECTER_SOCK` overrides
-    /// that and `--socket` overrides both. Must be absolute.
+    /// Omitted ⇒ the per-platform convention; `$SPECTER_SOCK` overrides that and `--socket`
+    /// overrides both. Must be absolute.
     #[arg(long)]
     pub socket: Option<PathBuf>,
 
@@ -99,8 +95,8 @@ pub struct DaemonArgs {
 
     /// Override log destination from config.
     ///
-    /// When `file`, the resolved path must come from either `--log-path`
-    /// or `[log] path` in the config.
+    /// When `file`, the resolved path must come from either `--log-path` or `[log] path` in the
+    /// config.
     #[arg(long, value_enum)]
     pub log_destination: Option<LogDestination>,
 
@@ -126,48 +122,42 @@ pub struct DaemonArgs {
     ///
     /// SIGHUP remains the only reload trigger.
     ///
-    /// Default-on auto-reload covers the common-case operator workflow
-    /// (edit + save the running daemon's config and have it pick up
-    /// the change). Disable when the config lives on a filesystem
-    /// where the watcher's preconditions don't hold:
+    /// Default-on auto-reload covers the common-case operator workflow (edit + save the running
+    /// daemon's config and have it pick up the change). Disable when the config lives on a
+    /// filesystem where the watcher's preconditions don't hold:
     ///
-    /// - Network filesystems (NFS, SMB, CIFS, FUSE-over-network) —
-    ///   fanotify / inotify / kqueue do not deliver kernel events for
-    ///   server-side mutations; the watcher would init successfully
+    /// - Network filesystems (NFS, SMB, CIFS, FUSE-over-network) — fanotify / inotify / kqueue do
+    ///   not deliver kernel events for server-side mutations; the watcher would init successfully
     ///   but never fire.
     ///
-    /// - Symlink-leaf retargeted post-startup — `canonicalize` runs
-    ///   once at watcher init; a later retarget at the leaf leaves the
-    ///   watcher pinned to the original inode.
+    /// - Symlink-leaf retargeted post-startup — `canonicalize` runs once at watcher init; a later
+    ///   retarget at the leaf leaves the watcher pinned to the original inode.
     ///
-    /// - Parent dir replaced underneath the watch — the parent fd
-    ///   pins the original parent inode but observes nothing further
-    ///   on the new dir.
+    /// - Parent dir replaced underneath the watch — the parent fd pins the original parent inode
+    ///   but observes nothing further on the new dir.
     ///
-    /// Also useful for ops scripts that want strict SIGHUP-only
-    /// reload semantics.
+    /// Also useful for ops scripts that want strict SIGHUP-only reload semantics.
     #[arg(long, env = "SPECTER_NO_CONFIG_WATCH")]
     pub no_config_watch: bool,
 }
 
-/// Arguments common to every client subcommand. Flattened via
-/// `#[command(flatten)]` so `--socket` reads naturally on each verb.
+/// Arguments common to every client subcommand. Flattened via `#[command(flatten)]` so `--socket`
+/// reads naturally on each verb.
 #[derive(Debug, Args)]
 #[must_use]
 pub struct ClientArgs {
     /// Daemon IPC socket path to connect to.
     ///
-    /// Omitted ⇒ probe the per-platform convention; `$SPECTER_SOCK`
-    /// overrides that and `--socket` overrides both. Must be absolute.
+    /// Omitted ⇒ probe the per-platform convention; `$SPECTER_SOCK` overrides that and `--socket`
+    /// overrides both. Must be absolute.
     #[arg(long)]
     pub socket: Option<PathBuf>,
 
     /// ANSI color policy for client output.
     ///
-    /// `auto` styles only when the target stream is a terminal and the
-    /// environment allows it (`NO_COLOR` / `CLICOLOR` / `CLICOLOR_FORCE`);
-    /// `always` / `never` override that gate. Stdout and stderr resolve
-    /// independently; `-o json` is never styled.
+    /// `auto` styles only when the target stream is a terminal and the environment allows it
+    /// (`NO_COLOR` / `CLICOLOR` / `CLICOLOR_FORCE`); `always` / `never` override that gate. Stdout
+    /// and stderr resolve independently; `-o json` is never styled.
     #[arg(long, value_enum, default_value_t = ColorWhen::Auto)]
     pub color: ColorWhen,
 }
@@ -183,8 +173,8 @@ pub struct StatusArgs {
     #[arg(long, short = 'o', value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
 
-    /// Include rarely-needed fields (counters, ids, full paths). Only
-    /// affects `-o human`; `-o json` is always lossless.
+    /// Include rarely-needed fields (counters, ids, full paths). Only affects `-o human`; `-o json`
+    /// is always lossless.
     #[arg(long)]
     pub wide: bool,
 }
@@ -200,9 +190,8 @@ pub struct ListArgs {
     #[arg(long, short = 'o', value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
 
-    /// Include rarely-needed columns (profile/sub ids, dedup count,
-    /// settle ms). Only affects `-o human`; `-o json` is always
-    /// lossless.
+    /// Include rarely-needed columns (profile/sub ids, dedup count, settle ms). Only affects `-o
+    /// human`; `-o json` is always lossless.
     #[arg(long)]
     pub wide: bool,
 }
@@ -222,8 +211,8 @@ pub struct ShowArgs {
     pub output: OutputFormat,
 }
 
-/// `specter disable <name>` / `specter enable <name>` arguments —
-/// identical shape; the verb itself selects the operation.
+/// `specter disable <name>` / `specter enable <name>` arguments — identical shape; the verb itself
+/// selects the operation.
 #[derive(Debug, Args)]
 #[must_use]
 pub struct NameTargetArgs {
@@ -234,8 +223,8 @@ pub struct NameTargetArgs {
     pub client: ClientArgs,
 }
 
-/// `specter absorb <name> [--for <dur>]` arguments — arm a
-/// fold-without-fire window on the named watch's Profile.
+/// `specter absorb <name> [--for <dur>]` arguments — arm a fold-without-fire window on the named
+/// watch's Profile.
 #[derive(Debug, Args)]
 #[must_use]
 pub struct AbsorbArgs {
@@ -245,9 +234,8 @@ pub struct AbsorbArgs {
     #[command(flatten)]
     pub client: ClientArgs,
 
-    /// Window length. Omitted ⇒ a one-shot window covering the next
-    /// change; `--for <dur>` holds it open to absorb a run of changes.
-    /// humantime format (`500ms`, `30s`, `1m30s`).
+    /// Window length. Omitted ⇒ a one-shot window covering the next change; `--for <dur>` holds it
+    /// open to absorb a run of changes. humantime format (`500ms`, `30s`, `1m30s`).
     #[arg(long = "for", value_parser = parse_duration)]
     pub for_: Option<Duration>,
 }
@@ -259,15 +247,13 @@ pub struct TailArgs {
     #[command(flatten)]
     pub client: ClientArgs,
 
-    /// Restrict the stream to one or more `WireDiagnostic` variant
-    /// names (e.g. `SubFired`, `SubDetached`). Repeatable; case-
-    /// sensitive. Empty (the default) streams every variant.
+    /// Restrict the stream to one or more `WireDiagnostic` variant names (e.g. `SubFired`,
+    /// `SubDetached`). Repeatable; case- sensitive. Empty (the default) streams every variant.
     #[arg(long)]
     pub filter: Vec<String>,
 
-    /// Output format. `human` pretty-prints one event per line; `json`
-    /// emits the lossless wire shape (one JSON object per line,
-    /// symmetric with the daemon's emission).
+    /// Output format. `human` pretty-prints one event per line; `json` emits the lossless wire
+    /// shape (one JSON object per line, symmetric with the daemon's emission).
     #[arg(long, short = 'o', value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
 }
@@ -282,13 +268,11 @@ pub struct WaitArgs {
     #[command(flatten)]
     pub client: ClientArgs,
 
-    /// Event class to wait for. `fire` (default) matches `SubFired`;
-    /// `detach` matches `SubDetached`.
+    /// Event class to wait for. `fire` (default) matches `SubFired`; `detach` matches `SubDetached`.
     #[arg(long, value_enum, default_value_t = WaitKind::Fire)]
     pub kind: WaitKind,
 
-    /// Time budget. Omitted ⇒ wait indefinitely. humantime format
-    /// (`500ms`, `30s`, `1m30s`).
+    /// Time budget. Omitted ⇒ wait indefinitely. humantime format (`500ms`, `30s`, `1m30s`).
     #[arg(long, value_parser = parse_duration)]
     pub timeout: Option<Duration>,
 }
@@ -302,16 +286,13 @@ pub enum OutputFormat {
     Json,
 }
 
-/// When to colorize client output — shared by every verb via
-/// [`ClientArgs`].
+/// When to colorize client output — shared by every verb via [`ClientArgs`].
 ///
-/// The renderer-side resolution (env precedence, TTY detection, the
-/// `Styler` it produces) lives in `specter-bin`'s `ipc::render::style`;
-/// this enum is only the operator's stated preference.
+/// The renderer-side resolution (env precedence, TTY detection, the `Styler` it produces) lives in
+/// `specter-bin`'s `ipc::render::style`; this enum is only the operator's stated preference.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
 pub enum ColorWhen {
-    /// Style only when the target stream is a terminal and the
-    /// environment permits it.
+    /// Style only when the target stream is a terminal and the environment permits it.
     Auto,
     /// Always style, regardless of stream or environment.
     Always,
@@ -324,14 +305,13 @@ pub enum ColorWhen {
 pub enum WaitKind {
     /// Match `SubFired` — the Sub emitted at least one Effect.
     Fire,
-    /// Match `SubDetached` — the Sub left the engine (IPC `disable`,
-    /// config-removal, or `modified_identity` rebind).
+    /// Match `SubDetached` — the Sub left the engine (IPC `disable`, config-removal, or
+    /// `modified_identity` rebind).
     Detach,
 }
 
-/// clap value-parser bridge for [`Duration`] in humantime form. The
-/// `String` error path is what clap's `value_parser` expects — it
-/// surfaces in the user's CLI error verbatim.
+/// clap value-parser bridge for [`Duration`] in humantime form. The `String` error path is what
+/// clap's `value_parser` expects — it surfaces in the user's CLI error verbatim.
 fn parse_duration(s: &str) -> Result<Duration, String> {
     humantime::parse_duration(s).map_err(|e| e.to_string())
 }
@@ -601,10 +581,9 @@ mod tests {
         assert_eq!(err.kind(), clap::error::ErrorKind::DisplayVersion);
     }
 
-    /// `--color` rides on every client verb via the flattened
-    /// [`ClientArgs`], defaults to [`ColorWhen::Auto`], and parses the
-    /// `always` / `never` overrides. Pins the flatten + field wiring the
-    /// renderer-side `style::resolve` reads.
+    /// `--color` rides on every client verb via the flattened [`ClientArgs`], defaults to
+    /// [`ColorWhen::Auto`], and parses the `always` / `never` overrides. Pins the flatten + field
+    /// wiring the renderer-side `style::resolve` reads.
     #[test]
     fn color_flag_defaults_auto_and_parses_overrides() {
         let cli = parse(&["specter", "status"]).unwrap();

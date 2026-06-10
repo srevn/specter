@@ -61,12 +61,10 @@ fn issue_kind_path_contains_parent_dir() {
     assert_kinds(toml, &[IssueKind::PathContainsParentDir]);
 }
 
-/// `/<regular-file>/missing` surfaces ENOTDIR from the kernel — a
-/// non-`NotFound` `io::Error` — which routes through
-/// [`PathError::Inaccessible`] to [`IssueKind::PathInaccessible`].
-/// Exercises the same arm `chmod 0` (EACCES) hits, without the
-/// root-skip gymnastics; the EACCES surface is verified manually
-/// (we can't drop privileges inside a test process).
+/// `/<regular-file>/missing` surfaces ENOTDIR from the kernel — a non-`NotFound` `io::Error` —
+/// which routes through [`PathError::Inaccessible`] to [`IssueKind::PathInaccessible`]. Exercises
+/// the same arm `chmod 0` (EACCES) hits, without the root-skip gymnastics; the EACCES surface is
+/// verified manually (we can't drop privileges inside a test process).
 #[cfg(unix)]
 #[test]
 fn issue_kind_path_inaccessible() {
@@ -100,9 +98,8 @@ fn issue_kind_invalid_glob_exclude() {
 
 #[test]
 fn issue_kind_unknown_placeholder() {
-    // Only lowercase non-catalog names trigger the typo error. Uppercase
-    // names (`$Path`, `$SPECTER_PATH`, `$HOME`) pass through as literal
-    // so the spawned shell can expand them.
+    // Only lowercase non-catalog names trigger the typo error. Uppercase names (`$Path`,
+    // `$SPECTER_PATH`, `$HOME`) pass through as literal so the spawned shell can expand them.
     let toml = format!(
         "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"${{specter.paht}}\"] }}]"
     );
@@ -176,8 +173,8 @@ fn issue_kind_duplicate_event_class() {
 
 #[test]
 fn issue_kind_invalid_enum_event_class() {
-    // Unknown event-class strings reuse `InvalidEnum`, the same family
-    // as scope/log-level — keeps the operator-experience symmetrical.
+    // Unknown event-class strings reuse `InvalidEnum`, the same family as scope/log-level — keeps
+    // the operator-experience symmetrical.
     let toml = format!(
         "[[watch]]\nname = \"a\"\npath = \"{ROOT}\"\nactions = [{{ exec = [\"echo\"] }}]\n\
          events = [\"strcuture\"]"
@@ -185,11 +182,10 @@ fn issue_kind_invalid_enum_event_class() {
     assert_kinds(&toml, &[IssueKind::InvalidEnum]);
 }
 
-/// Disabled entries flow through every validator unchanged: a
-/// structural error in a disabled entry surfaces at load time rather
-/// than silently at re-enable time. Path is the most common typo
-/// shape; one anchoring case is enough — the validator dispatcher
-/// runs the full pipeline regardless of `enabled`.
+/// Disabled entries flow through every validator unchanged: a structural error in a disabled entry
+/// surfaces at load time rather than silently at re-enable time. Path is the most common typo
+/// shape; one anchoring case is enough — the validator dispatcher runs the full pipeline regardless
+/// of `enabled`.
 #[test]
 fn disabled_entry_does_not_waive_validation() {
     let toml = "[[watch]]\nname = \"a\"\npath = \"src\"\n\
@@ -197,10 +193,9 @@ fn disabled_entry_does_not_waive_validation() {
     assert_kinds(toml, &[IssueKind::NonAbsolute]);
 }
 
-/// Duplicate-name detection spans enabled + disabled entries: two
-/// watches with the same `name` (one enabled, one disabled) would
-/// conflict at the bin's `name → SubId` map on flip, so preventing
-/// the ambiguity at load time is the desired behavior.
+/// Duplicate-name detection spans enabled + disabled entries: two watches with the same `name` (one
+/// enabled, one disabled) would conflict at the bin's `name → SubId` map on flip, so preventing the
+/// ambiguity at load time is the desired behavior.
 #[test]
 fn duplicate_name_across_enabled_and_disabled_rejected() {
     let toml = format!(

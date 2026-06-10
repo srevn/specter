@@ -1,5 +1,4 @@
-//! `specter show -o human` renderer — key/value block layout with
-//! an indented `program` sub-block.
+//! `specter show -o human` renderer — key/value block layout with an indented `program` sub-block.
 //!
 //! Three response arms map to three layouts:
 //!
@@ -7,12 +6,11 @@
 //! - [`ShowResponse::Disabled`] — one line, `<name>: disabled (source)`.
 //! - [`ShowResponse::Unknown`] — one line; operator hint.
 //!
-//! Labels align to [`LABEL_WIDTH`] via the shared [`super::label_cell`]
-//! primitive, so operators reading `status` and `show` see the same
-//! vertical anchor for the value column. Labels paint [`style::LABEL`];
-//! the `state` value carries its phase hue; the `Disabled` keyword is
-//! [`style::OFF`] and the `Unknown` arm is [`style::ERR`]. Under
-//! `Styler::Plain` the output is byte-identical to the pre-color view.
+//! Labels align to [`LABEL_WIDTH`] via the shared [`super::label_cell`] primitive, so operators
+//! reading `status` and `show` see the same vertical anchor for the value column. Labels paint
+//! [`style::LABEL`]; the `state` value carries its phase hue; the `Disabled` keyword is
+//! [`style::OFF`] and the `Unknown` arm is [`style::ERR`]. Under `Styler::Plain` the output is
+//! byte-identical to the pre-color view.
 
 use std::fmt::Write as _;
 
@@ -21,9 +19,8 @@ use crate::ipc::render::label_cell;
 use crate::ipc::render::style::{self, Rule, Styler};
 use crate::ipc::wire::{WireAbsorbMode, WireEffectScope};
 
-/// Render the response as one operator-readable block into the
-/// caller's buffer. `sty` gates ANSI styling on the resolved stdout
-/// stream.
+/// Render the response as one operator-readable block into the caller's buffer. `sty` gates ANSI
+/// styling on the resolved stdout stream.
 pub(crate) fn render(out: &mut String, resp: &ShowResponse, sty: Styler) {
     match resp {
         ShowResponse::Active(d) => render_active(out, d, sty),
@@ -46,8 +43,8 @@ pub(crate) fn render(out: &mut String, resp: &ShowResponse, sty: Styler) {
     }
 }
 
-/// Width of the label column. Padded so values align vertically;
-/// mirrors [`super::status`]'s convention.
+/// Width of the label column. Padded so values align vertically; mirrors [`super::status`]'s
+/// convention.
 const LABEL_WIDTH: usize = 16;
 
 /// Layout for `Active`:
@@ -77,10 +74,9 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         "{}",
         sty.paint(style::DELIM, Rule(d.name.len().max(40)))
     );
-    // `state: None` mirrors `anchor: None` / `last_fired_at: None`:
-    // the projection surfaces a missing Profile lookup rather than
-    // panicking the daemon. `-` (painted [`style::MISSING`]) is the
-    // operator-visible "missing" marker shared with `list`'s `col_state`.
+    // `state: None` mirrors `anchor: None` / `last_fired_at: None`: the projection surfaces a
+    // missing Profile lookup rather than panicking the daemon. `-` (painted [`style::MISSING`]) is
+    // the operator-visible "missing" marker shared with `list`'s `col_state`.
     match d.state {
         Some(s) => {
             let _ = writeln!(
@@ -124,8 +120,8 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         }
         None => missing_line(out, sty, "last fired"),
     }
-    // Only an armed, live window renders — the projection drops an
-    // inert one, so a present `absorb` is always operator-meaningful.
+    // Only an armed, live window renders — the projection drops an inert one, so a present `absorb`
+    // is always operator-meaningful.
     if let Some(w) = d.absorb.as_ref() {
         let _ = writeln!(
             out,
@@ -151,9 +147,8 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         d.profile.0,
     );
     out.push('\n');
-    // The `program (N ops):` header is a section label, painted `LABEL`
-    // like the others; the lines below it stay plain — the daemon
-    // pre-renders each as an opaque string the renderer does not
+    // The `program (N ops):` header is a section label, painted `LABEL` like the others; the lines
+    // below it stay plain — the daemon pre-renders each as an opaque string the renderer does not
     // re-tokenize.
     let _ = writeln!(
         out,
@@ -169,8 +164,8 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
 }
 
 /// Write a `label   -` line for a value the projection surfaced as
-/// `None` — the `-` painted [`style::MISSING`]. Shared by the three
-/// optional `Active` fields (`state` / `anchor` / `last fired`).
+/// `None` — the `-` painted [`style::MISSING`]. Shared by the three optional `Active` fields
+/// (`state` / `anchor` / `last fired`).
 fn missing_line(out: &mut String, sty: Styler, label: &str) {
     let _ = writeln!(
         out,
@@ -180,10 +175,9 @@ fn missing_line(out: &mut String, sty: Styler, label: &str) {
     );
 }
 
-/// View-local label for a [`WireEffectScope`] — hyphenated form
-/// already familiar from the config TOML (`scope = "subtree-root"`).
-/// The wire's own snake-case projection lives on [`WireEffectScope::as_str`];
-/// `show.rs` chooses to diverge for the detail block.
+/// View-local label for a [`WireEffectScope`] — hyphenated form already familiar from the config
+/// TOML (`scope = "subtree-root"`). The wire's own snake-case projection lives on
+/// [`WireEffectScope::as_str`]; `show.rs` chooses to diverge for the detail block.
 const fn effect_scope_str(s: WireEffectScope) -> &'static str {
     match s {
         WireEffectScope::SubtreeRoot => "subtree-root",
@@ -191,10 +185,9 @@ const fn effect_scope_str(s: WireEffectScope) -> &'static str {
     }
 }
 
-/// View-local mode label for the `absorbing until …` line. Hyphenated
-/// to match this view's label table (`subtree-root`, `per-stable-file`);
-/// `persist` is the bare form since the expiry instant already sits on
-/// the same line. The wire's own snake-case projection lives on
+/// View-local mode label for the `absorbing until …` line. Hyphenated to match this view's label
+/// table (`subtree-root`, `per-stable-file`); `persist` is the bare form since the expiry instant
+/// already sits on the same line. The wire's own snake-case projection lives on
 /// [`WireAbsorbMode::as_str`]; `diag`/`tail` reach it through `Display`.
 const fn absorb_mode_str(m: WireAbsorbMode) -> &'static str {
     match m {
@@ -217,9 +210,8 @@ mod tests {
         details_full(name, anchor, program, None, 0)
     }
 
-    /// `details` with explicit `absorb` window + `absorb_count` — the
-    /// fold-surface fields the absorb-render tests exercise; the
-    /// zero-arg `details` threads `None, 0` for every other test.
+    /// `details` with explicit `absorb` window + `absorb_count` — the fold-surface fields the
+    /// absorb-render tests exercise; the zero-arg `details` threads `None, 0` for every other test.
     fn details_full(
         name: &str,
         anchor: Option<WirePath>,
@@ -245,8 +237,8 @@ mod tests {
         }
     }
 
-    /// The program block renders as `program (N ops):` followed by each
-    /// pre-rendered line indented by two spaces.
+    /// The program block renders as `program (N ops):` followed by each pre-rendered line indented
+    /// by two spaces.
     #[test]
     fn show_human_active_renders_program_lines_indented() {
         let d = details(
@@ -273,9 +265,8 @@ mod tests {
         );
     }
 
-    /// Anchor-vanish (`None`) renders as `-` rather than an empty-string
-    /// sentinel — list and show carry the same `Option<WirePath>`
-    /// semantics on the wire.
+    /// Anchor-vanish (`None`) renders as `-` rather than an empty-string sentinel — list and show
+    /// carry the same `Option<WirePath>` semantics on the wire.
     #[test]
     fn show_human_active_anchor_none_renders_dash() {
         let d = details("foo", None, vec![]);
@@ -291,11 +282,9 @@ mod tests {
         );
     }
 
-    /// `state: None` renders as `-` — the operator-visible signal for
-    /// the engine-invariant breach the projection surfaces gracefully
-    /// instead of panicking. Mirrors `list -o human`'s `col_state`
-    /// `None → "-"` arm; pinning it on `show` keeps the two verbs'
-    /// vocabulary aligned.
+    /// `state: None` renders as `-` — the operator-visible signal for the engine-invariant breach
+    /// the projection surfaces gracefully instead of panicking. Mirrors `list -o human`'s
+    /// `col_state` `None → "-"` arm; pinning it on `show` keeps the two verbs' vocabulary aligned.
     #[test]
     fn show_human_active_state_none_renders_dash() {
         let mut d = details("foo", None, vec![]);
@@ -313,10 +302,9 @@ mod tests {
     }
 
     /// An armed `absorb` window renders an `absorbing   until <T> (mode)`
-    /// line with the hyphenated mode label, and the `fires` line always
-    /// carries the `absorbed: <n>` fold counter. A `None` window omits
-    /// the `absorbing` line entirely (the projection already dropped an
-    /// inert window, so a present `Some` is always operator-meaningful).
+    /// line with the hyphenated mode label, and the `fires` line always carries the `absorbed: <n>`
+    /// fold counter. A `None` window omits the `absorbing` line entirely (the projection already
+    /// dropped an inert window, so a present `Some` is always operator-meaningful).
     #[test]
     fn show_human_active_renders_absorb_window_and_count() {
         let d = details_full(
@@ -353,9 +341,8 @@ mod tests {
         );
     }
 
-    /// `PersistUntil` renders the bare `persist` mode label (the expiry
-    /// instant already sits on the same line), and a `None` window omits
-    /// the `absorbing` line.
+    /// `PersistUntil` renders the bare `persist` mode label (the expiry instant already sits on the
+    /// same line), and a `None` window omits the `absorbing` line.
     #[test]
     fn show_human_active_persist_label_and_absent_window() {
         let with = details_full(
@@ -405,8 +392,8 @@ mod tests {
         assert_eq!(buf, "off: disabled (toml)\n");
     }
 
-    /// `Unknown` arm renders a helpful hint that locates the resolution
-    /// failure (typo vs runtime vs TOML) for the operator.
+    /// `Unknown` arm renders a helpful hint that locates the resolution failure (typo vs runtime vs
+    /// TOML) for the operator.
     #[test]
     fn show_human_unknown_renders_helpful_message() {
         let r = ShowResponse::Unknown {
@@ -425,9 +412,8 @@ mod tests {
         );
     }
 
-    /// Color is purely additive across all three `show` arms: an
-    /// `Active` render stripped of every SGR escape equals the `Plain`
-    /// render byte-for-byte, and each arm does carry escapes (the
+    /// Color is purely additive across all three `show` arms: an `Active` render stripped of every
+    /// SGR escape equals the `Plain` render byte-for-byte, and each arm does carry escapes (the
     /// Active table, the `disabled` keyword, the `unknown` report).
     #[test]
     fn show_active_strips_to_plain_across_arms() {

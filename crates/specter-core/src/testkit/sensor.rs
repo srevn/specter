@@ -1,14 +1,11 @@
 //! Sensor-shaped test harness.
 //!
-//! **Not** an `FsWatcher` impl — that trait lives in `specter-sensor`,
-//! which `specter-core` may not depend on. Instead, `MockSensor`
-//! is a recorder + injector over the `StepOutput`/`Input` boundary.
+//! **Not** an `FsWatcher` impl — that trait lives in `specter-sensor`, which `specter-core` may not
+//! depend on. Instead, `MockSensor` is a recorder + injector over the `StepOutput`/`Input` boundary.
 //!
-//! `observe` aggregates every `StepOutput` field; the asserter helpers
-//! (`is_watched`, …) walk the captured op stream and report the *net*
-//! state for a Resource — `Watch + Unwatch` cancels out, so the helpers
-//! reflect what the Sensor would have observed at the moment of the
-//! last edge.
+//! `observe` aggregates every `StepOutput` field; the asserter helpers (`is_watched`, …) walk the
+//! captured op stream and report the *net* state for a Resource — `Watch + Unwatch` cancels out, so
+//! the helpers reflect what the Sensor would have observed at the moment of the last edge.
 
 use crate::{
     Diagnostic, Effect, FsEvent, Input, ProbeOp, ProbeResponse, ResourceId, StepOutput,
@@ -24,8 +21,8 @@ pub struct MockSensor {
 }
 
 impl MockSensor {
-    /// Drain a `StepOutput`'s op streams into the recorder. The caller
-    /// still owns the `StepOutput` — the recorder snapshots references.
+    /// Drain a `StepOutput`'s op streams into the recorder. The caller still owns the `StepOutput`
+    /// — the recorder snapshots references.
     pub fn observe(&mut self, out: &StepOutput) {
         self.watch_ops.extend(out.watch_ops.iter().cloned());
         self.probe_ops.extend(out.probe_ops().iter().cloned());
@@ -40,9 +37,9 @@ impl MockSensor {
         self.diagnostics.clear();
     }
 
-    /// First-emission predicate: `true` iff a `WatchOp::Watch` for `r` was
-    /// observed at any point. Does **not** net out a subsequent
-    /// `WatchOp::Unwatch` — prefer [`is_watched`](Self::is_watched).
+    /// First-emission predicate: `true` iff a `WatchOp::Watch` for `r` was observed at any point.
+    /// Does **not** net out a subsequent `WatchOp::Unwatch` — prefer
+    /// [`is_watched`](Self::is_watched).
     #[deprecated(note = "use `is_watched`; this only checks first-emission, hides Unwatch")]
     #[must_use]
     pub fn watched(&self, r: ResourceId) -> bool {
@@ -52,17 +49,15 @@ impl MockSensor {
         })
     }
 
-    /// Net-balance predicate: `true` iff the **last** `Watch`/`Unwatch` op
-    /// observed for `r` was `Watch`. Returns `false` if no op for `r` has
-    /// ever been observed.
+    /// Net-balance predicate: `true` iff the **last** `Watch`/`Unwatch` op observed for `r` was
+    /// `Watch`. Returns `false` if no op for `r` has ever been observed.
     #[must_use]
     pub fn is_watched(&self, r: ResourceId) -> bool {
         matches!(self.last_watch_edge(r), Some(Edge::Set))
     }
 
-    /// Complement of [`is_watched`](Self::is_watched). Includes the
-    /// "never observed" case — `r` not appearing in the captured stream
-    /// reports as unwatched.
+    /// Complement of [`is_watched`](Self::is_watched). Includes the "never observed" case — `r` not
+    /// appearing in the captured stream reports as unwatched.
     #[must_use]
     pub fn is_unwatched(&self, r: ResourceId) -> bool {
         !self.is_watched(r)
@@ -76,9 +71,8 @@ impl MockSensor {
         })
     }
 
-    // Typed `Input` constructors. Test code spells injections as
-    // `MockSensor::fs_event(rid, FsEvent::ContentChanged)` without having to
-    // remember the variant payload shape.
+    // Typed `Input` constructors. Test code spells injections as `MockSensor::fs_event(rid,
+    // FsEvent::ContentChanged)` without having to remember the variant payload shape.
 
     #[must_use]
     pub const fn fs_event(resource: ResourceId, event: FsEvent) -> Input {
@@ -90,9 +84,8 @@ impl MockSensor {
         Input::ProbeResponse(response)
     }
 
-    /// Mirror of [`fs_event`](Self::fs_event) for FD-pressure recovery —
-    /// wraps the rejected `resource` + typed [`WatchFailure`] into the
-    /// engine input shape.
+    /// Mirror of [`fs_event`](Self::fs_event) for FD-pressure recovery — wraps the rejected
+    /// `resource` + typed [`WatchFailure`] into the engine input shape.
     #[must_use]
     pub const fn watch_op_rejected(resource: ResourceId, failure: WatchFailure) -> Input {
         Input::WatchOpRejected { resource, failure }
@@ -166,8 +159,8 @@ mod tests {
         sensor.observe(&out);
 
         assert_eq!(sensor.diagnostics.len(), 1);
-        // Effects are populated by the engine in P5+; an empty `StepOutput`
-        // still flows through `observe` cleanly.
+        // Effects are populated by the engine in P5+; an empty `StepOutput` still flows through
+        // `observe` cleanly.
         assert!(sensor.effects.is_empty());
     }
 
@@ -278,8 +271,8 @@ mod tests {
 
     #[test]
     fn watch_op_rejected_constructor_yields_input() {
-        // `EMFILE` (Too many open files) is 24 on macOS / FreeBSD / Linux —
-        // hard-coded here so `core` keeps its no-`libc` discipline.
+        // `EMFILE` (Too many open files) is 24 on macOS / FreeBSD / Linux — hard-coded here so
+        // `core` keeps its no-`libc` discipline.
         const EMFILE: i32 = 24;
 
         let ids = fresh_resource_ids(1);

@@ -1,9 +1,7 @@
-//! Cancellation contract: `cancel(profile)` is best-effort. The
-//! deterministic cases (cancel-without-submit; resubmit-after-cancel
-//! runs; cancel-after-completion is a no-op) live here. The
-//! racy-by-construction "cancel skips a queued probe" case is covered
-//! by sibling unit tests via `run_worker` with a hand-seeded
-//! expectation map — that's where determinism is reachable.
+//! Cancellation contract: `cancel(profile)` is best-effort. The deterministic cases
+//! (cancel-without-submit; resubmit-after-cancel runs; cancel-after-completion is a no-op) live here.
+//! The racy-by-construction "cancel skips a queued probe" case is covered by sibling unit tests via
+//! `run_worker` with a hand-seeded expectation map — that's where determinism is reachable.
 
 #![cfg(unix)]
 
@@ -26,9 +24,8 @@ const fn nz(n: usize) -> NonZeroUsize {
     NonZeroUsize::new(n).expect("non-zero literal in test fixture")
 }
 
-/// Mirror of the bin's `DriverProberSender` — wraps a single
-/// `Sender<Input>` clone and rewraps each `ProbeResponse` as
-/// `Input::ProbeResponse(_)` on the wire.
+/// Mirror of the bin's `DriverProberSender` — wraps a single `Sender<Input>` clone and rewraps each
+/// `ProbeResponse` as `Input::ProbeResponse(_)` on the wire.
 struct TestProberSink {
     tx: Sender<Input>,
 }

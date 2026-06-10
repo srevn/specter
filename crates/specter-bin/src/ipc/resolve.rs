@@ -1,52 +1,43 @@
-//! Socket-path resolution **policy** — one decision shared by both
-//! roles, projected two ways.
+//! Socket-path resolution **policy** — one decision shared by both roles, projected two ways.
 //!
-//! The daemon *commits* a single path to bind; the client *probes* an
-//! ordered candidate list, taking the first that answers. These are
-//! not two independent resolvers: they read the **same** [`Resolution`]
-//! value and differ only in how they consume it.
+//! The daemon *commits* a single path to bind; the client *probes* an ordered candidate list,
+//! taking the first that answers. These are not two independent resolvers: they read the **same**
+//! [`Resolution`] value and differ only in how they consume it.
 //!
-//! - The daemon (which cannot probe — it binds exactly one path)
-//!   projects via [`Resolution::into_commit`].
-//! - The client (which cannot see the daemon's argv or environment)
-//!   matches the variant: a [`Resolution::Pinned`] override connects to
-//!   that one path; a [`Resolution::Cascade`] iterates its candidates.
+//! - The daemon (which cannot probe — it binds exactly one path) projects via
+//!   [`Resolution::into_commit`].
+//! - The client (which cannot see the daemon's argv or environment) matches the variant: a
+//!   [`Resolution::Pinned`] override connects to that one path; a [`Resolution::Cascade`] iterates
+//!   its candidates.
 //!
-//! Because both roles consume one value, the rendezvous invariant —
-//! *the daemon's committed path is the head of the client's probe set*
-//! — holds by construction, not by a paired equality test:
-//! `into_commit()` returns the [`Cascade`](Resolution::Cascade) head,
-//! and [`Candidates::into_iter`] yields that same head first.
+//! Because both roles consume one value, the rendezvous invariant — *the daemon's committed path is
+//! the head of the client's probe set* — holds by construction, not by a paired equality test:
+//! `into_commit()` returns the [`Cascade`](Resolution::Cascade) head, and [`Candidates::into_iter`]
+//! yields that same head first.
 //!
 //! # Purity and the environment seam
 //!
-//! The policy is pure: it never touches the filesystem and reads the
-//! environment only through an injected `getenv` closure, so the unit
-//! suite drives every branch with plain in-memory closures. [`env_os`]
-//! is the module's single `std::env` touchpoint — the production
-//! adapter the daemon and client thread in so both roles read one
-//! process environment through one definition.
+//! The policy is pure: it never touches the filesystem and reads the environment only through an
+//! injected `getenv` closure, so the unit suite drives every branch with plain in-memory closures.
+//! [`env_os`] is the module's single `std::env` touchpoint — the production adapter the daemon and
+//! client thread in so both roles read one process environment through one definition.
 //!
 //! # Precedence
 //!
-//! `--socket` > `$SPECTER_SOCK` > the per-platform convention cascade.
-//! Explicit overrides are absolute-only and length-checked here (one
-//! rule for both the flag and the env var); a relative or over-long
-//! override is a hard [`ResolveError`], never a silent fallback. The
-//! fixed convention paths (macOS `/tmp`, the system runtime dirs) are
-//! absolute and short by construction and skip [`validate`]; the
-//! env-derived Linux session path (`$XDG_RUNTIME_DIR` joined) runs
-//! through [`validate`] like an override, but an unusable one falls
-//! through to the system path instead of erroring — a convention rung
-//! is a try-else-fall-back, not an operator demand.
+//! `--socket` > `$SPECTER_SOCK` > the per-platform convention cascade. Explicit overrides are
+//! absolute-only and length-checked here (one rule for both the flag and the env var); a relative
+//! or over-long override is a hard [`ResolveError`], never a silent fallback. The fixed convention
+//! paths (macOS `/tmp`, the system runtime dirs) are absolute and short by construction and skip
+//! [`validate`]; the env-derived Linux session path (`$XDG_RUNTIME_DIR` joined) runs through
+//! [`validate`] like an override, but an unusable one falls through to the system path instead of
+//! erroring — a convention rung is a try-else-fall-back, not an operator demand.
 //!
 //! # Diagnostics vocabulary
 //!
-//! [`SocketSource`] tags every candidate with where it came from.
-//! [`SocketSource::label`] names it in the client's probe-failure list;
-//! [`SocketSource::daemon_hint`] selects the daemon's bind-failure
-//! escape advice ([`DaemonHint`]). Both failure surfaces render through
-//! this one vocab so daemon and client stay in lockstep.
+//! [`SocketSource`] tags every candidate with where it came from. [`SocketSource::label`] names it
+//! in the client's probe-failure list; [`SocketSource::daemon_hint`] selects the daemon's
+//! bind-failure escape advice ([`DaemonHint`]). Both failure surfaces render through this one vocab
+//! so daemon and client stay in lockstep.
 
 use std::ffi::OsString;
 use std::fmt;
@@ -56,52 +47,44 @@ use std::path::{Path, PathBuf};
 /// Socket filename under whichever directory the cascade selects.
 const SOCKET_FILE: &str = "specter.sock";
 
-/// Linux system-daemon socket directory. systemd provisions it `0700`
-/// and service-user-owned via `RuntimeDirectory=specter`; the daemon
-/// binds here whenever no session runtime dir is present, and a session
-/// client falls through to it when its own runtime dir holds no live
-/// socket.
+/// Linux system-daemon socket directory. systemd provisions it `0700` and service-user-owned via
+/// `RuntimeDirectory=specter`; the daemon binds here whenever no session runtime dir is present,
+/// and a session client falls through to it when its own runtime dir holds no live socket.
 #[cfg(target_os = "linux")]
 const CONVENTION_DIR: &str = "/run/specter";
 
-/// macOS socket directory. Fixed at `/tmp` (which resolves to
-/// `/private/tmp`): macOS has neither `PrivateTmp` namespacing nor
-/// `$XDG_RUNTIME_DIR`, so one well-known location is both the daemon's
-/// bind dir and the client's sole probe target — override-immune by
-/// design.
+/// macOS socket directory. Fixed at `/tmp` (which resolves to `/private/tmp`): macOS has neither
+/// `PrivateTmp` namespacing nor `$XDG_RUNTIME_DIR`, so one well-known location is both the daemon's
+/// bind dir and the client's sole probe target — override-immune by design.
 #[cfg(target_os = "macos")]
 const CONVENTION_DIR: &str = "/tmp";
 
-/// BSD system-daemon socket directory. The rc script provisions it in
-/// `start_precmd`; the daemon binds here as the sole convention path.
+/// BSD system-daemon socket directory. The rc script provisions it in `start_precmd`; the daemon
+/// binds here as the sole convention path.
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 const CONVENTION_DIR: &str = "/var/run/specter";
 
-/// `sockaddr_un.sun_path` capacity in bytes, including the terminating
-/// NUL. `std` does not expose this, so it is cfg-gated to the platform
-/// constant: 108 on Linux, 104 on macOS and the BSDs.
+/// `sockaddr_un.sun_path` capacity in bytes, including the terminating NUL. `std` does not expose
+/// this, so it is cfg-gated to the platform constant: 108 on Linux, 104 on macOS and the BSDs.
 #[cfg(target_os = "linux")]
 const SUN_MAX: usize = 108;
 #[cfg(not(target_os = "linux"))]
 const SUN_MAX: usize = 104;
 
-/// Longest explicit socket path that still fits `sun_path` once the
-/// bind-time staging suffix and the terminating NUL are accounted for.
+/// Longest explicit socket path that still fits `sun_path` once the bind-time staging suffix and
+/// the terminating NUL are accounted for.
 ///
-/// [`SUN_MAX`] (the `sun_path` capacity, NUL included) is resolve's own
-/// platform knowledge; the staging suffix width is single-sourced from
-/// `sockpath::STAGING_SUFFIX_MAX`, beside the `temp_sibling` code that
-/// emits the `.tmp.<pid>` format, so the reserve cannot drift from the
-/// format it guards. `bind_socket_atomic` binds the staging name
-/// *before* renaming onto the committed path, so the staging name — not
-/// the committed path — is the longest entry the kernel ever stores in
-/// `sun_path`; reserving its worst-case width makes any path that
-/// passes [`validate`] also fit at bind time. Convention paths are far
-/// shorter; this bound guards only operator-supplied overrides.
+/// [`SUN_MAX`] (the `sun_path` capacity, NUL included) is resolve's own platform knowledge; the
+/// staging suffix width is single-sourced from `sockpath::STAGING_SUFFIX_MAX`, beside the
+/// `temp_sibling` code that emits the `.tmp.<pid>` format, so the reserve cannot drift from the
+/// format it guards. `bind_socket_atomic` binds the staging name *before* renaming onto the committed
+/// path, so the staging name — not the committed path — is the longest entry the kernel ever stores
+/// in `sun_path`; reserving its worst-case width makes any path that passes [`validate`] also fit at
+/// bind time. Convention paths are far shorter; this bound guards only operator-supplied overrides.
 const MAX_SOCKET_PATH_LEN: usize = SUN_MAX - super::sockpath::STAGING_SUFFIX_MAX - 1;
 
-/// Where a resolved socket path came from — drives both-side
-/// diagnostics and (for the daemon) the bind-failure escape hint.
+/// Where a resolved socket path came from — drives both-side diagnostics and (for the daemon) the
+/// bind-failure escape hint.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SocketSource {
     /// `--socket <path>` on either role's command line.
@@ -123,8 +106,8 @@ pub(crate) enum SocketSource {
 }
 
 impl SocketSource {
-    /// Short label naming this source in a client probe-failure list,
-    /// e.g. `cannot reach the daemon; tried: <path> (session runtime)`.
+    /// Short label naming this source in a client probe-failure list, e.g. `cannot reach the
+    /// daemon; tried: <path> (session runtime)`.
     #[must_use]
     pub(crate) const fn label(self) -> &'static str {
         match self {
@@ -141,8 +124,8 @@ impl SocketSource {
         }
     }
 
-    /// Escape advice for the daemon's bind-failure message — how the
-    /// operator makes this source's parent directory exist.
+    /// Escape advice for the daemon's bind-failure message — how the operator makes this source's
+    /// parent directory exist.
     #[must_use]
     pub(crate) const fn daemon_hint(self) -> DaemonHint {
         match self {
@@ -152,8 +135,8 @@ impl SocketSource {
             Self::LinuxSession => DaemonHint::SessionRuntimeDir,
             #[cfg(target_os = "linux")]
             Self::LinuxSystem => DaemonHint::SystemdRuntimeDir,
-            // `/tmp` always exists; a missing parent there is an
-            // operator-environment anomaly, so the generic advice fits.
+            // `/tmp` always exists; a missing parent there is an operator-environment anomaly, so
+            // the generic advice fits.
             #[cfg(target_os = "macos")]
             Self::MacosDefault => DaemonHint::OperatorProvided,
             #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -162,13 +145,12 @@ impl SocketSource {
     }
 }
 
-/// The source-specific escape line of a daemon bind-failure message.
-/// `Display` renders the advice sentence; the caller owns the
-/// surrounding layout (which path failed, why its parent is unusable).
+/// The source-specific escape line of a daemon bind-failure message. `Display` renders the advice
+/// sentence; the caller owns the surrounding layout (which path failed, why its parent is unusable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum DaemonHint {
-    /// The path was operator-chosen (`--socket` / `$SPECTER_SOCK`) or a
-    /// fixed location: its parent is the operator's to create.
+    /// The path was operator-chosen (`--socket` / `$SPECTER_SOCK`) or a fixed location: its parent
+    /// is the operator's to create.
     OperatorProvided,
     /// `/run/specter` is provisioned by systemd.
     #[cfg(target_os = "linux")]
@@ -183,12 +165,11 @@ pub(crate) enum DaemonHint {
 
 impl fmt::Display for DaemonHint {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // The universal escape, shared by every convention variant: a
-        // convention path renders its source-specific provisioning
-        // clause, then "; otherwise " + this escape. An operator-chosen
-        // path has no provisioning mechanism (`None` below) and renders
-        // the bare creation advice alone — re-suggesting the `--socket`
-        // / `SPECTER_SOCK` the operator already passed would be circular.
+        // The universal escape, shared by every convention variant: a convention path renders its
+        // source-specific provisioning clause, then "; otherwise " + this escape. An
+        // operator-chosen path has no provisioning mechanism (`None` below) and renders the bare
+        // creation advice alone — re-suggesting the `--socket` / `SPECTER_SOCK` the operator
+        // already passed would be circular.
         const ESCAPE: &str =
             "create the parent directory, or override with --socket <path> / SPECTER_SOCK=<path>";
         let provisioning: Option<&'static str> = match self {
@@ -220,10 +201,9 @@ pub(crate) struct SocketCandidate {
     pub(crate) path: PathBuf,
 }
 
-/// The convention cascade: a guaranteed-present `head` plus zero or
-/// more fall-through candidates. Non-empty by construction (the head
-/// always exists); `tail` is a frozen `Box<[_]>` rather than a `Vec`
-/// because it gains no entries after construction.
+/// The convention cascade: a guaranteed-present `head` plus zero or more fall-through candidates.
+/// Non-empty by construction (the head always exists); `tail` is a frozen `Box<[_]>` rather than a
+/// `Vec` because it gains no entries after construction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Candidates {
     head: SocketCandidate,
@@ -235,9 +215,8 @@ impl IntoIterator for Candidates {
     type IntoIter =
         std::iter::Chain<std::iter::Once<SocketCandidate>, std::vec::IntoIter<SocketCandidate>>;
 
-    /// `head` first, then the fall-through `tail` in order — the client
-    /// probe order. Owned, so the winning candidate moves out of the
-    /// iterator into the live connection.
+    /// `head` first, then the fall-through `tail` in order — the client probe order. Owned, so the
+    /// winning candidate moves out of the iterator into the live connection.
     fn into_iter(self) -> Self::IntoIter {
         std::iter::once(self.head).chain(self.tail.into_vec())
     }
@@ -246,20 +225,17 @@ impl IntoIterator for Candidates {
 /// The single resolution outcome both roles consume.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Resolution {
-    /// An explicit override: bind / connect to exactly this path, with
-    /// no fall-through. A stale override must surface as an error, not
-    /// silently retarget a different daemon.
+    /// An explicit override: bind / connect to exactly this path, with no fall-through. A stale
+    /// override must surface as an error, not silently retarget a different daemon.
     Pinned(SocketCandidate),
-    /// The per-platform convention: the daemon binds the head; the
-    /// client probes head-then-tail.
+    /// The per-platform convention: the daemon binds the head; the client probes head-then-tail.
     Cascade(Candidates),
 }
 
 impl Resolution {
-    /// The daemon projection — the one path to bind. Variant-agnostic:
-    /// a [`Pinned`](Self::Pinned) override commits its path; a
-    /// [`Cascade`](Self::Cascade) commits its head. By construction the
-    /// committed path is the head of the client's probe set.
+    /// The daemon projection — the one path to bind. Variant-agnostic: a [`Pinned`](Self::Pinned)
+    /// override commits its path; a [`Cascade`](Self::Cascade) commits its head. By construction
+    /// the committed path is the head of the client's probe set.
     #[must_use]
     pub(crate) fn into_commit(self) -> SocketCandidate {
         match self {
@@ -269,18 +245,16 @@ impl Resolution {
     }
 }
 
-/// Why an explicit override could not be turned into a bindable path.
-/// Only an explicit override (`--socket` / `$SPECTER_SOCK`) surfaces
-/// this: the env-derived Linux session path also runs through
-/// [`validate`], but its failure is swallowed (`.ok()`) and falls
-/// through to the system path rather than aborting resolution.
+/// Why an explicit override could not be turned into a bindable path. Only an explicit override
+/// (`--socket` / `$SPECTER_SOCK`) surfaces this: the env-derived Linux session path also runs
+/// through [`validate`], but its failure is swallowed (`.ok()`) and falls through to the system
+/// path rather than aborting resolution.
 #[derive(Debug)]
 pub(crate) enum ResolveError {
-    /// A relative override. AF_UNIX needs an absolute path, and a
-    /// relative one would silently depend on the daemon's CWD.
+    /// A relative override. AF_UNIX needs an absolute path, and a relative one would silently
+    /// depend on the daemon's CWD.
     Relative { source: SocketSource, path: PathBuf },
-    /// An override whose byte length, plus the bind-time staging
-    /// suffix, would overflow `sun_path`.
+    /// An override whose byte length, plus the bind-time staging suffix, would overflow `sun_path`.
     TooLong {
         source: SocketSource,
         path: PathBuf,
@@ -316,11 +290,10 @@ impl fmt::Display for ResolveError {
 
 impl std::error::Error for ResolveError {}
 
-/// Resolve the socket path into the single [`Resolution`] both roles
-/// consume. Pure: every environment read flows through `getenv`.
+/// Resolve the socket path into the single [`Resolution`] both roles consume. Pure: every
+/// environment read flows through `getenv`.
 ///
-/// Precedence: `--socket` (`cli_socket`) > `$SPECTER_SOCK` > the
-/// per-platform convention cascade.
+/// Precedence: `--socket` (`cli_socket`) > `$SPECTER_SOCK` > the per-platform convention cascade.
 pub(crate) fn resolve<F>(cli_socket: Option<&Path>, getenv: F) -> Result<Resolution, ResolveError>
 where
     F: Fn(&str) -> Option<OsString>,
@@ -331,9 +304,8 @@ where
     Ok(Resolution::Cascade(convention(&getenv)))
 }
 
-/// Resolve the highest-precedence explicit override, if any. `--socket`
-/// wins over `$SPECTER_SOCK`; both run through [`validate`] so the
-/// absolute-only + length rule has one home.
+/// Resolve the highest-precedence explicit override, if any. `--socket` wins over `$SPECTER_SOCK`;
+/// both run through [`validate`] so the absolute-only + length rule has one home.
 fn explicit_override<F>(
     cli_socket: Option<&Path>,
     getenv: &F,
@@ -350,29 +322,25 @@ where
     Ok(None)
 }
 
-/// The per-platform convention cascade. Linux reads `$XDG_RUNTIME_DIR`
-/// to decide between the session daemon (with the system path as a
-/// fall-through tail) and the system daemon alone; macOS and BSD have a
-/// single fixed location and ignore the environment.
+/// The per-platform convention cascade. Linux reads `$XDG_RUNTIME_DIR` to decide between the
+/// session daemon (with the system path as a fall-through tail) and the system daemon alone; macOS
+/// and BSD have a single fixed location and ignore the environment.
 #[cfg(target_os = "linux")]
 fn convention<F>(getenv: &F) -> Candidates
 where
     F: Fn(&str) -> Option<OsString>,
 {
-    // The session head is env-derived (`$XDG_RUNTIME_DIR` joined with
-    // the socket filename), so it runs through `validate`: a relative or
-    // over-long runtime dir yields `None` and falls through to the
-    // system path rather than aborting resolution. `validate` subsumes
-    // the absolute-only check, so no separate `is_absolute` filter is
-    // needed. The fixed system path is absolute and short by
-    // construction and skips validation.
+    // The session head is env-derived (`$XDG_RUNTIME_DIR` joined with the socket filename), so it
+    // runs through `validate`: a relative or over-long runtime dir yields `None` and falls through
+    // to the system path rather than aborting resolution. `validate` subsumes the absolute-only
+    // check, so no separate `is_absolute` filter is needed. The fixed system path is absolute and
+    // short by construction and skips validation.
     match env_nonempty(getenv, "XDG_RUNTIME_DIR")
         .map(|xdg| Path::new(&xdg).join(SOCKET_FILE))
         .and_then(|path| validate(&path, SocketSource::LinuxSession).ok())
     {
-        // A usable session runtime dir: prefer it, but keep the system
-        // path as a fall-through so a session client still reaches a
-        // system daemon when no session daemon is running.
+        // A usable session runtime dir: prefer it, but keep the system path as a fall-through so a
+        // session client still reaches a system daemon when no session daemon is running.
         Some(session) => Candidates {
             head: session,
             tail: Box::new([candidate(
@@ -380,8 +348,8 @@ where
                 Path::new(CONVENTION_DIR).join(SOCKET_FILE),
             )]),
         },
-        // No usable session runtime dir — absent, empty, relative, or an
-        // over-long join: the system path is the sole convention path.
+        // No usable session runtime dir — absent, empty, relative, or an over-long join: the system
+        // path is the sole convention path.
         None => single(SocketSource::LinuxSystem, CONVENTION_DIR),
     }
 }
@@ -410,17 +378,16 @@ fn single(source: SocketSource, dir: &str) -> Candidates {
     }
 }
 
-/// Pair a source with its path. Convention paths skip [`validate`] —
-/// they are absolute and short by construction.
+/// Pair a source with its path. Convention paths skip [`validate`] — they are absolute and short by
+/// construction.
 const fn candidate(source: SocketSource, path: PathBuf) -> SocketCandidate {
     SocketCandidate { source, path }
 }
 
-/// Enforce the absolute-only + `sun_path`-length rule on a path whose
-/// shape is not guaranteed by construction — an explicit override
-/// (`--socket` / `$SPECTER_SOCK`) or the env-derived Linux session path.
-/// The length budget reserves the bind-time staging suffix, so a path
-/// that passes here also fits when `bind_socket_atomic` stages it.
+/// Enforce the absolute-only + `sun_path`-length rule on a path whose shape is not guaranteed by
+/// construction — an explicit override (`--socket` / `$SPECTER_SOCK`) or the env-derived Linux
+/// session path. The length budget reserves the bind-time staging suffix, so a path that passes
+/// here also fits when `bind_socket_atomic` stages it.
 fn validate(path: &Path, source: SocketSource) -> Result<SocketCandidate, ResolveError> {
     if !path.is_absolute() {
         return Err(ResolveError::Relative {
@@ -440,9 +407,8 @@ fn validate(path: &Path, source: SocketSource) -> Result<SocketCandidate, Resolv
     Ok(candidate(source, path.to_owned()))
 }
 
-/// Read an environment variable, treating an empty value (`export X=`)
-/// as unset. The one place the empty-is-unset rule lives, shared by
-/// `$SPECTER_SOCK` and `$XDG_RUNTIME_DIR`.
+/// Read an environment variable, treating an empty value (`export X=`) as unset. The one place the
+/// empty-is-unset rule lives, shared by `$SPECTER_SOCK` and `$XDG_RUNTIME_DIR`.
 fn env_nonempty<F>(getenv: &F, key: &str) -> Option<OsString>
 where
     F: Fn(&str) -> Option<OsString>,
@@ -450,9 +416,9 @@ where
     getenv(key).filter(|value| !value.is_empty())
 }
 
-/// Production `getenv` for [`resolve`] — the module's single `std::env`
-/// touchpoint. The daemon and client thread it in so both roles read
-/// one process environment; the unit suite injects closures instead.
+/// Production `getenv` for [`resolve`] — the module's single `std::env` touchpoint. The daemon and
+/// client thread it in so both roles read one process environment; the unit suite injects closures
+/// instead.
 #[must_use]
 pub(crate) fn env_os(key: &str) -> Option<OsString> {
     std::env::var_os(key)
@@ -462,9 +428,8 @@ pub(crate) fn env_os(key: &str) -> Option<OsString> {
 mod tests {
     use super::*;
 
-    /// Build a `getenv` closure from explicit key→value pairs; any key
-    /// not listed resolves to absent. Keeps each test's environment
-    /// shape visible at the call site.
+    /// Build a `getenv` closure from explicit key→value pairs; any key not listed resolves to
+    /// absent. Keeps each test's environment shape visible at the call site.
     fn env_of<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<OsString> + 'a {
         move |key| {
             pairs
@@ -473,9 +438,8 @@ mod tests {
         }
     }
 
-    /// Precedence ladder: `--socket` outranks `$SPECTER_SOCK` outranks
-    /// the convention cascade, and an explicit override is `Pinned`
-    /// (no fall-through) while the convention is a `Cascade`.
+    /// Precedence ladder: `--socket` outranks `$SPECTER_SOCK` outranks the convention cascade, and
+    /// an explicit override is `Pinned` (no fall-through) while the convention is a `Cascade`.
     #[test]
     fn resolve_precedence_cli_over_env_over_convention() {
         let env = env_of(&[("SPECTER_SOCK", "/tmp/env.sock")]);
@@ -505,9 +469,8 @@ mod tests {
         ));
     }
 
-    /// A relative override (flag or env) is a hard error tagged with its
-    /// source, never a silent fall-through; the message names the source
-    /// and the absolute-path requirement.
+    /// A relative override (flag or env) is a hard error tagged with its source, never a silent
+    /// fall-through; the message names the source and the absolute-path requirement.
     #[test]
     fn resolve_relative_override_is_hard_error() {
         let cli_err = resolve(Some(Path::new("relative/x.sock")), env_of(&[])).unwrap_err();
@@ -534,8 +497,8 @@ mod tests {
         ));
     }
 
-    /// The length check reserves the bind-time staging suffix: a path at
-    /// exactly the limit resolves, one byte longer is rejected.
+    /// The length check reserves the bind-time staging suffix: a path at exactly the limit
+    /// resolves, one byte longer is rejected.
     #[test]
     fn resolve_overlength_override_rejected_at_staging_threshold() {
         let at_limit = format!("/{}", "a".repeat(MAX_SOCKET_PATH_LEN - 1));
@@ -564,8 +527,8 @@ mod tests {
         );
     }
 
-    /// An empty `$SPECTER_SOCK` (`export SPECTER_SOCK=`) is unset, not an
-    /// empty-path pin — it falls through to the convention cascade.
+    /// An empty `$SPECTER_SOCK` (`export SPECTER_SOCK=`) is unset, not an empty-path pin — it falls
+    /// through to the convention cascade.
     #[test]
     fn resolve_empty_env_override_is_unset() {
         assert!(matches!(
@@ -574,9 +537,9 @@ mod tests {
         ));
     }
 
-    /// The diagnostic vocab: client labels and daemon hints per source.
-    /// `Cli`/`Env` exist on every platform; the convention sources are
-    /// platform-gated. Also exercises [`env_os`] against an absent var.
+    /// The diagnostic vocab: client labels and daemon hints per source. `Cli`/`Env` exist on every
+    /// platform; the convention sources are platform-gated. Also exercises [`env_os`] against an
+    /// absent var.
     #[test]
     fn vocab_label_and_daemon_hint() {
         assert_eq!(SocketSource::Cli.label(), "from --socket");
@@ -589,8 +552,8 @@ mod tests {
             SocketSource::Env.daemon_hint(),
             DaemonHint::OperatorProvided
         );
-        // An operator-chosen path renders the bare creation advice and
-        // must NOT re-suggest the override flag the operator just passed.
+        // An operator-chosen path renders the bare creation advice and must NOT re-suggest the
+        // override flag the operator just passed.
         let operator = DaemonHint::OperatorProvided.to_string();
         assert!(
             operator.contains("create the parent directory") && !operator.contains("--socket"),
@@ -614,8 +577,8 @@ mod tests {
                 SocketSource::LinuxSystem.daemon_hint(),
                 DaemonHint::SystemdRuntimeDir,
             );
-            // A convention hint names its provisioner AND carries the
-            // override escape, so a bind failure stays actionable.
+            // A convention hint names its provisioner AND carries the override escape, so a bind
+            // failure stays actionable.
             let systemd = DaemonHint::SystemdRuntimeDir.to_string();
             assert!(
                 systemd.contains("RuntimeDirectory=specter") && systemd.contains("--socket"),
@@ -642,10 +605,9 @@ mod tests {
         }
     }
 
-    /// Linux with an absolute `$XDG_RUNTIME_DIR`: the session path heads
-    /// the probe order with the system path as its fall-through tail,
-    /// and the daemon's commit is that same head (the rendezvous
-    /// invariant).
+    /// Linux with an absolute `$XDG_RUNTIME_DIR`: the session path heads the probe order with the
+    /// system path as its fall-through tail, and the daemon's commit is that same head (the
+    /// rendezvous invariant).
     #[cfg(target_os = "linux")]
     #[test]
     fn resolve_linux_session_head_with_system_tail() {
@@ -680,17 +642,15 @@ mod tests {
         );
     }
 
-    /// Linux without a usable `$XDG_RUNTIME_DIR` — absent, empty,
-    /// relative, or an over-long join — collapses to the system path
-    /// alone, no session tail.
+    /// Linux without a usable `$XDG_RUNTIME_DIR` — absent, empty, relative, or an over-long join —
+    /// collapses to the system path alone, no session tail.
     #[cfg(target_os = "linux")]
     #[test]
     fn resolve_linux_system_only_without_session_dir() {
-        // An absolute-but-pathological runtime dir: joined with the
-        // socket filename it overflows `sun_path`, so `validate` rejects
-        // the session rung and resolution falls through to the system
-        // path — exactly as an absent/empty/relative dir does. Bound
-        // here so the `&str` outlives the array borrow below.
+        // An absolute-but-pathological runtime dir: joined with the socket filename it overflows
+        // `sun_path`, so `validate` rejects the session rung and resolution falls through to the
+        // system path — exactly as an absent/empty/relative dir does. Bound here so the `&str`
+        // outlives the array borrow below.
         let over_long = format!("/{}", "x".repeat(SUN_MAX));
         for unusable in [
             None,
@@ -719,8 +679,8 @@ mod tests {
         }
     }
 
-    /// macOS convention is the fixed `/tmp/specter.sock`, ignoring
-    /// `$TMPDIR`; single candidate, and the commit is that head.
+    /// macOS convention is the fixed `/tmp/specter.sock`, ignoring `$TMPDIR`; single candidate, and
+    /// the commit is that head.
     #[cfg(target_os = "macos")]
     #[test]
     fn resolve_macos_convention_is_fixed_tmp() {
@@ -738,8 +698,7 @@ mod tests {
         );
     }
 
-    /// BSD convention is the fixed `/var/run/specter/specter.sock`;
-    /// single candidate, commit == head.
+    /// BSD convention is the fixed `/var/run/specter/specter.sock`; single candidate, commit == head.
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     #[test]
     fn resolve_bsd_convention_is_var_run() {

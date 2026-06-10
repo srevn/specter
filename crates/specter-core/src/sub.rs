@@ -1,16 +1,14 @@
 //! Subscription and `EffectScope`.
 //!
-//! A `Sub` is a *reaction declaration*: it names what to watch and what
-//! program should run when the watched tree settles. The program is a
-//! CFG-shaped op IR — [`ActionProgram`] (see [`crate::program`]) holds a
-//! `Box<[ProgramOp]>` walked by a `u32` cursor at the actuator. The
-//! surface syntax (validation-side `Action` tree, lives in
-//! `specter-config`) folds into the program at validation time; the
-//! engine and actuator see only the lowered form.
+//! A `Sub` is a *reaction declaration*: it names what to watch and what program should run when the
+//! watched tree settles. The program is a CFG-shaped op IR — [`ActionProgram`] holds a
+//! `Box<[ProgramOp]>` walked by a `u32` cursor at the actuator. The surface syntax (validation-side
+//! `Action` tree, lives in `specter-config`) folds into the program at validation time; the engine
+//! and actuator see only the lowered form.
 //!
-//! `Sub.needs_diff` is derived at construction: true iff the `EffectScope`
-//! is `PerStableFile` *or* the program references any diff-derived
-//! placeholder (`Created`/`Deleted`/`Modified`/`RenamedFrom`/`RenamedTo`).
+//! `Sub.needs_diff` is derived at construction: true iff the `EffectScope` is `PerStableFile` *or*
+//! the program references any diff-derived placeholder
+//! (`Created`/`Deleted`/`Modified`/`RenamedFrom`/`RenamedTo`).
 //!
 //! v1 surface is argv-only — no shell variant.
 
@@ -27,30 +25,25 @@ use std::time::{Duration, Instant};
 
 /// Where a Sub anchors.
 ///
-/// `Resource` names a slot the caller has already materialised; the
-/// engine trusts it after an O(1) liveness check. `Path` names an
-/// absolute path the engine resolves at attach time — immediate when
-/// every component already exists, otherwise pending descent until the
-/// anchor materialises and a Seed burst establishes the baseline.
+/// `Resource` names a slot the caller has already materialised; the engine trusts it after an O(1)
+/// liveness check. `Path` names an absolute path the engine resolves at attach time — immediate
+/// when every component already exists, otherwise pending descent until the anchor materialises and
+/// a Seed burst establishes the baseline.
 #[derive(Clone, Debug)]
 pub enum SubAttachAnchor {
     Resource(ResourceId),
     Path(PathBuf),
 }
 
-/// The per-Sub reaction declaration: everything that is *not* Profile
-/// identity or the anchor.
+/// The per-Sub reaction declaration: everything that is *not* Profile identity or the anchor.
 ///
-/// `name` is `CompactString`, moved end to end: `SubSpec.name`
-/// (config) is already `CompactString`, so the attach request carries
-/// it without a `String` round-trip and [`Sub::from_request`] moves it
-/// into `Sub.name` unchanged. `program` is `Arc<ActionProgram>` so the
-/// Arc minted by the config layer's `lower_to_program` flows through to
-/// `Sub.program` without a re-allocation.
+/// `name` is `CompactString`, moved end to end: `SubSpec.name` (config) is already `CompactString`,
+/// so the attach request carries it without a `String` round-trip and [`Sub::from_request`] moves
+/// it into `Sub.name` unchanged. `program` is `Arc<ActionProgram>` so the Arc minted by the config
+/// layer's `lower_to_program` flows through to `Sub.program` without a re-allocation.
 ///
-/// Carries no Profile-identity field, so a Sub cannot express (or
-/// leak) a sibling Profile's config/mask — demonstrated
-/// unrepresentable:
+/// Carries no Profile-identity field, so a Sub cannot express (or leak) a sibling Profile's
+/// config/mask — demonstrated unrepresentable:
 ///
 /// ```compile_fail
 /// use specter_core::SubParams;
@@ -61,36 +54,29 @@ pub struct SubParams {
     pub name: CompactString,
     pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
-    /// Per-Sub debounce floor — min-folded across the Profile's Subs by
-    /// the engine's `recompute_profile_settle`. Distinct from
-    /// `max_settle`, which is identity (folds into `config_hash`) and
-    /// lives on [`ProfileIdentity`].
+    /// Per-Sub debounce floor — min-folded across the Profile's Subs by the engine's
+    /// `recompute_profile_settle`. Distinct from `max_settle`, which is identity (folds into
+    /// `config_hash`) and lives on [`ProfileIdentity`].
     pub settle: Duration,
-    /// Forward subprocess stdout/stderr to Specter's own stdio
-    /// (`Stdio::inherit()`); `false` routes child output to
-    /// `/dev/null`. Threaded to `Effect.capture_output`; not identity.
+    /// Forward subprocess stdout/stderr to Specter's own stdio (`Stdio::inherit()`); `false` routes
+    /// child output to `/dev/null`. Threaded to `Effect.capture_output`; not identity.
     pub log_output: bool,
-    /// Promoter that synthesised this Sub — `None` for static
-    /// (operator-declared) Subs, `Some(pid)` for dynamic Subs. Read at
-    /// the engine's recovery fan-out (`on_anchor_terminal_event`) to
-    /// distinguish all-dynamic Profiles (wholesale teardown) from
-    /// mixed/static ones.
+    /// Promoter that synthesised this Sub — `None` for static (operator-declared) Subs, `Some(pid)`
+    /// for dynamic Subs. Read at the engine's recovery fan-out (`on_anchor_terminal_event`) to
+    /// distinguish all-dynamic Profiles (wholesale teardown) from mixed/static ones.
     pub source_promoter: Option<PromoterId>,
 }
 
 /// Public-API request to attach a Sub.
 ///
-/// Three orthogonal parts: *where* ([`SubAttachAnchor`]), *which
-/// Profile* ([`ProfileIdentity`]), *what the Sub does* ([`SubParams`]).
-/// Identity decides Profile partitioning; the anchor resolves
-/// separately (not in the hash preimage); params are per-Sub. The
-/// split makes a Sub leaking a sibling's identity field structurally
-/// unrepresentable.
+/// Three orthogonal parts: *where* ([`SubAttachAnchor`]), *which Profile* ([`ProfileIdentity`]),
+/// *what the Sub does* ([`SubParams`]). Identity decides Profile partitioning; the anchor resolves
+/// separately (not in the hash preimage); params are per-Sub. The split makes a Sub leaking a
+/// sibling's identity field structurally unrepresentable.
 ///
-/// Lives in `core::sub` (not `engine`) so [`SubRegistryDiff`] can carry
-/// pre-id requests via [`crate::Input::ConfigDiff`] without a
-/// `core → engine` cycle. `Clone` serves the rare multi-Engine
-/// fan-out; production consumes by value.
+/// Lives in `core::sub` (not `engine`) so [`SubRegistryDiff`] can carry pre-id requests via
+/// [`crate::Input::ConfigDiff`] without a `core → engine` cycle. `Clone` serves the rare
+/// multi-Engine fan-out; production consumes by value.
 #[derive(Clone, Debug)]
 pub struct SubAttachRequest {
     pub anchor: SubAttachAnchor,
@@ -99,10 +85,9 @@ pub struct SubAttachRequest {
 }
 
 impl SubAttachRequest {
-    /// Canonical constructor. [`Self::for_anchor`] is the
-    /// flat-argument ergonomic over this for the config layer and
-    /// tests; the engine's `try_promote` builds dynamic
-    /// (Promoter-synthesised) Subs through this directly.
+    /// Canonical constructor. [`Self::for_anchor`] is the flat-argument ergonomic over this for the
+    /// config layer and tests; the engine's `try_promote` builds dynamic (Promoter-synthesised)
+    /// Subs through this directly.
     #[must_use]
     pub const fn from_parts(
         anchor: SubAttachAnchor,
@@ -116,10 +101,9 @@ impl SubAttachRequest {
         }
     }
 
-    /// Build a static (operator-declared) attach request —
-    /// `source_promoter` is `None`. Dynamic (Promoter-synthesised)
-    /// Subs are built by the engine's `try_promote` via
-    /// [`Self::from_parts`] directly.
+    /// Build a static (operator-declared) attach request — `source_promoter` is `None`. Dynamic
+    /// (Promoter-synthesised) Subs are built by the engine's `try_promote` via [`Self::from_parts`]
+    /// directly.
     #[must_use]
     pub const fn for_anchor(
         name: CompactString,
@@ -151,63 +135,50 @@ impl SubAttachRequest {
     }
 }
 
-/// Hot-reload diff. Computed by the TOML loader; consumed by
-/// `Engine::step(Input::ConfigDiff(_))`.
+/// Hot-reload diff. Computed by the TOML loader; consumed by `Engine::step(Input::ConfigDiff(_))`.
 ///
-/// Name-keyed: `removed` carries operator watch names; `added`,
-/// `modified_identity`, and `modified_params` carry pre-id
-/// [`SubAttachRequest`]s (the name lives inside `params.name`). The
-/// engine resolves name → [`SubId`] at apply time through its own
-/// authoritative `by_name` index — identity resolution is a
-/// registry-owner operation, not the loader's.
+/// Name-keyed: `removed` carries operator watch names; `added`, `modified_identity`, and
+/// `modified_params` carry pre-id [`SubAttachRequest`]s (the name lives inside `params.name`). The
+/// engine resolves name → [`SubId`] at apply time through its own authoritative `by_name` index —
+/// identity resolution is a registry-owner operation, not the loader's.
 ///
-/// **The `modified` bucket is split.** Two semantically distinct
-/// transformations live behind a "modified watch":
+/// **The `modified` bucket is split.** Two semantically distinct transformations live behind a
+/// "modified watch":
 ///
-/// - **Identity change** (`modified_identity`): the anchor path, scan
-///   config, max_settle, or events mask differs from the prior spec.
-///   Any of these forces the Sub onto a different Profile partition
-///   (the partition key is `(anchor_resource, ProfileIdentity::config_hash())`).
-///   The engine validates the new anchor's parse first, then performs
-///   `detach_old → attach_new`. Validation failure leaves the old Sub
-///   in place — structural rollback at the composition layer.
-/// - **Params change** (`modified_params`): the anchor and identity are
-///   unchanged; only per-Sub fields (`program`, `scope`, `settle`,
-///   `log_output`) differ. The engine rebinds the live Sub in place
-///   via [`SubRegistry::rebind`]: no Profile churn, no kernel-watch
-///   flap, no baseline loss. On the rare case where the prior attach
-///   failed and the Sub never entered the registry, the engine
-///   degrades the entry to a fresh attach
-///   ([`crate::Diagnostic::ConfigDiffRebindFallbackAttach`] narrates
-///   the reason).
+/// - **Identity change** (`modified_identity`): the anchor path, scan config, max_settle, or events
+///   mask differs from the prior spec. Any of these forces the Sub onto a different Profile
+///   partition (the partition key is `(anchor_resource, ProfileIdentity::config_hash())`). The
+///   engine validates the new anchor's parse first, then performs `detach_old → attach_new`.
+///   Validation failure leaves the old Sub in place — structural rollback at the composition layer.
+/// - **Params change** (`modified_params`): the anchor and identity are unchanged; only per-Sub
+///   fields (`program`, `scope`, `settle`, `log_output`) differ. The engine rebinds the live Sub in
+///   place via [`SubRegistry::rebind`]: no Profile churn, no kernel-watch flap, no baseline loss.
+///   On the rare case where the prior attach failed and the Sub never entered the registry, the
+///   engine degrades the entry to a fresh attach
+///   ([`crate::Diagnostic::ConfigDiffRebindFallbackAttach`] narrates the reason).
 ///
-/// Engine processes `removed → modified_params → modified_identity →
-/// added` atomically in one step. The four buckets are name-disjoint
-/// by diff construction.
+/// Engine processes `removed → modified_params → modified_identity → added` atomically in one step.
+/// The four buckets are name-disjoint by diff construction.
 #[derive(Clone, Debug, Default)]
 pub struct SubRegistryDiff {
     /// Fresh attaches.
     pub added: Vec<SubAttachRequest>,
     /// Detaches by operator watch name.
     pub removed: Vec<CompactString>,
-    /// Path / scan / max_settle / events changed — the Sub must move
-    /// to a different Profile partition. Engine validates the new
-    /// anchor's parse, then detaches the old Sub and attaches the new.
-    /// Validation failure leaves the old Sub in place (rollback).
+    /// Path / scan / max_settle / events changed — the Sub must move to a different Profile
+    /// partition. Engine validates the new anchor's parse, then detaches the old Sub and attaches
+    /// the new. Validation failure leaves the old Sub in place (rollback).
     pub modified_identity: Vec<SubAttachRequest>,
-    /// Per-Sub fields only (`program`, `scope`, `settle`,
-    /// `log_output`); anchor and identity unchanged. Engine rebinds in
-    /// place via [`SubRegistry::rebind`] — no Profile churn, no
-    /// kernel-watch flap. When the named Sub is unexpectedly absent
-    /// from the registry (prior attach failed), the engine degrades
-    /// the entry to a fresh attach.
+    /// Per-Sub fields only (`program`, `scope`, `settle`, `log_output`); anchor and identity
+    /// unchanged. Engine rebinds in place via [`SubRegistry::rebind`] — no Profile churn, no
+    /// kernel-watch flap. When the named Sub is unexpectedly absent from the registry (prior attach
+    /// failed), the engine degrades the entry to a fresh attach.
     pub modified_params: Vec<SubAttachRequest>,
 }
 
 impl SubRegistryDiff {
-    /// True iff every bucket is empty — the "no Sub-side changes"
-    /// short-circuit the reload pipeline tests before handing the diff
-    /// to the engine. Single point of truth: every bucket future or
+    /// True iff every bucket is empty — the "no Sub-side changes" short-circuit the reload pipeline
+    /// tests before handing the diff to the engine. Single point of truth: every bucket future or
     /// present is named here.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
@@ -225,13 +196,11 @@ pub enum EffectScope {
     PerStableFile,
 }
 
-/// User-facing event-class set on a [`Sub`] — the surface of the event
-/// filtering primitive.
+/// User-facing event-class set on a [`Sub`] — the surface of the event filtering primitive.
 ///
-/// A class set names *what kinds of change* a watch cares about, in
-/// backend-agnostic vocabulary. The kqueue translator (sensor side) is the
-/// only place that maps the set onto `NOTE_*` fflags; inotify gets a
-/// sibling translator. Engine and core never see backend bits.
+/// A class set names *what kinds of change* a watch cares about, in backend-agnostic vocabulary.
+/// The kqueue translator (sensor side) is the only place that maps the set onto `NOTE_*` fflags;
+/// inotify gets a sibling translator. Engine and core never see backend bits.
 ///
 /// Three classes:
 /// - **STRUCTURE** — directory entries added / removed / renamed (Dir-only).
@@ -240,9 +209,8 @@ pub enum EffectScope {
 /// - **METADATA**  — attribute change (perms, owner, link count,
 ///   timestamps). Both Files and Dirs.
 ///
-/// The set is backed by a `u8` bitmask — `bits()` is the canonical
-/// representation folded into the Profile config hash via
-/// [`ProfileIdentity::config_hash`] (two Subs differing only on classes
+/// The set is backed by a `u8` bitmask — `bits()` is the canonical representation folded into the
+/// Profile config hash via [`ProfileIdentity::config_hash`] (two Subs differing only on classes
 /// fork separate Profiles).
 #[derive(Copy, Clone, Debug, Default, Eq, PartialEq, Ord, PartialOrd)]
 pub struct ClassSet(u8);
@@ -253,71 +221,56 @@ impl ClassSet {
     pub const CONTENT: Self = Self(1 << 1);
     pub const METADATA: Self = Self(1 << 2);
 
-    /// Default for [`EffectScope::SubtreeRoot`] — STRUCTURE | CONTENT.
-    /// Closes E2E #3 (in-place edits surface as events through the per-file
-    /// FDs implied by CONTENT).
+    /// Default for [`EffectScope::SubtreeRoot`] — STRUCTURE | CONTENT. Closes E2E #3 (in-place
+    /// edits surface as events through the per-file FDs implied by CONTENT).
     pub const DEFAULT_SUBTREE_ROOT: Self = Self(0b011);
 
-    /// Default for [`EffectScope::PerStableFile`] — CONTENT | METADATA.
-    /// The user opted into per-file granularity; metadata is part of
-    /// "this file's state changed".
+    /// Default for [`EffectScope::PerStableFile`] — CONTENT | METADATA. The user opted into
+    /// per-file granularity; metadata is part of "this file's state changed".
     pub const DEFAULT_PER_FILE: Self = Self(0b110);
 
-    /// Classes whose subscription suffices to witness in-place writes
-    /// over a settle window — the semantic mask the verdict floor reads
-    /// via [`crate::Profile::events_witness_quiescence`] to decide
-    /// whether `EventsReliable` or the Layer-C hash channel folds the
-    /// quiescence verdict.
+    /// Classes whose subscription suffices to witness in-place writes over a settle window — the
+    /// semantic mask the verdict floor reads via [`crate::Profile::events_witness_quiescence`] to
+    /// decide whether `EventsReliable` or the Layer-C hash channel folds the quiescence verdict.
     ///
-    /// Today reduces to [`Self::CONTENT`]: CONTENT events fire for
-    /// in-place writes — the only change kind that can span the settle
-    /// window invisibly. STRUCTURE and METADATA are point events
-    /// (atomic creates/renames; chmod/touch) and never bridge a gap.
-    /// Adding STREAM / SPARSE_GROW / XATTR to the witness vocabulary is
-    /// a one-line decision here.
+    /// Today reduces to [`Self::CONTENT`]: CONTENT events fire for in-place writes — the only
+    /// change kind that can span the settle window invisibly. STRUCTURE and METADATA are point
+    /// events (atomic creates/renames; chmod/touch) and never bridge a gap. Adding STREAM /
+    /// SPARSE_GROW / XATTR to the witness vocabulary is a one-line decision here.
     ///
-    /// **Kernel-event-vocabulary assumption.** The criterion assumes
-    /// the kernel surfaces every in-place write as a CONTENT-class
-    /// event at the write boundary (`NOTE_WRITE` / `NOTE_EXTEND` on
-    /// kqueue, `IN_MODIFY` / `IN_CLOSE_WRITE` on inotify).
-    /// `mmap`-driven writes via dirty-page flushes, async-I/O
-    /// completions, and `splice(2)` zero-copy paths may not satisfy
-    /// this on every supported platform. Workloads with such writers
-    /// should subscribe to a mask that does *not* cover
-    /// [`Self::IN_PLACE_WRITES`] (e.g. `STRUCTURE` only), forcing the
-    /// hash-channel safety net.
+    /// **Kernel-event-vocabulary assumption.** The criterion assumes the kernel surfaces every
+    /// in-place write as a CONTENT-class event at the write boundary (`NOTE_WRITE` / `NOTE_EXTEND` on
+    /// kqueue, `IN_MODIFY` / `IN_CLOSE_WRITE` on inotify). `mmap`-driven writes via dirty-page
+    /// flushes, async-I/O completions, and `splice(2)` zero-copy paths may not satisfy this on every
+    /// supported platform. Workloads with such writers should subscribe to a mask that does *not*
+    /// cover [`Self::IN_PLACE_WRITES`] (e.g. `STRUCTURE` only), forcing the hash-channel safety net.
     pub const IN_PLACE_WRITES: Self = Self::CONTENT;
 
-    /// True iff every bit in `other` is set in `self` AND `other` is
-    /// non-empty.
+    /// True iff every bit in `other` is set in `self` AND `other` is non-empty.
     ///
-    /// The `other.0 != 0` clause sidesteps the `bitflags`-crate footgun
-    /// where `contains(EMPTY) == true` for every set: at every call site
-    /// the question being asked is "do we hold this *specific*, non-empty
-    /// class?", and reporting "yes" for `EMPTY` would silently green-light
-    /// a no-class translator branch.
+    /// The `other.0 != 0` clause sidesteps the `bitflags`-crate footgun where `contains(EMPTY) ==
+    /// true` for every set: at every call site the question being asked is "do we hold this
+    /// *specific*, non-empty class?", and reporting "yes" for `EMPTY` would silently green-light a
+    /// no-class translator branch.
     #[must_use]
     pub const fn contains(self, other: Self) -> bool {
         (self.0 & other.0) == other.0 && other.0 != 0
     }
 
-    /// True iff `self` and `other` share at least one bit. `EMPTY`
-    /// intersects nothing (including itself).
+    /// True iff `self` and `other` share at least one bit. `EMPTY` intersects nothing (including
+    /// itself).
     #[must_use]
     pub const fn intersects(self, other: Self) -> bool {
         (self.0 & other.0) != 0
     }
 
-    /// True iff this mask subscribes to every change class that can
-    /// affect `leaf_hash` invisibly over a settle window — the
-    /// criterion the verdict floor reads (via
-    /// [`crate::Profile::events_witness_quiescence`]) to choose
-    /// between [`crate::QuiescenceWitness::EventsReliable`] and the
-    /// Layer-C hash channel.
+    /// True iff this mask subscribes to every change class that can affect `leaf_hash` invisibly
+    /// over a settle window — the criterion the verdict floor reads (via
+    /// [`crate::Profile::events_witness_quiescence`]) to choose between
+    /// [`crate::QuiescenceWitness::EventsReliable`] and the Layer-C hash channel.
     ///
-    /// Defined as `self.contains(Self::IN_PLACE_WRITES)`. Class
-    /// additions to the witness vocabulary are a one-line decision at
-    /// [`Self::IN_PLACE_WRITES`]'s docstring.
+    /// Defined as `self.contains(Self::IN_PLACE_WRITES)`. Class additions to the witness vocabulary
+    /// are a one-line decision at [`Self::IN_PLACE_WRITES`]'s docstring.
     #[must_use]
     pub const fn witnesses_quiescence(self) -> bool {
         self.contains(Self::IN_PLACE_WRITES)
@@ -364,94 +317,74 @@ impl std::ops::BitAndAssign for ClassSet {
 #[derive(Debug)]
 pub struct Sub {
     pub name: CompactString,
-    /// The Profile this Sub attaches to — the join axis of the per-Sub
-    /// fire bookkeeping onto a `(Resource, ScanConfig)` partition.
+    /// The Profile this Sub attaches to — the join axis of the per-Sub fire bookkeeping onto a
+    /// `(Resource, ScanConfig)` partition.
     ///
-    /// **Write-once** at [`Sub::from_request`]: re-assigning this would
-    /// orphan [`SubRegistry::by_profile`] (the secondary index by
-    /// `ProfileId`), break the `Sub`-to-`Profile` lifetime
-    /// presupposition every dispatcher reads, and silently re-target
-    /// fire history. The invariant is held by encapsulation —
-    /// module-private with no setter — matching the discipline on
-    /// [`crate::Profile::resource`] (the same write-once join axis on
-    /// the Profile side).
+    /// **Write-once** at [`Sub::from_request`]: re-assigning this would orphan
+    /// [`SubRegistry::by_profile`] (the secondary index by `ProfileId`), break the `Sub`-to-`Profile`
+    /// lifetime presupposition every dispatcher reads, and silently re-target fire history. The
+    /// invariant is held by encapsulation — module-private with no setter — matching the discipline
+    /// on [`crate::Profile::resource`] (the same write-once join axis on the Profile side).
     profile: ProfileId,
     pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
-    /// Per-Sub debounce floor. `max_settle` and `events` are *not*
-    /// stored here — they are Profile identity (fold into `config_hash`,
-    /// invariant for the Profile's lifetime); read them off the Profile.
+    /// Per-Sub debounce floor. `max_settle` and `events` are *not* stored here — they are Profile
+    /// identity (fold into `config_hash`, invariant for the Profile's lifetime); read them off the
+    /// Profile.
     pub settle: Duration,
     pub needs_diff: bool,
-    /// Forward subprocess stdout/stderr to Specter's own stdio. Threaded
-    /// onto each emitted [`crate::Effect`] as `capture_output`; the actuator
-    /// switches between `Stdio::null()` (false, the default) and
-    /// `Stdio::inherit()` (true).
+    /// Forward subprocess stdout/stderr to Specter's own stdio. Threaded onto each emitted
+    /// [`crate::Effect`] as `capture_output`; the actuator switches between `Stdio::null()` (false,
+    /// the default) and `Stdio::inherit()` (true).
     pub log_output: bool,
-    /// Promoter that synthesised this Sub — `None` for static
-    /// (operator-declared) Subs, `Some(pid)` for dynamic Subs spawned by
-    /// a Promoter's `try_promote`. Read at the engine's recovery
+    /// Promoter that synthesised this Sub — `None` for static (operator-declared) Subs, `Some(pid)`
+    /// for dynamic Subs spawned by a Promoter's `try_promote`. Read at the engine's recovery
     /// fan-out (`on_anchor_terminal_event`); never mutated post-attach.
     pub source_promoter: Option<PromoterId>,
-    /// The per-Sub Effect fire history: `true` once this Sub has
-    /// emitted at least one Effect. Sole load-bearing reader is the B1
-    /// dedup suppress (`!forced && nothing_changed && has_fired` — a
-    /// never-fired Sub is its own first emission); the per-Profile
-    /// SeedDrift filter ([`SubRegistry::fired_in`]) and the
-    /// recovery-drift short-circuit ([`SubRegistry::any_fired`]) read
-    /// it Profile-wide.
+    /// The per-Sub Effect fire history: `true` once this Sub has emitted at least one Effect. Sole
+    /// load-bearing reader is the B1 dedup suppress (`!forced && nothing_changed && has_fired` — a
+    /// never-fired Sub is its own first emission); the per-Profile SeedDrift filter
+    /// ([`SubRegistry::fired_in`]) and the recovery-drift short-circuit
+    /// ([`SubRegistry::any_fired`]) read it Profile-wide.
     ///
-    /// Lives here, not on [`crate::Profile`]: a Sub attaches to exactly
-    /// one Profile, so "has this Sub fired?" is per-Sub, not a
-    /// per-Profile join table. Its lifetime *is* the slotmap entry's —
-    /// detach ([`SubRegistry::remove`]) drops it with the Sub, so a
-    /// detached or hot-reload-modified reaction can never re-fire on a
-    /// later drift verdict and a revived Profile's fresh Subs start
-    /// `false` structurally (no purge step to forget). Mutated only
-    /// through [`SubRegistry::mark_fired`] / [`SubRegistry::clear_fired`]
-    /// (the registry holds the sole `&mut Sub`). The invariant is the
-    /// weakest tier in the engine — drift self-corrects on the next
-    /// real change, no refcount/state-machine corruption — so a plain
-    /// `bool` carries it with no edge-method ceremony.
+    /// Lives here, not on [`crate::Profile`]: a Sub attaches to exactly one Profile, so "has this
+    /// Sub fired?" is per-Sub, not a per-Profile join table. Its lifetime *is* the slotmap entry's
+    /// — detach ([`SubRegistry::remove`]) drops it with the Sub, so a detached or
+    /// hot-reload-modified reaction can never re-fire on a later drift verdict and a revived
+    /// Profile's fresh Subs start `false` structurally (no purge step to forget). Mutated only
+    /// through [`SubRegistry::mark_fired`] / [`SubRegistry::clear_fired`] (the registry holds the
+    /// sole `&mut Sub`). The invariant is the weakest tier in the engine — drift self-corrects on
+    /// the next real change, no refcount/state-machine corruption — so a plain `bool` carries it
+    /// with no edge-method ceremony.
     pub has_fired: bool,
-    /// Engine instant at which this Sub last emitted an Effect, or
-    /// `None` for a Sub that has never fired. Observational only —
-    /// distinct from [`Self::has_fired`] (the load-bearing B1-dedup
-    /// signal): `last_fired_at` is `Some` iff `has_fired` is true, but
-    /// the value carries the timestamp the operator-facing `list` UI
-    /// renders as a relative or wall-clock instant (via the bin's
-    /// `start_instant`/`start_wall` reference pair). Written only
-    /// through [`SubRegistry::record_fired`].
+    /// Engine instant at which this Sub last emitted an Effect, or `None` for a Sub that has never
+    /// fired. Observational only — distinct from [`Self::has_fired`] (the load-bearing B1-dedup
+    /// signal): `last_fired_at` is `Some` iff `has_fired` is true, but the value carries the
+    /// timestamp the operator-facing `list` UI renders as a relative or wall-clock instant (via the
+    /// bin's `start_instant`/`start_wall` reference pair). Written only through
+    /// [`SubRegistry::record_fired`].
     pub last_fired_at: Option<Instant>,
-    /// Cumulative Effect emissions across this Sub's lifetime —
-    /// `SubtreeRoot` increments by 1 per fire, `PerStableFile` by the
-    /// per-file count of the emission pass. Observational; surfaces in
-    /// the IPC `list` projection. Saturating-add on increment (`u64`
-    /// holds a millennium of microsecond-cadence fires); written only
-    /// through [`SubRegistry::record_fired`].
+    /// Cumulative Effect emissions across this Sub's lifetime — `SubtreeRoot` increments by 1 per
+    /// fire, `PerStableFile` by the per-file count of the emission pass. Observational; surfaces in
+    /// the IPC `list` projection. Saturating-add on increment (`u64` holds a millennium of
+    /// microsecond-cadence fires); written only through [`SubRegistry::record_fired`].
     pub fire_count: u64,
-    /// Cumulative B1-dedup-suppressed verdicts — bumped when this
-    /// `SubtreeRoot` Sub's `fire_decision` resolves to
-    /// `FireVerdict::SuppressDedup` (unchanged tree, already fired,
-    /// not forced). Observational; surfaces in `list --wide` for
-    /// operators tuning dedup behaviour. `PerStableFile` never
-    /// suppresses (its dedup is diff-membership), so this counter
-    /// stays zero on those Subs. Written only through
-    /// [`SubRegistry::record_dedup_suppressed`].
+    /// Cumulative B1-dedup-suppressed verdicts — bumped when this `SubtreeRoot` Sub's
+    /// `fire_decision` resolves to `FireVerdict::SuppressDedup` (unchanged tree, already fired, not
+    /// forced). Observational; surfaces in `list --wide` for operators tuning dedup behaviour.
+    /// `PerStableFile` never suppresses (its dedup is diff-membership), so this counter stays zero
+    /// on those Subs. Written only through [`SubRegistry::record_dedup_suppressed`].
     pub dedup_suppressed_count: u64,
 }
 
 impl Sub {
-    /// Construct a Sub from its [`ProfileId`] and the per-Sub
-    /// [`SubParams`]. `needs_diff` is derived: true iff
-    /// `scope == PerStableFile` OR the program references any
-    /// diff-derived placeholder. Pre-computed once; never re-evaluated.
+    /// Construct a Sub from its [`ProfileId`] and the per-Sub [`SubParams`]. `needs_diff` is
+    /// derived: true iff `scope == PerStableFile` OR the program references any diff-derived
+    /// placeholder. Pre-computed once; never re-evaluated.
     ///
-    /// The slotmap key is the Sub's identity authority — there is no
-    /// `id` field. `params.name` (`CompactString`) and
-    /// `params.program`'s Arc both move through unchanged (no
-    /// re-allocation, no Arc re-wrap); one Arc per Sub, refcount-bumped
-    /// on each emitted [`crate::Effect`].
+    /// The slotmap key is the Sub's identity authority — there is no `id` field. `params.name`
+    /// (`CompactString`) and `params.program`'s Arc both move through unchanged (no re-allocation,
+    /// no Arc re-wrap); one Arc per Sub, refcount-bumped on each emitted [`crate::Effect`].
     #[must_use]
     pub fn from_request(profile: ProfileId, params: SubParams) -> Self {
         let needs_diff =
@@ -472,9 +405,8 @@ impl Sub {
         }
     }
 
-    /// The Profile this Sub attaches to. Write-once at
-    /// [`Self::from_request`]; see the field rustdoc for the
-    /// load-bearing invariant.
+    /// The Profile this Sub attaches to. Write-once at [`Self::from_request`]; see the field
+    /// rustdoc for the load-bearing invariant.
     #[must_use]
     pub const fn profile(&self) -> ProfileId {
         self.profile
@@ -483,29 +415,22 @@ impl Sub {
 
 /// Slotmap-backed Sub store with two secondary indices.
 ///
-/// - `by_profile` groups Subs by `ProfileId` (insertion order within a
-///   Profile).
-/// - `by_name` resolves an operator-facing or synthesised name to its
-///   `SubId`. Indexes **every** Sub regardless of `source_promoter`:
-///   the config validator reserves the `@` byte, so a `[[watch]].name`
-///   never carries one and a synthesised `<promoter>@<path>` always
-///   does — the two populations are disjoint by construction and
-///   their union is unique. Callers that need the static-vs-dynamic
-///   discrimination read `sub.source_promoter` on the resolved Sub.
-///   The index is load-bearing — hot-reload resolves every
-///   `removed`/`modified` name to an id through [`Self::find_by_name`]
-///   (O(log N)).
+/// - `by_profile` groups Subs by `ProfileId` (insertion order within a Profile).
+/// - `by_name` resolves an operator-facing or synthesised name to its `SubId`. Indexes **every**
+///   Sub regardless of `source_promoter`: the config validator reserves the `@` byte, so a
+///   `[[watch]].name` never carries one and a synthesised `<promoter>@<path>` always does — the two
+///   populations are disjoint by construction and their union is unique. Callers that need the
+///   static-vs-dynamic discrimination read `sub.source_promoter` on the resolved Sub. The index is
+///   load-bearing — hot-reload resolves every `removed`/`modified` name to an id through
+///   [`Self::find_by_name`] (O(log N)).
 ///
-/// `by_name` mirrors the slotmap entry's lifetime:
-/// [`Self::insert`] populates it, [`Self::remove`] clears it
-/// id-checked. The `insert` `debug_assert!` is the dev/CI signal for
-/// a duplicate name; the validator (static side) and the promoter's
-/// per-resolved-path uniqueness (dynamic side) make a collision
-/// unreachable in correct operation, and the `@`-disjointness keeps
-/// the two construction sites from racing each other. A release-mode
-/// breach is contained by the id-checked `remove`: the *mapping*
-/// stays 1:1; only a hypothetical orphaned slotmap entry (never the
-/// wrong name→id edge) could survive.
+/// `by_name` mirrors the slotmap entry's lifetime: [`Self::insert`] populates it, [`Self::remove`]
+/// clears it id-checked. The `insert` `debug_assert!` is the dev/CI signal for a duplicate name;
+/// the validator (static side) and the promoter's per-resolved-path uniqueness (dynamic side) make
+/// a collision unreachable in correct operation, and the `@`-disjointness keeps the two
+/// construction sites from racing each other. A release-mode breach is contained by the id-checked
+/// `remove`: the *mapping* stays 1:1; only a hypothetical orphaned slotmap entry (never the wrong
+/// name→id edge) could survive.
 #[derive(Debug, Default)]
 pub struct SubRegistry {
     subs: SlotMap<SubId, Sub>,
@@ -519,18 +444,15 @@ impl SubRegistry {
         Self::default()
     }
 
-    /// Insert a Sub; the returned slotmap [`SubId`] is its identity
-    /// authority (the Sub carries no `id` field). Both secondary
-    /// indices update in lockstep — `by_profile` and `by_name` are
+    /// Insert a Sub; the returned slotmap [`SubId`] is its identity authority (the Sub carries no
+    /// `id` field). Both secondary indices update in lockstep — `by_profile` and `by_name` are
     /// populated for every Sub.
     ///
-    /// The `debug_assert!` fires on a duplicate name — the dev/CI
-    /// signal only. Static-name uniqueness is validator-enforced;
-    /// dynamic-name uniqueness is promoter-enforced (one Sub per
-    /// resolved-path per promoter); cross-population uniqueness is
-    /// structural via the `@`-byte reservation. A release-mode breach
-    /// is contained by the id-checked [`Self::remove`] (the mapping
-    /// stays consistent).
+    /// The `debug_assert!` fires on a duplicate name — the dev/CI signal only. Static-name
+    /// uniqueness is validator-enforced; dynamic-name uniqueness is promoter-enforced (one Sub per
+    /// resolved-path per promoter); cross-population uniqueness is structural via the `@`-byte
+    /// reservation. A release-mode breach is contained by the id-checked [`Self::remove`] (the
+    /// mapping stays consistent).
     pub fn insert(&mut self, sub: Sub) -> SubId {
         let profile = sub.profile;
         let name = sub.name.clone();
@@ -544,12 +466,10 @@ impl SubRegistry {
         id
     }
 
-    /// Remove a Sub by id, returning the owned value. Clears both
-    /// secondary indices. The `by_name` clear is **id-checked** — the
-    /// entry drops only if it still points at `id`, so removing a
-    /// duplicate-name escape's shadowed id (a release-mode diff bug)
-    /// cannot clobber the live id's mapping. Returns `None` for a
-    /// stale id.
+    /// Remove a Sub by id, returning the owned value. Clears both secondary indices. The `by_name`
+    /// clear is **id-checked** — the entry drops only if it still points at `id`, so removing a
+    /// duplicate-name escape's shadowed id (a release-mode diff bug) cannot clobber the live id's
+    /// mapping. Returns `None` for a stale id.
     pub fn remove(&mut self, id: SubId) -> Option<Sub> {
         let sub = self.subs.remove(id)?;
         if let Some(v) = self.by_profile.get_mut(&sub.profile) {
@@ -589,46 +509,40 @@ impl SubRegistry {
         self.subs.is_empty()
     }
 
-    /// Resolve a user-facing `name` to its [`SubId`] in O(log N) via
-    /// `by_name`. `None` if no Sub holds `name`.
+    /// Resolve a user-facing `name` to its [`SubId`] in O(log N) via `by_name`. `None` if no Sub
+    /// holds `name`.
     ///
-    /// Returns hits for both static and dynamic Subs — callers that
-    /// need the discrimination read `sub.source_promoter` on the
-    /// resolved Sub. The config validator reserves the `@` byte, so a
-    /// static name and a synthesised `<promoter>@<path>` cannot
-    /// collide; uniqueness across the union is structural.
+    /// Returns hits for both static and dynamic Subs — callers that need the discrimination read
+    /// `sub.source_promoter` on the resolved Sub. The config validator reserves the `@` byte, so a
+    /// static name and a synthesised `<promoter>@<path>` cannot collide; uniqueness across the
+    /// union is structural.
     ///
-    /// Load-bearing: the engine's hot-reload shim resolves every
-    /// `removed`/`modified` name through here.
+    /// Load-bearing: the engine's hot-reload shim resolves every `removed`/`modified` name through
+    /// here.
     #[must_use]
     pub fn find_by_name(&self, name: &str) -> Option<SubId> {
         self.by_name.get(name).copied()
     }
 
-    /// Record that `sub` emitted an Effect — the B1-dedup / SeedDrift
-    /// fire-history mark, written by `emit_effects`' SubtreeRoot arm on
-    /// a successful push. Idempotent. A stale `SubId` (the Sub detached
-    /// between the emit decision and here) is a silent no-op: the flag
-    /// already died with the slotmap entry.
+    /// Record that `sub` emitted an Effect — the B1-dedup / SeedDrift fire-history mark, written by
+    /// `emit_effects`' SubtreeRoot arm on a successful push. Idempotent. A stale `SubId` (the Sub
+    /// detached between the emit decision and here) is a silent no-op: the flag already died with
+    /// the slotmap entry.
     pub fn mark_fired(&mut self, sub: SubId) {
         if let Some(s) = self.subs.get_mut(sub) {
             s.has_fired = true;
         }
     }
 
-    /// Record `count` successful Effect emissions on `sub` at `now`.
-    /// Bumps [`Sub::fire_count`] by `count` (saturating) and writes
-    /// [`Sub::last_fired_at`] = `Some(now)`. Observational —
-    /// [`Self::mark_fired`] is the load-bearing B1-dedup edge; this
-    /// one carries the per-Sub fire history the operator-facing `list`
-    /// projection renders.
+    /// Record `count` successful Effect emissions on `sub` at `now`. Bumps [`Sub::fire_count`] by
+    /// `count` (saturating) and writes [`Sub::last_fired_at`] = `Some(now)`. Observational —
+    /// [`Self::mark_fired`] is the load-bearing B1-dedup edge; this one carries the per-Sub fire
+    /// history the operator-facing `list` projection renders.
     ///
-    /// Called at most once per Sub per `emit_effects` pass on the
-    /// emit-side. `count` is `1` for a `SubtreeRoot` emission and the
-    /// per-file count for a `PerStableFile` emission (aggregated so
-    /// `Diagnostic::SubFired`'s wire stream isn't amplified by N).
-    /// A stale `SubId` is a silent no-op — the counter already died
-    /// with the slotmap entry, mirroring [`Self::mark_fired`].
+    /// Called at most once per Sub per `emit_effects` pass on the emit-side. `count` is `1` for a
+    /// `SubtreeRoot` emission and the per-file count for a `PerStableFile` emission (aggregated so
+    /// `Diagnostic::SubFired`'s wire stream isn't amplified by N). A stale `SubId` is a silent
+    /// no-op — the counter already died with the slotmap entry, mirroring [`Self::mark_fired`].
     pub fn record_fired(&mut self, sub: SubId, count: u32, now: Instant) {
         if let Some(s) = self.subs.get_mut(sub) {
             s.fire_count = s.fire_count.saturating_add(u64::from(count));
@@ -636,62 +550,49 @@ impl SubRegistry {
         }
     }
 
-    /// Bump [`Sub::dedup_suppressed_count`] by one — written when
-    /// `emit_effects` resolves a `SubtreeRoot` Sub to
-    /// `FireVerdict::SuppressDedup` (unchanged tree + already-fired +
-    /// not forced). Saturating add; observational only. A stale
-    /// `SubId` is a silent no-op — same shape as [`Self::mark_fired`]
-    /// and [`Self::record_fired`].
+    /// Bump [`Sub::dedup_suppressed_count`] by one — written when `emit_effects` resolves a
+    /// `SubtreeRoot` Sub to `FireVerdict::SuppressDedup` (unchanged tree + already-fired + not
+    /// forced). Saturating add; observational only. A stale `SubId` is a silent no-op — same shape
+    /// as [`Self::mark_fired`] and [`Self::record_fired`].
     pub fn record_dedup_suppressed(&mut self, sub: SubId) {
         if let Some(s) = self.subs.get_mut(sub) {
             s.dedup_suppressed_count = s.dedup_suppressed_count.saturating_add(1);
         }
     }
 
-    /// Replace `sub`'s per-Sub fields with `new_params` in place — the
-    /// `modified_params` arm of hot-reload's [`SubRegistryDiff`] split.
+    /// Replace `sub`'s per-Sub fields with `new_params` in place — the `modified_params` arm of
+    /// hot-reload's [`SubRegistryDiff`] split.
     ///
-    /// **Preserves**: [`SubId`], `profile`, `name`, `source_promoter`,
-    /// `has_fired`, `last_fired_at`, `fire_count`,
-    /// `dedup_suppressed_count`. The first two are structural (the
-    /// slotmap key and the Profile join are invariants of this Sub's
-    /// lifetime); `name` and `source_promoter` are pinned by the
-    /// rebind invariant (callers route through [`Self::find_by_name`],
-    /// which keys on `name`, and a `source_promoter` change would cross
-    /// the static↔dynamic boundary the diff already maps to add+remove).
-    /// `has_fired` is preserved because the B1 dedup floor reads it as
-    /// "this Sub has already announced the current stable tree state";
-    /// a program swap changes *what runs*, not *whether the tree
-    /// changed*. The three observational counters
-    /// (`last_fired_at` / `fire_count` / `dedup_suppressed_count`) are
-    /// preserved for the same reason — they record this Sub's history
-    /// under its operator-facing name, and a `modified_params` rebind
-    /// leaves both identity and history intact.
+    /// **Preserves**: [`SubId`], `profile`, `name`, `source_promoter`, `has_fired`,
+    /// `last_fired_at`, `fire_count`, `dedup_suppressed_count`. The first two are structural (the
+    /// slotmap key and the Profile join are invariants of this Sub's lifetime); `name` and
+    /// `source_promoter` are pinned by the rebind invariant (callers route through
+    /// [`Self::find_by_name`], which keys on `name`, and a `source_promoter` change would cross the
+    /// static↔dynamic boundary the diff already maps to add+remove). `has_fired` is preserved
+    /// because the B1 dedup floor reads it as "this Sub has already announced the current stable
+    /// tree state"; a program swap changes *what runs*, not *whether the tree changed*. The three
+    /// observational counters (`last_fired_at` / `fire_count` / `dedup_suppressed_count`) are
+    /// preserved for the same reason — they record this Sub's history under its operator-facing
+    /// name, and a `modified_params` rebind leaves both identity and history intact.
     ///
-    /// **Replaces**: `program`, `scope`, `settle`, `log_output`;
-    /// recomputes `needs_diff` (derived from `scope` + the program's
-    /// diff-placeholder set).
+    /// **Replaces**: `program`, `scope`, `settle`, `log_output`; recomputes `needs_diff` (derived
+    /// from `scope` + the program's diff-placeholder set).
     ///
-    /// Returns `Some((prior_settle, profile))` on success: `prior_settle`
-    /// is the per-Sub settle the caller compares against
-    /// `new_params.settle` to gate a Profile-settle recompute; `profile`
-    /// is the rebound Sub's host Profile, threaded out so the wrapper
-    /// avoids a second `get(sub)` for the recompute target. Both reads
-    /// fold into the same `get_mut` the mutation uses — the wrapper's
-    /// recompute gate becomes a single comparison with no follow-up
-    /// lookup. `Sub.profile` is invariant for the Sub's lifetime, so
-    /// returning it costs nothing observable on the rebind itself.
+    /// Returns `Some((prior_settle, profile))` on success: `prior_settle` is the per-Sub settle the
+    /// caller compares against `new_params.settle` to gate a Profile-settle recompute; `profile` is
+    /// the rebound Sub's host Profile, threaded out so the wrapper avoids a second `get(sub)` for
+    /// the recompute target. Both reads fold into the same `get_mut` the mutation uses — the
+    /// wrapper's recompute gate becomes a single comparison with no follow-up lookup. `Sub.profile`
+    /// is invariant for the Sub's lifetime, so returning it costs nothing observable on the rebind
+    /// itself.
     ///
-    /// Returns `None` on a stale [`SubId`]. The invariant is that the
-    /// dispatcher resolves through [`Self::find_by_name`] in the same
-    /// step as the rebind, so a stale id is structurally unexpected;
-    /// the caller surfaces it via [`crate::Diagnostic::RebindUnknownSub`].
+    /// Returns `None` on a stale [`SubId`]. The invariant is that the dispatcher resolves through
+    /// [`Self::find_by_name`] in the same step as the rebind, so a stale id is structurally
+    /// unexpected; the caller surfaces it via [`crate::Diagnostic::RebindUnknownSub`].
     ///
-    /// `debug_assert!`s pin the `name` / `source_promoter` invariants —
-    /// a release-mode breach would silently rewrite the identifying
-    /// fields under the registry's `by_name` index, leaving the index
-    /// pointing at the wrong [`SubId`]; the assertions catch the
-    /// breach at the call site.
+    /// `debug_assert!`s pin the `name` / `source_promoter` invariants — a release-mode breach would
+    /// silently rewrite the identifying fields under the registry's `by_name` index, leaving the
+    /// index pointing at the wrong [`SubId`]; the assertions catch the breach at the call site.
     pub fn rebind(&mut self, sub: SubId, new_params: SubParams) -> Option<(Duration, ProfileId)> {
         let s = self.subs.get_mut(sub)?;
         debug_assert_eq!(
@@ -712,20 +613,18 @@ impl SubRegistry {
         Some((prior_settle, profile))
     }
 
-    /// Clear `sub`'s fire history — the `EffectComplete::Failed` clear.
-    /// A failed Effect produced no observation worth deduplicating
-    /// against, so the next stable verdict at this Sub must re-fire
-    /// even on an unchanged tree. No-op on a stale `SubId` (already
-    /// detached ⇒ its history is already gone).
+    /// Clear `sub`'s fire history — the `EffectComplete::Failed` clear. A failed Effect produced no
+    /// observation worth deduplicating against, so the next stable verdict at this Sub must re-fire
+    /// even on an unchanged tree. No-op on a stale `SubId` (already detached ⇒ its history is
+    /// already gone).
     pub fn clear_fired(&mut self, sub: SubId) {
         if let Some(s) = self.subs.get_mut(sub) {
             s.has_fired = false;
         }
     }
 
-    /// Whether any Sub on `profile` has fired — the fast
-    /// `seed_drift_observed` short-circuit ("never fired ⇒ no prior
-    /// emission to re-fire on recovery").
+    /// Whether any Sub on `profile` has fired — the fast `seed_drift_observed` short-circuit
+    /// ("never fired ⇒ no prior emission to re-fire on recovery").
     #[must_use]
     pub fn any_fired(&self, profile: ProfileId) -> bool {
         self.at(profile)
@@ -733,16 +632,12 @@ impl SubRegistry {
             .any(|sid| self.subs.get(*sid).is_some_and(|s| s.has_fired))
     }
 
-    /// The Subs on `profile` that have fired — the SeedDrift
-    /// conservative-recovery fire-filter basis.
+    /// The Subs on `profile` that have fired — the SeedDrift conservative-recovery fire-filter basis.
     ///
-    /// **Order is membership only.** The caller filters with
-    /// `.contains`; the observable Effect order is established globally
-    /// by [`crate::StepOutput::sort_for_emission`] (the load-bearing
-    /// `(SubId, ResourceId)` canonicalisation every step applies before
-    /// returning), so the insertion order `at` yields here is
-    /// sufficient and deterministic — there is no per-call re-sort to
-    /// justify.
+    /// **Order is membership only.** The caller filters with `.contains`; the observable Effect order
+    /// is established globally by [`crate::StepOutput::sort_for_emission`] (the load-bearing `(SubId,
+    /// ResourceId)` canonicalisation every step applies before returning), so the insertion order
+    /// `at` yields here is sufficient and deterministic — there is no per-call re-sort to justify.
     #[must_use]
     pub fn fired_in(&self, profile: ProfileId) -> SmallVec<[SubId; 2]> {
         self.at(profile)
@@ -752,19 +647,16 @@ impl SubRegistry {
             .collect()
     }
 
-    /// Whether `profile` has at least one attached `PerStableFile`
-    /// Sub — the scope test behind the per-file recovery-drop signal.
+    /// Whether `profile` has at least one attached `PerStableFile` Sub — the scope test behind the
+    /// per-file recovery-drop signal.
     ///
-    /// **Must not be collapsed into [`crate::Profile::has_per_file_fds`].**
-    /// That predicate is events-mask derived (`CONTENT | METADATA`
-    /// present) and a `SubtreeRoot` Sub watching `CONTENT` sets it
-    /// just as much as a `PerStableFile` Sub does — it is *necessary*
-    /// for per-file FDs but *not sufficient* for "this Profile carries
-    /// a per-file-*scoped* reaction". Swapping this scan for
-    /// `has_per_file_fds` would false-positive the recovery-drop
-    /// diagnostic on Subtree-only Profiles that happen to watch
-    /// content. The `scope` field is the only sound witness; the scan
-    /// stays.
+    /// **Must not be collapsed into [`crate::Profile::has_per_file_fds`].** That predicate is
+    /// events-mask derived (`CONTENT | METADATA` present) and a `SubtreeRoot` Sub watching
+    /// `CONTENT` sets it just as much as a `PerStableFile` Sub does — it is *necessary* for
+    /// per-file FDs but *not sufficient* for "this Profile carries a per-file-*scoped* reaction".
+    /// Swapping this scan for `has_per_file_fds` would false-positive the recovery-drop diagnostic
+    /// on Subtree-only Profiles that happen to watch content. The `scope` field is the only sound
+    /// witness; the scan stays.
     #[must_use]
     pub fn has_per_stable_file_sub(&self, profile: ProfileId) -> bool {
         self.at(profile).iter().any(|sid| {
@@ -788,8 +680,8 @@ mod tests {
 
     const SETTLE: Duration = Duration::from_millis(100);
 
-    /// Build a one-op program holding a single Exec body. Equivalent to
-    /// the lowering of a single `[[watch.actions]] exec = [...]` entry.
+    /// Build a one-op program holding a single Exec body. Equivalent to the lowering of a single
+    /// `[[watch.actions]] exec = [...]` entry.
     fn single_exec_program(exec: ExecAction) -> Arc<ActionProgram> {
         let mut b = ProgramBuilder::new();
         let h = b.emit(SpawnBody::Exec(exec));
@@ -834,12 +726,10 @@ mod tests {
     #[test]
     fn references_diff_derived_false_for_anchor_only_program() {
         assert!(!anchor_only_program().references_diff_derived());
-        // The full non-diff-derived set: every single-value placeholder
-        // PLUS `Excluded` (multi-value but not diff-derived). Including
-        // `Excluded` here is the load-bearing assertion of the
-        // `is_multivalue` / `is_diff_derived` split — using the
-        // `Excluded` variant in a template must NOT ratchet
-        // `Sub.needs_diff` true.
+        // The full non-diff-derived set: every single-value placeholder PLUS `Excluded`
+        // (multi-value but not diff-derived). Including `Excluded` here is the load-bearing
+        // assertion of the `is_multivalue` / `is_diff_derived` split — using the `Excluded` variant
+        // in a template must NOT ratchet `Sub.needs_diff` true.
         for p in [
             Placeholder::Path,
             Placeholder::Relative,
@@ -904,15 +794,12 @@ mod tests {
         assert!(!sub.needs_diff);
     }
 
-    /// A freshly built Sub starts with no fire history — the B1-dedup
-    /// / SeedDrift baseline. Relocated from the deleted per-Profile
-    /// `new_profile_initialises_fired_subs_empty`: the history now
-    /// lives per-Sub, so the "starts empty" contract is asserted on
-    /// the Sub, not the Profile. Also pins the three observational
-    /// counters' fresh state — `record_fired` /
-    /// `record_dedup_suppressed` are the only writers, so a fresh Sub
-    /// can never carry inherited history from a slotmap slot's prior
-    /// occupant.
+    /// A freshly built Sub starts with no fire history — the B1-dedup / SeedDrift baseline.
+    /// Relocated from the deleted per-Profile `new_profile_initialises_fired_subs_empty`: the
+    /// history now lives per-Sub, so the "starts empty" contract is asserted on the Sub, not the
+    /// Profile. Also pins the three observational counters' fresh state — `record_fired` /
+    /// `record_dedup_suppressed` are the only writers, so a fresh Sub can never carry inherited
+    /// history from a slotmap slot's prior occupant.
     #[test]
     fn fresh_sub_starts_unfired() {
         let sub = Sub::from_request(
@@ -932,10 +819,9 @@ mod tests {
         assert_eq!(sub.dedup_suppressed_count, 0, "no suppressed verdicts");
     }
 
-    /// `record_fired` accumulates per-pass counts into `fire_count` and
-    /// stamps `last_fired_at` with the supplied instant. The B1-dedup
-    /// `has_fired` is untouched — `mark_fired` and `record_fired` are
-    /// disjoint edge methods on disjoint pieces of fire history.
+    /// `record_fired` accumulates per-pass counts into `fire_count` and stamps `last_fired_at` with
+    /// the supplied instant. The B1-dedup `has_fired` is untouched — `mark_fired` and
+    /// `record_fired` are disjoint edge methods on disjoint pieces of fire history.
     #[test]
     fn record_fired_bumps_count_and_stamps_last_fired() {
         let mut reg = SubRegistry::new();
@@ -961,8 +847,7 @@ mod tests {
             "record_fired must NOT touch has_fired (mark_fired owns it)",
         );
 
-        // A PerStableFile-style aggregation: count=3 adds to the
-        // running total, timestamp advances.
+        // A PerStableFile-style aggregation: count=3 adds to the running total, timestamp advances.
         let t1 = t0 + Duration::from_millis(10);
         reg.record_fired(sid, 3, t1);
         let s = reg.get(sid).expect("Sub alive");
@@ -974,9 +859,8 @@ mod tests {
         reg.record_fired(sid, 1, t1); // would otherwise panic on missing entry
     }
 
-    /// `record_dedup_suppressed` increments the dedicated counter and
-    /// touches no other field — the SuppressDedup arm signals "Sub
-    /// would have fired but the dedup floor said no", distinct from
+    /// `record_dedup_suppressed` increments the dedicated counter and touches no other field — the
+    /// SuppressDedup arm signals "Sub would have fired but the dedup floor said no", distinct from
     /// fires (`record_fired`) and the B1 flag (`mark_fired`).
     #[test]
     fn record_dedup_suppressed_bumps_only_its_own_counter() {
@@ -1049,10 +933,9 @@ mod tests {
         assert!(reg.at(ProfileId::default()).is_empty());
     }
 
-    /// After a multi-insert/remove sequence, every key `iter()` yields
-    /// re-looks-up via `get` to the same Sub, and `at(profile)` equals
-    /// the live key set. The slotmap key is the sole identity authority
-    /// (a `Sub` carries no `id`).
+    /// After a multi-insert/remove sequence, every key `iter()` yields re-looks-up via `get` to the
+    /// same Sub, and `at(profile)` equals the live key set. The slotmap key is the sole identity
+    /// authority (a `Sub` carries no `id`).
     #[test]
     fn registry_iter_keys_round_trip_through_get() {
         let mut reg = SubRegistry::new();
@@ -1143,11 +1026,9 @@ mod tests {
         assert!(reg.find_by_name("build").is_none());
     }
 
-    /// `by_name` indexes every Sub regardless of `source_promoter` —
-    /// both a static operator name and a synthesised
-    /// `<promoter>@<path>` resolve through `find_by_name`. The two
-    /// populations are disjoint by the config validator's `@`-byte
-    /// reservation, so their indexed union is unique.
+    /// `by_name` indexes every Sub regardless of `source_promoter` — both a static operator name and
+    /// a synthesised `<promoter>@<path>` resolve through `find_by_name`. The two populations are
+    /// disjoint by the config validator's `@`-byte reservation, so their indexed union is unique.
     #[test]
     fn by_name_indexes_static_and_dynamic_subs() {
         let mut reg = SubRegistry::new();
@@ -1185,9 +1066,8 @@ mod tests {
         );
     }
 
-    /// `remove` drops the dynamic Sub's `by_name` entry just like a
-    /// static one — and `by_profile` accounting is symmetric across
-    /// the static/dynamic axis.
+    /// `remove` drops the dynamic Sub's `by_name` entry just like a static one — and `by_profile`
+    /// accounting is symmetric across the static/dynamic axis.
     #[test]
     fn remove_clears_by_name_for_dynamic_sub() {
         let mut reg = SubRegistry::new();
@@ -1239,8 +1119,8 @@ mod tests {
         assert_eq!(reg.len(), 0);
     }
 
-    /// `Sub.program` is reference-counted: cloning the field bumps the
-    /// strong count without copying the inner [`ActionProgram`].
+    /// `Sub.program` is reference-counted: cloning the field bumps the strong count without copying
+    /// the inner [`ActionProgram`].
     #[test]
     fn sub_program_is_arc_wrapped() {
         let sub = Sub::from_request(
@@ -1268,9 +1148,9 @@ mod tests {
         );
     }
 
-    /// `Sub::from_request` does not re-wrap the program: the caller's Arc
-    /// is the same allocation the Sub stores. The minted Arc from the
-    /// config layer's `lower_to_program` flows through without churn.
+    /// `Sub::from_request` does not re-wrap the program: the caller's Arc is the same allocation
+    /// the Sub stores. The minted Arc from the config layer's `lower_to_program` flows through
+    /// without churn.
     #[test]
     fn sub_new_does_not_rewrap_program_arc() {
         let program = anchor_only_program();
@@ -1292,11 +1172,9 @@ mod tests {
         );
     }
 
-    /// Diff is plain data — pins the `Default` shape and the
-    /// [`SubRegistryDiff::is_empty`] contract in one place. **Each**
-    /// of the four buckets independently flips the predicate, so a
-    /// future bucket addition that forgets to extend `is_empty` is
-    /// caught here.
+    /// Diff is plain data — pins the `Default` shape and the [`SubRegistryDiff::is_empty`] contract
+    /// in one place. **Each** of the four buckets independently flips the predicate, so a future
+    /// bucket addition that forgets to extend `is_empty` is caught here.
     #[test]
     fn sub_registry_diff_is_empty_per_bucket() {
         assert!(SubRegistryDiff::default().is_empty(), "default is empty");
@@ -1352,12 +1230,10 @@ mod tests {
         }
     }
 
-    /// `SubRegistry::rebind` replaces the four per-Sub fields and
-    /// preserves the structural ones — including `has_fired`, which
-    /// the B1 dedup floor reads as "this Sub has already announced
-    /// the current stable tree state." A program swap changes *what
-    /// runs*, not *whether the tree changed*, so the flag must not
-    /// reset on rebind.
+    /// `SubRegistry::rebind` replaces the four per-Sub fields and preserves the structural ones —
+    /// including `has_fired`, which the B1 dedup floor reads as "this Sub has already announced the
+    /// current stable tree state." A program swap changes *what runs*, not *whether the tree
+    /// changed*, so the flag must not reset on rebind.
     #[test]
     fn rebind_replaces_per_sub_fields_and_preserves_has_fired() {
         let mut reg = SubRegistry::new();
@@ -1426,9 +1302,8 @@ mod tests {
         );
     }
 
-    /// Stale `SubId` returns `None`. The dispatcher resolves through
-    /// `find_by_name` in the same step as the rebind, so this surface
-    /// is rarely hit in production; the engine wraps it in a
+    /// Stale `SubId` returns `None`. The dispatcher resolves through `find_by_name` in the same
+    /// step as the rebind, so this surface is rarely hit in production; the engine wraps it in a
     /// `RebindUnknownSub` diagnostic when it does.
     #[test]
     fn rebind_returns_none_on_stale_sub_id() {
@@ -1474,8 +1349,8 @@ mod class_set_tests {
 
     #[test]
     fn distinct_bit_positions() {
-        // All four named values pairwise distinct: each occupies its own
-        // bit position (verifies the constants haven't drifted).
+        // All four named values pairwise distinct: each occupies its own bit position (verifies the
+        // constants haven't drifted).
         let all = [
             ClassSet::EMPTY,
             ClassSet::STRUCTURE,
@@ -1530,8 +1405,8 @@ mod class_set_tests {
         assert!(!s.contains(ClassSet::CONTENT | ClassSet::METADATA));
     }
 
-    /// `contains(EMPTY)` returns `false` — guards against the bitflags
-    /// footgun where `contains(EMPTY) == true` for every set.
+    /// `contains(EMPTY)` returns `false` — guards against the bitflags footgun where
+    /// `contains(EMPTY) == true` for every set.
     #[test]
     fn contains_empty_is_false() {
         assert!(!ClassSet::EMPTY.contains(ClassSet::EMPTY));
@@ -1557,9 +1432,8 @@ mod class_set_tests {
 
     #[test]
     fn bits_round_trip_through_or() {
-        // Each case pairs a `ClassSet` with an *independently spelled*
-        // bitmask. Asserting the exact `u8` (not popcount) catches a
-        // bit-position swap in the constants or `BitOr` — an
+        // Each case pairs a `ClassSet` with an *independently spelled* bitmask. Asserting the exact
+        // `u8` (not popcount) catches a bit-position swap in the constants or `BitOr` — an
         // equal-popcount pair such as 0b011 / 0b101 would hide it.
         let cases: [(ClassSet, u8); 8] = [
             (ClassSet::EMPTY, 0b000),

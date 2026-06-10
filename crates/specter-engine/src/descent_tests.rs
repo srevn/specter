@@ -1,6 +1,6 @@
-//! Sibling tests for `engine::descent` — pending-path scenarios that
-//! exercise `DescentState` lifecycle in isolation. Tests compose `Engine`
-//! with `MockSensor`-style direct ProbeResponse injection.
+//! Sibling tests for `engine::descent` — pending-path scenarios that exercise `DescentState`
+//! lifecycle in isolation. Tests compose `Engine` with `MockSensor`-style direct ProbeResponse
+//! injection.
 
 #![allow(
     clippy::items_after_statements,
@@ -41,13 +41,11 @@ fn empty_program() -> Arc<ActionProgram> {
     ])])
 }
 
-/// Build an `Arc<DirSnapshot>` carrying the supplied single-component
-/// children. Descent probes ship `recursive=false`, so every descent test
-/// response is a single-level `DirSnapshot`; this helper matches that
-/// shape exactly. Recursive uses are out of scope for the descent test
-/// surface (recursive walks live in burst tests). The typed
-/// `ProbeOutcome::DirEnumerated` variant takes `Arc<DirSnapshot>`
-/// directly — no `TreeSnapshot::Dir` wrap is needed at the wire boundary.
+/// Build an `Arc<DirSnapshot>` carrying the supplied single-component children. Descent probes ship
+/// `recursive=false`, so every descent test response is a single-level `DirSnapshot`; this helper
+/// matches that shape exactly. Recursive uses are out of scope for the descent test surface
+/// (recursive walks live in burst tests). The typed `ProbeOutcome::DirEnumerated` variant takes
+/// `Arc<DirSnapshot>` directly — no `TreeSnapshot::Dir` wrap is needed at the wire boundary.
 fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
@@ -69,12 +67,12 @@ fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     ))
 }
 
-/// Set up an Engine with `/foo` as a Dir; attach a Sub at path
-/// `/foo/bar`. Bar doesn't exist yet — descent registers.
+/// Set up an Engine with `/foo` as a Dir; attach a Sub at path `/foo/bar`. Bar doesn't exist yet —
+/// descent registers.
 fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::ProfileId) {
     let mut e = Engine::new();
-    // /foo exists as a Dir with no role-anchor — represents a real
-    // directory the engine has discovered.
+    // /foo exists as a Dir with no role-anchor — represents a real directory the engine has
+    // discovered.
     let foo = e
         .tree_mut()
         .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User)
@@ -98,9 +96,8 @@ fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::Prof
     (e, sid, pid)
 }
 
-/// Resolve `/foo` after the helper's `ensure_path` placed it under the
-/// synthetic FS-root. Centralises the two-step lookup so individual tests
-/// stay readable.
+/// Resolve `/foo` after the helper's `ensure_path` placed it under the synthetic FS-root.
+/// Centralises the two-step lookup so individual tests stay readable.
 fn lookup_foo(e: &Engine) -> ResourceId {
     let root = e
         .tree()
@@ -138,9 +135,8 @@ fn descent_one_level_advances_on_created_entry() {
         Instant::now(),
     );
 
-    // Anchor materialized: descent state cleared; the Seed burst
-    // is cold-arm Verifying-first — a probe is emitted at burst
-    // construction (the same step as materialization).
+    // Anchor materialized: descent state cleared; the Seed burst is cold-arm Verifying-first — a
+    // probe is emitted at burst construction (the same step as materialization).
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
     assert!(
         matches!(
@@ -394,12 +390,11 @@ fn descent_anchor_kind_set_from_entry() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Companion to `descent_anchor_kind_set_from_entry`: descent
-/// materialisation must also cache the kind on the Profile itself, not
-/// just the Tree slot. The cached `Profile.kind` is the read path for
-/// `transition_to_verifying`'s probe-target dispatch — without it, a
-/// File-anchored Profile materialised from descent would fall through to
-/// the `unwrap_or(File)` default by accident rather than by knowledge.
+/// Companion to `descent_anchor_kind_set_from_entry`: descent materialisation must also cache the
+/// kind on the Profile itself, not just the Tree slot. The cached `Profile.kind` is the read path
+/// for `transition_to_verifying`'s probe-target dispatch — without it, a File-anchored Profile
+/// materialised from descent would fall through to the `unwrap_or(File)` default by accident rather
+/// than by knowledge.
 #[test]
 fn descent_materialization_caches_profile_kind() {
     let (mut e, _sid, pid) = setup_pending_one_level();
@@ -410,10 +405,8 @@ fn descent_materialization_caches_profile_kind() {
     );
 
     let corr = e.pending_probe_for(ProbeOwner::Profile(pid)).unwrap();
-    // Inject as a regular File. This pins the `Profile.kind` cache so a
-    // File-anchored materialisation can never re-introduce the
-    // descendant-observation dispatch path by an unprobed-anchor
-    // accident.
+    // Inject as a regular File. This pins the `Profile.kind` cache so a File-anchored materialisation
+    // can never re-introduce the descendant-observation dispatch path by an unprobed-anchor accident.
     let _foo = lookup_foo(&e);
     let snap = dir_snap_with(vec![("bar", EntryKind::File, 1)]);
     let _ = e.step(
@@ -435,9 +428,9 @@ fn descent_materialization_caches_profile_kind() {
 
 // ===== absolute-path bootstrap & minimal descent probe =====
 
-/// Absolute-path attaches bootstrap a synthetic FS-root `"/"` segment so
-/// descents have a guaranteed-existing starting prefix. The bootstrap is
-/// idempotent across repeated absolute attaches.
+/// Absolute-path attaches bootstrap a synthetic FS-root `"/"` segment so descents have a
+/// guaranteed-existing starting prefix. The bootstrap is idempotent across repeated absolute
+/// attaches.
 #[test]
 fn absolute_attach_bootstraps_fs_root_segment() {
     let mut e = Engine::new();
@@ -479,13 +472,13 @@ fn absolute_attach_bootstraps_fs_root_segment() {
     );
     assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_some());
 
-    // The FS-root carries the descent's watch_demand contribution; the
-    // anchor scaffold doesn't (descent hasn't materialized it yet).
+    // The FS-root carries the descent's watch_demand contribution; the anchor scaffold doesn't
+    // (descent hasn't materialized it yet).
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
     assert_eq!(e.tree().get(tmp).unwrap().watch_demand(), 0);
 
-    // The emitted Watch op carries an *absolute* path — `Tree::path_of`
-    // reconstructs `/` because `PathBuf::push("/")` resets to absolute.
+    // The emitted Watch op carries an *absolute* path — `Tree::path_of` reconstructs `/` because
+    // `PathBuf::push("/")` resets to absolute.
     let watch_for_root = out.watch_ops.iter().find_map(|op| match op {
         specter_core::WatchOp::Watch { resource, path, .. } if *resource == root => {
             Some(path.as_ref())
@@ -514,9 +507,8 @@ fn absolute_attach_bootstraps_fs_root_segment() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Two absolute attaches share the FS-root via the bootstrap's
-/// idempotence (`Tree::ensure_root("/")` returns the existing root on
-/// the second call).
+/// Two absolute attaches share the FS-root via the bootstrap's idempotence
+/// (`Tree::ensure_root("/")` returns the existing root on the second call).
 #[test]
 fn second_absolute_attach_reuses_fs_root() {
     let mut e = Engine::new();
@@ -555,8 +547,8 @@ fn second_absolute_attach_reuses_fs_root() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Deep absolute paths walk one segment at a time: the descent's
-/// `remaining_components` reflects the unmaterialized tail.
+/// Deep absolute paths walk one segment at a time: the descent's `remaining_components` reflects
+/// the unmaterialized tail.
 #[test]
 fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
     let mut e = Engine::new();
@@ -593,12 +585,10 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Descent probes ride a dedicated `ProbeRequest::Descent` variant —
-/// the engine ships only `(profile, correlation, target_path)`, leaving
-/// the scan-config override (recursive=false, hidden=true, no
-/// pattern/exclude) entirely to the walker. Since the engine carries
-/// no scan-config on the wire, the override correctness lives in the
-/// sensor's walker tests; this engine test pins the variant choice.
+/// Descent probes ride a dedicated `ProbeRequest::Descent` variant — the engine ships only `(profile,
+/// correlation, target_path)`, leaving the scan-config override (recursive=false, hidden=true, no
+/// pattern/exclude) entirely to the walker. Since the engine carries no scan-config on the wire, the
+/// override correctness lives in the sensor's walker tests; this engine test pins the variant choice.
 #[test]
 fn descent_probe_uses_descent_variant() {
     let mut e = Engine::new();
@@ -642,9 +632,8 @@ fn descent_probe_uses_descent_variant() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Materialization at descent's anchor branch sets
-/// `Profile.anchor_claim = AnchorClaim::Held` so a later reap correctly
-/// releases the anchor's `watch_demand`.
+/// Materialization at descent's anchor branch sets `Profile.anchor_claim = AnchorClaim::Held` so a
+/// later reap correctly releases the anchor's `watch_demand`.
 #[test]
 fn descent_materialization_sets_anchor_claim_held() {
     let (mut e, _sid, pid) = setup_pending_one_level();
@@ -677,8 +666,7 @@ fn reap_pending_profile_releases_only_descent_prefix() {
     let foo = lookup_foo(&e);
     let bar = e.tree().lookup(Some(foo), "bar").expect("anchor scaffold");
 
-    // Pre-conditions: descent contributes to `foo`, anchor `bar` is
-    // unbumped.
+    // Pre-conditions: descent contributes to `foo`, anchor `bar` is unbumped.
     assert_eq!(e.tree().get(foo).unwrap().watch_demand(), 1);
     assert_eq!(e.tree().get(bar).unwrap().watch_demand(), 0);
     assert_eq!(
@@ -686,13 +674,12 @@ fn reap_pending_profile_releases_only_descent_prefix() {
         AnchorClaim::None,
     );
 
-    // Detach the only Sub. Profile is Pending; Pending Profiles reap
-    // immediately (they hold no burst that would resolve a deferred reap).
+    // Detach the only Sub. Profile is Pending; Pending Profiles reap immediately (they hold no
+    // burst that would resolve a deferred reap).
     let out = e.step(Input::DetachSub(sid), Instant::now());
 
-    // `bar`'s slot is reaped (no other anchors), `foo` still has its
-    // pre-existing User Resource — only the descent's contribution is
-    // released.
+    // `bar`'s slot is reaped (no other anchors), `foo` still has its pre-existing User Resource —
+    // only the descent's contribution is released.
     assert_eq!(
         e.tree()
             .get(foo)
@@ -708,9 +695,8 @@ fn reap_pending_profile_releases_only_descent_prefix() {
     );
 }
 
-/// A fresh `Profile::new` defaults to `ProfileState::Idle`,
-/// not Pending. Pending is reachable only through the descent registry
-/// paths (`attach_sub_inner` Pending branch, `start_pending_recovery`,
+/// A fresh `Profile::new` defaults to `ProfileState::Idle`, not Pending. Pending is reachable only
+/// through the descent registry paths (`attach_sub_inner` Pending branch, `start_pending_recovery`,
 /// `dispatch_descent_vanished` rewind).
 #[test]
 fn profile_state_default_is_idle() {
@@ -730,8 +716,8 @@ fn profile_state_default_is_idle() {
     assert!(matches!(p.state(), ProfileState::Idle));
 }
 
-/// `Engine::descent_state` returns `None` for an Idle Profile.
-/// The accessor's reader contract is "Some iff state is Pending."
+/// `Engine::descent_state` returns `None` for an Idle Profile. The accessor's reader contract is
+/// "Some iff state is Pending."
 #[test]
 fn descent_state_helper_returns_none_for_idle() {
     let mut e = Engine::new();
@@ -751,8 +737,8 @@ fn descent_state_helper_returns_none_for_idle() {
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile();
-    // Materialized Profile starts a Seed burst — Active, not Idle. Drive
-    // it to completion to land in Idle.
+    // Materialized Profile starts a Seed burst — Active, not Idle. Drive it to completion to land
+    // in Idle.
     let probe = e
         .step(
             Input::ProbeResponse(ProbeResponse {
@@ -767,8 +753,8 @@ fn descent_state_helper_returns_none_for_idle() {
     assert!(e.descent_state(ProbeOwner::Profile(pid)).is_none());
 }
 
-/// `Engine::descent_state` returns `None` for an Active Profile
-/// (a burst is in flight; the descent slot is not used).
+/// `Engine::descent_state` returns `None` for an Active Profile (a burst is in flight; the descent
+/// slot is not used).
 #[test]
 fn descent_state_helper_returns_none_for_active() {
     let mut e = Engine::new();
@@ -797,8 +783,8 @@ fn descent_state_helper_returns_none_for_active() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `Engine::descent_state` returns `Some(d)` for a Pending Profile,
-/// and the inner state matches what was registered.
+/// `Engine::descent_state` returns `Some(d)` for a Pending Profile, and the inner state matches
+/// what was registered.
 #[test]
 fn descent_state_helper_returns_some_for_pending() {
     let (mut e, _sid, pid) = setup_pending_one_level();
@@ -817,8 +803,7 @@ fn descent_state_helper_returns_some_for_pending() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `Engine::descent_state` returns `None` for an unknown `ProfileId`.
-/// No panic; defensive read.
+/// `Engine::descent_state` returns `None` for an unknown `ProfileId`. No panic; defensive read.
 #[test]
 fn descent_state_helper_handles_unknown_profile() {
     let e = Engine::new();
@@ -826,12 +811,10 @@ fn descent_state_helper_handles_unknown_profile() {
     assert!(e.descent_state(ProbeOwner::Profile(bogus)).is_none());
 }
 
-/// `ProfileState::Pending` and `ProfileState::Active` are mutually
-/// exclusive variants — the compiler proves the property. This test
-/// exercises the lifecycle transition Pending → Idle → Active(Seed) at
-/// descent anchor materialization and asserts the Profile passes through
-/// the intermediate Idle state cleanly (no observation of
-/// Pending+Active simultaneously).
+/// `ProfileState::Pending` and `ProfileState::Active` are mutually exclusive variants — the
+/// compiler proves the property. This test exercises the lifecycle transition Pending → Idle →
+/// Active(Seed) at descent anchor materialization and asserts the Profile passes through the
+/// intermediate Idle state cleanly (no observation of Pending+Active simultaneously).
 #[test]
 fn profile_state_pending_and_active_are_mutually_exclusive() {
     use specter_core::ProfileState;
@@ -852,8 +835,8 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
         }),
         Instant::now(),
     );
-    // After anchor materialization: Pending → Idle, then start_seed_burst
-    // transitions Idle → Active(Seed). The post-step state is Active.
+    // After anchor materialization: Pending → Idle, then start_seed_burst transitions Idle →
+    // Active(Seed). The post-step state is Active.
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Active(_, _)
@@ -863,24 +846,22 @@ fn profile_state_pending_and_active_are_mutually_exclusive() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `reap_profile`'s trichotomy `debug_assert!` is reachable from the
-/// Pending lifecycle (descent in flight, then Sub detaches) and does not
-/// fire — the assertion pins the invariant in code, not just prose.
+/// `reap_profile`'s trichotomy `debug_assert!` is reachable from the Pending lifecycle (descent in
+/// flight, then Sub detaches) and does not fire — the assertion pins the invariant in code, not
+/// just prose.
 #[test]
 fn reap_profile_trichotomy_debug_assert_holds_for_pending() {
     let (mut e, sid, pid) = setup_pending_one_level();
-    // Pending Profile reap path: descent_prefix.is_some() &&
-    // anchor_claim == None. Predicate `(some && Held)` matches false →
-    // assertion holds.
+    // Pending Profile reap path: descent_prefix.is_some() && anchor_claim == None. Predicate `(some
+    // && Held)` matches false → assertion holds.
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
 }
 
 #[test]
 fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
-    // Materialized Profile reap path: descent_prefix.is_none() &&
-    // anchor_claim == Held. Predicate `(none && Held)` matches false →
-    // assertion holds.
+    // Materialized Profile reap path: descent_prefix.is_none() && anchor_claim == Held. Predicate
+    // `(none && Held)` matches false → assertion holds.
     let mut e = Engine::new();
     let foo = e.tree_mut().ensure_root("foo", ResourceRole::User);
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
@@ -902,8 +883,8 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
         e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::Held,
     );
-    // Drain Seed via Vanished so the Profile lands Idle with the
-    // anchor's contribution still held. Then detach.
+    // Drain Seed via Vanished so the Profile lands Idle with the anchor's contribution still held.
+    // Then detach.
     let Some(corr) = e.pending_probe_for(ProbeOwner::Profile(pid)) else {
         return;
     };
@@ -915,18 +896,15 @@ fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
         }),
         Instant::now(),
     );
-    // Vanished clears the anchor contribution (it's the terminal-event
-    // path). Force the materialized branch by re-seeding via a fresh
-    // anchor lookup. For coverage of the assertion, the detach path
-    // itself is sufficient (it runs reap_profile, which contains the
-    // assertion).
+    // Vanished clears the anchor contribution (it's the terminal-event path). Force the
+    // materialized branch by re-seeding via a fresh anchor lookup. For coverage of the assertion,
+    // the detach path itself is sufficient (it runs reap_profile, which contains the assertion).
     let _ = e.step(Input::DetachSub(sid), Instant::now());
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
 }
 
-/// Detaching the last Sub on a Pending Profile reaps immediately rather
-/// than setting `reap_pending = true`. Pending Profiles have no burst
-/// whose `finish_burst_to_idle` would resolve a deferred reap.
+/// Detaching the last Sub on a Pending Profile reaps immediately rather than setting `reap_pending =
+/// true`. Pending Profiles have no burst whose `finish_burst_to_idle` would resolve a deferred reap.
 #[test]
 fn detach_sub_pending_profile_reaps_immediately() {
     let (mut e, sid, pid) = setup_pending_one_level();
@@ -937,8 +915,8 @@ fn detach_sub_pending_profile_reaps_immediately() {
 
     let out = e.step(Input::DetachSub(sid), Instant::now());
 
-    // Profile reaped synchronously: no longer in the registry; descent
-    // contribution released atomically.
+    // Profile reaped synchronously: no longer in the registry; descent contribution released
+    // atomically.
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
     assert_eq!(
         e.tree()
@@ -959,10 +937,9 @@ fn detach_sub_pending_profile_reaps_immediately() {
     );
 }
 
-/// `on_probe_response`'s unified routing dispatches a Pending Profile's
-/// response to the descent path via `match &p.state`. This test asserts
-/// the routing by exercising a descent probe response and verifying the
-/// descent advances.
+/// `on_probe_response`'s unified routing dispatches a Pending Profile's response to the descent
+/// path via `match &p.state`. This test asserts the routing by exercising a descent probe response
+/// and verifying the descent advances.
 #[test]
 fn on_probe_response_routes_descent_via_state_match() {
     let (mut e, _sid, pid) = setup_pending_one_level();
@@ -977,8 +954,7 @@ fn on_probe_response_routes_descent_via_state_match() {
         }),
         Instant::now(),
     );
-    // Descent route fired: Pending → Idle → Active(Seed). The Profile
-    // is no longer Pending.
+    // Descent route fired: Pending → Idle → Active(Seed). The Profile is no longer Pending.
     assert!(
         e.descent_state(ProbeOwner::Profile(pid)).is_none(),
         "descent route ran"
@@ -1026,17 +1002,14 @@ fn descent_remaining_from_empty_vec_is_none() {
 // ───────────────────────────────────────────────────────────────────────
 // Probe-channel discipline (post-refactor invariants)
 //
-// I5 ("at most one outstanding probe per Profile") is enforced
-// structurally by the owner state's single `ProbeSlot` (one owner ⇒
-// one state variant ⇒ one slot). The tests
-// below pin the surrounding behaviour: clear-on-cancel,
-// recovery-overlap accounting, and the cancel-first contract on
-// `release_descent_prefix_claim`.
+// I5 ("at most one outstanding probe per Profile") is enforced structurally by the owner state's
+// single `ProbeSlot` (one owner ⇒ one state variant ⇒ one slot). The tests below pin the
+// surrounding behaviour: clear-on-cancel, recovery-overlap accounting, and the cancel-first
+// contract on `release_descent_prefix_claim`.
 // ───────────────────────────────────────────────────────────────────────
 
-/// `on_watch_op_rejected` descent purge: cancel-then-release ordering
-/// disarms the descent slot and emits exactly one `ProbeOp::Cancel`. The
-/// Profile transitions Pending → Idle in the same step.
+/// `on_watch_op_rejected` descent purge: cancel-then-release ordering disarms the descent slot and
+/// emits exactly one `ProbeOp::Cancel`. The Profile transitions Pending → Idle in the same step.
 #[test]
 fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
     use specter_core::ProfileState;
@@ -1083,26 +1056,25 @@ fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
     );
 }
 
-/// `enter_pending_descent` recovery-overlap invariant: when invoked from
-/// `start_pending_recovery`, the parent already carries `+1 STRUCTURE` from
-/// `Profile.watch_root_parent`. The helper bumps `+1` again for the descent
-/// contribution; refcount sums to `+2`. Verifies the helper's pre-condition
-/// assertion AND the documented post-condition.
+/// `enter_pending_descent` recovery-overlap invariant: when invoked from `start_pending_recovery`,
+/// the parent already carries `+1 STRUCTURE` from `Profile.watch_root_parent`. The helper bumps
+/// `+1` again for the descent contribution; refcount sums to `+2`. Verifies the helper's
+/// pre-condition assertion AND the documented post-condition.
 #[test]
 fn enter_pending_descent_recovery_overlap_invariant() {
     use specter_core::{ClassSet, ProfileState};
     // Build the recovery scenario by hand:
     //   1. Attach a Sub at /foo/bar (Pending — bar doesn't exist yet).
-    //   2. Materialize bar via descent, landing the Profile in Idle with
-    //      Profile.watch_root_parent = Some(foo) and foo.watch_demand = +1.
-    //   3. Drop bar (anchor terminal) → Profile remains Idle, anchor
-    //      contribution gone, watch_root_parent contribution persists.
+    //   2. Materialize bar via descent, landing the Profile in Idle with Profile.watch_root_parent
+    //      = Some(foo) and foo.watch_demand = +1.
+    //   3. Drop bar (anchor terminal) → Profile remains Idle, anchor contribution gone,
+    //      watch_root_parent contribution persists.
     //   4. Call enter_pending_descent at foo with [bar] as remaining.
     let (mut e, _sid, pid) = setup_pending_one_level();
     let foo = lookup_foo(&e);
 
-    // Step 1+2: Drive descent to materialization. The probe response with
-    // `bar` as a Dir entry materializes the anchor.
+    // Step 1+2: Drive descent to materialization. The probe response with `bar` as a Dir entry
+    // materializes the anchor.
     let corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("descent probe in flight");
@@ -1117,8 +1089,8 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         t_mat,
     );
     let _bar = e.tree().lookup(Some(foo), "bar").unwrap();
-    // Post-materialization: Profile is Active(Seed Verifying); bar carries
-    // events_union; foo carries STRUCTURE from watch_root_parent.
+    // Post-materialization: Profile is Active(Seed Verifying); bar carries events_union; foo
+    // carries STRUCTURE from watch_root_parent.
     assert_eq!(
         e.profiles().get(pid).unwrap().watch_root_parent(),
         Some(foo),
@@ -1129,9 +1101,8 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         "foo carries STRUCTURE from watch_root_parent",
     );
 
-    // The materialized Seed burst is Batching-first; expire its settle
-    // timer so a verify probe is in flight, then close it with Vanished
-    // (no Effect — fresh Seed).
+    // The materialized Seed burst is Batching-first; expire its settle timer so a verify probe is
+    // in flight, then close it with Vanished (no Effect — fresh Seed).
     let t_settle = t_mat + SETTLE;
     while let Some(entry) = e.pop_expired(t_settle) {
         e.step(
@@ -1154,8 +1125,8 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         }),
         t_settle,
     );
-    // dispatch_seed_vanished routes to finalize_anchor_lost: anchor
-    // contribution released, baseline/current cleared, Profile lands Idle.
+    // dispatch_seed_vanished routes to finalize_anchor_lost: anchor contribution released,
+    // baseline/current cleared, Profile lands Idle.
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
@@ -1165,16 +1136,14 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         "slot disarmed after Seed Vanished",
     );
     let foo_demand_pre = e.tree().get(foo).unwrap().watch_demand();
-    // Bar's anchor contribution was released; only watch_root_parent's
-    // STRUCTURE on foo remains.
+    // Bar's anchor contribution was released; only watch_root_parent's STRUCTURE on foo remains.
     assert_eq!(
         foo_demand_pre, 1,
         "foo.watch_demand() reflects only the watch_root_parent contribution",
     );
 
-    // Step 4: Call enter_pending_descent directly to simulate the
-    // `start_pending_recovery` re-entry path. The helper's debug_assert
-    // pins Profile=Idle + closed-channel; both hold.
+    // Step 4: Call enter_pending_descent directly to simulate the `start_pending_recovery` re-entry
+    // path. The helper's debug_assert pins Profile=Idle + closed-channel; both hold.
     let mut out = specter_core::StepOutput::default();
     e.enter_pending_descent(
         pid,
@@ -1184,9 +1153,8 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         &mut out,
     );
 
-    // Recovery overlap: foo's watch_demand is now +2 (watch_root_parent
-    // STRUCTURE + descent STRUCTURE). The helper armed the descent slot
-    // and emitted a descent probe.
+    // Recovery overlap: foo's watch_demand is now +2 (watch_root_parent STRUCTURE + descent
+    // STRUCTURE). The helper armed the descent slot and emitted a descent probe.
     assert_eq!(
         e.tree().get(foo).unwrap().watch_demand(),
         foo_demand_pre + 1,
@@ -1200,11 +1168,10 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
     ));
-    // The descent probe was emitted at foo (the parent / new prefix).
-    // Descent variants carry `target_path` but not `target_resource`
-    // (the walker resolves the path against the live filesystem, not
-    // against an engine-side ResourceId). Cross-check by comparing the
-    // descent's path-of(foo) against the request's `target_path`.
+    // The descent probe was emitted at foo (the parent / new prefix). Descent variants carry
+    // `target_path` but not `target_resource` (the walker resolves the path against the live
+    // filesystem, not against an engine-side ResourceId). Cross-check by comparing the descent's
+    // path-of(foo) against the request's `target_path`.
     let foo_path = e.tree().path_of(foo).expect("foo path resolves");
     assert!(
         out.probe_ops().iter().any(|op| matches!(op,
@@ -1218,15 +1185,12 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Cancel-first contract on `release_descent_prefix_claim`: invoked
-/// without a prior `cancel_owner_probe`, on a Pending Profile whose
-/// descent probe is still in flight, the helper's
-/// `transition_state(ProfileState::Idle)` discard drops the armed
-/// `Pending(DescentState)`, tripping `ProbeSlot`'s Drop tripwire. The
-/// tripwire is unconditional (fires in debug AND release), so the test
-/// runs in every build profile. The four production cancel-paths each
-/// call `cancel_owner_probe` first — this guards against future
-/// regressions that bypass the cancel-first order.
+/// Cancel-first contract on `release_descent_prefix_claim`: invoked without a prior
+/// `cancel_owner_probe`, on a Pending Profile whose descent probe is still in flight, the helper's
+/// `transition_state(ProfileState::Idle)` discard drops the armed `Pending(DescentState)`, tripping
+/// `ProbeSlot`'s Drop tripwire. The tripwire is unconditional (fires in debug AND release), so the
+/// test runs in every build profile. The four production cancel-paths each call `cancel_owner_probe`
+/// first — this guards against future regressions that bypass the cancel-first order.
 #[test]
 #[should_panic(expected = "ProbeSlot dropped while armed")]
 fn release_descent_prefix_claim_without_cancel_trips_probeslot_drop() {

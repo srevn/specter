@@ -1,61 +1,48 @@
 //! `specter wait <name>` client handler.
 //!
-//! Subscribes by name (server resolves `name → SubId` atomic with
-//! `add_subscriber`; an unknown name fails the Subscribe immediately
-//! with `WireErrorCode::UnknownSub`), then reads streamed
-//! [`WireDiagnostic`]s until one matches the requested `--kind` (or
-//! the deadline fires, or the stream ends without a match).
+//! Subscribes by name (server resolves `name → SubId` atomic with `add_subscriber`; an unknown name
+//! fails the Subscribe immediately with `WireErrorCode::UnknownSub`), then reads streamed
+//! [`WireDiagnostic`]s until one matches the requested `--kind` (or the deadline fires, or the
+//! stream ends without a match).
 //!
 //! # Exit codes
 //!
-//! - `0` — matched the requested kind. The matching event renders
-//!   to stdout for the operator's confirmation (one human line).
-//! - `1` — connect / subscribe failure (including the daemon's
-//!   structured `WireErrorCode::UnknownSub` error response).
-//! - `2` — precondition violated mid-wait: `--kind fire` observed a
-//!   [`WireDiagnostic::SubDetached`] before the requested fire. The
-//!   Sub is gone; no fire is coming, an indefinite wait would hang
+//! - `0` — matched the requested kind. The matching event renders to stdout for the operator's
+//!   confirmation (one human line).
+//! - `1` — connect / subscribe failure (including the daemon's structured
+//!   `WireErrorCode::UnknownSub` error response).
+//! - `2` — precondition violated mid-wait: `--kind fire` observed a [`WireDiagnostic::SubDetached`]
+//!   before the requested fire. The Sub is gone; no fire is coming, an indefinite wait would hang
 //!   for an event that will never arrive.
 //! - `124` — deadline elapsed (POSIX `timeout(1)` convention).
-//! - other non-zero ([`ExitCode::FAILURE`]) — stream ended without a
-//!   match (daemon shutdown closed the conn, peer terminated mid-
-//!   stream, etc.).
+//! - other non-zero ([`ExitCode::FAILURE`]) — stream ended without a match (daemon shutdown closed
+//!   the conn, peer terminated mid- stream, etc.).
 //!
 //! # Deadline mechanics
 //!
-//! `--timeout` is the *total* budget from handler entry to match.
-//! The deadline is captured once before subscribing (so the budget
-//! covers the connect / ack handshake too) and re-applied as the
-//! remaining time before every read. The connect-time 5s ack
-//! deadline is intentionally kept for the ack itself: if `--timeout
-//! < 5s` and the daemon hangs the ack, the user sees a "receive
-//! failed: …" message (a daemon problem) instead of the `124`
-//! "didn't fire in time" exit code — the two failure modes stay
-//! distinguishable.
+//! `--timeout` is the *total* budget from handler entry to match. The deadline is captured once
+//! before subscribing (so the budget covers the connect / ack handshake too) and re-applied as the
+//! remaining time before every read. The connect-time 5s ack deadline is intentionally kept for the
+//! ack itself: if `--timeout < 5s` and the daemon hangs the ack, the user sees a "receive failed:
+//! …" message (a daemon problem) instead of the `124` "didn't fire in time" exit code — the two
+//! failure modes stay distinguishable.
 //!
-//! `Duration::ZERO` on `set_read_timeout` is implementation-defined
-//! on Linux (older glibc returned `EINVAL`; newer kernels treat it
-//! as non-blocking). The handler explicitly maps a zero / past-due
-//! remaining to exit `124` *before* the syscall, so the syscall
-//! never sees a zero argument.
+//! `Duration::ZERO` on `set_read_timeout` is implementation-defined on Linux (older glibc returned
+//! `EINVAL`; newer kernels treat it as non-blocking). The handler explicitly maps a zero / past-due
+//! remaining to exit `124` *before* the syscall, so the syscall never sees a zero argument.
 //!
 //! # Per-recv approximation
 //!
-//! `set_read_timeout(Some(remaining))` writes `SO_RCVTIMEO`, which
-//! the kernel applies per `recv(2)` syscall — every recv that
-//! returns `Ok(n > 0)` resets the per-syscall timer. A daemon
-//! trickling diag bytes one-at-a-time could in principle exceed the
-//! loop's cumulative `remaining` budget by many seconds inside a
-//! single `read_line` (which may issue multiple `recv`s to fill the
-//! line).
+//! `set_read_timeout(Some(remaining))` writes `SO_RCVTIMEO`, which the kernel applies per `recv(2)`
+//! syscall — every recv that returns `Ok(n > 0)` resets the per-syscall timer. A daemon trickling
+//! diag bytes one-at-a-time could in principle exceed the loop's cumulative `remaining` budget by
+//! many seconds inside a single `read_line` (which may issue multiple `recv`s to fill the line).
 //!
 //! In practice, the daemon's diag emission is one-line-per-write
-//! ([`crate::ipc::framing::encode_line`] returns a single `Vec<u8>`
-//! that `write_all` ships in one syscall), so the per-syscall and
-//! cumulative budgets agree to within scheduler jitter. A
-//! cumulative-deadline implementation (mio on the client side) is
-//! heavyweight for a single-stream client; the per-syscall
-//! approximation is the right shape for the operator's typical use.
+//! ([`crate::ipc::framing::encode_line`] returns a single `Vec<u8>` that `write_all` ships in one
+//! syscall), so the per-syscall and cumulative budgets agree to within scheduler jitter. A
+//! cumulative-deadline implementation (mio on the client side) is heavyweight for a single-stream
+//! client; the per-syscall approximation is the right shape for the operator's typical use.
 
 use compact_str::CompactString;
 use specter_config::{ClientArgs, WaitArgs, WaitKind};
@@ -77,9 +64,8 @@ pub(crate) fn run(args: &WaitArgs) -> ExitCode {
         Err(code) => return code,
     };
 
-    // Indefinite wait: clear the connect-time 5s deadline once.
-    // Re-clearing on every iteration would waste a syscall per
-    // event with no observable effect.
+    // Indefinite wait: clear the connect-time 5s deadline once. Re-clearing on every iteration
+    // would waste a syscall per event with no observable effect.
     if deadline.is_none()
         && let Err(e) = sub.set_read_timeout(None)
     {
@@ -91,9 +77,8 @@ pub(crate) fn run(args: &WaitArgs) -> ExitCode {
     }
 
     loop {
-        // Per-iteration deadline application: read horizon shrinks
-        // with each iteration. The pre-syscall zero check converts
-        // `now >= deadline` into a clean `124` exit instead of a
+        // Per-iteration deadline application: read horizon shrinks with each iteration. The
+        // pre-syscall zero check converts `now >= deadline` into a clean `124` exit instead of a
         // platform-dependent `set_read_timeout(0)` call.
         if let Some(d) = deadline {
             let Some(remaining) = d.checked_duration_since(Instant::now()) else {
@@ -149,31 +134,26 @@ pub(crate) fn run(args: &WaitArgs) -> ExitCode {
     }
 }
 
-/// Classification outcome for one streamed event against the
-/// requested `--kind`.
+/// Classification outcome for one streamed event against the requested `--kind`.
 enum Match {
-    /// The event is the one the operator was waiting for. Render +
-    /// exit `0`.
+    /// The event is the one the operator was waiting for. Render + exit `0`.
     Matched,
-    /// `--kind fire` observed a [`WireDiagnostic::SubDetached`]. The
-    /// Sub is gone; no fire is coming. Exit `2`.
+    /// `--kind fire` observed a [`WireDiagnostic::SubDetached`]. The Sub is gone; no fire is
+    /// coming. Exit `2`.
     DetachBeforeFire,
-    /// Not the requested kind — keep reading. Per-Sub server-side
-    /// filtering guarantees we only see events naming the resolved
-    /// Sub, so this arm covers in-stream events like
-    /// [`WireDiagnostic::SubRebound`] (a `modified_params` rebind)
-    /// or post-fire effects from earlier bursts.
+    /// Not the requested kind — keep reading. Per-Sub server-side filtering guarantees we only see
+    /// events naming the resolved Sub, so this arm covers in-stream events like
+    /// [`WireDiagnostic::SubRebound`] (a `modified_params` rebind) or post-fire effects from
+    /// earlier bursts.
     Skip,
 }
 
 /// Classify one event against the wait kind.
 ///
-/// The per-Sub server-side filter guarantees every reachable event
-/// names the resolved Sub, so this match only branches on the
-/// variant tag. A new per-Sub diagnostic variant (added to both
-/// [`specter_core::Diagnostic`] and `crate::driver::forward`'s
-/// `diag_sub_id` projection) reaches the `Skip` arm by default;
-/// that's the right behaviour — only Fire/Detach are wait-actionable.
+/// The per-Sub server-side filter guarantees every reachable event names the resolved Sub, so this
+/// match only branches on the variant tag. A new per-Sub diagnostic variant (added to both
+/// [`specter_core::Diagnostic`] and `crate::driver::forward`'s `diag_sub_id` projection) reaches
+/// the `Skip` arm by default; that's the right behaviour — only Fire/Detach are wait-actionable.
 const fn classify(kind: WaitKind, wire: &WireDiagnostic) -> Match {
     match (kind, wire) {
         (WaitKind::Fire, WireDiagnostic::SubFired { .. })
@@ -183,17 +163,14 @@ const fn classify(kind: WaitKind, wire: &WireDiagnostic) -> Match {
     }
 }
 
-/// Render the matching event to stdout (one human line) and return
-/// `ExitCode::SUCCESS`. A stdout write failure surfaces as
-/// [`ExitCode::FAILURE`] — the match succeeded but the operator
-/// won't see the confirmation line, which is itself a signal worth
-/// preserving in the exit code.
+/// Render the matching event to stdout (one human line) and return `ExitCode::SUCCESS`. A stdout
+/// write failure surfaces as [`ExitCode::FAILURE`] — the match succeeded but the operator won't see
+/// the confirmation line, which is itself a signal worth preserving in the exit code.
 ///
-/// One-shot — `wait` exits after the first match — so the render
-/// buffer is allocated locally rather than threaded from `run`. The
-/// 256-byte initial capacity mirrors `tail`'s reused buffer so a
-/// long-field event (e.g. [`WireDiagnostic::DynamicSubReaped`] with a
-/// deep path) does not grow on the first hit.
+/// One-shot — `wait` exits after the first match — so the render buffer is allocated locally rather
+/// than threaded from `run`. The 256-byte initial capacity mirrors `tail`'s reused buffer so a
+/// long-field event (e.g. [`WireDiagnostic::DynamicSubReaped`] with a deep path) does not grow on
+/// the first hit.
 fn emit_matched(client: &ClientArgs, wire: &WireDiagnostic) -> ExitCode {
     let sty = style::resolve(client.color, style::Stream::Stdout);
     let mut stdout = io::stdout().lock();
@@ -203,10 +180,9 @@ fn emit_matched(client: &ClientArgs, wire: &WireDiagnostic) -> ExitCode {
         .write_all(rendered.as_bytes())
         .and_then(|()| stdout.flush())
     {
-        // A BrokenPipe on the confirmation line still represents a
-        // matched wait — operators piping `wait` into something that
-        // closes early want the same `0` they'd get from a
-        // non-piped run. Everything else is a write failure.
+        // A BrokenPipe on the confirmation line still represents a matched wait — operators piping
+        // `wait` into something that closes early want the same `0` they'd get from a non-piped
+        // run. Everything else is a write failure.
         if e.kind() == io::ErrorKind::BrokenPipe {
             return ExitCode::SUCCESS;
         }
@@ -258,9 +234,8 @@ mod tests {
         ));
     }
 
-    /// `--kind detach` against `SubDetached` matches regardless of
-    /// reason (`ConfigDiffRemoved`, `IpcDisabled`, `PromoterReaped`,
-    /// `ConfigDiffIdentityChanged`). Operators waiting for "this
+    /// `--kind detach` against `SubDetached` matches regardless of reason (`ConfigDiffRemoved`,
+    /// `IpcDisabled`, `PromoterReaped`, `ConfigDiffIdentityChanged`). Operators waiting for "this
     /// Sub left" don't differentiate the cause.
     #[test]
     fn classify_detach_matches_subdetached_any_reason() {
@@ -277,9 +252,8 @@ mod tests {
         }
     }
 
-    /// `--kind fire` observing a detach is a precondition violation —
-    /// the Sub is gone, no fire is coming. The handler exits `2`.
-    /// Distinct from `124` (timeout) and `1` (subscribe failure) so
+    /// `--kind fire` observing a detach is a precondition violation — the Sub is gone, no fire is
+    /// coming. The handler exits `2`. Distinct from `124` (timeout) and `1` (subscribe failure) so
     /// scripts can branch on the cause.
     #[test]
     fn classify_fire_observes_detach_returns_detach_before_fire() {
@@ -289,9 +263,8 @@ mod tests {
         ));
     }
 
-    /// `--kind detach` observing a fire is normal — fires happen
-    /// during a detach-wait. Skip and keep reading until the detach
-    /// (or the deadline) arrives.
+    /// `--kind detach` observing a fire is normal — fires happen during a detach-wait. Skip and
+    /// keep reading until the detach (or the deadline) arrives.
     #[test]
     fn classify_detach_observes_fire_skips() {
         assert!(matches!(
@@ -300,10 +273,8 @@ mod tests {
         ));
     }
 
-    /// `SubRebound` (a `modified_params` rebind, per-Sub but
-    /// neither a fire nor a detach) is `Skip` for both kinds — the
-    /// Sub is alive and in the engine, the operator's wait should
-    /// continue.
+    /// `SubRebound` (a `modified_params` rebind, per-Sub but neither a fire nor a detach) is `Skip`
+    /// for both kinds — the Sub is alive and in the engine, the operator's wait should continue.
     #[test]
     fn classify_subrebound_is_skip_for_both_kinds() {
         assert!(matches!(

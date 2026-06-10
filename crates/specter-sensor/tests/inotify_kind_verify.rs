@@ -1,15 +1,11 @@
-//! Race-stable kind verification. The watcher's fresh-watch path opens
-//! the user-supplied path with `O_PATH | O_NOFOLLOW`, `fstat`s the
-//! resulting fd to discover the inode's actual kind, and verifies it
-//! against the engine's `WatchOp::Watch.kind`. A disagreement maps to
-//! [`WatchFailure::Resource`] (`ENOTDIR`) so the engine routes through
-//! the path-fatal recovery channel rather than installing a
-//! kind-incoherent watch. Engine-emitted `Unknown` is a wildcard that
-//! defers to the observed kind — verification cannot fail when `kind ==
-//! ResourceKind::Unknown`.
+//! Race-stable kind verification. The watcher's fresh-watch path opens the user-supplied path with
+//! `O_PATH | O_NOFOLLOW`, `fstat`s the resulting fd to discover the inode's actual kind, and verifies
+//! it against the engine's `WatchOp::Watch.kind`. A disagreement maps to [`WatchFailure::Resource`]
+//! (`ENOTDIR`) so the engine routes through the path-fatal recovery channel rather than installing a
+//! kind-incoherent watch. Engine-emitted `Unknown` is a wildcard that defers to the observed kind —
+//! verification cannot fail when `kind == ResourceKind::Unknown`.
 //!
-//! Pins the static disagreement case (engine expected one shape, the
-//! path is the other).
+//! Pins the static disagreement case (engine expected one shape, the path is the other).
 
 #![cfg(target_os = "linux")]
 
@@ -28,9 +24,9 @@ fn dir_watch_on_regular_file_returns_resource_enotdir() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    // Engine asserts `ResourceKind::Dir`; on-disk the path is a regular
-    // file. The watcher's fstat verification fails and surfaces ENOTDIR
-    // — classified as `Resource` by `WatchFailureExt::from_io`.
+    // Engine asserts `ResourceKind::Dir`; on-disk the path is a regular file. The watcher's fstat
+    // verification fails and surfaces ENOTDIR — classified as `Resource` by
+    // `WatchFailureExt::from_io`.
     let res = w.watch(r, &file_path, ResourceKind::Dir, ClassSet::STRUCTURE);
     assert_eq!(
         res,
@@ -51,8 +47,8 @@ fn file_watch_on_directory_returns_resource_enotdir() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = sm.insert(());
 
-    // Engine asserts `ResourceKind::File`; on-disk the path is a
-    // directory. The same kind-mismatch arm fires.
+    // Engine asserts `ResourceKind::File`; on-disk the path is a directory. The same kind-mismatch
+    // arm fires.
     let res = w.watch(r, tmp.path(), ResourceKind::File, ClassSet::CONTENT);
     assert_eq!(
         res,
@@ -67,9 +63,8 @@ fn file_watch_on_directory_returns_resource_enotdir() {
 
 #[test]
 fn unknown_kind_accepts_any_inode_shape_dir() {
-    // `ResourceKind::Unknown` is the wildcard the descent placeholder
-    // emits before the parent probe has classified the slot. The
-    // watcher accepts whatever inode resolves and caches the observed
+    // `ResourceKind::Unknown` is the wildcard the descent placeholder emits before the parent probe
+    // has classified the slot. The watcher accepts whatever inode resolves and caches the observed
     // kind for downstream normalization.
     let tmp = TempDir::new().unwrap();
 

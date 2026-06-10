@@ -6,48 +6,38 @@
 //! <wall-clock>  <variant>  key=value  key=value  ...
 //! ```
 //!
-//! - `<wall-clock>` is the RFC 3339 timestamp the daemon captured at
-//!   `forward()` fanout ([`WireTime`], monospaced).
-//! - `<variant>` is the same tag `tail --filter` accepts (matches
-//!   [`WireDiagnostic::variant_name`]). Operators copy a tag from a
-//!   tail line directly into the next invocation's `--filter`.
-//! - Field pairs are space-separated `key=value`. Values escape
-//!   nothing (paths and names are not expected to contain
-//!   whitespace; [`WireTime`] is a pre-formatted RFC 3339 token);
-//!   operators wanting structured data use `-o json`.
+//! - `<wall-clock>` is the RFC 3339 timestamp the daemon captured at `forward()` fanout
+//!   ([`WireTime`], monospaced).
+//! - `<variant>` is the same tag `tail --filter` accepts (matches [`WireDiagnostic::variant_name`]).
+//!   Operators copy a tag from a tail line directly into the next invocation's `--filter`.
+//! - Field pairs are space-separated `key=value`. Values escape nothing (paths and names are not
+//!   expected to contain whitespace; [`WireTime`] is a pre-formatted RFC 3339 token); operators
+//!   wanting structured data use `-o json`.
 //!
-//! Layout discipline: timestamp first, variant second, fields after.
-//! Same row shape on every line so a column-aligning eye can scan
-//! quickly without `column -t`.
+//! Layout discipline: timestamp first, variant second, fields after. Same row shape on every line
+//! so a column-aligning eye can scan quickly without `column -t`.
 //!
-//! Pure writer: `(&mut String, &WireDiagnostic, Styler)`. No I/O. The
-//! leading timestamp paints [`style::SECONDARY`], the variant tag its
-//! [`severity`] hue, and each field's key/`=` paint [`style::LABEL`] /
-//! [`style::DELIM`] (values stay unstyled). Under `Styler::Plain` the
-//! line is byte-identical to the pre-color form, and the painted path
-//! stays allocation-free — the caller owns the buffer's lifetime so the
-//! per-event work amortizes across stream-loop iterations
-//! ([`crate::ipc::client::tail::run`] reuses one buffer for the
-//! lifetime of the subscription).
+//! Pure writer: `(&mut String, &WireDiagnostic, Styler)`. No I/O. The leading timestamp paints
+//! [`style::SECONDARY`], the variant tag its [`severity`] hue, and each field's key/`=` paint
+//! [`style::LABEL`] / [`style::DELIM`] (values stay unstyled). Under `Styler::Plain` the line is
+//! byte-identical to the pre-color form, and the painted path stays allocation-free — the caller
+//! owns the buffer's lifetime so the per-event work amortizes across stream-loop iterations
+//! ([`crate::ipc::client::tail::run`] reuses one buffer for the lifetime of the subscription).
 
 use std::fmt::{Display, Write as _};
 
 use crate::ipc::render::style::{self, Severity, Styler};
 use crate::ipc::wire::{WireDiagnostic, WireTime};
 
-/// Render one event as a single newline-terminated line into the
-/// caller's buffer.
+/// Render one event as a single newline-terminated line into the caller's buffer.
 ///
-/// Writer-shape so the call site amortizes the line buffer across
-/// iterations — `specter tail` reuses one [`String`] for the lifetime
-/// of the stream loop, symmetric with
-/// [`crate::ipc::client::subscribe::Subscription`]'s reused inbound
-/// `line_buf`. A 1000-evt/s tail carries no per-event allocation
-/// through the human path; the three compound-enum Display impls
-/// ([`crate::ipc::wire::WireProbeOwner`] /
-/// [`crate::ipc::wire::WireOverflowScope`] /
-/// [`crate::ipc::wire::WireWatchFailure`]) write through the same
-/// formatter so the compound fields likewise carry no allocation.
+/// Writer-shape so the call site amortizes the line buffer across iterations — `specter tail`
+/// reuses one [`String`] for the lifetime of the stream loop, symmetric with
+/// [`crate::ipc::client::subscribe::Subscription`]'s reused inbound `line_buf`. A 1000-evt/s tail
+/// carries no per-event allocation through the human path; the three compound-enum Display impls
+/// ([`crate::ipc::wire::WireProbeOwner`] / [`crate::ipc::wire::WireOverflowScope`] /
+/// [`crate::ipc::wire::WireWatchFailure`]) write through the same formatter so the compound fields
+/// likewise carry no allocation.
 pub(crate) fn render(out: &mut String, d: &WireDiagnostic, sty: Styler) {
     let _ = write!(
         out,
@@ -59,10 +49,9 @@ pub(crate) fn render(out: &mut String, d: &WireDiagnostic, sty: Styler) {
     out.push('\n');
 }
 
-/// Project the variant's `at` field through the structural commitment
-/// that every [`WireDiagnostic`] variant declares `at: WireTime` as
-/// its first field. Single or-pattern arm — a new variant without an
-/// `at` field is a compile error here.
+/// Project the variant's `at` field through the structural commitment that every [`WireDiagnostic`]
+/// variant declares `at: WireTime` as its first field. Single or-pattern arm — a new variant
+/// without an `at` field is a compile error here.
 const fn at_field(d: &WireDiagnostic) -> &WireTime {
     match d {
         WireDiagnostic::StaleProbeResponse { at, .. }
@@ -123,38 +112,32 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
     }
 }
 
-/// Severity tier of a diagnostic — the hue [`render`] paints its
-/// variant tag with. Exhaustive or-pattern match (a new variant
-/// without a tier is a compile error here).
+/// Severity tier of a diagnostic — the hue [`render`] paints its variant tag with. Exhaustive
+/// or-pattern match (a new variant without a tier is a compile error here).
 ///
 /// The tiers mirror the daemon's own per-variant tracing levels in
-/// `crate::driver::forward::log_diagnostic` — the established
-/// operator-facing severity catalogue — so a `tail` line's tail colour
-/// matches the level the same event carries in the daemon log:
+/// `crate::driver::forward::log_diagnostic` — the established operator-facing severity catalogue —
+/// so a `tail` line's tail colour matches the level the same event carries in the daemon log:
 ///
-/// - `error!` → [`Severity::Error`] — a violated engine invariant the
-///   daemon flags loudly (a malformed attach request, an anchor-kind
-///   mismatch, a walker-contract breach). Exactly three variants.
-/// - `warn!` → [`Severity::Warn`] — a degraded-but-recovered edge: a
-///   failed / vanished probe (the errno self-recovers), a purged claim,
-///   a forced ceiling, an overflow reseed, a gate deadline, a routing
-///   breach the helper bailed on.
-/// - `info!` / `debug!` / `trace!` → [`Severity::Info`] — routine
-///   lifecycle, benign races, and class / consumer drops.
+/// - `error!` → [`Severity::Error`] — a violated engine invariant the daemon flags loudly (a
+///   malformed attach request, an anchor-kind mismatch, a walker-contract breach). Exactly three
+///   variants.
+/// - `warn!` → [`Severity::Warn`] — a degraded-but-recovered edge: a failed / vanished probe (the
+///   errno self-recovers), a purged claim, a forced ceiling, an overflow reseed, a gate deadline, a
+///   routing breach the helper bailed on.
+/// - `info!` / `debug!` / `trace!` → [`Severity::Info`] — routine lifecycle, benign races, and
+///   class / consumer drops.
 ///
 /// Two deliberate departures from a literal level mirror:
 ///
-/// - `SubFired` is `info!` in the daemon log but elevated to
-///   [`Severity::Ok`] here — a fire is the headline positive event and
-///   reads green on a `tail`.
-/// - `Missed` is wire-only (the slow-subscriber back-pressure marker
-///   has no `log_diagnostic` arm); it is [`Severity::Warn`], the
-///   data-loss signal it shares with `SensorOverflow`.
+/// - `SubFired` is `info!` in the daemon log but elevated to [`Severity::Ok`] here — a fire is the
+///   headline positive event and reads green on a `tail`.
+/// - `Missed` is wire-only (the slow-subscriber back-pressure marker has no `log_diagnostic` arm);
+///   it is [`Severity::Warn`], the data-loss signal it shares with `SensorOverflow`.
 ///
-/// Re-judging a variant means moving it here AND in `log_diagnostic`
-/// (its rustdoc carries the reciprocal note). Tiers are an
-/// operator-triage projection, not a wire contract: re-tiering changes
-/// only a line's colour, never its bytes.
+/// Re-judging a variant means moving it here AND in `log_diagnostic` (its rustdoc carries the
+/// reciprocal note). Tiers are an operator-triage projection, not a wire contract: re-tiering
+/// changes only a line's colour, never its bytes.
 const fn severity(d: &WireDiagnostic) -> Severity {
     use WireDiagnostic as W;
     match d {
@@ -166,8 +149,8 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::AnchorKindMismatch { .. }
         | W::WalkerContractViolated { .. } => Severity::Error,
 
-        // `warn!` in the log — a degraded-but-recovered edge — plus the
-        // wire-only `Missed` data-loss marker.
+        // `warn!` in the log — a degraded-but-recovered edge — plus the wire-only `Missed`
+        // data-loss marker.
         W::StaleProbeResponse { .. }
         | W::StaleTimer { .. }
         | W::EffectCompleteOutsideAwaiting { .. }
@@ -198,8 +181,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::InvalidBurstTransition { .. }
         | W::Missed { .. } => Severity::Warn,
 
-        // `info!` / `debug!` / `trace!` — routine lifecycle, benign
-        // races, class / consumer drops.
+        // `info!` / `debug!` / `trace!` — routine lifecycle, benign races, class / consumer drops.
         W::ConfigDiffUnknownSub { .. }
         | W::ConfigDiffUnknownPromoter { .. }
         | W::ConfigDiffRebindFallbackAttach { .. }
@@ -225,9 +207,9 @@ const fn severity(d: &WireDiagnostic) -> Severity {
     }
 }
 
-/// Append one ` key=value` field — `key` painted [`style::LABEL`], the
-/// `=` painted [`style::DELIM`], the value unstyled. The two leading
-/// spaces are the inter-field separator every line uses, so a run of
+/// Append one ` key=value` field — `key` painted [`style::LABEL`], the `=` painted
+/// [`style::DELIM`], the value unstyled. The two leading spaces are the inter-field separator every
+/// line uses, so a run of
 /// `field` calls reproduces the pre-color `  k=v  k2=v2` shape
 /// byte-for-byte under `Styler::Plain`.
 fn field(out: &mut String, sty: Styler, key: &str, value: impl Display) {
@@ -239,17 +221,15 @@ fn field(out: &mut String, sty: Styler, key: &str, value: impl Display) {
     );
 }
 
-/// Append every non-`at` field as ` key=value` pairs via [`field`].
-/// Exhaustive match — a new variant lands a compile error here, paired
-/// with the matching arm in [`WireDiagnostic::variant_name`] and the
-/// `KNOWN_WIRE_VARIANTS` tag list.
+/// Append every non-`at` field as ` key=value` pairs via [`field`]. Exhaustive match — a new
+/// variant lands a compile error here, paired with the matching arm in
+/// [`WireDiagnostic::variant_name`] and the `KNOWN_WIRE_VARIANTS` tag list.
 ///
-/// Field order mirrors the variant's declaration order so the human
-/// form and the JSON form present fields in the same sequence.
+/// Field order mirrors the variant's declaration order so the human form and the JSON form present
+/// fields in the same sequence.
 ///
-/// Snake-rename'd wire enum fields render through `Display`; see the
-/// per-enum `as_str` impls in [`super::super::wire`] and
-/// [`super::super::protocol`].
+/// Snake-rename'd wire enum fields render through `Display`; see the per-enum `as_str` impls in
+/// [`super::super::wire`] and [`super::super::protocol`].
 fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
     match d {
         WireDiagnostic::StaleProbeResponse {
@@ -586,9 +566,8 @@ mod tests {
     };
     use std::time::UNIX_EPOCH;
 
-    /// The renderer's row shape: timestamp first, variant second,
-    /// fields after, newline last. Pin per-Sub event details so the
-    /// operator-visible fields stay structural.
+    /// The renderer's row shape: timestamp first, variant second, fields after, newline last. Pin
+    /// per-Sub event details so the operator-visible fields stay structural.
     #[test]
     fn render_sub_fired_carries_timestamp_tag_sub_profile_count() {
         let mut s = String::new();
@@ -612,10 +591,9 @@ mod tests {
         assert!(s.ends_with('\n'), "newline-terminated: {s:?}");
     }
 
-    /// `Missed` is the back-pressure marker. Its tag is the
-    /// underscore-prefixed `_missed` (the only variant with an
-    /// override) — operators reading a `_missed N` line know the
-    /// daemon dropped events upstream.
+    /// `Missed` is the back-pressure marker. Its tag is the underscore-prefixed `_missed` (the only
+    /// variant with an override) — operators reading a `_missed N` line know the daemon dropped
+    /// events upstream.
     #[test]
     fn render_missed_marker_is_underscore_prefixed() {
         let mut s = String::new();
@@ -635,9 +613,8 @@ mod tests {
         assert!(s.ends_with('\n'), "newline-terminated: {s:?}");
     }
 
-    /// `SubAttached.source_promoter = Some(_)` renders an extra
-    /// `source_promoter=N` field; `None` omits it entirely. Operators
-    /// distinguishing static vs promoter-minted Subs read the
+    /// `SubAttached.source_promoter = Some(_)` renders an extra `source_promoter=N` field; `None`
+    /// omits it entirely. Operators distinguishing static vs promoter-minted Subs read the
     /// presence/absence of the field.
     #[test]
     fn render_sub_attached_promoter_field_optional() {
@@ -672,10 +649,9 @@ mod tests {
         assert!(dynamic_attach.contains("source_promoter=99"));
     }
 
-    /// `SubDetached.reason` renders through the typed
-    /// [`WireDetachReason`] label table (`config_diff_removed`,
-    /// `ipc_disabled`, etc.). Mirrors the snake_case serde rename so
-    /// the human form matches the JSON.
+    /// `SubDetached.reason` renders through the typed [`WireDetachReason`] label table
+    /// (`config_diff_removed`, `ipc_disabled`, etc.). Mirrors the snake_case serde rename so the
+    /// human form matches the JSON.
     #[test]
     fn render_sub_detached_reason_label() {
         let mut s = String::new();
@@ -692,9 +668,8 @@ mod tests {
         assert!(s.contains("  reason=ipc_disabled"), "got: {s:?}");
     }
 
-    /// A Profile-keyed variant (`ProfileReaped`) renders without any
-    /// `sub=` field — operators reading a tail know the event is not
-    /// per-Sub by the absence of the column. Distinct from
+    /// A Profile-keyed variant (`ProfileReaped`) renders without any `sub=` field — operators
+    /// reading a tail know the event is not per-Sub by the absence of the column. Distinct from
     /// per-Sub variants that always carry `sub=N`.
     #[test]
     fn render_profile_keyed_has_no_sub_field() {
@@ -716,8 +691,8 @@ mod tests {
         );
     }
 
-    /// Promoter-keyed variants (`PromoterAttached`) render the
-    /// `promoter=N` key. Sanity-checks the cross-cutting helper coverage.
+    /// Promoter-keyed variants (`PromoterAttached`) render the `promoter=N` key. Sanity-checks the
+    /// cross-cutting helper coverage.
     #[test]
     fn render_promoter_attached_carries_promoter_and_name() {
         let mut s = String::new();
@@ -734,9 +709,9 @@ mod tests {
         assert!(s.contains("  name=watch_glob"));
     }
 
-    /// Compound enums render through their helper — `WireProbeOwner`
-    /// projects through `probe_owner_str` to `<kind>/<id>` form, which
-    /// is more operator-readable than two separate fields.
+    /// Compound enums render through their helper — `WireProbeOwner` projects through
+    /// `probe_owner_str` to `<kind>/<id>` form, which is more operator-readable than two separate
+    /// fields.
     #[test]
     fn render_probe_owner_compound_label() {
         let mut profile_owner = String::new();
@@ -767,9 +742,9 @@ mod tests {
         assert!(promoter_owner.contains("  owner=promoter/2"));
     }
 
-    /// `EventClassDropped` is the canonical multi-field per-Resource
-    /// variant; its rendered line carries resource, event, profile in
-    /// declaration order with the correct enum label for the event.
+    /// `EventClassDropped` is the canonical multi-field per-Resource variant; its rendered line
+    /// carries resource, event, profile in declaration order with the correct enum label for the
+    /// event.
     #[test]
     fn render_event_class_dropped_three_fields_in_order() {
         let mut s = String::new();
@@ -794,8 +769,8 @@ mod tests {
         assert!(s.contains("event=metadata_changed"), "got: {s:?}");
     }
 
-    /// `WireOverflowScope::Global` is the bare-tag variant —
-    /// rendering must emit `scope=global` without any `/id` tail.
+    /// `WireOverflowScope::Global` is the bare-tag variant — rendering must emit `scope=global`
+    /// without any `/id` tail.
     #[test]
     fn render_sensor_overflow_global_scope_bare() {
         let mut s = String::new();
@@ -815,24 +790,19 @@ mod tests {
     }
 
     /// Cross-variant coverage: every variant on the [`super::super::wire::KNOWN_WIRE_VARIANTS`]
-    /// list renders to a non-empty line that contains its tag. Catches
-    /// a missing `write_fields` arm before the operator hits it. Uses
-    /// the same witness fixture the wire round-trip test consumes —
-    /// duplicating would invite drift.
+    /// list renders to a non-empty line that contains its tag. Catches a missing `write_fields` arm
+    /// before the operator hits it. Uses the same witness fixture the wire round-trip test consumes
+    /// — duplicating would invite drift.
     #[test]
     fn every_variant_renders_a_nonempty_line_with_its_tag() {
-        // The wire test fixture lives in wire's test module; we
-        // can't reach it cross-module, so we exercise the
-        // KNOWN_WIRE_VARIANTS surface here via the JSON wire round
-        // trip — every wire-variant witness round-trips, and the
-        // renderer reads back the structural shape. Reach the
-        // wire-side test seam through serde directly.
+        // The wire test fixture lives in wire's test module; we can't reach it cross-module, so we
+        // exercise the KNOWN_WIRE_VARIANTS surface here via the JSON wire round trip — every
+        // wire-variant witness round-trips, and the renderer reads back the structural shape. Reach
+        // the wire-side test seam through serde directly.
         //
-        // For each variant tag, synthesize the minimum-field JSON
-        // shape and feed it through deserialize → render. A wire
-        // variant whose JSON shape doesn't round-trip would already
-        // fail the wire's own round-trip test; this guard reports
-        // any render-side regression separately.
+        // For each variant tag, synthesize the minimum-field JSON shape and feed it through
+        // deserialize → render. A wire variant whose JSON shape doesn't round-trip would already fail
+        // the wire's own round-trip test; this guard reports any render-side regression separately.
         let timestamp = serde_json::to_value(WireTime::from(UNIX_EPOCH)).unwrap();
         for tag in crate::ipc::wire::KNOWN_WIRE_VARIANTS {
             let value = synthesize_min_value(tag, &timestamp);
@@ -853,11 +823,9 @@ mod tests {
         }
     }
 
-    /// Minimum-field JSON value for one variant tag. Constructs the
-    /// smallest acceptable payload so [`WireDiagnostic::deserialize`]
-    /// succeeds; any new variant added without a paired arm here
-    /// fails [`every_variant_renders_a_nonempty_line_with_its_tag`]
-    /// loudly.
+    /// Minimum-field JSON value for one variant tag. Constructs the smallest acceptable payload so
+    /// [`WireDiagnostic::deserialize`] succeeds; any new variant added without a paired arm here
+    /// fails [`every_variant_renders_a_nonempty_line_with_its_tag`] loudly.
     fn synthesize_min_value(tag: &str, at: &serde_json::Value) -> serde_json::Value {
         use serde_json::json;
         let id = json!(1);
@@ -1021,9 +989,9 @@ mod tests {
         assert!(s.contains("  errno=13"), "got: {s:?}");
     }
 
-    /// `severity` classifies one representative per tier. Exhaustiveness
-    /// is the compiler's (the or-pattern match owns every variant); this
-    /// pins the four anchors so a mis-tiered representative is caught.
+    /// `severity` classifies one representative per tier. Exhaustiveness is the compiler's (the
+    /// or-pattern match owns every variant); this pins the four anchors so a mis-tiered
+    /// representative is caught.
     #[test]
     fn severity_classifies_one_representative_per_tier() {
         use super::severity;
@@ -1047,9 +1015,9 @@ mod tests {
             }),
             Severity::Error,
         );
-        // Warn — a probe failure carries an errno but self-recovers, so
-        // it mirrors the daemon's `warn!`, NOT `error!`. Pinned here so
-        // the variant stays at Warn and does not drift to Error.
+        // Warn — a probe failure carries an errno but self-recovers, so it mirrors the daemon's
+        // `warn!`, NOT `error!`. Pinned here so the variant stays at Warn and does not drift to
+        // Error.
         assert_eq!(
             severity(&WireDiagnostic::ProbeFailed {
                 at: WireTime::from(UNIX_EPOCH),
@@ -1071,10 +1039,9 @@ mod tests {
         );
     }
 
-    /// Under `Styler::Active` the variant tag wears its severity hue
-    /// (`Ok`→green for `sub_fired`, `Error`→red for `probe_failed`) and
-    /// the field keys gain SGR; stripping every escape reproduces the
-    /// `Plain` line byte-for-byte (color is purely additive).
+    /// Under `Styler::Active` the variant tag wears its severity hue (`Ok`→green for `sub_fired`,
+    /// `Error`→red for `probe_failed`) and the field keys gain SGR; stripping every escape
+    /// reproduces the `Plain` line byte-for-byte (color is purely additive).
     #[test]
     fn active_colors_tag_by_severity_and_strips_to_plain() {
         use crate::ipc::render::style::{Severity, severity_style, strip_ansi};
@@ -1096,8 +1063,8 @@ mod tests {
         render(&mut plain, &fired, Styler::Plain);
         assert_eq!(strip_ansi(&active), plain, "stripping Active yields Plain");
 
-        // A probe failure is the daemon's `warn!` — yellow, not red —
-        // even though an errno rides the line (the cause self-recovers).
+        // A probe failure is the daemon's `warn!` — yellow, not red — even though an errno rides
+        // the line (the cause self-recovers).
         let failed = WireDiagnostic::ProbeFailed {
             at: WireTime::from(UNIX_EPOCH),
             profile: WireId(1),

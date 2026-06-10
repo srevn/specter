@@ -1,6 +1,5 @@
-//! Real-fs recursive walks with `max_depth`, `exclude`, `pattern`,
-//! `hidden`. Pins the walker semantics through the
-//! `WorkerProber` → `engine_inbound` channel surface.
+//! Real-fs recursive walks with `max_depth`, `exclude`, `pattern`, `hidden`. Pins the walker
+//! semantics through the `WorkerProber` → `engine_inbound` channel surface.
 
 #![cfg(unix)]
 
@@ -27,9 +26,8 @@ const fn nz(n: usize) -> NonZeroUsize {
     NonZeroUsize::new(n).expect("non-zero literal in test fixture")
 }
 
-/// Mirror of the bin's `DriverProberSender` — wraps a single
-/// `Sender<Input>` clone and rewraps each `ProbeResponse` as
-/// `Input::ProbeResponse(_)` on the wire.
+/// Mirror of the bin's `DriverProberSender` — wraps a single `Sender<Input>` clone and rewraps each
+/// `ProbeResponse` as `Input::ProbeResponse(_)` on the wire.
 struct TestProberSink {
     tx: Sender<Input>,
 }
@@ -130,8 +128,8 @@ fn exclude_target_dir_omits_subtree_contents() {
         .exclude(GlobPattern::compile("target/**").unwrap())
         .build();
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
-    // No entry under `target/` is emitted (every cumulative path
-    // starting with `target/` matches the glob).
+    // No entry under `target/` is emitted (every cumulative path starting with `target/` matches
+    // the glob).
     assert!(segs.iter().all(|s| !s.starts_with("target/")));
     assert!(segs.contains("src"));
     assert!(segs.contains("src/main.c"));
@@ -153,8 +151,7 @@ fn pattern_double_star_matches_recursive_files() {
         .pattern(GlobPattern::compile("**/*.c").unwrap())
         .build();
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
-    // Dirs always emit (pattern bypass); .c file emits; .txt
-    // does not.
+    // Dirs always emit (pattern bypass); .c file emits; .txt does not.
     assert!(segs.contains("src"));
     assert!(segs.contains("src/main.c"));
     assert!(!segs.contains("src/foo.txt"));

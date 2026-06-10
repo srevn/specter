@@ -1,6 +1,5 @@
-//! Hot-reload via `Input::ConfigDiff`. Atomic apply of
-//! `removed → modified → added`; reap-pending mid-burst handling;
-//! in-flight Effect race after detach.
+//! Hot-reload via `Input::ConfigDiff`. Atomic apply of `removed → modified → added`; reap-pending
+//! mid-burst handling; in-flight Effect race after detach.
 
 use compact_str::CompactString;
 use specter_core::testkit::{dir_snap, empty_program};
@@ -18,9 +17,8 @@ use std::time::Instant;
 
 #[test]
 fn config_diff_add_sub_to_existing_profile() {
-    // Engine has Sub A; ConfigDiff adds Sub B at the same anchor with the
-    // same config — both share one Profile. The Profile's Sub count goes 1 → 2; no
-    // new Watch/Probe.
+    // Engine has Sub A; ConfigDiff adds Sub B at the same anchor with the same config — both share
+    // one Profile. The Profile's Sub count goes 1 → 2; no new Watch/Probe.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -83,9 +81,8 @@ fn config_diff_add_sub_to_existing_profile() {
 
 #[test]
 fn config_diff_remove_sole_sub_reaps_profile() {
-    // Engine has Sub A on its own Profile, post-Seed Idle. ConfigDiff
-    // removes A. Profile reaped immediately (no Subs remain, Idle);
-    // anchor unwatched.
+    // Engine has Sub A on its own Profile, post-Seed Idle. ConfigDiff removes A. Profile reaped
+    // immediately (no Subs remain, Idle); anchor unwatched.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -138,8 +135,8 @@ fn config_diff_remove_sole_sub_reaps_profile() {
 
 #[test]
 fn config_diff_mid_burst_remove_defers_reap() {
-    // Engine has Sub A; Standard burst in flight; ConfigDiff removes A.
-    // reap_pending=true; on burst-end, no Effect; Profile reaped.
+    // Engine has Sub A; Standard burst in flight; ConfigDiff removes A. reap_pending=true; on
+    // burst-end, no Effect; Profile reaped.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -195,8 +192,8 @@ fn config_diff_mid_burst_remove_defers_reap() {
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
 
-    // The single Authoritative verify response folds to `Stable`;
-    // reap-pending suppresses the Effect and finishes by reaping.
+    // The single Authoritative verify response folds to `Stable`; reap-pending suppresses the
+    // Effect and finishes by reaping.
     let v = verify(&mut e, pid, &dir_snap(&[]), t2);
     let out = v.out;
     assert!(out.effects().is_empty(), "reap_pending suppresses Effect");
@@ -206,15 +203,12 @@ fn config_diff_mid_burst_remove_defers_reap() {
     );
 }
 
-/// Same identity (anchor + scan + max_settle + events), different
-/// per-Sub fields ⇒ `modified_params`. Mid-Standard-burst, the engine
-/// rebinds the live Sub in place: the burst stays on the same
-/// `ProfileId`, the anchor's `watch_demand` is unchanged (no
-/// Unwatch/re-Watch), no fresh probe is emitted (the existing settle
-/// timer still owns the burst lifecycle), and `SubRebound` narrates
-/// the edge. Under `modified_params` the path does not go through
-/// detach+attach via the zombie-revival branch, so
-/// `ReapPendingCancelled` must **not** appear.
+/// Same identity (anchor + scan + max_settle + events), different per-Sub fields ⇒
+/// `modified_params`. Mid-Standard-burst, the engine rebinds the live Sub in place: the burst stays
+/// on the same `ProfileId`, the anchor's `watch_demand` is unchanged (no Unwatch/re-Watch), no
+/// fresh probe is emitted (the existing settle timer still owns the burst lifecycle), and
+/// `SubRebound` narrates the edge. Under `modified_params` the path does not go through
+/// detach+attach via the zombie-revival branch, so `ReapPendingCancelled` must **not** appear.
 #[test]
 fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     let mut e = Engine::new();
@@ -252,9 +246,8 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     );
     let watch_demand_before = e.tree().get(r).unwrap().watch_demand();
 
-    // Mid-burst ConfigDiff: rebind the watch "A" via `modified_params`
-    // (same identity; different per-Sub field — same `empty_program`
-    // here, but the path is exercised by the bucket choice).
+    // Mid-burst ConfigDiff: rebind the watch "A" via `modified_params` (same identity; different
+    // per-Sub field — same `empty_program` here, but the path is exercised by the bucket choice).
     let mut diff = SubRegistryDiff::default();
     diff.modified_params.push(SubAttachRequest::for_anchor(
         "A".into(),
@@ -314,14 +307,11 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     );
 }
 
-/// Settle-change rebind on a post-Seed Idle Profile: the SubId, the
-/// ProfileId, and the kernel watch all survive; `Profile.settle` is
-/// recomputed to the new value; the `SubRebound` diagnostic narrates
-/// the edge; no fresh probe or Unwatch is emitted. T2 in the
-/// validate-then-act plan. (The orthogonal `has_fired`-preservation
-/// claim is pinned by [`specter_core::SubRegistry::rebind`]'s own
-/// unit test — driving a real fire here would over-couple the
-/// integration test to actuator-side mechanics.)
+/// Settle-change rebind on a post-Seed Idle Profile: the SubId, the ProfileId, and the kernel watch
+/// all survive; `Profile.settle` is recomputed to the new value; the `SubRebound` diagnostic narrates
+/// the edge; no fresh probe or Unwatch is emitted. T2 in the validate-then-act plan. (The orthogonal
+/// `has_fired`-preservation claim is pinned by [`specter_core::SubRegistry::rebind`]'s own unit test
+/// — driving a real fire here would over-couple the integration test to actuator-side mechanics.)
 #[test]
 fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
     let mut e = Engine::new();
@@ -347,8 +337,7 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
     let pid = e.subs().get(sid).unwrap().profile();
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
-    // Rebind to a longer settle. Everything else identical, including
-    // the program Arc.
+    // Rebind to a longer settle. Everything else identical, including the program Arc.
     let new_settle = SETTLE + SETTLE; // doubled
     let mut diff = SubRegistryDiff::default();
     diff.modified_params.push(SubAttachRequest::for_anchor(
@@ -411,11 +400,9 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
     );
 }
 
-/// T1 — malformed `modified_identity` request leaves the old Sub in
-/// place. The validate-then-act composition pre-checks the new
-/// anchor's parse; on failure the engine emits
-/// `AttachPathInvalid`, the detach never runs, and the live
-/// attachment survives unchanged. Structural rollback at the
+/// T1 — malformed `modified_identity` request leaves the old Sub in place. The validate-then-act
+/// composition pre-checks the new anchor's parse; on failure the engine emits `AttachPathInvalid`,
+/// the detach never runs, and the live attachment survives unchanged. Structural rollback at the
 /// composition layer.
 #[test]
 fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
@@ -444,8 +431,8 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
     let pid = e.subs().get(sid).unwrap().profile();
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
-    // modified_identity with a malformed path — `Tree::parse_attach_path`
-    // rejects relative paths, so this fails validation.
+    // modified_identity with a malformed path — `Tree::parse_attach_path` rejects relative paths,
+    // so this fails validation.
     let mut diff = SubRegistryDiff::default();
     diff.modified_identity.push(SubAttachRequest::for_anchor(
         "A".into(),
@@ -495,10 +482,9 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
 
 #[test]
 fn effect_complete_after_detach_drops_silently() {
-    // Engine has Sub on Idle Profile; an Effect was previously emitted
-    // (we mock the EffectComplete path manually). Detach the Sub; then
-    // inject EffectComplete for the now-removed Sub. Engine drops with
-    // a Diagnostic — no panic, no reseed.
+    // Engine has Sub on Idle Profile; an Effect was previously emitted (we mock the EffectComplete
+    // path manually). Detach the Sub; then inject EffectComplete for the now-removed Sub. Engine
+    // drops with a Diagnostic — no panic, no reseed.
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
@@ -560,20 +546,16 @@ fn effect_complete_after_detach_drops_silently() {
     assert_eq!(new_probes, 0);
 }
 
-/// T4 — same-path identity change exercises `modified_identity`
-/// against the prepare/commit bug an earlier plan would have
-/// introduced. Sub "A" at `/src` with `recursive=true`; reload edits
-/// to `recursive=false` — same path, different `config_hash` ⇒ the
-/// Sub must move to a different Profile. The composition is
-/// validate → detach → attach: the old Profile is reaped (last Sub
+/// T4 — same-path identity change exercises `modified_identity` against the prepare/commit bug an
+/// earlier plan would have introduced. Sub "A" at `/src` with `recursive=true`; reload edits to
+/// `recursive=false` — same path, different `config_hash` ⇒ the Sub must move to a different
+/// Profile. The composition is validate → detach → attach: the old Profile is reaped (last Sub
 /// left) and the new Sub mints on a fresh Profile.
 ///
-/// The historical bug was that a prepare/commit split would observe
-/// the old Profile's anchor claim getting released by the detach,
-/// reaping the slot mid-operation; the commit then panicked
-/// `expect("resource has no live Tree slot")`. Validate-then-act
-/// captures no engine state, so the attach re-materializes the slot
-/// via `ensure_path` and no panic is possible.
+/// The historical bug was that a prepare/commit split would observe the old Profile's anchor claim
+/// getting released by the detach, reaping the slot mid-operation; the commit then panicked
+/// `expect("resource has no live Tree slot")`. Validate-then-act captures no engine state, so the
+/// attach re-materializes the slot via `ensure_path` and no panic is possible.
 #[test]
 fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
     let mut e = Engine::new();
@@ -602,9 +584,8 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
     let pid_a = e.subs().get(sid_a).unwrap().profile();
     let seed_done = seed_to_idle(&mut e, pid_a, &dir_snap(&[]), now);
 
-    // Same path, different scan ⇒ `modified_identity`. Path-based
-    // anchor to exercise the re-materialise-after-reap path that the
-    // prepare/commit shape would have broken.
+    // Same path, different scan ⇒ `modified_identity`. Path-based anchor to exercise the
+    // re-materialise-after-reap path that the prepare/commit shape would have broken.
     let post_seed = seed_done + SETTLE;
     let mut diff = SubRegistryDiff::default();
     diff.modified_identity.push(SubAttachRequest::for_anchor(
@@ -626,8 +607,8 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
         post_seed,
     );
 
-    // Old Sub gone; new Sub at the same name resolves to a fresh
-    // id on a fresh Profile (different `config_hash`).
+    // Old Sub gone; new Sub at the same name resolves to a fresh id on a fresh Profile (different
+    // `config_hash`).
     assert!(e.subs().get(sid_a).is_none(), "old Sub detached");
     let sid_b = e.subs().find_by_name("A").expect("A re-attached");
     assert_ne!(sid_b, sid_a, "fresh SubId minted on identity change");

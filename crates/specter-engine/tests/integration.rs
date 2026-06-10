@@ -1,16 +1,13 @@
 //! Cross-module integration tests for `specter-engine`.
 //!
 //! Two suites:
-//! - **P3-era primitives**: the `covers` predicate against a real
-//!   `Tree` + `ProfileMap`. Its transitive derivation
-//!   (`nearest_covering_ancestor`) and the reconfirm query built on it
-//!   (`has_active_standard_descendant`) are engine-internal, so their
-//!   units live inline in `coverage::tests`; the `Draining → Verifying`
-//!   reconfirm is exercised end-to-end through the burst lifecycle in
-//!   `tests/multi_profile.rs`.
-//! - **P4 lifecycle**: full `Idle ↔ Active(Burst)` flows driven through
-//!   `Engine::attach_sub` and `Engine::step` against a `MockSensor`-style
-//!   harness (assertions read from `StepOutput`).
+//! - **P3-era primitives**: the `covers` predicate against a real `Tree` + `ProfileMap`. Its
+//!   transitive derivation (`nearest_covering_ancestor`) and the reconfirm query built on it
+//!   (`has_active_standard_descendant`) are engine-internal, so their units live inline in
+//!   `coverage::tests`; the `Draining → Verifying` reconfirm is exercised end-to-end through the
+//!   burst lifecycle in `tests/multi_profile.rs`.
+//! - **P4 lifecycle**: full `Idle ↔ Active(Burst)` flows driven through `Engine::attach_sub` and
+//!   `Engine::step` against a `MockSensor`-style harness (assertions read from `StepOutput`).
 
 use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
@@ -31,11 +28,10 @@ use std::time::{Duration, Instant};
 const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
-/// Production-realistic `EffectScope::SubtreeRoot` events mask — CONTENT
-/// in the mask sets `events_witness_quiescence == true`, so a single
-/// Authoritative sample closes the verdict floor's hash-equality
-/// obligation. Tests that drive the N=2 hash channel directly opt into
-/// `NO_EVENTS` (or a CONTENT-free mask) inline.
+/// Production-realistic `EffectScope::SubtreeRoot` events mask — CONTENT in the mask sets
+/// `events_witness_quiescence == true`, so a single Authoritative sample closes the verdict floor's
+/// hash-equality obligation. Tests that drive the N=2 hash channel directly opt into `NO_EVENTS`
+/// (or a CONTENT-free mask) inline.
 const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 
 fn cfg_recursive() -> ScanConfig {
@@ -105,12 +101,11 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
 
 // ---------- P4 single-Profile lifecycle scenarios ----------
 
-/// Walk through a Standard burst — drains settle timers, injects probe
-/// responses with `snap` until the burst stabilizes and emits an Effect.
-/// Returns the `StepOutput` containing the Effect.
+/// Walk through a Standard burst — drains settle timers, injects probe responses with `snap` until
+/// the burst stabilizes and emits an Effect. Returns the `StepOutput` containing the Effect.
 ///
-/// `t0` is the moment the `FsEvent` fired. The walker advances time by
-/// large strides each iteration so backoff catches up.
+/// `t0` is the moment the `FsEvent` fired. The walker advances time by large strides each iteration
+/// so backoff catches up.
 fn drive_standard_burst_to_stable(
     e: &mut Engine,
     pid: specter_core::ProfileId,
@@ -138,8 +133,7 @@ fn drive_standard_burst_to_stable(
     panic!("Standard burst failed to stabilize within drive iterations");
 }
 
-/// Drain timers and return the most recent probe's correlation, if any
-/// fired in the process.
+/// Drain timers and return the most recent probe's correlation, if any fired in the process.
 fn drain_to_probe_correlation(e: &mut Engine, t: Instant) -> Option<ProbeCorrelation> {
     let mut last_correlation = None;
     while let Some(entry) = e.pop_expired(t) {
@@ -160,9 +154,8 @@ fn drain_to_probe_correlation(e: &mut Engine, t: Instant) -> Option<ProbeCorrela
 
 #[test]
 fn golden_path_full_lifecycle() {
-    // The whole V4 spine: attach_sub → Seed → Idle → FsEvent → Standard →
-    // Effect → EffectComplete → Seed → Idle. Each transition observable
-    // in the StepOutputs.
+    // The whole V4 spine: attach_sub → Seed → Idle → FsEvent → Standard → Effect → EffectComplete →
+    // Seed → Idle. Each transition observable in the StepOutputs.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -177,8 +170,8 @@ fn golden_path_full_lifecycle() {
         t0,
     );
 
-    // attach_sub emits Watch (anchor) but NO Probe — a Seed is
-    // Batching-first; the first Seed probe fires only on settle expiry.
+    // attach_sub emits Watch (anchor) but NO Probe — a Seed is Batching-first; the first Seed probe
+    // fires only on settle expiry.
     assert!(
         attach_out
             .watch_ops
@@ -191,14 +184,13 @@ fn golden_path_full_lifecycle() {
     );
     assert!(attach_out.effects().is_empty());
 
-    // Seed quiescence proof → baseline = current = empty snapshot;
-    // → Idle. Never emits Effects (fresh Profile).
+    // Seed quiescence proof → baseline = current = empty snapshot; → Idle. Never emits Effects
+    // (fresh Profile).
     let snap_seed = dir_snap(&[]);
     let _ = seed_to_idle(&mut e, pid, &snap_seed, t0);
 
-    // FsEvent on anchor → Standard Settling. The Seed consumed its
-    // settle window; keep instants monotonic by opening the Standard
-    // burst strictly after.
+    // FsEvent on anchor → Standard Settling. The Seed consumed its settle window; keep instants
+    // monotonic by opening the Standard burst strictly after.
     let t1 = t0 + SETTLE * 2 + Duration::from_millis(10);
     let fs_out = e.step(
         Input::FsEvent {
@@ -209,21 +201,20 @@ fn golden_path_full_lifecycle() {
     );
     assert!(fs_out.effects().is_empty());
 
-    // Drive the Standard burst to a stable verdict (probing against the
-    // empty snapshot; the burst stabilizes when current matches the
-    // response). The walker advances time and injects probe responses.
+    // Drive the Standard burst to a stable verdict (probing against the empty snapshot; the burst
+    // stabilizes when current matches the response). The walker advances time and injects probe
+    // responses.
     let stable_out = drive_standard_burst_to_stable(&mut e, pid, &snap_seed, t1);
     assert_eq!(stable_out.effects().len(), 1);
     assert!(!stable_out.effects()[0].forced);
 
-    // EffectComplete::Ok drives the burst out of Awaiting and directly
-    // into Rebasing (probe-first) — the WholeSubtree rebase probe is
-    // emitted in this very step to capture the post-command tree.
+    // EffectComplete::Ok drives the burst out of Awaiting and directly into Rebasing (probe-first) —
+    // the WholeSubtree rebase probe is emitted in this very step to capture the post-command tree.
     let _ =
         complete_effect_to_rebasing(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
 
-    // Post-fire rebase (idempotent — same snapshot) → Idle;
-    // baseline := current (the post-command tree).
+    // Post-fire rebase (idempotent — same snapshot) → Idle; baseline := current (the post-command
+    // tree).
     let _ = rebase_post_fire_to_idle(
         &mut e,
         pid,
@@ -238,12 +229,10 @@ fn golden_path_full_lifecycle() {
 
 #[test]
 fn trailing_latched_anchor_event_does_not_double_fire() {
-    // After a fire cycle completes (Profile → Idle, baseline := the
-    // post-command tree), a trailing latched anchor FsEvent — the late
-    // event the watcher now delivers post-burst — opens a spurious
-    // Standard burst. Its verdict is `baseline == current` (the rebase
-    // just set it) and the Sub has already fired, so B1 dedup
-    // suppresses: the burst finishes to Idle with no second Effect.
+    // After a fire cycle completes (Profile → Idle, baseline := the post-command tree), a trailing
+    // latched anchor FsEvent — the late event the watcher now delivers post-burst — opens a spurious
+    // Standard burst. Its verdict is `baseline == current` (the rebase just set it) and the Sub has
+    // already fired, so B1 dedup suppresses: the burst finishes to Idle with no second Effect.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -258,8 +247,8 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
         t0,
     );
 
-    // Seed → Idle with an empty baseline. The cold-arm Seed answers
-    // its in-flight probe and pins the empty baseline directly.
+    // Seed → Idle with an empty baseline. The cold-arm Seed answers its in-flight probe and pins
+    // the empty baseline directly.
     assert!(
         first_probe_correlation(&attach_out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
@@ -267,9 +256,8 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
     let snap = dir_snap(&[]);
     let _ = seed_to_idle(&mut e, pid, &snap, t0);
 
-    // First fire cycle: FsEvent → Standard → Effect → EffectComplete →
-    // Rebase Ok → Idle. The Sub's has_fired is set by the emission.
-    // Open the Standard burst after the Seed's settle window so
+    // First fire cycle: FsEvent → Standard → Effect → EffectComplete → Rebase Ok → Idle. The Sub's
+    // has_fired is set by the emission. Open the Standard burst after the Seed's settle window so
     // instants stay monotonic.
     let t1 = t0 + SETTLE * 2 + Duration::from_millis(10);
     e.step(
@@ -283,9 +271,8 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
     assert_eq!(stable_out.effects().len(), 1, "first fire emits one Effect");
     let _ =
         complete_effect_to_rebasing(&mut e, sid, stable_out.effects()[0].key(), t1 + SETTLE * 16);
-    // Post-fire rebase (idempotent) → Idle; baseline := the
-    // post-command tree. The loop closes to Idle before the trailing
-    // event below.
+    // Post-fire rebase (idempotent) → Idle; baseline := the post-command tree. The loop closes to
+    // Idle before the trailing event below.
     let _ = rebase_post_fire_to_idle(
         &mut e,
         pid,
@@ -307,9 +294,8 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
         t2,
     );
 
-    // Drive the spurious burst: every verify responds with the same
-    // unchanged tree. B1 dedup must suppress — no Effect ever — and the
-    // burst must finish cleanly back to Idle.
+    // Drive the spurious burst: every verify responds with the same unchanged tree. B1 dedup must
+    // suppress — no Effect ever — and the burst must finish cleanly back to Idle.
     let mut t = t2;
     let mut returned_to_idle = false;
     for _ in 0..8 {
@@ -359,8 +345,8 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         t0,
     );
 
-    // The cold-arm Seed answers its in-flight Verify probe with a
-    // Vanished — terminal, no further sample needed.
+    // The cold-arm Seed answers its in-flight Verify probe with a Vanished — terminal, no further
+    // sample needed.
     assert!(
         first_probe_correlation(&out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
@@ -400,20 +386,18 @@ fn pending_event_race_late_probe_response_discarded() {
         t0,
     );
 
-    // The Seed is Batching-first (no probe at attach). The
-    // first Seed probe materializes only after the initial settle
-    // expiry; its correlation is the one the intervening FsEvent will
-    // render stale.
+    // The Seed is Batching-first (no probe at attach). The first Seed probe materializes only after
+    // the initial settle expiry; its correlation is the one the intervening FsEvent will render
+    // stale.
     assert!(
         first_probe_correlation(&attach_out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
     );
     let (stale_correlation, _) = assert_seed_verifying(&mut e, pid, t0);
 
-    // Inject FsEvent while the first Seed probe is in flight
-    // (Verifying). `event_drives_batching` Cancels + disarms that
-    // verify and re-arms Batching, preserving Seed intent — the
-    // correlation above is now stale.
+    // Inject FsEvent while the first Seed probe is in flight (Verifying). `event_drives_batching`
+    // Cancels + disarms that verify and re-arms Batching, preserving Seed intent — the correlation
+    // above is now stale.
     let evt_t = t0 + SETTLE + Duration::from_millis(1);
     let _evt_out = e.step(
         Input::FsEvent {
@@ -467,11 +451,10 @@ fn seed_burst_descendants_watched_via_first_probe() {
         t0,
     );
 
-    // The Seed is Batching-first: descendants are watched via
-    // the *first* Seed probe, which materializes only after the initial
-    // settle expiry — not at attach. The first sample's verdict is
-    // `Retry` (no prior), but `apply_snapshot` still runs the
-    // reconcile / Watch side effects on that first response.
+    // The Seed is Batching-first: descendants are watched via the *first* Seed probe, which
+    // materializes only after the initial settle expiry — not at attach. The first sample's verdict
+    // is `Retry` (no prior), but `apply_snapshot` still runs the reconcile / Watch side effects on
+    // that first response.
     assert!(
         first_probe_correlation(&attach_out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
@@ -492,9 +475,8 @@ fn seed_burst_descendants_watched_via_first_probe() {
         .iter()
         .filter(|op| matches!(op, WatchOp::Watch { .. }))
         .count();
-    // Files don't get Watch ops; only the Dir descendant
-    // contributes. The File still materializes as a Resource (for
-    // PerStableFile DedupKey support), no FD.
+    // Files don't get Watch ops; only the Dir descendant contributes. The File still materializes
+    // as a Resource (for PerStableFile DedupKey support), no FD.
     assert_eq!(watches, 1, "one Watch for Dir descendant only");
 }
 
@@ -514,8 +496,8 @@ fn force_fire_emits_effect_with_forced_true() {
         t0,
     );
 
-    // Complete the Seed burst with an empty baseline. The cold-arm Seed
-    // answers its in-flight Verify probe and pins directly.
+    // Complete the Seed burst with an empty baseline. The cold-arm Seed answers its in-flight
+    // Verify probe and pins directly.
     assert!(
         first_probe_correlation(&attach_out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
@@ -523,8 +505,7 @@ fn force_fire_emits_effect_with_forced_true() {
     let snap = dir_snap(&[]);
     let _ = seed_to_idle(&mut e, pid, &snap, t0);
 
-    // FsEvent → Standard Settling. Open it after the Seed's settle
-    // window so instants stay monotonic.
+    // FsEvent → Standard Settling. Open it after the Seed's settle window so instants stay monotonic.
     let t1 = t0 + SETTLE * 2 + Duration::from_millis(10);
     e.step(
         Input::FsEvent {
@@ -561,8 +542,8 @@ fn force_fire_emits_effect_with_forced_true() {
 
 #[test]
 fn step_output_is_sorted() {
-    // Build a multi-Watch scenario (descendants reconciled on first probe)
-    // and confirm StepOutput.watch_ops is sorted by ResourceId.
+    // Build a multi-Watch scenario (descendants reconciled on first probe) and confirm
+    // StepOutput.watch_ops is sorted by ResourceId.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "root");
     let t0 = Instant::now();
@@ -576,9 +557,8 @@ fn step_output_is_sorted() {
         t0,
     );
 
-    // The attach output is probe-less (Batching-first Seed) and
-    // carries no reconciled descendants. The multi-Watch StepOutput is
-    // the *first* Seed probe response (post initial settle expiry),
+    // The attach output is probe-less (Batching-first Seed) and carries no reconciled descendants.
+    // The multi-Watch StepOutput is the *first* Seed probe response (post initial settle expiry),
     // where descendants reconcile — assert sortedness there.
     assert!(
         first_probe_correlation(&attach_out).is_some(),
@@ -617,10 +597,9 @@ fn step_output_is_sorted() {
 
 #[test]
 fn cancel_all_in_flight_probes_returns_sealed_output() {
-    // Graceful-shutdown probe drain. Two Profiles in Verifying — one
-    // probe in flight each — exercise the multi-owner cancel path; the
-    // returned `StepOutput` must carry only `ProbeOp::Cancel` ops, in
-    // owner order, with `watch_ops` and `effects` empty (the live
+    // Graceful-shutdown probe drain. Two Profiles in Verifying — one probe in flight each —
+    // exercise the multi-owner cancel path; the returned `StepOutput` must carry only
+    // `ProbeOp::Cancel` ops, in owner order, with `watch_ops` and `effects` empty (the live
     // falsifier of `bin/driver.rs`'s shutdown debug_assert).
     let mut e = Engine::new();
     let r1 = anchor_dir(&mut e, "src");
@@ -645,8 +624,7 @@ fn cancel_all_in_flight_probes_returns_sealed_output() {
         t0,
     );
 
-    // Expire each Profile's own Batching settle so both reach Verifying
-    // with a Seed probe in flight.
+    // Expire each Profile's own Batching settle so both reach Verifying with a Seed probe in flight.
     let _ = assert_seed_verifying(&mut e, pid1, t0);
     let _ = assert_seed_verifying(&mut e, pid2, t0);
 
@@ -671,19 +649,16 @@ fn cancel_all_in_flight_probes_returns_sealed_output() {
 
 #[test]
 fn reap_promoter_active_returns_sealed_output() {
-    // A Promoter with multiple proxies emits multiple `Unwatch` ops
-    // across dynamic-Sub teardown plus per-proxy release. The returned
-    // `StepOutput` must reseal `watch_ops` by `ResourceId` — the
-    // contract `bin/driver/forward.rs` assumes when dispatching by
-    // by-value destructure.
+    // A Promoter with multiple proxies emits multiple `Unwatch` ops across dynamic-Sub teardown
+    // plus per-proxy release. The returned `StepOutput` must reseal `watch_ops` by `ResourceId` —
+    // the contract `bin/driver/forward.rs` assumes when dispatching by by-value destructure.
     let mut e = Engine::new();
     let _ = pre_place_dir(&mut e, &["var", "log"]);
     let t0 = Instant::now();
     let pid = attach_promoter(&mut e, "logs", "/var/log/*.log", t0);
 
-    // Drive the initial enumeration: respond with a directory of two
-    // matching files. The Promoter mints a dynamic Sub per match,
-    // leaving it in `Active` with two proxies.
+    // Drive the initial enumeration: respond with a directory of two matching files. The Promoter
+    // mints a dynamic Sub per match, leaving it in `Active` with two proxies.
     let correlation = e
         .pending_probe_for(ProbeOwner::Promoter(pid))
         .expect("Promoter enumeration probe in flight after attach");
@@ -712,13 +687,11 @@ fn reap_promoter_active_returns_sealed_output() {
             .any(|d| matches!(d, Diagnostic::PromoterReaped { promoter } if *promoter == pid)),
         "PromoterReaped diagnostic emitted",
     );
-    // Under the cold-arm Verifying-first contract, each dynamic Sub's
-    // Profile lands in `Active(PreFire(Verifying))` with the cold-walk
-    // probe armed. `reap_promoter`'s `detach_sub_inner` routes each
-    // Active Profile through `DeferToBurstEnd` (marks for reap, keeps
-    // the burst alive for its Draining-sweep reconfirm). The Profiles
-    // outlive `reap_promoter` with armed slots until a fresh input
-    // drives them. Drop the test engine's Profiles cleanly via the
-    // engine-wide probe cancel.
+    // Under the cold-arm Verifying-first contract, each dynamic Sub's Profile lands in
+    // `Active(PreFire(Verifying))` with the cold-walk probe armed. `reap_promoter`'s
+    // `detach_sub_inner` routes each Active Profile through `DeferToBurstEnd` (marks for reap,
+    // keeps the burst alive for its Draining-sweep reconfirm). The Profiles outlive `reap_promoter`
+    // with armed slots until a fresh input drives them. Drop the test engine's Profiles cleanly via
+    // the engine-wide probe cancel.
     let _ = e.cancel_all_in_flight_probes();
 }

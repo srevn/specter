@@ -153,9 +153,8 @@ fn missing_file_yields_io_error() {
     assert!(matches!(err, ConfigError::Io { .. }));
 }
 
-/// `enabled` is typed as `Option<bool>` in `RawWatch`; toml's standard
-/// type-check rejects non-bool values at parse time, so the most
-/// common typo (quoting the bool by reflex) surfaces as a parse
+/// `enabled` is typed as `Option<bool>` in `RawWatch`; toml's standard type-check rejects non-bool
+/// values at parse time, so the most common typo (quoting the bool by reflex) surfaces as a parse
 /// error rather than a validation issue.
 #[test]
 fn enabled_string_value_yields_parse_error() {
@@ -165,12 +164,10 @@ fn enabled_string_value_yields_parse_error() {
     assert!(matches!(err, ConfigError::Parse { .. }), "got {err:?}");
 }
 
-/// Per-action `timeout` (humantime at the TOML layer) round-trips
-/// through validation into [`ExecAction::timeout`]. Pinned in one
-/// test: humantime mapping, per-action threading, AND
-/// omitted-as-`None` are all observable in the same program — the
-/// middle step carries `None`, the outer steps carry distinct
-/// durations.
+/// Per-action `timeout` (humantime at the TOML layer) round-trips through validation into
+/// [`ExecAction::timeout`]. Pinned in one test: humantime mapping, per-action threading, AND
+/// omitted-as-`None` are all observable in the same program — the middle step carries `None`, the
+/// outer steps carry distinct durations.
 #[test]
 fn exec_timeout_threads_per_action_via_humantime_serde() {
     let toml = "[[watch]]\nname = \"t\"\npath = \"/\"\n\
@@ -199,9 +196,8 @@ fn exec_timeout_threads_per_action_via_humantime_serde() {
     );
 }
 
-/// Zero-duration timeouts (`"0s"`, `"0ms"`) are a near-certain typo —
-/// the SIGTERM would fire before the child can make progress. Surface
-/// as [`IssueKind::TimeoutZero`] rather than silently parsing.
+/// Zero-duration timeouts (`"0s"`, `"0ms"`) are a near-certain typo — the SIGTERM would fire before
+/// the child can make progress. Surface as [`IssueKind::TimeoutZero`] rather than silently parsing.
 #[test]
 fn exec_zero_timeout_is_validation_error() {
     let toml = "[[watch]]\nname = \"t\"\npath = \"/\"\n\
@@ -214,9 +210,8 @@ fn exec_zero_timeout_is_validation_error() {
     );
 }
 
-/// `${env.HOME:-/tmp}` lowers through validation into
-/// [`ArgPart::EnvVar`] inside the program. Confirms the lexer + lowering
-/// path is wired end-to-end; the default-bearing form covers both the
+/// `${env.HOME:-/tmp}` lowers through validation into [`ArgPart::EnvVar`] inside the program.
+/// Confirms the lexer + lowering path is wired end-to-end; the default-bearing form covers both the
 /// `${env.NAME}` and `${env.NAME:-default}` lexer branches in one test.
 #[test]
 fn exec_env_placeholder_lowers_into_program() {
@@ -236,11 +231,10 @@ fn exec_env_placeholder_lowers_into_program() {
     }
 }
 
-/// Malformed env-var name (`1HOME`) surfaces as a validation issue
-/// rather than panicking. The template layer's `InvalidEnvName` is
-/// collapsed onto [`IssueKind::UnknownPlaceholder`] so operator-facing
-/// output stays consistent across both namespaces; the detail message
-/// carries the specific cause.
+/// Malformed env-var name (`1HOME`) surfaces as a validation issue rather than panicking. The
+/// template layer's `InvalidEnvName` is collapsed onto [`IssueKind::UnknownPlaceholder`] so
+/// operator-facing output stays consistent across both namespaces; the detail message carries the
+/// specific cause.
 #[test]
 fn exec_env_invalid_name_yields_validation_error() {
     let toml = "[[watch]]\nname = \"e\"\npath = \"/\"\n\
@@ -257,11 +251,10 @@ fn exec_env_invalid_name_yields_validation_error() {
 
 // ----- Conditional actions (`when` / `then` / `else`) -----
 
-/// Conditional with `when` + `then` lowers to a two-op program:
-/// predicate op (Exec body, `on_failed = Escape` — "branch, not guard")
-/// then the then-branch's Exec op. With no `else`, the predicate's
-/// `on_failed = Escape` (the "branch, not guard" outcome elision —
-/// predicate Failed terminates the plan Ok without propagating).
+/// Conditional with `when` + `then` lowers to a two-op program: predicate op (Exec body, `on_failed
+/// = Escape` — "branch, not guard") then the then-branch's Exec op. With no `else`, the predicate's
+/// `on_failed = Escape` (the "branch, not guard" outcome elision — predicate Failed terminates the
+/// plan Ok without propagating).
 #[test]
 fn conditional_when_then_lowers_to_predicate_plus_then() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -271,29 +264,27 @@ fn conditional_when_then_lowers_to_predicate_plus_then() {
     let cfg = Config::from_str(toml).unwrap();
     let p = &cfg.watches[0].program;
     assert_eq!(p.ops().len(), 2);
-    // Predicate op (cursor 0): Exec body; on_ok continues to then-branch
-    // (op 1); on_failed = Escape (no-else: terminate Ok without propagation).
+    // Predicate op (cursor 0): Exec body; on_ok continues to then-branch (op 1); on_failed = Escape
+    // (no-else: terminate Ok without propagation).
     assert!(matches!(p.ops()[0].body(), SpawnBody::Exec(_)));
     match p.ops()[0].on_ok() {
         BranchTarget::Continue(idx) => assert_eq!(idx.get(), 1, "predicate Ok enters then"),
         other => panic!("expected Continue(1), got {other:?}"),
     }
     assert_eq!(p.ops()[0].on_failed(), BranchTarget::Escape);
-    // Then-exec (cursor 1): on_ok = Escape (top-level natural completion);
-    // on_failed = Terminate (stop-on-failure, outcome propagates).
+    // Then-exec (cursor 1): on_ok = Escape (top-level natural completion); on_failed = Terminate
+    // (stop-on-failure, outcome propagates).
     assert!(matches!(p.ops()[1].body(), SpawnBody::Exec(_)));
     assert_eq!(p.ops()[1].on_ok(), BranchTarget::Escape);
     assert_eq!(p.ops()[1].on_failed(), BranchTarget::Terminate);
 }
 
-/// Conditional with `when` + `then` + `else` lowers to a three-op
-/// program whose skip past the else-branch is encoded by branch edges,
-/// with no explicit jump opcode. Layout:
+/// Conditional with `when` + `then` + `else` lowers to a three-op program whose skip past the
+/// else-branch is encoded by branch edges, with no explicit jump opcode. Layout:
 ///
-/// - op 0: predicate Exec — `on_ok = Continue(1)` (enter then),
-///   `on_failed = Continue(2)` (enter else).
-/// - op 1: then-Exec — `on_ok = Escape` (skip past else), `on_failed =
-///   Terminate` (stop-on-failure).
+/// - op 0: predicate Exec — `on_ok = Continue(1)` (enter then), `on_failed = Continue(2)` (enter
+///   else).
+/// - op 1: then-Exec — `on_ok = Escape` (skip past else), `on_failed = Terminate` (stop-on-failure).
 /// - op 2: else-Exec — `on_ok = Escape`, `on_failed = Terminate`.
 #[test]
 fn conditional_with_else_lowers_to_predicate_then_else_via_edges() {
@@ -326,10 +317,9 @@ fn conditional_with_else_lowers_to_predicate_then_else_via_edges() {
     assert_eq!(p.ops()[2].on_failed(), BranchTarget::Terminate);
 }
 
-/// `when` carries its own per-step `timeout` inside the nested
-/// `RawExec`. Confirms the predicate's `ExecAction.timeout` is
-/// threaded from TOML, distinct from the surrounding action's
-/// top-level (forbidden) `timeout`.
+/// `when` carries its own per-step `timeout` inside the nested `RawExec`. Confirms the predicate's
+/// `ExecAction.timeout` is threaded from TOML, distinct from the surrounding action's top-level
+/// (forbidden) `timeout`.
 #[test]
 fn conditional_predicate_carries_per_step_timeout() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -338,8 +328,8 @@ fn conditional_predicate_carries_per_step_timeout() {
                     then = [{ exec = [\"yes\"] }] },\n\
                 ]";
     let cfg = Config::from_str(toml).unwrap();
-    // The predicate op (cursor 0) carries an Exec body whose timeout
-    // round-trips from TOML through validation into ExecAction.timeout.
+    // The predicate op (cursor 0) carries an Exec body whose timeout round-trips from TOML through
+    // validation into ExecAction.timeout.
     let p = &cfg.watches[0].program;
     let SpawnBody::Exec(exec) = &p.ops()[0].body() else {
         panic!("expected SpawnBody::Exec for predicate");
@@ -347,9 +337,9 @@ fn conditional_predicate_carries_per_step_timeout() {
     assert_eq!(exec.timeout(), Some(Duration::from_secs(2)));
 }
 
-/// `when` without `then` is rejected at the variant-completeness
-/// gate as [`IssueKind::ConditionalIncomplete`]. Operators get a
-/// single, clear "you wrote half a conditional" error.
+/// `when` without `then` is rejected at the variant-completeness gate as
+/// [`IssueKind::ConditionalIncomplete`]. Operators get a single, clear "you wrote half a
+/// conditional" error.
 #[test]
 fn conditional_when_without_then_is_rejected() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -380,9 +370,8 @@ fn conditional_then_without_when_is_rejected() {
     );
 }
 
-/// Conditional with empty `then` and no `else` (or empty `else`) is
-/// pointless — the predicate would have no observable effect.
-/// Rejected as [`IssueKind::EmptyConditional`].
+/// Conditional with empty `then` and no `else` (or empty `else`) is pointless — the predicate would
+/// have no observable effect. Rejected as [`IssueKind::EmptyConditional`].
 #[test]
 fn conditional_empty_then_and_no_else_is_rejected() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -395,12 +384,10 @@ fn conditional_empty_then_and_no_else_is_rejected() {
     );
 }
 
-/// Empty `then` with non-empty `else` is allowed — operationally
-/// equivalent to a negated predicate (run else iff predicate failed).
-/// Lowers to a 2-op program: predicate then else-Exec. The empty
-/// then-block contributes no ops; the predicate's `on_ok` resolves to
-/// `Escape` (the empty then-tail's escape — skip past else on Ok).
-/// `on_failed` continues into the else-Exec.
+/// Empty `then` with non-empty `else` is allowed — operationally equivalent to a negated predicate
+/// (run else iff predicate failed). Lowers to a 2-op program: predicate then else-Exec. The empty
+/// then-block contributes no ops; the predicate's `on_ok` resolves to `Escape` (the empty
+/// then-tail's escape — skip past else on Ok). `on_failed` continues into the else-Exec.
 #[test]
 fn conditional_empty_then_nonempty_else_is_allowed() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -412,8 +399,8 @@ fn conditional_empty_then_nonempty_else_is_allowed() {
     assert_eq!(p.ops().len(), 2);
     // op 0: predicate
     assert!(matches!(p.ops()[0].body(), SpawnBody::Exec(_)));
-    // The empty then-block has no ops — predicate on_ok resolves
-    // to Escape (skip past else on the Ok path).
+    // The empty then-block has no ops — predicate on_ok resolves to Escape (skip past else on the
+    // Ok path).
     assert_eq!(p.ops()[0].on_ok(), BranchTarget::Escape);
     match p.ops()[0].on_failed() {
         BranchTarget::Continue(idx) => {
@@ -427,9 +414,9 @@ fn conditional_empty_then_nonempty_else_is_allowed() {
     assert_eq!(p.ops()[1].on_failed(), BranchTarget::Terminate);
 }
 
-/// Conditional with both `exec` and `when` set is ambiguous — flagged
-/// as [`IssueKind::ActionAmbiguousVariant`]. The exactly-one-variant
-/// rule applies across exec / pipe / conditional uniformly.
+/// Conditional with both `exec` and `when` set is ambiguous — flagged as
+/// [`IssueKind::ActionAmbiguousVariant`]. The exactly-one-variant rule applies across exec / pipe /
+/// conditional uniformly.
 #[test]
 fn exec_and_conditional_together_is_rejected() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -446,10 +433,9 @@ fn exec_and_conditional_together_is_rejected() {
     );
 }
 
-/// Top-level `timeout` on a conditional action is rejected — the
-/// predicate carries its own per-step timeout inside the nested
-/// `RawExec`. Operators sometimes try `timeout` at the outer scope;
-/// the validator catches it as [`IssueKind::TimeoutNotApplicable`].
+/// Top-level `timeout` on a conditional action is rejected — the predicate carries its own per-step
+/// timeout inside the nested `RawExec`. Operators sometimes try `timeout` at the outer scope; the
+/// validator catches it as [`IssueKind::TimeoutNotApplicable`].
 #[test]
 fn conditional_top_level_timeout_is_rejected() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -467,17 +453,16 @@ fn conditional_top_level_timeout_is_rejected() {
     );
 }
 
-/// Nested conditional inside `then` lowers recursively — each
-/// nesting level produces its own predicate op with edges patched to
-/// the right surrounding context. Pinned to detect off-by-one drift in
-/// [`crate::action::lower_actions`] under nested input.
+/// Nested conditional inside `then` lowers recursively — each nesting level produces its own
+/// predicate op with edges patched to the right surrounding context. Pinned to detect off-by-one
+/// drift in [`crate::action::lower_actions`] under nested input.
 ///
 /// Shape for outer-when=outer, outer-then=[inner-when, inner-then=[y]]:
 ///
-/// - op 0: outer predicate Exec — `on_ok = Continue(1)` (enter outer-then),
-///   `on_failed = Escape` (outer has no else, "branch-not-guard").
-/// - op 1: inner predicate Exec — `on_ok = Continue(2)` (enter inner-then),
-///   `on_failed = Escape` (inner has no else either).
+/// - op 0: outer predicate Exec — `on_ok = Continue(1)` (enter outer-then), `on_failed = Escape`
+///   (outer has no else, "branch-not-guard").
+/// - op 1: inner predicate Exec — `on_ok = Continue(2)` (enter inner-then), `on_failed = Escape`
+///   (inner has no else either).
 /// - op 2: inner-then Exec `/bin/y` — `on_ok = Escape`, `on_failed = Terminate`.
 #[test]
 fn nested_conditional_inside_then_lowers_recursively() {
@@ -510,9 +495,8 @@ fn nested_conditional_inside_then_lowers_recursively() {
     assert_eq!(p.ops()[2].on_failed(), BranchTarget::Terminate);
 }
 
-/// Empty `else` array (explicit `else = []`) is normalised to "no
-/// else" — the lowered shape is identical to the omitted-`else` form
-/// (predicate + then, with predicate's `on_failed = Escape`).
+/// Empty `else` array (explicit `else = []`) is normalised to "no else" — the lowered shape is
+/// identical to the omitted-`else` form (predicate + then, with predicate's `on_failed = Escape`).
 #[test]
 fn conditional_explicit_empty_else_normalises_to_no_else() {
     let toml = "[[watch]]\nname = \"c\"\npath = \"/\"\n\
@@ -535,8 +519,8 @@ fn conditional_explicit_empty_else_normalises_to_no_else() {
     assert_eq!(p.ops()[1].on_failed(), BranchTarget::Terminate);
 }
 
-/// Two-stage pipe lowers to a single op with `SpawnBody::Pipe` carrying
-/// every stage. Each stage's argv is preserved verbatim.
+/// Two-stage pipe lowers to a single op with `SpawnBody::Pipe` carrying every stage. Each stage's
+/// argv is preserved verbatim.
 #[test]
 fn pipe_two_stages_lowers_to_single_op() {
     let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
@@ -570,9 +554,8 @@ fn pipe_two_stages_lowers_to_single_op() {
     assert_eq!(p.ops()[0].on_failed(), BranchTarget::Terminate);
 }
 
-/// Each pipe stage carries its own per-stage `timeout`. Validation
-/// threads the Duration onto the `ExecAction.timeout` field of the
-/// corresponding stage. Stages without a timeout have `None`.
+/// Each pipe stage carries its own per-stage `timeout`. Validation threads the Duration onto the
+/// `ExecAction.timeout` field of the corresponding stage. Stages without a timeout have `None`.
 #[test]
 fn pipe_stage_timeouts_threaded_per_stage() {
     let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
@@ -608,8 +591,8 @@ fn pipe_empty_rejected() {
     );
 }
 
-/// Single-stage pipe is rejected as `IssueKind::SingleStagePipe` —
-/// degenerate, the operator should use top-level `exec` directly.
+/// Single-stage pipe is rejected as `IssueKind::SingleStagePipe` — degenerate, the operator should
+/// use top-level `exec` directly.
 #[test]
 fn pipe_single_stage_rejected() {
     let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
@@ -622,8 +605,8 @@ fn pipe_single_stage_rejected() {
     );
 }
 
-/// Top-level `timeout` on a pipe action is rejected — pipe stages
-/// each set their own `timeout` on the nested `RawExec`.
+/// Top-level `timeout` on a pipe action is rejected — pipe stages each set their own `timeout` on
+/// the nested `RawExec`.
 #[test]
 fn pipe_top_level_timeout_rejected() {
     let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
@@ -643,8 +626,7 @@ fn pipe_top_level_timeout_rejected() {
     );
 }
 
-/// `exec` and `pipe` set simultaneously is rejected as
-/// `IssueKind::ActionAmbiguousVariant`.
+/// `exec` and `pipe` set simultaneously is rejected as `IssueKind::ActionAmbiguousVariant`.
 #[test]
 fn pipe_with_exec_simultaneously_rejected() {
     let toml = "[[watch]]\nname = \"p\"\npath = \"/data\"\n\
@@ -664,9 +646,8 @@ fn pipe_with_exec_simultaneously_rejected() {
     );
 }
 
-/// An empty `exec` argv inside a pipe stage surfaces as
-/// `IssueKind::EmptyArgv` with a path label that locates the offending
-/// stage. The structural pipe check (>=2 stages) still passes — the
+/// An empty `exec` argv inside a pipe stage surfaces as `IssueKind::EmptyArgv` with a path label
+/// that locates the offending stage. The structural pipe check (>=2 stages) still passes — the
 /// per-stage validation catches the empty argv.
 #[test]
 fn pipe_stage_with_empty_argv_rejected() {

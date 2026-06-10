@@ -1,12 +1,10 @@
-//! Unit tests for `Engine::discard_anchor_state` — pins the helper's
-//! contract: which Profile fields are cleared, which are preserved,
-//! idempotence, post-vacate safety, and invariance of the
+//! Unit tests for `Engine::discard_anchor_state` — pins the helper's contract: which Profile fields
+//! are cleared, which are preserved, idempotence, post-vacate safety, and invariance of the
 //! lifetime-fixed fields (`events_union`, `has_per_file_fds`).
 //!
-//! Co-located via `#[path]` on `claims.rs`. Goes hand-in-hand with the
-//! per-site `dispatch_*_clears_profile_kind` assertions in
-//! `transitions_tests.rs`, which exercise the helper through each
-//! production call site.
+//! Co-located via `#[path]` on `claims.rs`. Goes hand-in-hand with the per-site
+//! `dispatch_*_clears_profile_kind` assertions in `transitions_tests.rs`, which exercise the helper
+//! through each production call site.
 
 #![allow(
     clippy::items_after_statements,
@@ -57,18 +55,14 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     ))
 }
 
-/// Drive a fresh-attach cold Seed burst from
-/// `Active(PreFire(Verifying))` through its quiescence verdict to
-/// pinned `Idle`, committing `snap` as `current` + `baseline`.
+/// Drive a fresh-attach cold Seed burst from `Active(PreFire(Verifying))` through its quiescence
+/// verdict to pinned `Idle`, committing `snap` as `current` + `baseline`.
 ///
-/// The cold-arm Seed burst pins on the first `Authoritative` sample:
-/// a cold-Seed `SilentPin` consequence does not owe quiescence proof, so
-/// the witness is [`QuiescenceWitness::EventsReliable`] and the fold
-/// folds to `Stable(StableReason::Natural)`; dispatch reaches `SilentPin`
-/// (no fired Subs, no drift) and finishes to Idle. The cold-arm
-/// Verifying-first contract puts the probe in flight at burst
-/// construction, so this helper answers it directly — no settle expiry
-/// step.
+/// The cold-arm Seed burst pins on the first `Authoritative` sample: a cold-Seed `SilentPin`
+/// consequence does not owe quiescence proof, so the witness is [`QuiescenceWitness::EventsReliable`]
+/// and the fold folds to `Stable(StableReason::Natural)`; dispatch reaches `SilentPin` (no fired
+/// Subs, no drift) and finishes to Idle. The cold-arm Verifying-first contract puts the probe in
+/// flight at burst construction, so this helper answers it directly — no settle expiry step.
 fn drive_fresh_seed_to_idle(e: &mut Engine, pid: ProfileId, snap: Arc<DirSnapshot>, t0: Instant) {
     let corr = e
         .pending_probe_for(ProbeOwner::Profile(pid))
@@ -93,10 +87,9 @@ fn drive_fresh_seed_to_idle(e: &mut Engine, pid: ProfileId, snap: Arc<DirSnapsho
     );
 }
 
-/// Build an Engine + a Profile materialised at `root`. Returns the
-/// `(SubId, ProfileId, anchor_id, parent_id)` tuple. The anchor sits
-/// under a parent slot so `watch_root_parent` is set; both are Dir;
-/// `events = ClassSet::EMPTY` keeps `has_per_file_fds = false`.
+/// Build an Engine + a Profile materialised at `root`. Returns the `(SubId, ProfileId, anchor_id,
+/// parent_id)` tuple. The anchor sits under a parent slot so `watch_root_parent` is set; both are
+/// Dir; `events = ClassSet::EMPTY` keeps `has_per_file_fds = false`.
 fn engine_with_materialised_profile(
     events: ClassSet,
 ) -> (Engine, SubId, ProfileId, ResourceId, ResourceId) {
@@ -125,8 +118,8 @@ fn engine_with_materialised_profile(
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile();
 
-    // Drive the cold-arm Seed through its quiescence proof so `current`
-    // and `baseline` pin to the empty-dir observation.
+    // Drive the cold-arm Seed through its quiescence proof so `current` and `baseline` pin to the
+    // empty-dir observation.
     drive_fresh_seed_to_idle(&mut e, pid, dir_snap(vec![]), t0);
 
     (e, sid, pid, anchor, parent)
@@ -171,9 +164,8 @@ fn discard_anchor_state_preserves_watch_root_parent() {
         Some(parent),
         "recovery channel preserved across anchor loss",
     );
-    // Parent's watch_demand still carries this Profile's STRUCTURE
-    // contribution — the recompute walks covering Profiles, finds this
-    // one still claims the parent, and keeps the union.
+    // Parent's watch_demand still carries this Profile's STRUCTURE contribution — the recompute
+    // walks covering Profiles, finds this one still claims the parent, and keeps the union.
     assert!(
         e.tree().get(parent).is_some_and(|r| r.watch_demand() >= 1),
         "parent watch_demand preserved",
@@ -189,9 +181,8 @@ fn discard_anchor_state_carries_settled_hash_through_loss() {
         .get(pid)
         .and_then(|p| p.baseline().map(|s| s.hash()))
         .expect("fixture must produce baseline");
-    // Active mode: the settled reference *is* the live baseline — a
-    // separate survival witness alongside a held baseline is not
-    // representable in the anchor sum.
+    // Active mode: the settled reference *is* the live baseline — a separate survival witness
+    // alongside a held baseline is not representable in the anchor sum.
     assert_eq!(
         e.profiles().get(pid).unwrap().settled_hash(),
         Some(pre_loss_hash),
@@ -213,11 +204,10 @@ fn discard_anchor_state_carries_settled_hash_through_loss() {
 
 #[test]
 fn discard_anchor_state_preserves_fired_subs() {
-    // Negative-space contract: anchor loss does not clear fire
-    // history. The history is now per-Sub (`Sub.has_fired`) and
-    // `discard_anchor_state` operates on the Profile only, so survival
-    // across the loss window is structural — but the property still
-    // matters: post-recovery drift must re-fire emitted-once Effects.
+    // Negative-space contract: anchor loss does not clear fire history. The history is now per-Sub
+    // (`Sub.has_fired`) and `discard_anchor_state` operates on the Profile only, so survival across
+    // the loss window is structural — but the property still matters: post-recovery drift must
+    // re-fire emitted-once Effects.
     let (mut e, sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
     e.subs.mark_fired(sid);
     assert!(
@@ -300,10 +290,10 @@ fn discard_anchor_state_idempotent() {
 
 #[test]
 fn discard_anchor_state_safe_after_vacate() {
-    // anchor contributions were cleared (e.g., by WatchOpRejected
-    // → `Tree::vacate`); `release_anchor_claim`'s `sub_watch` must
-    // silently skip the absent `ContribKey::ProfileAnchor(pid)` key
-    // and skip emitting a second Unwatch (vacate already emitted one).
+    // anchor contributions were cleared (e.g., by WatchOpRejected → `Tree::vacate`);
+    // `release_anchor_claim`'s `sub_watch` must silently skip the absent
+    // `ContribKey::ProfileAnchor(pid)` key and skip emitting a second Unwatch (vacate already
+    // emitted one).
     let (mut e, _sid, pid, anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
 
     // Capture the pre-vacate counter to make sure vacate actually fires.
@@ -321,8 +311,8 @@ fn discard_anchor_state_safe_after_vacate() {
 
     let mut out = StepOutput::default();
     e.discard_anchor_state(pid, &mut out);
-    // Anchor's edge already fired during vacate; the helper must
-    // not emit a second Unwatch on the post-vacate counter.
+    // Anchor's edge already fired during vacate; the helper must not emit a second Unwatch on the
+    // post-vacate counter.
     assert!(
         !out.watch_ops
             .iter()
@@ -342,8 +332,7 @@ fn discard_anchor_state_no_op_on_already_lost_profile() {
     let mut first_out = StepOutput::default();
     e.discard_anchor_state(pid, &mut first_out);
 
-    // Second call against a fully-cleared Profile — no ops, no
-    // diagnostics.
+    // Second call against a fully-cleared Profile — no ops, no diagnostics.
     let mut out = StepOutput::default();
     e.discard_anchor_state(pid, &mut out);
 
@@ -367,9 +356,8 @@ fn discard_anchor_state_no_op_on_already_lost_profile() {
 
 #[test]
 fn discard_anchor_state_preserves_events_union_and_per_file_fds() {
-    // events_union and has_per_file_fds are invariant for the Profile's
-    // lifetime under the events-folds-into-config_hash discipline; the
-    // helper must not touch them.
+    // events_union and has_per_file_fds are invariant for the Profile's lifetime under the
+    // events-folds-into-config_hash discipline; the helper must not touch them.
     let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::CONTENT);
     let (events_before, fds_before) = {
         let p = e.profiles().get(pid).expect("Profile lives");
@@ -392,8 +380,8 @@ fn discard_anchor_state_preserves_events_union_and_per_file_fds() {
 
 #[test]
 fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
-    // Materialise a Profile with a Dir child; verify the per-descendant
-    // contribution is released by the helper.
+    // Materialise a Profile with a Dir child; verify the per-descendant contribution is released by
+    // the helper.
     let mut e = Engine::new();
     let anchor = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
@@ -432,9 +420,8 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
     let mut out = StepOutput::default();
     e.discard_anchor_state(pid, &mut out);
 
-    // Child's contribution from this Profile released; the slot may
-    // even have been reaped if no other claimers remain. Either way,
-    // its watch_demand drops to 0.
+    // Child's contribution from this Profile released; the slot may even have been reaped if no
+    // other claimers remain. Either way, its watch_demand drops to 0.
     let child_demand = e
         .tree()
         .get(nested_id)
@@ -446,34 +433,27 @@ fn discard_anchor_state_walks_descendants_and_releases_their_demand() {
     let _ = sid;
 }
 
-/// Anchor-loss mid-burst with a dirty descendant: the abnormal-end
-/// path through `Tree::vacate` cleanly reaps the descendant slot with
-/// the kernel-watch protocol balanced. `vacate` is a single-protocol
-/// (`Unwatch`-only) terminus, so no suppress-precondition can be
-/// violated. This pins the *positive* invariant — exactly one
-/// `Unwatch(b)` closes the descendant's watch via the terminus, the
-/// slot reaps, and the Profile reverts to anchor-loss state.
+/// Anchor-loss mid-burst with a dirty descendant: the abnormal-end path through `Tree::vacate`
+/// cleanly reaps the descendant slot with the kernel-watch protocol balanced. `vacate` is a
+/// single-protocol (`Unwatch`-only) terminus, so no suppress-precondition can be violated. This
+/// pins the *positive* invariant — exactly one `Unwatch(b)` closes the descendant's watch via the
+/// terminus, the slot reaps, and the Profile reverts to anchor-loss state.
 ///
 /// Lifecycle reproduced:
-/// 1. Profile P at `/a` (Dir), STRUCTURE-only, with materialised
-///    descendant `/a/b` (Dir) — `b.watch_demand == 1`.
-/// 2. `FsEvent` at `/a` ⇒ `start_standard_burst` ⇒
-///    `Active(PreFire(Batching))`.
-/// 3. `FsEvent` at `/a/b` mid-Batching ⇒ `event_drives_batching`
-///    tracks `b`'s path in the burst's `dirty` provenance.
-/// 4. `WatchOpRejected` on the anchor ⇒ `on_watch_op_rejected` ⇒
-///    `finalize_anchor_lost(P)` ⇒ `discard_anchor_state(P)` ⇒
-///    `release_descendant_claim(P)` walks the snapshot ⇒
-///    `delete_child(b)` ⇒ `sub_watch_then_try_reap(b)`: the last
-///    contribution drains (emits `WatchOp::Unwatch { resource: b }`)
-///    then `try_reap` removes the slot — `vacate`'s `Unwatch` branch
-///    is dormant there (the map is already empty by `has_anchors`'
-///    contract).
+/// 1. Profile P at `/a` (Dir), STRUCTURE-only, with materialised descendant `/a/b` (Dir) —
+///    `b.watch_demand == 1`.
+/// 2. `FsEvent` at `/a` ⇒ `start_standard_burst` ⇒ `Active(PreFire(Batching))`.
+/// 3. `FsEvent` at `/a/b` mid-Batching ⇒ `event_drives_batching` tracks `b`'s path in the burst's
+///    `dirty` provenance.
+/// 4. `WatchOpRejected` on the anchor ⇒ `on_watch_op_rejected` ⇒ `finalize_anchor_lost(P)` ⇒
+///    `discard_anchor_state(P)` ⇒ `release_descendant_claim(P)` walks the snapshot ⇒
+///    `delete_child(b)` ⇒ `sub_watch_then_try_reap(b)`: the last contribution drains (emits
+///    `WatchOp::Unwatch { resource: b }`) then `try_reap` removes the slot — `vacate`'s `Unwatch`
+///    branch is dormant there (the map is already empty by `has_anchors`' contract).
 #[test]
 fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
-    // Materialise P at /a with Dir descendant /a/b. STRUCTURE-only ⇒
-    // `has_per_file_fds = false`, so the descendant clause's Dir branch
-    // is the contribution this exercises.
+    // Materialise P at /a with Dir descendant /a/b. STRUCTURE-only ⇒ `has_per_file_fds = false`, so
+    // the descendant clause's Dir branch is the contribution this exercises.
     let mut e = Engine::new();
     let anchor = e.tree_mut().ensure_root("a", ResourceRole::User);
     e.tree_mut().set_kind(anchor, ResourceKind::Dir);
@@ -512,10 +492,9 @@ fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
         Instant::now(),
     );
 
-    // FsEvent at the descendant mid-Batching: `event_drives_batching`
-    // tracks `b` in the burst's dirty / force-walk accumulator. This
-    // is the per-event state the deleted global suppress filter used
-    // to poison for a co-resident Profile; assert it concretely.
+    // FsEvent at the descendant mid-Batching: `event_drives_batching` tracks `b` in the burst's
+    // dirty / force-walk accumulator. This is the per-event state the deleted global suppress
+    // filter used to poison for a co-resident Profile; assert it concretely.
     e.step(
         Input::FsEvent {
             resource: b_id,
@@ -540,12 +519,10 @@ fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
         );
     }
 
-    // WatchOpRejected on the anchor: the abnormal-end path through
-    // finalize_anchor_lost → discard_anchor_state →
-    // release_descendant_claim → delete_child(b) → vacate. The
-    // single-protocol terminus makes the old suppress-precondition
-    // dev-panic unconstructable; the test reaching its asserts is
-    // itself the no-panic witness.
+    // WatchOpRejected on the anchor: the abnormal-end path through finalize_anchor_lost →
+    // discard_anchor_state → release_descendant_claim → delete_child(b) → vacate. The
+    // single-protocol terminus makes the old suppress-precondition dev-panic unconstructable; the
+    // test reaching its asserts is itself the no-panic witness.
     let purge_out = e.step(
         Input::WatchOpRejected {
             resource: anchor,
@@ -560,9 +537,8 @@ fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
         "descendant b reaped after delete_child + try_reap",
     );
 
-    // The kernel-watch protocol stays balanced through the
-    // single-protocol vacate terminus: exactly one Unwatch(b), no
-    // other op references the reaped descendant.
+    // The kernel-watch protocol stays balanced through the single-protocol vacate terminus: exactly
+    // one Unwatch(b), no other op references the reaped descendant.
     let unwatch_b = purge_out
         .watch_ops
         .iter()
@@ -575,10 +551,9 @@ fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
         purge_out.watch_ops,
     );
 
-    // Profile reverts to anchor-loss state: anchor_claim cleared,
-    // baseline / kind cleared, watch_root_parent preserved (the
-    // recovery channel — but the anchor is a root in this fixture, so
-    // `watch_root_parent` is None throughout).
+    // Profile reverts to anchor-loss state: anchor_claim cleared, baseline / kind cleared,
+    // watch_root_parent preserved (the recovery channel — but the anchor is a root in this fixture,
+    // so `watch_root_parent` is None throughout).
     let p = e.profiles().get(pid).expect("Profile lives");
     assert_eq!(p.anchor_claim(), AnchorClaim::None);
     assert!(p.kind().is_none());
@@ -589,11 +564,10 @@ fn release_descendant_claim_clean_reaps_dirty_descendant_via_vacate() {
     assert!(matches!(p.state(), specter_core::ProfileState::Idle));
 }
 
-/// `release_anchor_claim` flips a materialised `Held` claim to `None`
-/// and is idempotent — a second call is a no-op on both the claim and
-/// the Tree (the early-return guard on `anchor_claim`), so it emits no
-/// further watch op. Isolates the helper that `discard_anchor_state`
-/// composes; pins the materialise ↔ release symmetry directly.
+/// `release_anchor_claim` flips a materialised `Held` claim to `None` and is idempotent — a second
+/// call is a no-op on both the claim and the Tree (the early-return guard on `anchor_claim`), so it
+/// emits no further watch op. Isolates the helper that `discard_anchor_state` composes; pins the
+/// materialise ↔ release symmetry directly.
 #[test]
 fn release_anchor_claim_is_symmetric_and_idempotent() {
     let (mut e, _sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);

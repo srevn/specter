@@ -1,5 +1,4 @@
-//! `specter status -o human` renderer — key/value layout of the
-//! daemon's [`StatusResponse`].
+//! `specter status -o human` renderer — key/value layout of the daemon's [`StatusResponse`].
 //!
 //! Layout:
 //!
@@ -16,14 +15,11 @@
 //! socket              /run/user/1000/specter.sock
 //! ```
 //!
-//! `--wide` is accepted but currently ignored — `status` carries
-//! no extra fields today. The renderer keeps the flag in its
-//! signature so the client need not branch on per-verb argument
-//! shapes.
+//! `--wide` is accepted but currently ignored — `status` carries no extra fields today. The renderer
+//! keeps the flag in its signature so the client need not branch on per-verb argument shapes.
 //!
-//! Pure writer: `(&mut String, &StatusResponse, bool, Styler)`. No
-//! I/O. The title and labels paint [`style::LABEL`], the rule and the
-//! `·` separators [`style::DELIM`]; values stay unstyled. Under
+//! Pure writer: `(&mut String, &StatusResponse, bool, Styler)`. No I/O. The title and labels paint
+//! [`style::LABEL`], the rule and the `·` separators [`style::DELIM`]; values stay unstyled. Under
 //! `Styler::Plain` the output is byte-identical to the pre-color view.
 
 use crate::ipc::protocol::{StatusResponse, WireLastReload};
@@ -33,10 +29,9 @@ use std::fmt::Write as _;
 
 /// Render the status response as one operator-readable block.
 ///
-/// `_wide` is reserved for future extensions (currently unused; the
-/// `status` view fits on one screen of the default columns) — keeps
-/// the signature aligned with the other renderers. `sty` gates ANSI
-/// styling on the resolved stdout stream.
+/// `_wide` is reserved for future extensions (currently unused; the `status` view fits on one
+/// screen of the default columns) — keeps the signature aligned with the other renderers. `sty`
+/// gates ANSI styling on the resolved stdout stream.
 pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: Styler) {
     out.reserve(512);
     let _ = writeln!(out, "{}", sty.paint(style::LABEL, "specter status"));
@@ -59,8 +54,8 @@ pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: 
         label_cell(sty, "reloads", LABEL_WIDTH),
         format_reloads(resp.reload_count, resp.last_reload.as_ref()),
     );
-    // The `·` separators paint as siblings — counts and trailing text
-    // stay unstyled, so the line reads identically when plain.
+    // The `·` separators paint as siblings — counts and trailing text stay unstyled, so the line
+    // reads identically when plain.
     let _ = writeln!(
         out,
         "{}{} attached {} {} disabled (toml) {} {} disabled (runtime)",
@@ -83,8 +78,8 @@ pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: 
         label_cell(sty, "promoters", LABEL_WIDTH),
         resp.promoter_active,
     );
-    // `WirePath: Display` writes its inner UTF-8 / lossy-projected
-    // string verbatim — zero-alloc into `out`, no intermediate.
+    // `WirePath: Display` writes its inner UTF-8 / lossy-projected string verbatim — zero-alloc
+    // into `out`, no intermediate.
     let _ = writeln!(
         out,
         "{}{}",
@@ -102,9 +97,8 @@ pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: 
 /// Width of the label column. Padded to align all values vertically.
 const LABEL_WIDTH: usize = 20;
 
-/// Format `uptime_secs` as `D:HH:MM:SS` (days drop if 0). At
-/// operator latency the resolution of "seconds since boot" is
-/// already enough; sub-second precision would be noise.
+/// Format `uptime_secs` as `D:HH:MM:SS` (days drop if 0). At operator latency the resolution of
+/// "seconds since boot" is already enough; sub-second precision would be noise.
 fn format_uptime(uptime_secs: u64) -> String {
     let secs = uptime_secs % 60;
     let mins = (uptime_secs / 60) % 60;
@@ -117,11 +111,9 @@ fn format_uptime(uptime_secs: u64) -> String {
     }
 }
 
-/// Render the `reloads` line: count + (optionally) the most-recent
-/// reload pair. A daemon that has never reloaded shows just the
-/// count. The single [`WireLastReload`] makes the impossible
-/// `(Some(at), None)` product unrepresentable, so the match has two
-/// arms.
+/// Render the `reloads` line: count + (optionally) the most-recent reload pair. A daemon that has
+/// never reloaded shows just the count. The single [`WireLastReload`] makes the impossible
+/// `(Some(at), None)` product unrepresentable, so the match has two arms.
 fn format_reloads(count: u64, last: Option<&WireLastReload>) -> String {
     match last {
         Some(r) => format!("{count} (last {} via {})", r.at, r.via),
@@ -154,9 +146,8 @@ mod tests {
         }
     }
 
-    /// Smoke test: every field renders on its own line, no panic.
-    /// The output starts with the header banner and includes the
-    /// canonical socket-path + config-path footer.
+    /// Smoke test: every field renders on its own line, no panic. The output starts with the header
+    /// banner and includes the canonical socket-path + config-path footer.
     #[test]
     fn render_minimal_status_includes_every_label() {
         let mut s = String::new();
@@ -178,9 +169,8 @@ mod tests {
         assert!(s.contains("/etc/specter.toml"), "config path appears");
     }
 
-    /// Uptime under 24h drops the days segment; ≥1 day shows it.
-    /// The format is operator-friendly H:MM:SS / D HH:MM:SS, not
-    /// Duration::Debug.
+    /// Uptime under 24h drops the days segment; ≥1 day shows it. The format is operator-friendly
+    /// H:MM:SS / D HH:MM:SS, not Duration::Debug.
     #[test]
     fn format_uptime_renders_days_only_when_needed() {
         assert_eq!(format_uptime(0), "0:00:00");
@@ -190,11 +180,9 @@ mod tests {
         assert_eq!(format_uptime(86_400 + 3661), "1d 01:01:01");
     }
 
-    /// Zero reloads renders the bare count; non-zero with attribution
-    /// renders the full `(last ... via X)` parenthetical. The
-    /// impossible-by-construction `(Some(at), None)` arm collapses
-    /// out of the renderer since [`WireLastReload`] holds the pair
-    /// together.
+    /// Zero reloads renders the bare count; non-zero with attribution renders the full `(last ...
+    /// via X)` parenthetical. The impossible-by-construction `(Some(at), None)` arm collapses out
+    /// of the renderer since [`WireLastReload`] holds the pair together.
     #[test]
     fn format_reloads_minimal_and_full_lines() {
         assert_eq!(format_reloads(0, None), "0");
@@ -210,10 +198,9 @@ mod tests {
         );
     }
 
-    /// Color is purely additive: an `Active` render stripped of every
-    /// SGR escape reproduces the `Plain` render byte-for-byte, and the
-    /// `Active` render does carry escapes (title / labels / rule are
-    /// painted).
+    /// Color is purely additive: an `Active` render stripped of every SGR escape reproduces the
+    /// `Plain` render byte-for-byte, and the `Active` render does carry escapes (title / labels /
+    /// rule are painted).
     #[test]
     fn status_active_strips_to_plain() {
         use crate::ipc::render::style::strip_ansi;

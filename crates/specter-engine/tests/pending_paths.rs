@@ -1,6 +1,5 @@
-//! Pending-path descent end-to-end. Drives `Engine::attach_sub` with a
-//! path-based request, walks descent through scaffolds, and confirms
-//! anchor materialization triggers a Seed burst.
+//! Pending-path descent end-to-end. Drives `Engine::attach_sub` with a path-based request, walks
+//! descent through scaffolds, and confirms anchor materialization triggers a Seed burst.
 
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
@@ -17,10 +16,9 @@ use std::time::Instant;
 
 #[test]
 fn attach_sub_path_pending_then_anchor_appears() {
-    // Tree has /var only. attach_sub at path /var/log/myapp pending state:
-    // prefix=/var, remaining=[log, myapp]. Inject probe responses showing
-    // log appears, then myapp appears. Anchor materializes; Seed burst
-    // starts.
+    // Tree has /var only. attach_sub at path /var/log/myapp pending state: prefix=/var,
+    // remaining=[log, myapp]. Inject probe responses showing log appears, then myapp appears.
+    // Anchor materializes; Seed burst starts.
     let mut e = Engine::new();
     let var = e
         .tree_mut()
@@ -44,11 +42,9 @@ fn attach_sub_path_pending_then_anchor_appears() {
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).unwrap().profile();
 
-    // Initial pending state: intermediate scaffold in place; anchor
-    // already has role=User ("role = User for the
-    // anchor, role = DescentScaffold for everything else"). Pending
-    // status lives on `Profile.state == ProfileState::Pending(_)`, not
-    // on the anchor's role.
+    // Initial pending state: intermediate scaffold in place; anchor already has role=User ("role =
+    // User for the anchor, role = DescentScaffold for everything else"). Pending status lives on
+    // `Profile.state == ProfileState::Pending(_)`, not on the anchor's role.
     let log = e.tree().lookup(Some(var), "log").expect("log scaffold");
     let myapp = e.tree().lookup(Some(log), "myapp").expect("anchor slot");
     assert!(matches!(
@@ -83,19 +79,16 @@ fn attach_sub_path_pending_then_anchor_appears() {
         now,
     );
 
-    // Anchor materialized: kind set from the snapshot's entry; role
-    // stays User (set at attach time).
+    // Anchor materialized: kind set from the snapshot's entry; role stays User (set at attach time).
     assert!(matches!(
         e.tree().get(myapp).unwrap().role,
         ResourceRole::User,
     ));
     assert_eq!(e.tree().get(myapp).unwrap().kind(), Some(ResourceKind::Dir));
 
-    // Profile is now in Active(PreFire(Seed)) — the Seed burst was
-    // started at materialization. Under the cold-arm Verifying-first
-    // contract, the materializing step opens the burst in
-    // `Verifying(ProbeSlot::armed(corr, ()))` and emits the cold-walk
-    // Probe directly.
+    // Profile is now in Active(PreFire(Seed)) — the Seed burst was started at materialization.
+    // Under the cold-arm Verifying-first contract, the materializing step opens the burst in
+    // `Verifying(ProbeSlot::armed(corr, ()))` and emits the cold-walk Probe directly.
     match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
             assert_eq!(pre.intent, specter_core::BurstIntent::Seed);
@@ -112,9 +105,8 @@ fn attach_sub_path_pending_then_anchor_appears() {
         "cold-arm Seed: probe emitted at burst construction (materialization)",
     );
 
-    // Drive the Seed proof. `t0` is the instant the Seed burst
-    // started — the step that materialized the anchor (`now`), not the
-    // original attach.
+    // Drive the Seed proof. `t0` is the instant the Seed burst started — the step that materialized
+    // the anchor (`now`), not the original attach.
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
 
     // Profile should now be Idle with baseline established.
@@ -164,8 +156,8 @@ fn pending_path_failed_probe_retains_state() {
             ..
         },
     )));
-    // Profile still pending (descent state lives on
-    // `ProfileState::Pending`, not on a separate SecondaryMap).
+    // Profile still pending (descent state lives on `ProfileState::Pending`, not on a separate
+    // SecondaryMap).
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
@@ -174,9 +166,8 @@ fn pending_path_failed_probe_retains_state() {
 
 #[test]
 fn pending_path_event_at_prefix_emits_fresh_probe() {
-    // Pending descent waiting for /var/missing/. Drain in-flight probe
-    // with a no-progress response, then inject FsEvent at /var (the
-    // prefix) to trigger a fresh probe (no settle).
+    // Pending descent waiting for /var/missing/. Drain in-flight probe with a no-progress response,
+    // then inject FsEvent at /var (the prefix) to trigger a fresh probe (no settle).
     let mut e = Engine::new();
     let var = e
         .tree_mut()
@@ -229,10 +220,9 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
 
 #[test]
 fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
-    // "Watch root deletion": Sub at /src; / is the
-    // watch_root_parent. Anchor is removed; Profile → Idle with
-    // current=None. Then a StructureChanged at / triggers the recovery
-    // path which re-enters pending descent.
+    // "Watch root deletion": Sub at /src; / is the watch_root_parent. Anchor is removed; Profile →
+    // Idle with current=None. Then a StructureChanged at / triggers the recovery path which
+    // re-enters pending descent.
     let mut e = Engine::new();
     // Both / and /src exist; /src is the anchor.
     let root_dir = e.tree_mut().ensure_root("root", ResourceRole::User);
@@ -271,8 +261,8 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     ));
     assert!(e.profiles().get(pid).unwrap().watch_root_parent() == Some(root_dir));
 
-    // The Seed proof consumed two settle windows; keep instants
-    // monotonic for the recovery sequence that follows.
+    // The Seed proof consumed two settle windows; keep instants monotonic for the recovery sequence
+    // that follows.
     let after_seed = seed_done + SETTLE;
 
     // Anchor gone (Removed event at /src).
@@ -288,8 +278,8 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     assert!(matches!(p.state(), ProfileState::Idle));
     assert!(p.current().is_none());
 
-    // StructureChanged at / triggers recovery: Profile re-enters pending
-    // descent with prefix=/, remaining=[src].
+    // StructureChanged at / triggers recovery: Profile re-enters pending descent with prefix=/,
+    // remaining=[src].
     let out = e.step(
         Input::FsEvent {
             resource: root_dir,
@@ -367,20 +357,17 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     );
 }
 
-// Anchor terminal event on a Pending Profile pins the no-consumer
-// routing. An absolute attach against an empty Tree puts the FS-root
-// bootstrap between prefix and anchor: prefix is the synthetic `/`,
-// anchor is the scaffolded `/foo`. The two are distinct slots, and the
-// anchor's `watch_demand` is zero (descent hasn't materialized it yet),
-// so a `Removed` at the anchor lands in `EventOnUnwatchedResource`
-// rather than coercing the Pending Profile through
+// Anchor terminal event on a Pending Profile pins the no-consumer routing. An absolute attach
+// against an empty Tree puts the FS-root bootstrap between prefix and anchor: prefix is the
+// synthetic `/`, anchor is the scaffolded `/foo`. The two are distinct slots, and the anchor's
+// `watch_demand` is zero (descent hasn't materialized it yet), so a `Removed` at the anchor lands
+// in `EventOnUnwatchedResource` rather than coercing the Pending Profile through
 // `finalize_anchor_lost` / `finish_burst_to_idle`.
 #[test]
 fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
     let mut e = Engine::new();
-    // Absolute path against an empty Tree: bootstrap creates `/`, anchor
-    // `/foo` is scaffolded under `/`. Profile lands Pending with
-    // current_prefix = `/`, anchor = /foo (different slots).
+    // Absolute path against an empty Tree: bootstrap creates `/`, anchor `/foo` is scaffolded under
+    // `/`. Profile lands Pending with current_prefix = `/`, anchor = /foo (different slots).
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Path(PathBuf::from("/foo")),
@@ -418,14 +405,11 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
         "anchor scaffold is not yet bumped (descent hasn't materialized it)",
     );
 
-    // Dispatch FsEvent::Removed at the anchor (/foo). The anchor's
-    // `watch_demand == 0` short-circuits at the `EventOnUnwatchedResource`
-    // head guard in `on_fs_event` before any classifier work runs.
-    // Earlier this same Profile shape (a degenerate `prefix == anchor`
-    // fixture from a relative-path attach against an empty Tree) routed
-    // through `finish_burst_to_idle` and underflowed a Resource
-    // refcount. The FS-root bootstrap rules out that degenerate shape
-    // entirely.
+    // Dispatch FsEvent::Removed at the anchor (/foo). The anchor's `watch_demand == 0` short-circuits
+    // at the `EventOnUnwatchedResource` head guard in `on_fs_event` before any classifier work runs.
+    // Earlier this same Profile shape (a degenerate `prefix == anchor` fixture from a relative-path
+    // attach against an empty Tree) routed through `finish_burst_to_idle` and underflowed a Resource
+    // refcount. The FS-root bootstrap rules out that degenerate shape entirely.
     let out = e.step(
         Input::FsEvent {
             resource: anchor,
@@ -443,8 +427,8 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
         still_pending,
         "Pending Profile not coerced through anchor-terminal-event path",
     );
-    // The head guard short-circuits before any classifier work, so it
-    // emits no watch op (no spurious Unwatch/Watch on this path).
+    // The head guard short-circuits before any classifier work, so it emits no watch op (no
+    // spurious Unwatch/Watch on this path).
     assert!(
         out.watch_ops.is_empty(),
         "EventOnUnwatchedResource head guard emits no watch op; got {:?}",
@@ -462,9 +446,9 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-// Behavioral parity: a single FsEvent at one Resource fans out to a
-// Pending Profile (descent dispatch) AND an Idle Profile with absent
-// anchor (recovery dispatch), without disturbing an unrelated Profile.
+// Behavioral parity: a single FsEvent at one Resource fans out to a Pending Profile (descent
+// dispatch) AND an Idle Profile with absent anchor (recovery dispatch), without disturbing an
+// unrelated Profile.
 #[test]
 #[allow(clippy::similar_names)]
 fn classifier_routes_descent_and_recovery_in_single_pass() {
@@ -486,10 +470,9 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         .expect("non-empty fixture");
     e.tree_mut().set_kind(elsewhere, ResourceKind::Dir);
 
-    // Profile A: Pending at /root, descending toward `foo` (does not
-    // exist). Drain its initial descent probe with a no-progress
-    // response so its `pending_probe` slot is empty before the test
-    // event — `on_descent_event` short-circuits on a busy slot.
+    // Profile A: Pending at /root, descending toward `foo` (does not exist). Drain its initial
+    // descent probe with a no-progress response so its `pending_probe` slot is empty before the
+    // test event — `on_descent_event` short-circuits on a busy slot.
     let req_a = SubAttachRequest::for_anchor(
         "watch-a".into(),
         SubAttachAnchor::Path(PathBuf::from("/root/foo")),
@@ -523,8 +506,8 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         "A still Pending after no-progress response",
     );
 
-    // Profile B: anchor at /root/bar; drive Seed → Idle, then Removed
-    // at /root/bar → Idle with current=None and watch_root_parent=/root.
+    // Profile B: anchor at /root/bar; drive Seed → Idle, then Removed at /root/bar → Idle with
+    // current=None and watch_root_parent=/root.
     let req_b = SubAttachRequest::for_anchor(
         "watch-b".into(),
         SubAttachAnchor::Resource(bar),
@@ -544,9 +527,8 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         first_probe_correlation(&attach_b_out).is_some(),
         "cold-arm Seed: probe emitted at burst construction",
     );
-    // Drive B's Seed proof → Idle (`t0` is B's attach instant). A is
-    // Pending with an empty descent slot (no settle timer), so its
-    // timers do not interfere with B's settle drain.
+    // Drive B's Seed proof → Idle (`t0` is B's attach instant). A is Pending with an empty descent
+    // slot (no settle timer), so its timers do not interfere with B's settle drain.
     let b_seed_done = seed_to_idle(&mut e, pid_b, &dir_snap(&[]), now);
     assert_eq!(
         e.profiles().get(pid_b).unwrap().watch_root_parent(),
@@ -598,11 +580,9 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
 
     // The trigger: a single StructureChanged event at /root.
     // - A's `current_prefix == /root` ⇒ descent dispatch.
-    // - B's `watch_root_parent == /root && current.is_none()` ⇒ recovery
-    //   dispatch (Idle → Pending).
-    // - C is anchored at /elsewhere ⇒ untouched.
-    // Strictly after both Seed proofs (B and C each consumed two settle
-    // windows since `now`).
+    // - B's `watch_root_parent == /root && current.is_none()` ⇒ recovery dispatch (Idle → Pending).
+    // - C is anchored at /elsewhere ⇒ untouched. Strictly after both Seed proofs (B and C each
+    //   consumed two settle windows since `now`).
     let trigger = c_seed_done + SETTLE;
     let out = e.step(
         Input::FsEvent {

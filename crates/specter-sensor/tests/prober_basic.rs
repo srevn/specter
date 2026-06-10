@@ -1,5 +1,5 @@
-//! `WorkerProber` round-trip smoke tests against real `tempfile::TempDir`
-//! fixtures: AnchorFile and Subtree probes, Vanished on missing/kind-mismatch.
+//! `WorkerProber` round-trip smoke tests against real `tempfile::TempDir` fixtures: AnchorFile and
+//! Subtree probes, Vanished on missing/kind-mismatch.
 
 #![cfg(unix)]
 
@@ -25,9 +25,8 @@ const fn nz(n: usize) -> NonZeroUsize {
     NonZeroUsize::new(n).expect("non-zero literal in test fixture")
 }
 
-/// Mirror of the bin's `DriverProberSender` — wraps a single
-/// `Sender<Input>` clone and rewraps each `ProbeResponse` as
-/// `Input::ProbeResponse(_)` on the wire.
+/// Mirror of the bin's `DriverProberSender` — wraps a single `Sender<Input>` clone and rewraps each
+/// `ProbeResponse` as `Input::ProbeResponse(_)` on the wire.
 struct TestProberSink {
     tx: Sender<Input>,
 }

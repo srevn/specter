@@ -1,41 +1,33 @@
 //! `specter tail` client handler.
 //!
-//! Subscribes unfiltered, optionally restricts the stream to a set
-//! of `--filter <variant>` tags (validated against
-//! [`KNOWN_WIRE_VARIANTS`] at handler entry), and emits each surviving
-//! event through [`diag`] (default `-o human`) or the wire's
-//! own JSON line (`-o json`).
+//! Subscribes unfiltered, optionally restricts the stream to a set of `--filter <variant>` tags
+//! (validated against [`KNOWN_WIRE_VARIANTS`] at handler entry), and emits each surviving event
+//! through [`diag`] (default `-o human`) or the wire's own JSON line (`-o json`).
 //!
 //! # Exit codes
 //!
-//! - `0` — graceful EOF (the daemon closed the per-conn socket on
-//!   shutdown ⇒ the next read returns EOF) or a downstream pipe
-//!   consumer closed (`BrokenPipe`).
-//! - `1` — connect / subscribe / read I/O failure (a parse failure
-//!   on one streamed line is logged to stderr but the loop
-//!   continues).
-//! - `2` — `--filter <unknown>`: the operator's flag carries a tag
-//!   that is not part of the wire vocabulary. Matches clap's
-//!   "argument error" exit-code shape.
+//! - `0` — graceful EOF (the daemon closed the per-conn socket on shutdown ⇒ the next read returns
+//!   EOF) or a downstream pipe consumer closed (`BrokenPipe`).
+//! - `1` — connect / subscribe / read I/O failure (a parse failure on one streamed line is logged
+//!   to stderr but the loop continues).
+//! - `2` — `--filter <unknown>`: the operator's flag carries a tag that is not part of the wire
+//!   vocabulary. Matches clap's "argument error" exit-code shape.
 //!
 //! # Filter semantics
 //!
-//! `--filter` is OR across variants — `--filter sub_fired --filter
-//! sub_detached` admits either one. Empty filter (the default) admits
-//! every variant. Filter validation lives in the handler, not in
-//! clap's `value_parser`, because the vocabulary is owned by the
-//! wire crate ([`KNOWN_WIRE_VARIANTS`]) and `specter-config` should
-//! not depend on `specter-bin`'s wire shape. `run` reports an unknown
-//! tag through [`connect::emit_error`] ("specter tail: unknown filter
-//! …"), matching the other verbs' diagnostics.
+//! `--filter` is OR across variants — `--filter sub_fired --filter sub_detached` admits either one.
+//! Empty filter (the default) admits every variant. Filter validation lives in the handler, not in
+//! clap's `value_parser`, because the vocabulary is owned by the wire crate
+//! ([`KNOWN_WIRE_VARIANTS`]) and `specter-config` should not depend on `specter-bin`'s wire shape.
+//! `run` reports an unknown tag through [`connect::emit_error`] ("specter tail: unknown filter …"),
+//! matching the other verbs' diagnostics.
 //!
 //! # Output buffering
 //!
-//! Stdout is locked once for the loop's duration so per-line writes
-//! reach the kernel pipe immediately on each `flush()`. Operators
-//! piping to `jq` / `grep` see one line at a time without depending
-//! on Rust's per-process stdout buffering policy (which is
-//! block-buffered when piped, line-buffered on a tty).
+//! Stdout is locked once for the loop's duration so per-line writes reach the kernel pipe
+//! immediately on each `flush()`. Operators piping to `jq` / `grep` see one line at a time without
+//! depending on Rust's per-process stdout buffering policy (which is block-buffered when piped,
+//! line-buffered on a tty).
 
 use specter_config::{OutputFormat, TailArgs};
 use std::io::{self, Write};
@@ -66,9 +58,8 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
         Err(code) => return code,
     };
 
-    // Indefinite tail: clear the connect-time 5s deadline so the
-    // read blocks until the next event arrives (or EOF when the
-    // daemon closes the conn on shutdown).
+    // Indefinite tail: clear the connect-time 5s deadline so the read blocks until the next event
+    // arrives (or EOF when the daemon closes the conn on shutdown).
     if let Err(e) = sub.set_read_timeout(None) {
         connect::emit_error(
             &args.client,
@@ -77,18 +68,15 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
         return ExitCode::from(1);
     }
 
-    // Resolve the stdout Styler once for the loop's lifetime. The
-    // `-o json` path ignores it (it re-emits the wire bytes verbatim);
-    // the `-o human` path threads it into every `diag::render`.
+    // Resolve the stdout Styler once for the loop's lifetime. The `-o json` path ignores it (it
+    // re-emits the wire bytes verbatim); the `-o human` path threads it into every `diag::render`.
     let sty = style::resolve(args.client.color, style::Stream::Stdout);
 
     let mut stdout = io::stdout().lock();
-    // One render buffer reused for the lifetime of the stream loop —
-    // amortizes the per-event allocation the previous owned-String
-    // `render` shape paid. Symmetric with
-    // [`crate::ipc::client::subscribe::Subscription`]'s reused
-    // inbound `line_buf`. The 256-byte initial capacity covers the
-    // common diag line (~120 bytes) without growing on the first hit.
+    // One render buffer reused for the lifetime of the stream loop — amortizes the per-event
+    // allocation the previous owned-String `render` shape paid. Symmetric with
+    // [`crate::ipc::client::subscribe::Subscription`]'s reused inbound `line_buf`. The 256-byte
+    // initial capacity covers the common diag line (~120 bytes) without growing on the first hit.
     let mut buf = String::with_capacity(256);
     loop {
         match sub.read_next() {
@@ -97,10 +85,9 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
                     continue;
                 }
                 if let Err(e) = emit(&mut stdout, &wire, args.output, &mut buf, sty) {
-                    // Downstream pipe consumer closed (`BrokenPipe`)
-                    // or any other stdout failure: graceful exit.
-                    // The daemon's stream is healthy; the operator's
-                    // consumer (`head -1`, etc.) just stopped reading.
+                    // Downstream pipe consumer closed (`BrokenPipe`) or any other stdout failure:
+                    // graceful exit. The daemon's stream is healthy; the operator's consumer (`head
+                    // -1`, etc.) just stopped reading.
                     if e.kind() == io::ErrorKind::BrokenPipe {
                         return ExitCode::SUCCESS;
                     }
@@ -126,12 +113,10 @@ pub(crate) fn run(args: &TailArgs) -> ExitCode {
     }
 }
 
-/// Validate every `--filter <tag>` against [`KNOWN_WIRE_VARIANTS`].
-/// Pure — returns the first tag outside the vocabulary as `Err`, or
-/// `Ok(())` when every tag is valid (or the list is empty). The
-/// caller reports the rejection and owns the exit code (`2`, matching
-/// clap's argument-error shape), so the rule pins as a unit test
-/// independent of the surrounding I/O.
+/// Validate every `--filter <tag>` against [`KNOWN_WIRE_VARIANTS`]. Pure — returns the first tag
+/// outside the vocabulary as `Err`, or `Ok(())` when every tag is valid (or the list is empty). The
+/// caller reports the rejection and owns the exit code (`2`, matching clap's argument-error shape),
+/// so the rule pins as a unit test independent of the surrounding I/O.
 fn validate_filter(filter: &[String]) -> Result<(), &str> {
     match filter
         .iter()
@@ -144,36 +129,28 @@ fn validate_filter(filter: &[String]) -> Result<(), &str> {
 
 /// Filter predicate — `true` iff `wire` should reach stdout.
 ///
-/// Empty filter ⇒ admit every variant. Non-empty filter ⇒ admit
-/// only when `wire.variant_name()` matches one of the entries (OR
-/// across the list). Pure function so the filter rule pins as a
-/// unit test independent of the surrounding I/O.
+/// Empty filter ⇒ admit every variant. Non-empty filter ⇒ admit only when `wire.variant_name()`
+/// matches one of the entries (OR across the list). Pure function so the filter rule pins as a unit
+/// test independent of the surrounding I/O.
 fn should_emit(wire: &WireDiagnostic, filter: &[String]) -> bool {
     filter.is_empty() || filter.iter().any(|f| f == wire.variant_name())
 }
 
-/// Write one event to `out` and flush. Returns the underlying
-/// `io::Error` on any failure so the caller can distinguish
-/// `BrokenPipe` (graceful exit) from genuine write failures.
+/// Write one event to `out` and flush. Returns the underlying `io::Error` on any failure so the
+/// caller can distinguish `BrokenPipe` (graceful exit) from genuine write failures.
 ///
-/// `buf` is the caller's reused render buffer — the Human branch
-/// clears and refills it through [`diag::render`]'s writer-shape
-/// surface (painting via `sty`); the Json branch is untouched and goes
-/// through [`encode_line`]'s owned [`Vec<u8>`] path, ignoring `sty`.
-/// Threading the buffer keeps the per-event amortization legible at
-/// the call site without inlining the I/O error matching into the
-/// stream loop.
+/// `buf` is the caller's reused render buffer — the Human branch clears and refills it through
+/// [`diag::render`]'s writer-shape surface (painting via `sty`); the Json branch is untouched and
+/// goes through [`encode_line`]'s owned [`Vec<u8>`] path, ignoring `sty`. Threading the buffer
+/// keeps the per-event amortization legible at the call site without inlining the I/O error
+/// matching into the stream loop.
 ///
-/// JSON output re-serializes the parsed [`WireDiagnostic`] rather
-/// than passing through the daemon's original bytes. Serde derive is
-/// symmetric over the wire's `#[serde]` tags, so the re-serialized
-/// line is byte-equivalent to the daemon's emission for every
-/// variant — the witness-fixture round-trip test
-/// (`wire_diagnostic_round_trips_via_serde`) pins this contract.
-/// [`encode_line`]'s
-/// [`crate::ipc::framing::InfallibleSerialize`] bound asserts the
-/// re-emit's `Vec<u8>`-build cannot fail (audited at the marker
-/// impl in [`crate::ipc::wire`]).
+/// JSON output re-serializes the parsed [`WireDiagnostic`] rather than passing through the daemon's
+/// original bytes. Serde derive is symmetric over the wire's `#[serde]` tags, so the re-serialized
+/// line is byte-equivalent to the daemon's emission for every variant — the witness-fixture
+/// round-trip test (`wire_diagnostic_round_trips_via_serde`) pins this contract. [`encode_line`]'s
+/// [`crate::ipc::framing::InfallibleSerialize`] bound asserts the re-emit's `Vec<u8>`-build cannot
+/// fail (audited at the marker impl in [`crate::ipc::wire`]).
 fn emit<W: Write>(
     out: &mut W,
     wire: &WireDiagnostic,
@@ -217,8 +194,7 @@ mod tests {
         }
     }
 
-    /// Empty filter admits every variant — the default `tail`
-    /// behaviour.
+    /// Empty filter admits every variant — the default `tail` behaviour.
     #[test]
     fn should_emit_empty_filter_admits_everything() {
         let filter: Vec<String> = vec![];
@@ -233,18 +209,16 @@ mod tests {
         assert!(should_emit(&sub_fired(), &filter));
     }
 
-    /// Filter naming a different variant rejects this one.
-    /// Mirrors the operator's `--filter sub_detached` against an
-    /// incoming `SubFired` line.
+    /// Filter naming a different variant rejects this one. Mirrors the operator's `--filter
+    /// sub_detached` against an incoming `SubFired` line.
     #[test]
     fn should_emit_non_matching_filter_rejects() {
         let filter = vec!["sub_detached".to_string()];
         assert!(!should_emit(&sub_fired(), &filter));
     }
 
-    /// Multiple `--filter` entries are OR — either matches admits
-    /// the event. Catches a future bug that re-interpreted the list
-    /// as AND.
+    /// Multiple `--filter` entries are OR — either matches admits the event. Catches a future bug
+    /// that re-interpreted the list as AND.
     #[test]
     fn should_emit_or_across_multiple_filters() {
         let filter = vec!["sub_fired".to_string(), "sub_detached".to_string()];
@@ -252,9 +226,8 @@ mod tests {
         assert!(!should_emit(&missed(), &filter));
     }
 
-    /// The back-pressure marker uses the `_missed` tag — operators
-    /// filtering for it use the underscore-prefixed name (the only
-    /// `#[serde(rename)]` override on the enum).
+    /// The back-pressure marker uses the `_missed` tag — operators filtering for it use the
+    /// underscore-prefixed name (the only `#[serde(rename)]` override on the enum).
     #[test]
     fn should_emit_missed_marker_matches_underscore_tag() {
         let filter = vec!["_missed".to_string()];
@@ -262,9 +235,8 @@ mod tests {
         assert!(!should_emit(&sub_fired(), &filter));
     }
 
-    /// `validate_filter` accepts an empty list and any list of
-    /// valid wire-vocabulary tags. Catches a future regression that
-    /// rejected the empty default.
+    /// `validate_filter` accepts an empty list and any list of valid wire-vocabulary tags. Catches
+    /// a future regression that rejected the empty default.
     #[test]
     fn validate_filter_accepts_known_tags() {
         assert!(validate_filter(&[]).is_ok());
@@ -275,10 +247,9 @@ mod tests {
         );
     }
 
-    /// `validate_filter` rejects on the first unknown tag, surfacing
-    /// it for the caller to report. The exit-code policy (`2`, clap's
-    /// argument-error shape) lives in `run` and is pinned end-to-end
-    /// by the `tail_unknown_filter_exits_two` integration test.
+    /// `validate_filter` rejects on the first unknown tag, surfacing it for the caller to report.
+    /// The exit-code policy (`2`, clap's argument-error shape) lives in `run` and is pinned
+    /// end-to-end by the `tail_unknown_filter_exits_two` integration test.
     #[test]
     fn validate_filter_rejects_unknown_tag() {
         let filter = vec!["NotAVariant".to_string()];

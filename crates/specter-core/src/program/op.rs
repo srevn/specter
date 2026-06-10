@@ -1,22 +1,18 @@
 //! Program ops — CFG nodes with two outgoing edges.
 //!
-//! A [`ProgramOp`] carries a [`SpawnBody`] (single `Exec` or N-stage
-//! `Pipe`) plus a pair of [`BranchTarget`]s — `on_ok` and `on_failed` —
-//! chosen by the dispatcher on the spawned-process outcome. Branch
-//! targets are explicit and total: there is no implicit "fall through
-//! to the next index" — the dispatcher reads exactly the edge that
-//! matches the outcome.
+//! A [`ProgramOp`] carries a [`SpawnBody`] (single `Exec` or N-stage `Pipe`) plus a pair of
+//! [`BranchTarget`]s — `on_ok` and `on_failed` — chosen by the dispatcher on the spawned-process
+//! outcome. Branch targets are explicit and total: there is no implicit "fall through to the next
+//! index" — the dispatcher reads exactly the edge that matches the outcome.
 //!
 //! Three terminal shapes the dispatcher can land on:
 //!
-//! - [`BranchTarget::Continue`] — advance to an in-program index;
-//!   builder enforces forward-only-and-in-bounds at patch time.
-//! - [`BranchTarget::Terminate`] — early exit; the carried outcome
-//!   propagates to the plan's `EffectComplete`. Lowering emits this on
-//!   the `on_failed` edge of Exec/Pipe (stop-on-failure).
-//! - [`BranchTarget::Escape`] — natural completion; terminate with
-//!   `EffectOutcome::Ok` regardless of the carried outcome. This is
-//!   the top-level escape — also the no-else fall-through of a
+//! - [`BranchTarget::Continue`] — advance to an in-program index; builder enforces
+//!   forward-only-and-in-bounds at patch time.
+//! - [`BranchTarget::Terminate`] — early exit; the carried outcome propagates to the plan's
+//!   `EffectComplete`. Lowering emits this on the `on_failed` edge of Exec/Pipe (stop-on-failure).
+//! - [`BranchTarget::Escape`] — natural completion; terminate with `EffectOutcome::Ok` regardless
+//!   of the carried outcome. This is the top-level escape — also the no-else fall-through of a
 //!   conditional ("branch, not guard" outcome elision).
 
 use super::error::ProgramError;
@@ -24,21 +20,17 @@ use super::exec::ExecAction;
 use crate::effect::EffectOutcome;
 use std::sync::Arc;
 
-/// One CFG node — a spawn body plus the two edges the dispatcher reads
-/// on outcome.
+/// One CFG node — a spawn body plus the two edges the dispatcher reads on outcome.
 ///
-/// Builder-only: `Self::new` is `pub(super)`, so a `ProgramOp` is
-/// minted solely by [`super::ProgramBuilder::build`]. A bare op
-/// outside a built [`super::ActionProgram`] is inert — nothing
-/// consumes one — so exposing a public constructor would be a
-/// dead-end affordance. Reads go through [`Self::target`] (semantic,
-/// outcome-routed) or the structural [`Self::body`] / [`Self::on_ok`]
-/// / [`Self::on_failed`] accessors.
+/// Builder-only: `Self::new` is `pub(super)`, so a `ProgramOp` is minted solely by
+/// [`super::ProgramBuilder::build`]. A bare op outside a built [`super::ActionProgram`] is inert —
+/// nothing consumes one — so exposing a public constructor would be a dead-end affordance. Reads go
+/// through [`Self::target`] (semantic, outcome-routed) or the structural [`Self::body`] /
+/// [`Self::on_ok`] / [`Self::on_failed`] accessors.
 ///
-/// Structural `Eq` propagates from [`SpawnBody`] and [`BranchTarget`];
-/// consumed by `SubRegistryDiff` for hot-reload no-op suppression
-/// (two `Arc<ActionProgram>`s with byte-equal ops compare equal even
-/// when the Arc allocations differ).
+/// Structural `Eq` propagates from [`SpawnBody`] and [`BranchTarget`]; consumed by
+/// `SubRegistryDiff` for hot-reload no-op suppression (two `Arc<ActionProgram>`s with byte-equal
+/// ops compare equal even when the Arc allocations differ).
 ///
 /// ```compile_fail
 /// use specter_core::program::{ProgramOp, SpawnBody, ExecAction, ArgTemplate, ArgPart, BranchTarget};
@@ -57,8 +49,7 @@ pub struct ProgramOp {
 }
 
 impl ProgramOp {
-    /// Assemble a node. Builder-only — see [`Self`] for why no public
-    /// constructor exists.
+    /// Assemble a node. Builder-only — see [`Self`] for why no public constructor exists.
     #[must_use]
     pub(super) const fn new(body: SpawnBody, on_ok: BranchTarget, on_failed: BranchTarget) -> Self {
         Self {
@@ -88,9 +79,8 @@ impl ProgramOp {
 
     /// Pick the edge that matches `outcome`.
     ///
-    /// `Ok ⇒ on_ok`, `Failed ⇒ on_failed`. The exit-code / signal
-    /// payload on `Failed` is irrelevant to routing — it propagates
-    /// verbatim when the edge terminates the plan.
+    /// `Ok ⇒ on_ok`, `Failed ⇒ on_failed`. The exit-code / signal payload on `Failed` is irrelevant
+    /// to routing — it propagates verbatim when the edge terminates the plan.
     #[must_use]
     pub const fn target(&self, outcome: &EffectOutcome) -> BranchTarget {
         match outcome {
@@ -99,8 +89,8 @@ impl ProgramOp {
         }
     }
 
-    /// `true` iff the body's argv references any diff-derived
-    /// placeholder. `Pipe` ratchets if any stage does.
+    /// `true` iff the body's argv references any diff-derived placeholder. `Pipe` ratchets if any
+    /// stage does.
     #[must_use]
     pub fn references_diff_derived(&self) -> bool {
         match &self.body {
@@ -115,34 +105,27 @@ impl ProgramOp {
 
 /// A pipe's stage list — **≥2 stages, guaranteed by construction**.
 ///
-/// The payload of [`SpawnBody::Pipe`]. Wraps the shared
-/// `Arc<[ExecAction]>` so coalesced Effects share one stages allocation
-/// (the newtype is zero-cost over the `Arc`; [`Self::shared`] proves
-/// it). The sole constructor [`Self::new`] enforces the arity the
-/// actuator's pipe path assumes — stdout→stdin wiring and pipefail
-/// aggregation are meaningless below two stages. This is the
-/// spawn-body-shape analogue of the control-flow seal [`BranchIndex`]
-/// and [`ProgramOp`] already apply: the type admits no bad value
-/// because its constructor, not the caller, does.
+/// The payload of [`SpawnBody::Pipe`]. Wraps the shared `Arc<[ExecAction]>` so coalesced Effects
+/// share one stages allocation (the newtype is zero-cost over the `Arc`; [`Self::shared`] proves
+/// it). The sole constructor [`Self::new`] enforces the arity the actuator's pipe path assumes —
+/// stdout→stdin wiring and pipefail aggregation are meaningless below two stages. This is the
+/// spawn-body-shape analogue of the control-flow seal [`BranchIndex`] and [`ProgramOp`] already
+/// apply: the type admits no bad value because its constructor, not the caller, does.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MultiStage(Arc<[ExecAction]>);
 
 impl MultiStage {
-    /// Reify a validated stage list. `Err(ProgramError::DegeneratePipe)`
-    /// on fewer than two stages.
+    /// Reify a validated stage list. `Err(ProgramError::DegeneratePipe)` on fewer than two stages.
     ///
-    /// The config validator rejects 0/1-stage pipes upstream
-    /// (`IssueKind::EmptyPipe` / `SingleStagePipe`) before an
-    /// `Action::Pipe` is built, so reaching here with <2 is a
-    /// lowering-hygiene bug — surfaced (not panicked) so it rides the
-    /// contained `LoweringInternal` channel like every other
-    /// [`ProgramError`].
+    /// The config validator rejects 0/1-stage pipes upstream (`IssueKind::EmptyPipe` /
+    /// `SingleStagePipe`) before an `Action::Pipe` is built, so reaching here with <2 is a
+    /// lowering-hygiene bug — surfaced (not panicked) so it rides the contained `LoweringInternal`
+    /// channel like every other [`ProgramError`].
     ///
-    /// `pub` (not `pub(super)`): the sole producer is `specter-config`
-    /// lowering, a different crate — the same crate-boundary rationale
-    /// as [`ExecAction::new`]. ([`BranchIndex`] / [`ProgramOp`] are
-    /// sealed `pub(super)` because the in-crate builder is their only
-    /// producer; a pipe body is reified cross-crate.)
+    /// `pub` (not `pub(super)`): the sole producer is `specter-config` lowering, a different crate
+    /// — the same crate-boundary rationale as [`ExecAction::new`]. ([`BranchIndex`] / [`ProgramOp`]
+    /// are sealed `pub(super)` because the in-crate builder is their only producer; a pipe body is
+    /// reified cross-crate.)
     pub fn new(stages: Arc<[ExecAction]>) -> Result<Self, ProgramError> {
         if stages.len() < 2 {
             return Err(ProgramError::DegeneratePipe {
@@ -152,16 +135,15 @@ impl MultiStage {
         Ok(Self(stages))
     }
 
-    /// The stage slice — spawn order, stage 0's stdout feeds stage 1's
-    /// stdin, etc. Length is ≥2 by construction.
+    /// The stage slice — spawn order, stage 0's stdout feeds stage 1's stdin, etc. Length is ≥2 by
+    /// construction.
     #[must_use]
     pub fn stages(&self) -> &[ExecAction] {
         &self.0
     }
 
-    /// The shared backing `Arc`. Exposed so a consumer can prove two
-    /// coalesced Effects share one stages allocation (no per-Effect
-    /// re-clone) — the optimization this newtype exists to preserve.
+    /// The shared backing `Arc`. Exposed so a consumer can prove two coalesced Effects share one
+    /// stages allocation (no per-Effect re-clone) — the optimization this newtype exists to preserve.
     #[must_use]
     pub const fn shared(&self) -> &Arc<[ExecAction]> {
         &self.0
@@ -170,16 +152,13 @@ impl MultiStage {
 
 /// Spawn shape — what the actuator actually launches.
 ///
-/// `Exec` is one process; `Pipe` is N processes wired stdout→stdin
-/// with pipefail-on aggregation (last non-zero exit, first observed
-/// signal). A `Pipe` always has ≥2 stages: [`MultiStage`] is its sole
-/// producer and rejects fewer, so a single-stage "pipe" is
-/// unrepresentable — one command lowers to a top-level `Exec`, not a
-/// `Pipe`.
+/// `Exec` is one process; `Pipe` is N processes wired stdout→stdin with pipefail-on aggregation
+/// (last non-zero exit, first observed signal). A `Pipe` always has ≥2 stages: [`MultiStage`] is
+/// its sole producer and rejects fewer, so a single-stage "pipe" is unrepresentable — one command
+/// lowers to a top-level `Exec`, not a `Pipe`.
 ///
-/// `Pipe`'s [`MultiStage`] is a zero-cost wrapper over the shared
-/// `Arc<[ExecAction]>`, so coalesced Effects still share one stages
-/// allocation; the Arc travels from `lower_to_program` into every
+/// `Pipe`'s [`MultiStage`] is a zero-cost wrapper over the shared `Arc<[ExecAction]>`, so coalesced
+/// Effects still share one stages allocation; the Arc travels from `lower_to_program` into every
 /// emitted `Effect` without rewrapping.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SpawnBody {
@@ -189,42 +168,36 @@ pub enum SpawnBody {
 
 /// Edge endpoint chosen on outcome.
 ///
-/// `Continue(BranchIndex)` is the only in-program target; `BranchIndex`
-/// can be constructed only by [`super::ProgramBuilder`], which enforces
-/// the forward-only-and-in-bounds invariant at patch time. The two
-/// no-op terminal variants — `Terminate` and `Escape` — can be minted
-/// directly: they carry no payload that needs builder validation.
+/// `Continue(BranchIndex)` is the only in-program target; `BranchIndex` can be constructed only by
+/// [`super::ProgramBuilder`], which enforces the forward-only-and-in-bounds invariant at patch
+/// time. The two no-op terminal variants — `Terminate` and `Escape` — can be minted directly: they
+/// carry no payload that needs builder validation.
 ///
-/// `Escape` is the typed encoding of "natural completion" — a
-/// conditional whose `then` branch ran and there is no `else`, or
-/// a top-level reach past the last op. Without it, the IR would need
-/// an implicit past-end-substitutes-Ok mechanic in the dispatcher;
-/// with it, every edge is total.
+/// `Escape` is the typed encoding of "natural completion" — a conditional whose `then` branch ran
+/// and there is no `else`, or a top-level reach past the last op. Without it, the IR would need an
+/// implicit past-end-substitutes-Ok mechanic in the dispatcher; with it, every edge is total.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum BranchTarget {
-    /// In-program target. `Continue(i)` ⇒ `i > origin_index` AND
-    /// `i < ops.len()`; enforced by [`super::ProgramBuilder`] at patch
-    /// time.
+    /// In-program target. `Continue(i)` ⇒ `i > origin_index` AND `i < ops.len()`; enforced by
+    /// [`super::ProgramBuilder`] at patch time.
     Continue(BranchIndex),
-    /// Early exit; the carried outcome propagates to `EffectComplete`.
-    /// Emitted as `on_failed` for `Exec` / `Pipe` (stop-on-failure).
+    /// Early exit; the carried outcome propagates to `EffectComplete`. Emitted as `on_failed` for
+    /// `Exec` / `Pipe` (stop-on-failure).
     Terminate,
-    /// Natural completion; terminate with `EffectOutcome::Ok` regardless
-    /// of the carried outcome. Top-level escape; a `Conditional`'s
-    /// no-else fall-through ("branch, not guard" outcome elision).
+    /// Natural completion; terminate with `EffectOutcome::Ok` regardless of the carried outcome.
+    /// Top-level escape; a `Conditional`'s no-else fall-through ("branch, not guard" outcome
+    /// elision).
     Escape,
 }
 
 /// Validated index into an [`super::ActionProgram`]'s `ops` slice.
 ///
-/// The inner field is private; the only constructor — `new` — is
-/// `pub(super)` so only `program::*` can mint values. External code
-/// can construct [`BranchTarget::Terminate`]
-/// and [`BranchTarget::Escape`] directly, but cannot construct
-/// [`BranchTarget::Continue`] without going through the builder. This
-/// is the type-level enforcement of the forward-only-and-in-bounds
-/// invariant: every `Continue` in a built program was patched by
-/// [`super::ProgramBuilder`], which validated the index.
+/// The inner field is private; the only constructor — `new` — is `pub(super)` so only `program::*`
+/// can mint values. External code can construct [`BranchTarget::Terminate`] and
+/// [`BranchTarget::Escape`] directly, but cannot construct [`BranchTarget::Continue`] without going
+/// through the builder. This is the type-level enforcement of the forward-only-and-in-bounds
+/// invariant: every `Continue` in a built program was patched by [`super::ProgramBuilder`], which
+/// validated the index.
 ///
 /// ```compile_fail
 /// use specter_core::program::{BranchTarget, BranchIndex};
@@ -235,15 +208,13 @@ pub enum BranchTarget {
 pub struct BranchIndex(u32);
 
 impl BranchIndex {
-    /// Mint a fresh index. Builder-only — see [`Self`] for the
-    /// encapsulation rationale.
+    /// Mint a fresh index. Builder-only — see [`Self`] for the encapsulation rationale.
     #[must_use]
     pub(super) const fn new(i: u32) -> Self {
         Self(i)
     }
 
-    /// Read the underlying op index as `u32`. Used by the dispatcher
-    /// to advance the cursor.
+    /// Read the underlying op index as `u32`. Used by the dispatcher to advance the cursor.
     #[must_use]
     pub const fn get(self) -> u32 {
         self.0
@@ -275,9 +246,8 @@ mod tests {
         )
     }
 
-    /// `MultiStage::new` is the spawn-body-shape seal: a pipe with
-    /// fewer than two stages is a lowering-hygiene bug, surfaced as
-    /// `DegeneratePipe` (never panicked) with the rejected count.
+    /// `MultiStage::new` is the spawn-body-shape seal: a pipe with fewer than two stages is a
+    /// lowering-hygiene bug, surfaced as `DegeneratePipe` (never panicked) with the rejected count.
     #[test]
     fn multi_stage_new_rejects_fewer_than_two_stages() {
         let zero: Arc<[ExecAction]> = Arc::from(Vec::<ExecAction>::new());
@@ -293,8 +263,7 @@ mod tests {
         );
     }
 
-    /// ≥2 stages construct; `stages()` returns the slice verbatim with
-    /// length preserved.
+    /// ≥2 stages construct; `stages()` returns the slice verbatim with length preserved.
     #[test]
     fn multi_stage_new_accepts_two_or_more_stages() {
         let stages = exec_arc(&["/bin/a", "/bin/b"]);
@@ -307,10 +276,9 @@ mod tests {
         assert_eq!(ms3.stages().len(), 3);
     }
 
-    /// `shared()` exposes the *same* backing allocation — the zero-cost
-    /// wrapping that is the entire reason `MultiStage` wraps the `Arc`
-    /// rather than reshaping the body. Coalesced Effects depend on this:
-    /// the stage vector is never re-cloned per Effect.
+    /// `shared()` exposes the *same* backing allocation — the zero-cost wrapping that is the entire
+    /// reason `MultiStage` wraps the `Arc` rather than reshaping the body. Coalesced Effects depend
+    /// on this: the stage vector is never re-cloned per Effect.
     #[test]
     fn multi_stage_shared_preserves_the_backing_arc() {
         let stages = exec_arc(&["/bin/a", "/bin/b"]);
@@ -341,8 +309,7 @@ mod tests {
             BranchTarget::Escape,
             BranchTarget::Terminate,
         );
-        // Routing is by-discriminant — exit code / signal don't change
-        // the edge selection.
+        // Routing is by-discriminant — exit code / signal don't change the edge selection.
         let failed_exit = EffectOutcome::Failed(Termination::Exit(1));
         let failed_signal = EffectOutcome::Failed(Termination::Signal(15));
         assert_eq!(op.target(&failed_exit), BranchTarget::Terminate);
@@ -369,10 +336,9 @@ mod tests {
         assert!(op.references_diff_derived());
     }
 
-    /// `Pipe` ratchets `references_diff_derived` on any stage; pinning
-    /// the OR-semantic prevents a future refactor from regressing to
-    /// `&&` (which would silently miss diff-derived placeholders in
-    /// later stages).
+    /// `Pipe` ratchets `references_diff_derived` on any stage; pinning the OR-semantic prevents a
+    /// future refactor from regressing to `&&` (which would silently miss diff-derived placeholders
+    /// in later stages).
     #[test]
     fn references_diff_derived_pipe_or_across_stages() {
         let plain = exec_with(ArgPart::literal("/bin/cat"));
@@ -405,9 +371,9 @@ mod tests {
         }
     }
 
-    /// Two equal-shape ops compare equal — structural `Eq` is preserved
-    /// across `ProgramOp` / `SpawnBody` / `BranchTarget`. The
-    /// `SubRegistryDiff` hot-reload no-op suppression relies on this.
+    /// Two equal-shape ops compare equal — structural `Eq` is preserved across `ProgramOp` /
+    /// `SpawnBody` / `BranchTarget`. The `SubRegistryDiff` hot-reload no-op suppression relies on
+    /// this.
     #[test]
     fn program_op_eq_is_structural() {
         let a = op_with_edges(

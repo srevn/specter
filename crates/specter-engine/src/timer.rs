@@ -1,5 +1,5 @@
-//! Timer heap. Tie-break on `(deadline, ProfileId, TimerId)`;
-//! cancelled timers are not removed eagerly, only invalidated on pop.
+//! Timer heap. Tie-break on `(deadline, ProfileId, TimerId)`; cancelled timers are not removed
+//! eagerly, only invalidated on pop.
 
 use crate::counter::MonotonicCounter;
 use specter_core::{ProfileId, TimerId, TimerKind};
@@ -9,14 +9,12 @@ use std::time::Instant;
 
 /// One pending timer.
 ///
-/// Ordering is `(deadline, profile, id)` — the documented tie-break.
-/// `id` is unique within the heap's lifetime, so the third tier
-/// guarantees a total order. `kind` rides on the entry as a dispatch
-/// hint (pop validates it against the owning Profile's burst slot;
-/// the engine routes Settle vs BurstDeadline directly without
-/// re-deriving from state) but is **not** part of the ordering
-/// identity — a manual `Ord` impl makes that explicit and prevents a
-/// future field reorder from silently changing tie-break semantics.
+/// Ordering is `(deadline, profile, id)` — the documented tie-break. `id` is unique within the
+/// heap's lifetime, so the third tier guarantees a total order. `kind` rides on the entry as a
+/// dispatch hint (pop validates it against the owning Profile's burst slot; the engine routes
+/// Settle vs BurstDeadline directly without re-deriving from state) but is **not** part of the
+/// ordering identity — a manual `Ord` impl makes that explicit and prevents a future field reorder
+/// from silently changing tie-break semantics.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TimerEntry {
     pub deadline: Instant,
@@ -42,55 +40,43 @@ impl PartialOrd for TimerEntry {
 
 /// Min-heap of pending timers.
 ///
-/// Lazy invalidation: a cancelled timer stays in the heap until
-/// [`pop_top`](Self::pop_top) returns it; the engine then validates
-/// against the owning Profile's burst and silently drops stale entries.
-/// `O(log n)` removal would force a slot map alongside the heap; the
-/// lazy form is cheaper for the typical "schedule, fire,
-/// occasionally cancel" workload.
+/// Lazy invalidation: a cancelled timer stays in the heap until [`pop_top`](Self::pop_top) returns
+/// it; the engine then validates against the owning Profile's burst and silently drops stale
+/// entries. `O(log n)` removal would force a slot map alongside the heap; the lazy form is cheaper
+/// for the typical "schedule, fire, occasionally cancel" workload.
 ///
-/// Sizing: live count is at most two per Active Profile —
-/// `Batching` holds `Settle` + `BurstDeadline`; `Verifying` /
-/// `Draining` hold `BurstDeadline` alone; `Awaiting` holds
-/// `AwaitGateDeadline` alone; `Rebasing` holds none. Stale entries
-/// are bounded by the settle-reuse discipline: at most one per
-/// settle reschedule (events during Batching update
-/// `Burst.last_event_time` without re-inserting; the on-expiry
-/// handler reschedules at `last_event_time + settle` only when
-/// events arrived since), plus the per-burst orphans from post-fire
-/// transitions (`BurstDeadline` orphans at `Awaiting` entry;
-/// `AwaitGateDeadline` orphans at `Rebasing` entry); all clear
-/// lazily at their original deadlines.
+/// Sizing: live count is at most two per Active Profile — `Batching` holds `Settle` +
+/// `BurstDeadline`; `Verifying` / `Draining` hold `BurstDeadline` alone; `Awaiting` holds
+/// `AwaitGateDeadline` alone; `Rebasing` holds none. Stale entries are bounded by the settle-reuse
+/// discipline: at most one per settle reschedule (events during Batching update
+/// `Burst.last_event_time` without re-inserting; the on-expiry handler reschedules at
+/// `last_event_time + settle` only when events arrived since), plus the per-burst orphans from
+/// post-fire transitions (`BurstDeadline` orphans at `Awaiting` entry; `AwaitGateDeadline` orphans
+/// at `Rebasing` entry); all clear lazily at their original deadlines.
 ///
-/// **Visibility.** `pub(crate)` — the heap itself is engine-internal;
-/// the bin layer only ever holds the [`TimerEntry`] returned by
-/// [`crate::Engine::pop_expired`]. Demoting the type keeps the engine
-/// crate's public surface scoped to the dispatcher view of the timer
-/// subsystem.
+/// **Visibility.** `pub(crate)` — the heap itself is engine-internal; the bin layer only ever holds
+/// the [`TimerEntry`] returned by [`crate::Engine::pop_expired`]. Demoting the type keeps the
+/// engine crate's public surface scoped to the dispatcher view of the timer subsystem.
 #[derive(Debug, Default)]
 pub(crate) struct TimerHeap {
     inner: BinaryHeap<Reverse<TimerEntry>>,
-    /// Monotonic counter for `TimerId` minting. Saturation panics
-    /// unconditionally (see [`MonotonicCounter::next`]).
+    /// Monotonic counter for `TimerId` minting. Saturation panics unconditionally (see
+    /// [`MonotonicCounter::next`]).
     counter: MonotonicCounter<TimerId>,
 }
 
 impl TimerHeap {
-    /// Schedule a fresh timer. Returns the minted [`TimerId`]; the engine
-    /// stores this on the owning Profile's burst so `pop_expired` can
-    /// recognize live timers from cancelled ones.
+    /// Schedule a fresh timer. Returns the minted [`TimerId`]; the engine stores this on the owning
+    /// Profile's burst so `pop_expired` can recognize live timers from cancelled ones.
     ///
-    /// `kind` rides along on the entry; on pop it tells the engine which
-    /// burst slot to validate against (settle_timer vs. burst_deadline)
-    /// and which transition to dispatch — without it, the engine would
-    /// re-derive from state on every fire.
+    /// `kind` rides along on the entry; on pop it tells the engine which burst slot to validate
+    /// against (settle_timer vs. burst_deadline) and which transition to dispatch — without it, the
+    /// engine would re-derive from state on every fire.
     ///
-    /// The minted id is unique within this heap's lifetime. [`TimerId`]
-    /// is a plain `u64` wrapper minted by [`MonotonicCounter`] (the id
-    /// space lives in `specter_core`'s `ids` module); the heap stores it
-    /// directly without a backing slotmap allocation, and lazy
-    /// invalidation makes the per-id state cheap (one heap entry per
-    /// schedule; no per-mint slot to free on cancel).
+    /// The minted id is unique within this heap's lifetime. [`TimerId`] is a plain `u64` wrapper
+    /// minted by [`MonotonicCounter`] (the id space lives in `specter_core`'s `ids` module); the
+    /// heap stores it directly without a backing slotmap allocation, and lazy invalidation makes
+    /// the per-id state cheap (one heap entry per schedule; no per-mint slot to free on cancel).
     #[must_use]
     pub fn schedule(&mut self, deadline: Instant, profile: ProfileId, kind: TimerKind) -> TimerId {
         let id = self.counter.next();
@@ -113,21 +99,18 @@ impl TimerHeap {
         self.inner.pop().map(|r| r.0)
     }
 
-    /// Iterate every entry currently in the heap, including stale entries
-    /// that lazy invalidation has not yet collected. Order is unspecified
-    /// (`BinaryHeap` exposes its internal layout, not the priority order).
-    /// Test-only introspection — production code reads the heap through
-    /// [`peek_top`](Self::peek_top) and [`pop_top`](Self::pop_top), which
-    /// honour the priority order.
+    /// Iterate every entry currently in the heap, including stale entries that lazy invalidation has
+    /// not yet collected. Order is unspecified (`BinaryHeap` exposes its internal layout, not the
+    /// priority order). Test-only introspection — production code reads the heap through
+    /// [`peek_top`](Self::peek_top) and [`pop_top`](Self::pop_top), which honour the priority order.
     #[cfg(test)]
     pub(crate) fn iter(&self) -> impl Iterator<Item = &TimerEntry> {
         self.inner.iter().map(|r| &r.0)
     }
 
-    /// Length and emptiness accessors are test-only introspection (asserted
-    /// against in `#[cfg(test)]` siblings to pin steady-state heap sizes);
-    /// production code reads the heap through [`peek_top`](Self::peek_top)
-    /// and [`pop_top`](Self::pop_top) exclusively.
+    /// Length and emptiness accessors are test-only introspection (asserted against in
+    /// `#[cfg(test)]` siblings to pin steady-state heap sizes); production code reads the heap
+    /// through [`peek_top`](Self::peek_top) and [`pop_top`](Self::pop_top) exclusively.
     #[cfg(test)]
     #[must_use]
     pub(crate) fn len(&self) -> usize {
@@ -174,10 +157,9 @@ mod tests {
         assert_ne!(a, c);
     }
 
-    /// Counter saturation — release-runnable. Pairs with the
-    /// `MonotonicCounter` unit tests in `counter.rs`; this site test
-    /// proves the heap wires the counter all the way through `schedule`
-    /// rather than re-implementing the bump.
+    /// Counter saturation — release-runnable. Pairs with the `MonotonicCounter` unit tests in
+    /// `counter.rs`; this site test proves the heap wires the counter all the way through
+    /// `schedule` rather than re-implementing the bump.
     #[test]
     #[should_panic(expected = "MonotonicCounter")]
     fn schedule_panics_on_counter_saturation() {
@@ -203,8 +185,8 @@ mod tests {
 
     #[test]
     fn monotonic_counter_persists_across_pops() {
-        // Schedule → pop → schedule. The second-minted id must differ from
-        // the first; the counter does not recycle on pop.
+        // Schedule → pop → schedule. The second-minted id must differ from the first; the counter
+        // does not recycle on pop.
         let mut h = TimerHeap::default();
         let now = Instant::now();
         let a = h.schedule(now, ProfileId::default(), TimerKind::Settle);
@@ -227,8 +209,8 @@ mod tests {
 
     #[test]
     fn pop_breaks_ties_by_profile_then_id() {
-        // Same deadline, different profile: the smaller profile pops first
-        // even when scheduled later — confirms profile-tier tie-break.
+        // Same deadline, different profile: the smaller profile pops first even when scheduled
+        // later — confirms profile-tier tie-break.
         let mut h = TimerHeap::default();
         let when = Instant::now();
         let p_high = pid(0xdead_beef);
@@ -245,11 +227,10 @@ mod tests {
 
     #[test]
     fn pop_breaks_ties_by_id_within_same_profile() {
-        // Same deadline, same profile, two timers: the smaller-Ord TimerId
-        // pops first. TimerId is a plain u64 wrapper so Ord is u64::cmp,
-        // but the test compares the actual minted ids rather than assuming
-        // a mint order — keeps the assertion robust if MonotonicCounter's
-        // semantics ever change.
+        // Same deadline, same profile, two timers: the smaller-Ord TimerId pops first. TimerId is a
+        // plain u64 wrapper so Ord is u64::cmp, but the test compares the actual minted ids rather
+        // than assuming a mint order — keeps the assertion robust if MonotonicCounter's semantics
+        // ever change.
         let mut h = TimerHeap::default();
         let when = Instant::now();
         let p = pid(1);

@@ -1,38 +1,30 @@
 //! `StepOutput` — the engine's per-step buffer.
 //!
-//! Five streams ride one value; shapes and seal mechanisms differ
-//! because the consumers and roles differ:
+//! Five streams ride one value; shapes and seal mechanisms differ because the consumers and roles
+//! differ:
 //!
-//! - **`watch_ops`** — `pub SmallVec<[WatchOp; 2]>`. Sorted by
-//!   [`WatchOp::resource`]; resealed at the boundary by
-//!   [`StepOutput::sort_for_emission`].
-//! - **`effects`** — private [`SortedEffects`] (`SmallVec`). Sorted by
-//!   [`Effect::sort_key`]; resealed at the boundary by
-//!   [`StepOutput::sort_for_emission`].
-//! - **`probe_ops`** — private [`ProbeOps`] (`BTreeMap`). Order is
-//!   intrinsic to the [`ProbeOwner`] key; sealed structurally — a
-//!   per-owner last-writer-wins upsert ([`StepOutput::push_probe_op`])
-//!   makes "at most one op per owner, in owner order" unrepresentable
-//!   to violate.
-//! - **`cancel_effects`** — private [`CancelEffects`] (`BTreeSet`).
-//!   Per-profile dedup set; order intrinsic to the [`ProfileId`] key.
-//!   Engine emits at most one Cancel per profile per step
-//!   ([`StepOutput::push_cancel_effect`]); set semantics make the
-//!   structural invariant unrepresentable to violate.
-//! - **`diagnostics`** — `pub SmallVec<[Diagnostic; 2]>`. Insertion
-//!   order, intentionally unsealed: operator-readable, not part of
-//!   the determinism contract.
+//! - **`watch_ops`** — `pub SmallVec<[WatchOp; 2]>`. Sorted by [`WatchOp::resource`]; resealed at
+//!   the boundary by [`StepOutput::sort_for_emission`].
+//! - **`effects`** — private [`SortedEffects`] (`SmallVec`). Sorted by [`Effect::sort_key`];
+//!   resealed at the boundary by [`StepOutput::sort_for_emission`].
+//! - **`probe_ops`** — private [`ProbeOps`] (`BTreeMap`). Order is intrinsic to the [`ProbeOwner`]
+//!   key; sealed structurally — a per-owner last-writer-wins upsert ([`StepOutput::push_probe_op`])
+//!   makes "at most one op per owner, in owner order" unrepresentable to violate.
+//! - **`cancel_effects`** — private [`CancelEffects`] (`BTreeSet`). Per-profile dedup set; order
+//!   intrinsic to the [`ProfileId`] key. Engine emits at most one Cancel per profile per step
+//!   ([`StepOutput::push_cancel_effect`]); set semantics make the structural invariant
+//!   unrepresentable to violate.
+//! - **`diagnostics`** — `pub SmallVec<[Diagnostic; 2]>`. Insertion order, intentionally unsealed:
+//!   operator-readable, not part of the determinism contract.
 //!
-//! Probe **correctness** is the engine's response gate, not this
-//! stream's. A stale or superseded response folds to
-//! `StaleProbeResponse` regardless of op order; the per-owner shape
-//! mirrors the sensor's `expected` map only to spare the missed-
-//! syscall stall an unstructured stream could induce.
+//! Probe **correctness** is the engine's response gate, not this stream's. A stale or superseded
+//! response folds to `StaleProbeResponse` regardless of op order; the per-owner shape mirrors the
+//! sensor's `expected` map only to spare the missed- syscall stall an unstructured stream could
+//! induce.
 //!
-//! Residual discipline: every `StepOutput`-returning entry point
-//! calls [`StepOutput::sort_for_emission`] before returning. Pinned
-//! at the engine boundary by `tests/integration.rs` —
-//! `step_output_is_sorted`,
+//! Residual discipline: every `StepOutput`-returning entry point calls
+//! [`StepOutput::sort_for_emission`] before returning. Pinned at the engine boundary by
+//! `tests/integration.rs` — `step_output_is_sorted`,
 //! `cancel_all_in_flight_probes_returns_sealed_output`, and
 //! `reap_promoter_active_returns_sealed_output`.
 
@@ -45,16 +37,15 @@ use std::collections::{BTreeMap, BTreeSet};
 
 /// The `effects` stream in emission order.
 ///
-/// Append-only from outside the module ([`StepOutput::push_effect`]);
-/// the order-establishing `reseal` and the unsorted `push_unsorted` are
-/// module-private, so the only public view ([`std::ops::Deref`] to
-/// `&[Effect]`) is always the sorted one.
+/// Append-only from outside the module ([`StepOutput::push_effect`]); the order-establishing
+/// `reseal` and the unsorted `push_unsorted` are module-private, so the only public view
+/// ([`std::ops::Deref`] to `&[Effect]`) is always the sorted one.
 #[derive(Clone, Debug, Default)]
 pub struct SortedEffects(SmallVec<[Effect; 2]>);
 
 impl SortedEffects {
-    /// Append without re-establishing order. The companion
-    /// [`Self::reseal`] restores the invariant before the value escapes.
+    /// Append without re-establishing order. The companion [`Self::reseal`] restores the invariant
+    /// before the value escapes.
     fn push_unsorted(&mut self, e: Effect) {
         self.0.push(e);
     }
@@ -74,30 +65,25 @@ impl std::ops::Deref for SortedEffects {
 
 /// The `probe_ops` stream as a sealed per-owner map.
 ///
-/// Isomorphic to the sensor's `WorkerProber.expected:
-/// BTreeMap<ProbeOwner, ProbeCorrelation>` (`submit` inserts, `cancel`
-/// removes, both owner-keyed). Producer and consumer share one shape;
+/// Isomorphic to the sensor's `WorkerProber.expected: BTreeMap<ProbeOwner, ProbeCorrelation>`
+/// (`submit` inserts, `cancel` removes, both owner-keyed). Producer and consumer share one shape;
 /// `BTreeMap<ProbeOwner, ProbeOp>` is type-honest, not a dedup tactic.
 ///
-/// Append-only from outside the module
-/// ([`StepOutput::push_probe_op`], a per-owner upsert); read via
-/// [`ProbeOps::iter`] or, at the terminal drain,
-/// [`StepOutput::into_parts`]. An empty map does not allocate (the
-/// common case), so the sealed shape is lighter on the hot
-/// `StepOutput` than always-resident inline slots would be.
+/// Append-only from outside the module ([`StepOutput::push_probe_op`], a per-owner upsert); read
+/// via [`ProbeOps::iter`] or, at the terminal drain, [`StepOutput::into_parts`]. An empty map does
+/// not allocate (the common case), so the sealed shape is lighter on the hot `StepOutput` than
+/// always-resident inline slots would be.
 #[derive(Clone, Debug, Default)]
 pub struct ProbeOps(BTreeMap<ProbeOwner, ProbeOp>);
 
 impl ProbeOps {
-    /// Record `op`, replacing any prior op for the same owner
-    /// (last-writer-wins — see type rustdoc). Module-private:
-    /// external writes go through [`StepOutput::push_probe_op`].
+    /// Record `op`, replacing any prior op for the same owner (last-writer-wins — see type
+    /// rustdoc). Module-private: external writes go through [`StepOutput::push_probe_op`].
     fn upsert(&mut self, op: ProbeOp) {
         self.0.insert(op.owner(), op);
     }
 
-    /// The ops in [`ProbeOwner`] order (`Profile` < `Promoter`, then
-    /// payload id).
+    /// The ops in [`ProbeOwner`] order (`Profile` < `Promoter`, then payload id).
     #[must_use]
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ProbeOp> {
         self.0.values()
@@ -109,8 +95,8 @@ impl ProbeOps {
         self.0.is_empty()
     }
 
-    /// Number of distinct owners with a recorded op — equivalently,
-    /// the op count, since the map holds at most one per owner.
+    /// Number of distinct owners with a recorded op — equivalently, the op count, since the map
+    /// holds at most one per owner.
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
@@ -119,36 +105,30 @@ impl ProbeOps {
 
 /// The `cancel_effects` stream as a sealed per-profile dedup set.
 ///
-/// Engine→actuator cancel emissions are profile-scoped — the actuator
-/// fans the cancel across every slot whose [`crate::DedupKey::profile`]
-/// matches — so the wire identity is the [`ProfileId`] alone. Set
-/// semantics are structurally sufficient: the only emission site is
-/// `handle_gate_deadline`, a once-per-burst edge, so two cancels for
-/// one profile in one step would mean two gate-deadline timers fired
-/// in one tick — impossible by construction.
+/// Engine→actuator cancel emissions are profile-scoped — the actuator fans the cancel across every
+/// slot whose [`crate::DedupKey::profile`] matches — so the wire identity is the [`ProfileId`]
+/// alone. Set semantics are structurally sufficient: the only emission site is
+/// `handle_gate_deadline`, a once-per-burst edge, so two cancels for one profile in one step would
+/// mean two gate-deadline timers fired in one tick — impossible by construction.
 ///
-/// `BTreeSet<ProfileId>` matches the discipline of [`ProbeOps`]
-/// (owner-keyed map): order is intrinsic to the key, no
-/// [`StepOutput::sort_for_emission`] work. Append-only from outside
-/// the module ([`StepOutput::push_cancel_effect`]); read via
-/// [`Self::iter`] or, at the terminal drain,
-/// [`StepOutput::into_parts`]. An empty set does not allocate (the
-/// common case — most steps emit no cancel), so the sealed shape is
-/// lighter on the hot `StepOutput` than an always-resident inline
+/// `BTreeSet<ProfileId>` matches the discipline of [`ProbeOps`] (owner-keyed map): order is
+/// intrinsic to the key, no [`StepOutput::sort_for_emission`] work. Append-only from outside the
+/// module ([`StepOutput::push_cancel_effect`]); read via [`Self::iter`] or, at the terminal drain,
+/// [`StepOutput::into_parts`]. An empty set does not allocate (the common case — most steps emit no
+/// cancel), so the sealed shape is lighter on the hot `StepOutput` than an always-resident inline
 /// slot would be.
 #[derive(Clone, Debug, Default)]
 pub struct CancelEffects(BTreeSet<ProfileId>);
 
 impl CancelEffects {
-    /// Insert `profile` into the dedup set. Module-private: external
-    /// writes go through [`StepOutput::push_cancel_effect`].
+    /// Insert `profile` into the dedup set. Module-private: external writes go through
+    /// [`StepOutput::push_cancel_effect`].
     fn insert(&mut self, profile: ProfileId) {
         self.0.insert(profile);
     }
 
-    /// The profiles in [`ProfileId`] order. Iterates by-value (the
-    /// id is `Copy`), mirroring [`BTreeSet::iter`]'s `.copied()` shape
-    /// without forcing the caller to chain it.
+    /// The profiles in [`ProfileId`] order. Iterates by-value (the id is `Copy`), mirroring
+    /// [`BTreeSet::iter`]'s `.copied()` shape without forcing the caller to chain it.
     #[must_use]
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = ProfileId> + '_ {
         self.0.iter().copied()
@@ -160,24 +140,21 @@ impl CancelEffects {
         self.0.is_empty()
     }
 
-    /// Number of distinct profiles to cancel — equivalently, the
-    /// cancel count, since the set holds at most one per profile.
+    /// Number of distinct profiles to cancel — equivalently, the cancel count, since the set holds
+    /// at most one per profile.
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
     }
 }
 
-/// The five owned streams yielded by [`StepOutput::into_parts`], in
-/// dispatch order: watch ops, probe ops (owner-keyed), effects
-/// (emission-sorted), cancel-effects (profile-keyed), diagnostics.
+/// The five owned streams yielded by [`StepOutput::into_parts`], in dispatch order: watch ops,
+/// probe ops (owner-keyed), effects (emission-sorted), cancel-effects (profile-keyed), diagnostics.
 ///
-/// Cancel-effects sit between effects and diagnostics so the bin's
-/// `forward` can dispatch cancels first then submits in one pass over
-/// the tuple — "kill stale before spawn new" is the right ordering
-/// (defense in depth: a same-step cancel + submit for one profile
-/// cannot construct in production, but if it ever did, this ordering
-/// is the correctness contract).
+/// Cancel-effects sit between effects and diagnostics so the bin's `forward` can dispatch cancels
+/// first then submits in one pass over the tuple — "kill stale before spawn new" is the right
+/// ordering (defense in depth: a same-step cancel + submit for one profile cannot construct in
+/// production, but if it ever did, this ordering is the correctness contract).
 pub type StepOutputParts = (
     SmallVec<[WatchOp; 2]>,
     BTreeMap<ProbeOwner, ProbeOp>,
@@ -196,9 +173,8 @@ pub struct StepOutput {
 }
 
 impl StepOutput {
-    /// Append an [`Effect`] in unsorted (insertion) order.
-    /// [`Self::sort_for_emission`] re-establishes the contract before
-    /// the value is handed downstream.
+    /// Append an [`Effect`] in unsorted (insertion) order. [`Self::sort_for_emission`]
+    /// re-establishes the contract before the value is handed downstream.
     pub fn push_effect(&mut self, e: Effect) {
         self.effects.push_unsorted(e);
     }
@@ -209,9 +185,8 @@ impl StepOutput {
         &self.effects
     }
 
-    /// Record a [`ProbeOp`], replacing any prior op for the same owner
-    /// (last-writer-wins — see [`ProbeOps`]). The `probe_ops` analogue
-    /// of [`Self::push_effect`].
+    /// Record a [`ProbeOp`], replacing any prior op for the same owner (last-writer-wins — see
+    /// [`ProbeOps`]). The `probe_ops` analogue of [`Self::push_effect`].
     pub fn push_probe_op(&mut self, op: ProbeOp) {
         self.probe_ops.upsert(op);
     }
@@ -222,29 +197,25 @@ impl StepOutput {
         &self.probe_ops
     }
 
-    /// Record a cancel-effect for `profile`. Idempotent (set
-    /// semantics): repeated calls in one step coalesce to one
-    /// emission — by construction, only one gate-deadline can fire
-    /// per profile per step, so this guard is structural rather than
-    /// load-bearing.
+    /// Record a cancel-effect for `profile`. Idempotent (set semantics): repeated calls in one step
+    /// coalesce to one emission — by construction, only one gate-deadline can fire per profile per
+    /// step, so this guard is structural rather than load-bearing.
     pub fn push_cancel_effect(&mut self, profile: ProfileId) {
         self.cancel_effects.insert(profile);
     }
 
-    /// The cancel-effects emitted this step, profile-keyed with at
-    /// most one per profile. The `cancel_effects` analogue of
-    /// [`Self::probe_ops`].
+    /// The cancel-effects emitted this step, profile-keyed with at most one per profile. The
+    /// `cancel_effects` analogue of [`Self::probe_ops`].
     #[must_use]
     pub const fn cancel_effects(&self) -> &CancelEffects {
         &self.cancel_effects
     }
 
-    /// Consume into the five owned streams, effects in emission order,
-    /// probe ops owner-keyed, cancel-effects profile-keyed.
+    /// Consume into the five owned streams, effects in emission order, probe ops owner-keyed,
+    /// cancel-effects profile-keyed.
     ///
-    /// Terminal-consumer drain: `self` is owned, so this is only
-    /// reachable on a fully built, already-resealed value (every
-    /// `StepOutput`-returning entry point reseals before returning).
+    /// Terminal-consumer drain: `self` is owned, so this is only reachable on a fully built,
+    /// already-resealed value (every `StepOutput`-returning entry point reseals before returning).
     /// Zero-copy — every stream moves out.
     #[must_use]
     pub fn into_parts(self) -> StepOutputParts {
@@ -257,11 +228,9 @@ impl StepOutput {
         )
     }
 
-    /// Seal the order-determined streams: `watch_ops` by
-    /// [`WatchOp::resource`], `effects` by [`Effect::sort_key`].
-    /// `probe_ops` and `cancel_effects` are key-ordered by
-    /// construction (no reseal); `diagnostics` follow insertion order
-    /// (not part of the contract).
+    /// Seal the order-determined streams: `watch_ops` by [`WatchOp::resource`], `effects` by
+    /// [`Effect::sort_key`]. `probe_ops` and `cancel_effects` are key-ordered by construction (no
+    /// reseal); `diagnostics` follow insertion order (not part of the contract).
     pub fn sort_for_emission(&mut self) {
         self.watch_ops.sort_by_key(WatchOp::resource);
         self.effects.reseal();
@@ -297,9 +266,8 @@ mod tests {
         SubId::from(KeyData::from_ffi(n))
     }
 
-    /// Minimal one-op program for fixture construction; the body content
-    /// doesn't matter for the sort-emission tests below, only that the
-    /// field is well-typed and non-empty.
+    /// Minimal one-op program for fixture construction; the body content doesn't matter for the
+    /// sort-emission tests below, only that the field is well-typed and non-empty.
     fn fixture_program() -> Arc<ActionProgram> {
         let mut b = ProgramBuilder::new();
         let h = b.emit(SpawnBody::Exec(ExecAction::new(
@@ -311,12 +279,10 @@ mod tests {
         Arc::new(b.build().unwrap())
     }
 
-    /// Test fixture for an [`Effect`] when only `(key, target)` matter
-    /// (sort tests). Other fields take their natural empty values.
-    /// `anchor` doubles as the Subtree sort resource: setting it to
-    /// `target` keeps `sort_key().1 == target` for the Subtree arm. The
-    /// PerFile arm keys on its own `resource`, which the test always
-    /// passes equal to `target`.
+    /// Test fixture for an [`Effect`] when only `(key, target)` matter (sort tests). Other fields
+    /// take their natural empty values. `anchor` doubles as the Subtree sort resource: setting it
+    /// to `target` keeps `sort_key().1 == target` for the Subtree arm. The PerFile arm keys on its
+    /// own `resource`, which the test always passes equal to `target`.
     fn effect(key: DedupKey, target: ResourceId) -> Effect {
         let common = EffectCommon {
             sub: key.sub(),
@@ -363,11 +329,10 @@ mod tests {
         assert_eq!(resources, vec![r1, r2, r3]);
     }
 
-    /// [`ProbeOps`] iterates in [`ProbeOwner`] order *intrinsically* —
-    /// the order is the map key, established at insert, not by a sort.
-    /// Push out of owner order and assert iteration order *before* any
-    /// `sort_for_emission`; the seal call then leaves it unchanged (it
-    /// is a no-op for `probe_ops`).
+    /// [`ProbeOps`] iterates in [`ProbeOwner`] order *intrinsically* — the order is the map key,
+    /// established at insert, not by a sort. Push out of owner order and assert iteration order
+    /// *before* any `sort_for_emission`; the seal call then leaves it unchanged (it is a no-op for
+    /// `probe_ops`).
     #[test]
     fn probe_ops_iterate_in_owner_order_without_a_sort() {
         use crate::op::ProbeOwner;
@@ -396,10 +361,9 @@ mod tests {
         assert_eq!(owners(&out), expected);
     }
 
-    /// Last-writer-wins per owner: a second op for an owner *replaces*
-    /// the first, isomorphic to the sensor's `expected` map. This is
-    /// what makes "at most one op per owner" structural — the violation
-    /// is unrepresentable, not asserted-against.
+    /// Last-writer-wins per owner: a second op for an owner *replaces* the first, isomorphic to the
+    /// sensor's `expected` map. This is what makes "at most one op per owner" structural — the
+    /// violation is unrepresentable, not asserted-against.
     #[test]
     fn push_probe_op_replaces_prior_op_for_same_owner() {
         use crate::op::ProbeOwner;
@@ -424,9 +388,8 @@ mod tests {
         );
     }
 
-    /// Distinct owners are independent keys: both survive, in owner
-    /// order. The map is owner-keyed, not a single slot — the per-owner
-    /// replace must not collapse different owners.
+    /// Distinct owners are independent keys: both survive, in owner order. The map is owner-keyed,
+    /// not a single slot — the per-owner replace must not collapse different owners.
     #[test]
     fn push_probe_op_keeps_distinct_owners() {
         use crate::op::ProbeOwner;
@@ -452,13 +415,11 @@ mod tests {
         );
     }
 
-    /// `sort_for_emission` orders mixed-arm effects by `(sub, target)`.
-    /// Mixing `PerFile` and `Subtree` in one step is the production
-    /// case (a multi-Sub Profile firing both kinds simultaneously); the
-    /// ordering interleaves them by sub and target rather than
-    /// segregating by variant. The captured `Effect.target` survives
-    /// any post-emission state churn — sort is independent of
-    /// `ProfileMap`.
+    /// `sort_for_emission` orders mixed-arm effects by `(sub, target)`. Mixing `PerFile` and
+    /// `Subtree` in one step is the production case (a multi-Sub Profile firing both kinds
+    /// simultaneously); the ordering interleaves them by sub and target rather than segregating by
+    /// variant. The captured `Effect.target` survives any post-emission state churn — sort is
+    /// independent of `ProfileMap`.
     #[test]
     fn sort_for_emission_orders_effects_by_sub_then_target() {
         let sub_a = sidn(2);

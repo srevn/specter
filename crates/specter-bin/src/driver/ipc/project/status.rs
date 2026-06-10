@@ -9,16 +9,13 @@ use std::path::Path;
 
 /// Project the engine + driver state into a [`StatusResponse`].
 ///
-/// The projection is **pure** — every read is a borrow off its
-/// source and every owned field on the response is a fresh
-/// allocation (mostly `WireTime` strings; `WirePath` lossy
-/// projections for the two filesystem paths).
+/// The projection is **pure** — every read is a borrow off its source and every owned field on the
+/// response is a fresh allocation (mostly `WireTime` strings; `WirePath` lossy projections for the
+/// two filesystem paths).
 ///
-/// **`sub_total` semantics** — every Sub currently in the engine
-/// registry, *including* dynamic Subs minted by Promoters. An
-/// operator wanting "only static, only attached" derives it from
-/// `list`. The minimal `status` shape avoids carrying multiple
-/// counts that would skew interpretation at a glance.
+/// **`sub_total` semantics** — every Sub currently in the engine registry, *including* dynamic Subs
+/// minted by Promoters. An operator wanting "only static, only attached" derives it from `list`. The
+/// minimal `status` shape avoids carrying multiple counts that would skew interpretation at a glance.
 pub(crate) fn status(
     engine: &Engine,
     ds: &DriverState,
@@ -32,12 +29,10 @@ pub(crate) fn status(
         reload_count: ds.reload_count,
         last_reload: ds.last_reload.map(WireLastReload::from),
         sub_total: engine.subs().len(),
-        // Inline filter+count over `config.watches` rather than
-        // `Config::disabled_names()`. The latter allocates two
-        // `Vec<&str>` (watches AND promoters) just to read `.len()`
-        // off the first one — the promoter side is unused here, and
-        // even the watch side wastes a heap allocation for what is
-        // structurally a counter.
+        // Inline filter+count over `config.watches` rather than `Config::disabled_names()`. The
+        // latter allocates two `Vec<&str>` (watches AND promoters) just to read `.len()` off the
+        // first one — the promoter side is unused here, and even the watch side wastes a heap
+        // allocation for what is structurally a counter.
         sub_disabled_toml: config.watches.iter().filter(|s| !s.enabled).count(),
         sub_disabled_runtime: disabled_runtime.len(),
         profile_active: engine.profiles().active_count(),
@@ -106,11 +101,10 @@ mod tests {
         let disabled = BTreeSet::<CompactString>::new();
         let config = Config::from_str("").expect("empty config parses");
 
-        // Sleep a measurable amount so `start_instant.elapsed()` is
-        // non-zero in seconds with extreme tolerance for CI scheduler
-        // jitter — the projection's wiring is "did we read
-        // `start_instant.elapsed().as_secs()`?", not "is the clock
-        // moving?". A boolean witness keeps the test deterministic.
+        // Sleep a measurable amount so `start_instant.elapsed()` is non-zero in seconds with
+        // extreme tolerance for CI scheduler jitter — the projection's wiring is "did we read
+        // `start_instant.elapsed().as_secs()`?", not "is the clock moving?". A boolean witness
+        // keeps the test deterministic.
         sleep(Duration::from_millis(5));
         let r = status(
             &engine,
@@ -119,9 +113,8 @@ mod tests {
             &config,
             &PathBuf::from("/etc/specter.toml"),
         );
-        // u64 is unsigned; the constraint reduces to "this read
-        // didn't panic and we got a number". A regression that swapped
-        // `start_instant.elapsed()` for, say, `start_wall.elapsed()`
+        // u64 is unsigned; the constraint reduces to "this read didn't panic and we got a number".
+        // A regression that swapped `start_instant.elapsed()` for, say, `start_wall.elapsed()`
         // would fail at compile time (different methods).
         let _: u64 = r.uptime_secs;
     }
@@ -143,10 +136,9 @@ mod tests {
         );
 
         assert_eq!(r.reload_count, 1);
-        // `WireReloadTrigger::from(ReloadTrigger::Sighup) == Sighup` —
-        // the projection is the structural mapping, not a string. The
-        // single `last_reload` field carries both halves together;
-        // partial (Some(at), None) is unconstructable.
+        // `WireReloadTrigger::from(ReloadTrigger::Sighup) == Sighup` — the projection is the
+        // structural mapping, not a string. The single `last_reload` field carries both halves
+        // together; partial (Some(at), None) is unconstructable.
         let lr = r.last_reload.expect("record_reload populated the pair");
         assert_eq!(lr.via, crate::ipc::wire::WireReloadTrigger::Sighup);
     }

@@ -1,12 +1,10 @@
 //! Test fixtures behind the `testkit` Cargo feature.
 //!
-//! [`MockSpawner`] is a pure-Rust [`crate::Spawner`] that records every
-//! `spawn` call into a `Mutex<Vec<SpawnRecord>>` and returns handles
-//! whose `wait` blocks on a per-call channel until the test signals
-//! [`MockSpawner::complete`]. The signaler records `signal_term` /
-//! `signal_kill` calls. This lets coalescing, concurrency, and
-//! shutdown logic be tested deterministically without forking real
-//! children.
+//! [`MockSpawner`] is a pure-Rust [`crate::Spawner`] that records every `spawn` call into a
+//! `Mutex<Vec<SpawnRecord>>` and returns handles whose `wait` blocks on a per-call channel until
+//! the test signals [`MockSpawner::complete`]. The signaler records `signal_term` / `signal_kill`
+//! calls. This lets coalescing, concurrency, and shutdown logic be tested deterministically without
+//! forking real children.
 
 use crate::lifecycle::DeadFlag;
 use crate::spawner::{
@@ -20,8 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Recorded spawn — what the controller passed to
-/// [`Spawner::spawn`].
+/// Recorded spawn — what the controller passed to [`Spawner::spawn`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnRecord {
     pub pid: u32,
@@ -31,8 +28,8 @@ pub struct SpawnRecord {
     pub capture_output: bool,
 }
 
-/// Recorded signal call. `Reap` records the synchronous reap path
-/// taken on wait-thread-spawn-failure recovery.
+/// Recorded signal call. `Reap` records the synchronous reap path taken on
+/// wait-thread-spawn-failure recovery.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SignalRecord {
     Term(u32),
@@ -46,11 +43,11 @@ pub struct MockSpawner {
     next_pid: AtomicU32,
     spawns: Mutex<Vec<SpawnRecord>>,
     signals: Arc<Mutex<Vec<SignalRecord>>>,
-    /// Per-pid completion sender; the waiter reads from the
-    /// corresponding receiver. Tests inject outcomes via `complete`.
+    /// Per-pid completion sender; the waiter reads from the corresponding receiver. Tests inject
+    /// outcomes via `complete`.
     completions: Mutex<BTreeMap<u32, Sender<EffectOutcome>>>,
-    /// If set, every `spawn` returns this error instead of recording the
-    /// call. Used to test the spawn-fail synthesis path.
+    /// If set, every `spawn` returns this error instead of recording the call. Used to test the
+    /// spawn-fail synthesis path.
     inject_spawn_error: Mutex<Option<io::ErrorKind>>,
 }
 
@@ -92,12 +89,11 @@ impl MockSpawner {
         self.signals.lock().unwrap().clone()
     }
 
-    /// Cause the spawned child with `pid` to return `outcome` from its
-    /// `wait`. Returns `Err` if `pid` was never spawned or if the
-    /// waiter is no longer listening.
+    /// Cause the spawned child with `pid` to return `outcome` from its `wait`. Returns `Err` if
+    /// `pid` was never spawned or if the waiter is no longer listening.
     pub fn complete(&self, pid: u32, outcome: EffectOutcome) -> Result<(), &'static str> {
-        // Clone the Sender so the lock is released before send (avoids
-        // holding the Mutex across the channel operation).
+        // Clone the Sender so the lock is released before send (avoids holding the Mutex across the
+        // channel operation).
         let tx = self
             .completions
             .lock()
@@ -108,8 +104,7 @@ impl MockSpawner {
         tx.send(outcome).map_err(|_| "waiter dropped channel")
     }
 
-    /// Configure subsequent `spawn` calls to return the given error
-    /// kind.
+    /// Configure subsequent `spawn` calls to return the given error kind.
     pub fn inject_spawn_error(&self, kind: io::ErrorKind) {
         *self.inject_spawn_error.lock().unwrap() = Some(kind);
     }
@@ -121,16 +116,14 @@ impl MockSpawner {
 }
 
 impl MockSpawner {
-    /// Allocate one spawn slot: mint a pid, register the completion
-    /// channel, record the [`SpawnRecord`]. Returns the primitives the
-    /// caller assembles into per-stage waiter + signaler pair shapes
-    /// — `Box<dyn>` for single-spawn (`Self::spawn`) or
-    /// `Arc<dyn ChildSignaler>` for pipe stages (`Self::spawn_pipe`).
+    /// Allocate one spawn slot: mint a pid, register the completion channel, record the
+    /// [`SpawnRecord`]. Returns the primitives the caller assembles into per-stage waiter +
+    /// signaler pair shapes — `Box<dyn>` for single-spawn (`Self::spawn`) or `Arc<dyn
+    /// ChildSignaler>` for pipe stages (`Self::spawn_pipe`).
     ///
-    /// Centralising the id minting / channel bookkeeping here keeps
-    /// `MockSpawner::complete(pid, outcome)` a single contract: any
-    /// pid returned from `take_spawns()` / `spawns()` is wired into
-    /// exactly one in-flight completion channel.
+    /// Centralising the id minting / channel bookkeeping here keeps `MockSpawner::complete(pid,
+    /// outcome)` a single contract: any pid returned from `take_spawns()` / `spawns()` is wired
+    /// into exactly one in-flight completion channel.
     fn allocate_spawn(
         &self,
         argv: Vec<String>,
@@ -151,9 +144,8 @@ impl MockSpawner {
         (pid, rx, DeadFlag::new())
     }
 
-    /// Owned `Vec<(String, String)>` mirror of the spawner's
-    /// borrowed env slice. Shared by [`Self::spawn`] and
-    /// [`Self::spawn_pipe`] so the recorded env shape is stable.
+    /// Owned `Vec<(String, String)>` mirror of the spawner's borrowed env slice. Shared by
+    /// [`Self::spawn`] and [`Self::spawn_pipe`] so the recorded env shape is stable.
     fn env_to_owned(env: &[EnvVar<'_>]) -> Vec<(String, String)> {
         env.iter()
             .map(|e| (e.key.to_owned(), e.value.as_ref().to_owned()))
@@ -169,8 +161,8 @@ impl Spawner for MockSpawner {
         cwd: &Path,
         capture_output: bool,
     ) -> io::Result<SpawnHandles> {
-        // Copy out of the lock before checking — Mutex guard's
-        // significant Drop should not span the if-let body.
+        // Copy out of the lock before checking — Mutex guard's significant Drop should not span the
+        // if-let body.
         let injected = *self.inject_spawn_error.lock().unwrap();
         if let Some(kind) = injected {
             return Err(io::Error::from(kind));
@@ -201,8 +193,8 @@ impl Spawner for MockSpawner {
         cwd: &Path,
         capture_output: bool,
     ) -> io::Result<PipeSpawnHandles> {
-        // Same injection point as `spawn` — tests can flip the flag
-        // and observe a pipe spawn failure as a stage-0 failure.
+        // Same injection point as `spawn` — tests can flip the flag and observe a pipe spawn
+        // failure as a stage-0 failure.
         let injected = *self.inject_spawn_error.lock().unwrap();
         if let Some(kind) = injected {
             return Err(io::Error::from(kind));
@@ -234,11 +226,9 @@ impl Spawner for MockSpawner {
                 signals: Arc::clone(&self.signals),
             }));
         }
-        // Mirror `OsSpawner::spawn_pipe`: one `Arc<[_]>` backs the
-        // aggregating waiter, the combined signaler, and the
-        // controller's `stage_signalers` handle. Tests reading
-        // `handles.stage_signalers.len()` see the same shape as
-        // production.
+        // Mirror `OsSpawner::spawn_pipe`: one `Arc<[_]>` backs the aggregating waiter, the combined
+        // signaler, and the controller's `stage_signalers` handle. Tests reading
+        // `handles.stage_signalers.len()` see the same shape as production.
         let stage_signalers: Arc<[Arc<dyn ChildSignaler>]> = Arc::from(stage_signalers);
         let combined: Arc<dyn ChildSignaler> = Arc::new(crate::pipe::CombinedSignaler::new(
             Arc::clone(&stage_signalers),
@@ -264,8 +254,8 @@ struct MockChildWaiter {
 impl ChildWaiter for MockChildWaiter {
     fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
         let result = self.rx.recv();
-        // Mirror OsChildWaiter — mark dead unconditionally before
-        // returning so the protocol contract holds even on error.
+        // Mirror OsChildWaiter — mark dead unconditionally before returning so the protocol
+        // contract holds even on error.
         self.dead.mark_dead();
         match result {
             Ok(o) => Ok(o),
@@ -319,9 +309,8 @@ impl ChildSignaler for MockChildSignaler {
         self.dead.is_dead()
     }
     fn mark_dead(&self) {
-        // Trait-level publish — delegates to the shared DeadFlag the
-        // MockChildWaiter writes after its rx.recv() returns. Idempotent
-        // against the waiter's own mark and against reap_blocking.
+        // Trait-level publish — delegates to the shared DeadFlag the MockChildWaiter writes after its
+        // rx.recv() returns. Idempotent against the waiter's own mark and against reap_blocking.
         self.dead.mark_dead();
     }
 }

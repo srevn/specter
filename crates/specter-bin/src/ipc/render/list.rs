@@ -1,18 +1,16 @@
 //! `specter list -o human` renderer — column-padded table.
 //!
-//! Default columns: `NAME STATE ANCHOR LAST_FIRED FIRES DISABLED`.
-//! `--wide` adds: `PROFILE_ID SUB_ID DEDUP_SUPPRESSED SETTLE`.
+//! Default columns: `NAME STATE ANCHOR LAST_FIRED FIRES DISABLED`. `--wide` adds: `PROFILE_ID
+//! SUB_ID DEDUP_SUPPRESSED SETTLE`.
 //!
-//! `&[Column]` of `fn` pointers is the dispatch — no trait, no
-//! generics, no `Box`. Adding a column is one `Column { header,
-//! render }` literal. The two column sets are `const &[Column]` so
-//! the layout is data, not control flow.
+//! `&[Column]` of `fn` pointers is the dispatch — no trait, no generics, no `Box`. Adding a column
+//! is one `Column { header, render }` literal. The two column sets are `const &[Column]` so the
+//! layout is data, not control flow.
 //!
-//! Each cell renders once per row into a [`Vec`] grid as a [`Cell`] —
-//! its plain text plus the [`anstyle::Style`] to paint it with. Column
-//! widths derive from the plain `text.len()`, so the SGR bytes a
-//! `Styler::Active` paint adds never shift a column: stripping the ANSI
-//! from a styled render reproduces the plain layout byte-for-byte.
+//! Each cell renders once per row into a [`Vec`] grid as a [`Cell`] — its plain text plus the
+//! [`anstyle::Style`] to paint it with. Column widths derive from the plain `text.len()`, so the
+//! SGR bytes a `Styler::Active` paint adds never shift a column: stripping the ANSI from a styled
+//! render reproduces the plain layout byte-for-byte.
 
 use std::fmt::Write as _;
 
@@ -21,12 +19,10 @@ use anstyle::Style;
 use crate::ipc::protocol::{ListResponse, ListRow};
 use crate::ipc::render::style::{self, PadRight, Rule, Styler};
 
-/// Render the response as one operator-readable block into the
-/// caller's buffer.
+/// Render the response as one operator-readable block into the caller's buffer.
 ///
-/// `wide = true` includes the four extra columns. Writes
-/// `no watches declared\n` for an empty response so the operator sees
-/// a definite signal, not blank output. `sty` gates ANSI styling on
+/// `wide = true` includes the four extra columns. Writes `no watches declared\n` for an empty
+/// response so the operator sees a definite signal, not blank output. `sty` gates ANSI styling on
 /// the resolved stdout stream.
 pub(crate) fn render(out: &mut String, resp: &ListResponse, wide: bool, sty: Styler) {
     if resp.rows.is_empty() {
@@ -35,9 +31,8 @@ pub(crate) fn render(out: &mut String, resp: &ListResponse, wide: bool, sty: Sty
     }
     let columns = if wide { ALL_COLUMNS } else { DEFAULT_COLUMNS };
 
-    // Render every cell once into a `cols × rows` grid. Indexed by
-    // `[col][row]` so the width fold is a single linear pass per
-    // column.
+    // Render every cell once into a `cols × rows` grid. Indexed by `[col][row]` so the width fold
+    // is a single linear pass per column.
     let grid: Vec<Vec<Cell>> = columns
         .iter()
         .map(|col| resp.rows.iter().map(col.render).collect())
@@ -64,23 +59,20 @@ pub(crate) fn render(out: &mut String, resp: &ListResponse, wide: bool, sty: Sty
     }
 }
 
-/// One column's header label and per-row cell renderer. `fn` pointer
-/// (not `dyn Fn`) — every renderer is a static free function with no
-/// captured state, so the indirection is one pointer load, no Box.
+/// One column's header label and per-row cell renderer. `fn` pointer (not `dyn Fn`) — every renderer
+/// is a static free function with no captured state, so the indirection is one pointer load, no Box.
 struct Column {
     header: &'static str,
     render: fn(&ListRow) -> Cell,
 }
 
-/// One rendered table cell — its plain text plus the [`Style`] to
-/// paint it with. Widths fold over `text.len()` (plain bytes), so a
-/// styled cell occupies the same columns as its plain twin.
+/// One rendered table cell — its plain text plus the [`Style`] to paint it with. Widths fold over
+/// `text.len()` (plain bytes), so a styled cell occupies the same columns as its plain twin.
 ///
-/// The paint wraps the right-padded cell ([`write_row`]), so the style
-/// covers the trailing pad: cell styles must be glyph-only (foreground
-/// hue or `dimmed`) — never background / underline / reverse, which
-/// would render on the pad spaces and break column alignment to the eye
-/// (the same constraint [`style::LABEL`] documents).
+/// The paint wraps the right-padded cell ([`write_row`]), so the style covers the trailing pad:
+/// cell styles must be glyph-only (foreground hue or `dimmed`) — never background / underline /
+/// reverse, which would render on the pad spaces and break column alignment to the eye (the same
+/// constraint [`style::LABEL`] documents).
 struct Cell {
     text: String,
     style: Style,
@@ -95,8 +87,7 @@ impl Cell {
         }
     }
 
-    /// The `-` placeholder for an absent value, painted
-    /// [`style::MISSING`].
+    /// The `-` placeholder for an absent value, painted [`style::MISSING`].
     fn missing() -> Self {
         Self {
             text: "-".to_string(),
@@ -110,11 +101,9 @@ impl Cell {
     }
 }
 
-/// Map an `Option` to a cell: `Some` through `f`, `None` to the shared
-/// [`Cell::missing`] marker. Collapses the `Option → "-"` arm every
-/// optional column would otherwise restate — including the styled
-/// present-arms (`state`, `disabled`, the ids), since `f` returns any
-/// [`Cell`].
+/// Map an `Option` to a cell: `Some` through `f`, `None` to the shared [`Cell::missing`] marker.
+/// Collapses the `Option → "-"` arm every optional column would otherwise restate — including the
+/// styled present-arms (`state`, `disabled`, the ids), since `f` returns any [`Cell`].
 fn present_or_missing<T>(value: Option<T>, f: impl FnOnce(T) -> Cell) -> Cell {
     value.map_or_else(Cell::missing, f)
 }
@@ -205,11 +194,10 @@ fn write_header(out: &mut String, columns: &[Column], widths: &[usize], sty: Sty
     out.push('\n');
 }
 
-/// One box-drawing dash per column-width cell, joined by [`COL_GAP`].
-/// Each column's dash row matches the header / data widths exactly,
-/// so the separator lines up under the labels regardless of cell
-/// length. The dash run is a [`Rule`] per column painted
-/// [`style::DELIM`] — the N-rules-joined-by-gap shape, not one rule.
+/// One box-drawing dash per column-width cell, joined by [`COL_GAP`]. Each column's dash row
+/// matches the header / data widths exactly, so the separator lines up under the labels regardless
+/// of cell length. The dash run is a [`Rule`] per column painted [`style::DELIM`] — the
+/// N-rules-joined-by-gap shape, not one rule.
 fn write_separator(out: &mut String, widths: &[usize], sty: Styler) {
     for (i, &w) in widths.iter().enumerate() {
         if i > 0 {
@@ -232,11 +220,9 @@ fn write_row(out: &mut String, grid: &[Vec<Cell>], widths: &[usize], row_idx: us
     out.push('\n');
 }
 
-// --- Per-column renderers. Each returns a [`Cell`]; `-` (painted
-//     [`style::MISSING`]) is the operator-visible "missing" marker
-//     shared with `show`'s vocabulary. `state` carries its phase hue,
-//     `disabled` is [`style::OFF`], the ids are [`style::SECONDARY`];
-//     every other value is unstyled data.
+// --- Per-column renderers. Each returns a [`Cell`]; `-` (painted [`style::MISSING`]) is the
+// operator-visible "missing" marker shared with `show`'s vocabulary. `state` carries its phase hue,
+// `disabled` is [`style::OFF`], the ids are [`style::SECONDARY`]; every other value is unstyled data.
 
 fn col_name(row: &ListRow) -> Cell {
     Cell::data(row.name.clone())
@@ -324,9 +310,8 @@ mod tests {
         }
     }
 
-    /// Empty rows render as a definite "no watches declared" signal instead
-    /// of a blank string, so the operator is not left guessing whether the
-    /// request succeeded.
+    /// Empty rows render as a definite "no watches declared" signal instead of a blank string, so
+    /// the operator is not left guessing whether the request succeeded.
     #[test]
     fn list_table_renders_empty_rows_as_no_watches() {
         let resp = ListResponse { rows: vec![] };
@@ -341,9 +326,8 @@ mod tests {
         );
     }
 
-    /// Default columns include NAME / STATE / ANCHOR / LAST_FIRED / FIRES
-    /// / DISABLED, and NOT the four wide-only columns (PROFILE_ID / SUB_ID
-    /// / DEDUP_SUPPRESSED / SETTLE).
+    /// Default columns include NAME / STATE / ANCHOR / LAST_FIRED / FIRES / DISABLED, and NOT the
+    /// four wide-only columns (PROFILE_ID / SUB_ID / DEDUP_SUPPRESSED / SETTLE).
     #[test]
     fn list_table_default_columns_excludes_wide_only() {
         let resp = ListResponse {
@@ -362,8 +346,8 @@ mod tests {
         }
     }
 
-    /// `--wide` adds the four extra columns. The default columns remain
-    /// present (wide is additive, not replacing).
+    /// `--wide` adds the four extra columns. The default columns remain present (wide is additive,
+    /// not replacing).
     #[test]
     fn list_table_wide_adds_profile_sub_dedup_settle() {
         let resp = ListResponse {
@@ -387,8 +371,8 @@ mod tests {
         }
     }
 
-    /// The separator row spans each column's width with the box-
-    /// drawing dash. The separator is at least as wide as the
+    /// The separator row spans each column's width with the box- drawing dash. The separator is at
+    /// least as wide as the
     /// corresponding header — never empty (`"─".repeat(0)` would
     /// regress this).
     #[test]
@@ -402,9 +386,8 @@ mod tests {
         let header = lines.next().expect("header line");
         let separator = lines.next().expect("separator line");
         let dash_count = separator.chars().filter(|c| *c == '─').count();
-        // NAME (4) + STATE (5) + ANCHOR (6) + LAST_FIRED (10) +
-        // FIRES (5) + DISABLED (8) = 38 — header widths bound the
-        // separator from below.
+        // NAME (4) + STATE (5) + ANCHOR (6) + LAST_FIRED (10) + FIRES (5) + DISABLED (8) = 38 —
+        // header widths bound the separator from below.
         assert!(
             dash_count >= 38,
             "separator must repeat per-column-width; got {dash_count} dashes from {separator:?}",
@@ -419,8 +402,8 @@ mod tests {
         );
     }
 
-    /// Disabled-source labels render verbatim — `runtime` / `toml`
-    /// match the `DisabledSource` snake_case serde rename.
+    /// Disabled-source labels render verbatim — `runtime` / `toml` match the `DisabledSource`
+    /// snake_case serde rename.
     #[test]
     fn list_table_disabled_renders_source_label() {
         let resp = ListResponse {
@@ -435,11 +418,10 @@ mod tests {
         assert!(out.contains("toml"), "missing 'toml' label: {out}");
     }
 
-    /// Geometry parity: an `Active` render of a multi-row table,
-    /// stripped of every SGR escape, is byte-identical to the `Plain`
-    /// render in both default and wide modes — proving the painted cells
-    /// occupy exactly the same columns (widths fold over the plain
-    /// `text.len()`, never the SGR bytes a paint adds).
+    /// Geometry parity: an `Active` render of a multi-row table, stripped of every SGR escape, is
+    /// byte-identical to the `Plain` render in both default and wide modes — proving the painted
+    /// cells occupy exactly the same columns (widths fold over the plain `text.len()`, never the
+    /// SGR bytes a paint adds).
     #[test]
     fn list_active_preserves_column_geometry() {
         use crate::ipc::render::style::strip_ansi;

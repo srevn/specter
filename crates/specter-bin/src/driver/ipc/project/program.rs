@@ -1,25 +1,22 @@
 //! Render an [`ActionProgram`] to operator-readable lines for
 //! [`crate::ipc::protocol::SubDetails::program`].
 //!
-//! One line per [`ProgramOp`]. The argv parts use the same
-//! `${specter.<name>}` / `${env.<NAME>}` vocabulary the source
-//! TOML uses, but the rendered form is **operator-readable, not
-//! round-trippable**: adjacent literals in one `ArgTemplate`
-//! concatenate without a separator, so the config lexer remains
-//! the authoritative parse boundary.
+//! One line per [`ProgramOp`]. The argv parts use the same `${specter.<name>}` / `${env.<NAME>}`
+//! vocabulary the source TOML uses, but the rendered form is **operator-readable, not
+//! round-trippable**: adjacent literals in one `ArgTemplate` concatenate without a separator, so
+//! the config lexer remains the authoritative parse boundary.
 //!
-//! The reverse-direction placeholder table mirrors the forward table
-//! consumed by the TOML lexer; both are exhaustive matches against
-//! the shared [`Placeholder`] enum, so a new variant is a compile
-//! error in this module AND in the lexer.
+//! The reverse-direction placeholder table mirrors the forward table consumed by the TOML lexer;
+//! both are exhaustive matches against the shared [`Placeholder`] enum, so a new variant is a
+//! compile error in this module AND in the lexer.
 
 use std::fmt::Write as _;
 
 use specter_core::program::{BranchTarget, ProgramOp, SpawnBody};
 use specter_core::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 
-/// Render every op in the program as one line. Caller threads the
-/// returned slice into [`crate::ipc::protocol::SubDetails::program`].
+/// Render every op in the program as one line. Caller threads the returned slice into
+/// [`crate::ipc::protocol::SubDetails::program`].
 pub(crate) fn render(program: &ActionProgram) -> Vec<String> {
     program
         .ops()
@@ -62,9 +59,8 @@ fn write_body(out: &mut String, body: &SpawnBody) {
     }
 }
 
-/// Argv joined by a single space, then an optional ` (timeout …)`
-/// suffix on a per-stage basis. Default-untimed Execs render
-/// unannotated; operators see per-stage timeouts in the pipe form.
+/// Argv joined by a single space, then an optional ` (timeout …)` suffix on a per-stage basis.
+/// Default-untimed Execs render unannotated; operators see per-stage timeouts in the pipe form.
 fn write_exec(out: &mut String, exec: &ExecAction) {
     for (i, arg) in exec.argv().iter().enumerate() {
         if i > 0 {
@@ -77,9 +73,8 @@ fn write_exec(out: &mut String, exec: &ExecAction) {
     }
 }
 
-/// One argv slot's parts written back-to-back. Two adjacent parts (a
-/// literal `--flag=` followed by `${specter.path}`) collapse into a
-/// single argv slot — the writer does not insert separators.
+/// One argv slot's parts written back-to-back. Two adjacent parts (a literal `--flag=` followed by
+/// `${specter.path}`) collapse into a single argv slot — the writer does not insert separators.
 fn write_template(out: &mut String, t: &ArgTemplate) {
     for part in t.parts() {
         write_part(out, part);
@@ -107,8 +102,8 @@ fn write_part(out: &mut String, p: &ArgPart) {
     }
 }
 
-/// In-program target prints as `#<index>`; the two no-op terminals
-/// print their operator-facing keyword.
+/// In-program target prints as `#<index>`; the two no-op terminals print their operator-facing
+/// keyword.
 fn write_target(out: &mut String, t: BranchTarget) {
     match t {
         BranchTarget::Continue(idx) => {
@@ -119,11 +114,9 @@ fn write_target(out: &mut String, t: BranchTarget) {
     }
 }
 
-/// Reverse direction of the TOML template lexer's placeholder
-/// catalog. A new [`Placeholder`] variant added to `specter-core`
-/// without a matching arm here is a compile error — the exhaustive
-/// match is the structural seam that keeps the round-trip vocabulary
-/// in sync.
+/// Reverse direction of the TOML template lexer's placeholder catalog. A new [`Placeholder`]
+/// variant added to `specter-core` without a matching arm here is a compile error — the exhaustive
+/// match is the structural seam that keeps the round-trip vocabulary in sync.
 const fn placeholder_token(p: Placeholder) -> &'static str {
     match p {
         Placeholder::Path => "path",
@@ -173,9 +166,9 @@ mod tests {
         b.build().unwrap()
     }
 
-    /// `${specter.<name>}` projects back from [`Placeholder`] using the
-    /// same vocabulary the TOML lexer consumes. Catches a future rename of
-    /// a `Placeholder` variant that forgets to update the reverse table.
+    /// `${specter.<name>}` projects back from [`Placeholder`] using the same vocabulary the TOML
+    /// lexer consumes. Catches a future rename of a `Placeholder` variant that forgets to update
+    /// the reverse table.
     #[test]
     fn render_exec_with_literal_and_placeholder() {
         let body = SpawnBody::Exec(exec_with([
@@ -191,8 +184,8 @@ mod tests {
         );
     }
 
-    /// `pipe(N)` prefix carries the stage count and stages join on ` | `.
-    /// Pins both the operator-visible separator and the stage counting.
+    /// `pipe(N)` prefix carries the stage count and stages join on ` | `. Pins both the
+    /// operator-visible separator and the stage counting.
     #[test]
     fn render_pipe_joins_stages_with_pipe_separator() {
         let stages: Arc<[ExecAction]> = Arc::from(vec![
@@ -211,10 +204,9 @@ mod tests {
         );
     }
 
-    /// Argv parts from separate [`ArgTemplate`]s join on a single space;
-    /// parts within one template concatenate. Two `ArgTemplate`s with
-    /// `[Literal("--input="), Placeholder(Path)]` and `[Literal("/log")]`
-    /// render as `--input=${specter.path} /log`.
+    /// Argv parts from separate [`ArgTemplate`]s join on a single space; parts within one template
+    /// concatenate. Two `ArgTemplate`s with `[Literal("--input="), Placeholder(Path)]` and
+    /// `[Literal("/log")]` render as `--input=${specter.path} /log`.
     #[test]
     fn render_exec_splits_args_on_template_boundaries() {
         let body = SpawnBody::Exec(exec_with_args([
@@ -232,8 +224,8 @@ mod tests {
         );
     }
 
-    /// Both env forms render with the right delimiter. `default = None` is
-    /// `${env.NAME}`; `default = Some(d)` is `${env.NAME:-d}`.
+    /// Both env forms render with the right delimiter. `default = None` is `${env.NAME}`; `default
+    /// = Some(d)` is `${env.NAME:-d}`.
     #[test]
     fn render_env_var_with_and_without_default() {
         let body = SpawnBody::Exec(exec_with_args([
@@ -254,10 +246,9 @@ mod tests {
         );
     }
 
-    /// Branch targets render to `#N` / `terminate` / `escape`. `Continue`
-    /// is built via the builder's `continue_to_next` helper (the only public
-    /// path — `BranchIndex` is sealed); `Terminate` and `Escape` are the two
-    /// no-op terminals.
+    /// Branch targets render to `#N` / `terminate` / `escape`. `Continue` is built via the
+    /// builder's `continue_to_next` helper (the only public path — `BranchIndex` is sealed);
+    /// `Terminate` and `Escape` are the two no-op terminals.
     #[test]
     fn render_branch_targets_continue_terminate_escape() {
         // Two-op program so `Continue` points at the next emit.
@@ -276,8 +267,8 @@ mod tests {
         assert_eq!(lines[1], "[1] exec /bin/b  ok→escape fail→terminate");
     }
 
-    /// `(timeout …)` suffix only appears when the operator set one.
-    /// Default-untimed Execs render unannotated.
+    /// `(timeout …)` suffix only appears when the operator set one. Default-untimed Execs render
+    /// unannotated.
     #[test]
     fn render_exec_with_timeout_appends_suffix() {
         let body = SpawnBody::Exec(exec_timed(

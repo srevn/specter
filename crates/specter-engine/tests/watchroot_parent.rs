@@ -1,7 +1,6 @@
-//! Watch-root-parent infrastructure. Each User Profile contributes a `+1`
-//! watch_demand to its parent Resource so the engine can detect
-//! rename/delete of the anchor itself; the contribution is released on
-//! `detach_sub` reap.
+//! Watch-root-parent infrastructure. Each User Profile contributes a `+1` watch_demand to its
+//! parent Resource so the engine can detect rename/delete of the anchor itself; the contribution is
+//! released on `detach_sub` reap.
 
 use specter_core::testkit::dir_snap;
 use specter_core::{
@@ -14,9 +13,8 @@ use std::time::Instant;
 
 #[test]
 fn attach_sub_creates_watch_root_parent_contribution() {
-    // Tree has /root and /root/src. attach_sub at /root/src; /root's
-    // watch_demand bumps; /root/src watch_demand bumps; Profile records
-    // /root as its watch_root_parent.
+    // Tree has /root and /root/src. attach_sub at /root/src; /root's watch_demand bumps; /root/src
+    // watch_demand bumps; Profile records /root as its watch_root_parent.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
@@ -61,8 +59,8 @@ fn attach_sub_creates_watch_root_parent_contribution() {
 
 #[test]
 fn root_anchor_has_no_watch_root_parent() {
-    // attach_sub at /src directly (no parent in Tree). watch_root_parent
-    // stays None — root rename detection is unavailable.
+    // attach_sub at /src directly (no parent in Tree). watch_root_parent stays None — root rename
+    // detection is unavailable.
     let mut e = Engine::new();
     let src = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(src, ResourceKind::Dir);
@@ -115,10 +113,9 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), now);
     assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
 
-    // Detach. The detach releases the anchor's contribution and the
-    // watch-root parent's contribution; `Tree::try_reap` cascades up
-    // from the now-orphaned anchor and reaps `/root` in the same step
-    // (no other claims). Both slots emit `Unwatch` on the way out.
+    // Detach. The detach releases the anchor's contribution and the watch-root parent's
+    // contribution; `Tree::try_reap` cascades up from the now-orphaned anchor and reaps `/root` in
+    // the same step (no other claims). Both slots emit `Unwatch` on the way out.
     let out = e.step(Input::DetachSub(sid), Instant::now());
     assert!(
         e.tree().get(root).is_none_or(|r| r.watch_demand() == 0),
@@ -135,8 +132,8 @@ fn detach_sub_releases_watch_root_parent_contribution() {
 
 #[test]
 fn multiple_profiles_share_one_watch_root_parent() {
-    // Sub A at /root/srcA, Sub B at /root/srcB. Both register /root as
-    // watch_root_parent. /root's watch_demand = 2.
+    // Sub A at /root/srcA, Sub B at /root/srcB. Both register /root as watch_root_parent. /root's
+    // watch_demand = 2.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);
@@ -190,9 +187,8 @@ fn multiple_profiles_share_one_watch_root_parent() {
 
 #[test]
 fn watch_root_parent_role_stays_user_when_already_user() {
-    // /root is User-anchored by another Profile. Adding a Sub at
-    // /root/src registers /root as watch_root_parent but does NOT
-    // demote its role.
+    // /root is User-anchored by another Profile. Adding a Sub at /root/src registers /root as
+    // watch_root_parent but does NOT demote its role.
     let mut e = Engine::new();
     let root = e.tree_mut().ensure_root("root", ResourceRole::User);
     e.tree_mut().set_kind(root, ResourceKind::Dir);

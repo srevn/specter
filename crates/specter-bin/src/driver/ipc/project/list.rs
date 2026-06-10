@@ -1,13 +1,10 @@
-//! `specter list` projection — union three populations (engine-
-//! attached, runtime-disabled, TOML-disabled) into one
-//! alphabetically-sorted row set.
+//! `specter list` projection — union three populations (engine- attached, runtime-disabled,
+//! TOML-disabled) into one alphabetically-sorted row set.
 //!
-//! [`BTreeMap`]-keyed by owned `String`: insertion-time
-//! conflict-resolution (engine wins) AND alphabetic iteration are
-//! both structural to the data structure, not the algorithm. The
-//! map allocates once per request and drops on send; the cost is
-//! operator-paced (single requests, human-latency tolerance), not
-//! per-tick.
+//! [`BTreeMap`]-keyed by owned `String`: insertion-time conflict-resolution (engine wins) AND
+//! alphabetic iteration are both structural to the data structure, not the algorithm. The map
+//! allocates once per request and drops on send; the cost is operator-paced (single requests,
+//! human-latency tolerance), not per-tick.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -24,23 +21,19 @@ use super::project_wall;
 
 /// Project the three populations into a [`ListResponse`].
 ///
-/// Order of insertion mirrors the engine-wins conflict-resolution
-/// rule (a name in the engine *and* the runtime-disabled set can only
-/// race during an in-flight IPC `disable`):
-/// 1. Engine-attached rows first (every Sub in the registry — static
-///    AND dynamic). [`BTreeMap::insert`] semantics overwrite by key,
-///    but no other insertion follows for the same name; the engine row
-///    is the authoritative one.
-/// 2. Runtime-disabled rows — <code>[BTreeMap::entry].or_insert_with</code>
-///    skips when the engine already claimed the name.
+/// Order of insertion mirrors the engine-wins conflict-resolution rule (a name in the engine *and*
+/// the runtime-disabled set can only race during an in-flight IPC `disable`):
+/// 1. Engine-attached rows first (every Sub in the registry — static AND dynamic).
+///    [`BTreeMap::insert`] semantics overwrite by key, but no other insertion follows for the same
+///    name; the engine row is the authoritative one.
+/// 2. Runtime-disabled rows — <code>[BTreeMap::entry].or_insert_with</code> skips when the engine
+///    already claimed the name.
 /// 3. TOML-disabled rows — same [`BTreeMap::entry`] rule.
 ///
-/// Owned `String` keys (not `&str`): each source has a different
-/// borrow lifetime (engine's `&Sub.name`, the runtime set's
-/// `&CompactString`, the config's `&SubSpec.name`). An owned key
-/// outlives every borrow and round-trips into [`ListRow::name`]
-/// without a second allocation — [`BTreeMap::into_values`] consumes
-/// the map.
+/// Owned `String` keys (not `&str`): each source has a different borrow lifetime (engine's
+/// `&Sub.name`, the runtime set's `&CompactString`, the config's `&SubSpec.name`). An owned key
+/// outlives every borrow and round-trips into [`ListRow::name`] without a second allocation —
+/// [`BTreeMap::into_values`] consumes the map.
 pub(crate) fn list(
     engine: &Engine,
     ds: &DriverState,
@@ -70,12 +63,10 @@ pub(crate) fn list(
 
 /// Project a registry-attached `(SubId, &Sub)` into a [`ListRow`].
 ///
-/// Looks up the hosting Profile and anchor path. Both lookups must
-/// succeed for an attached Sub: a missing Profile or unresolved
-/// anchor is an engine invariant breach. The projection surfaces the
-/// partial row (`state: None` / `anchor: None`) rather than
-/// panicking — the breach is operator-visible, not hidden behind a
-/// crash.
+/// Looks up the hosting Profile and anchor path. Both lookups must succeed for an attached Sub: a
+/// missing Profile or unresolved anchor is an engine invariant breach. The projection surfaces the
+/// partial row (`state: None` / `anchor: None`) rather than panicking — the breach is
+/// operator-visible, not hidden behind a crash.
 fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) -> ListRow {
     let profile = engine.profiles().get(sub.profile());
     let state = profile.map(|p| WireStateLabel::from(p.state().label()));
@@ -103,9 +94,8 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
     }
 }
 
-/// Construct a row for a non-attached Sub (runtime-disabled or
-/// TOML-disabled). Every engine-derived field is `None`; only `name`
-/// and `disabled` are set.
+/// Construct a row for a non-attached Sub (runtime-disabled or TOML-disabled). Every engine-derived
+/// field is `None`; only `name` and `disabled` are set.
 fn disabled_row(name: &str, source: DisabledSource) -> ListRow {
     ListRow {
         name: name.to_string(),
@@ -142,10 +132,9 @@ mod tests {
         DriverState::new(PathBuf::from("/tmp/specter-test.sock"))
     }
 
-    /// Build a Config from a TOML string keyed by anchor path so the
-    /// tests can stage many watches at different paths. The path itself
-    /// is irrelevant to the projection — the engine descends but never
-    /// resolves it in these tests.
+    /// Build a Config from a TOML string keyed by anchor path so the tests can stage many watches
+    /// at different paths. The path itself is irrelevant to the projection — the engine descends
+    /// but never resolves it in these tests.
     fn config_from_watches(watches: &[(&str, &str, bool)]) -> Config {
         let mut s = String::new();
         for (name, path, enabled) in watches {
@@ -164,10 +153,9 @@ mod tests {
         Config::from_str(&s).expect("test config parses")
     }
 
-    /// Attach every active watch in `config` through `engine.step`. The
-    /// returned engine carries one Sub per active watch, in source order.
-    /// `StepOutput`s are discarded — the projection reads `engine.subs()`
-    /// directly.
+    /// Attach every active watch in `config` through `engine.step`. The returned engine carries one
+    /// Sub per active watch, in source order. `StepOutput`s are discarded — the projection reads
+    /// `engine.subs()` directly.
     fn engine_with(config: &Config) -> Engine {
         let mut engine = Engine::new();
         let now = Instant::now();
@@ -177,13 +165,12 @@ mod tests {
         engine
     }
 
-    /// RAII guard that drains every in-flight probe before the wrapped
-    /// `Engine` drops. Without it `ProbeSlot`'s linear-edge tripwire
-    /// (`specter_core::probe`) panics on test teardown — every attach
-    /// arms a probe on the descent / Seed path.
+    /// RAII guard that drains every in-flight probe before the wrapped `Engine` drops. Without it
+    /// `ProbeSlot`'s linear-edge tripwire (`specter_core::probe`) panics on test teardown — every
+    /// attach arms a probe on the descent / Seed path.
     ///
-    /// Tests construct the engine, hand it to [`Self::wrap`], project
-    /// off [`Self::engine`], and `drop(guard)` cleans up.
+    /// Tests construct the engine, hand it to [`Self::wrap`], project off [`Self::engine`], and
+    /// `drop(guard)` cleans up.
     struct EngineGuard {
         engine: Option<Engine>,
     }
@@ -251,17 +238,15 @@ mod tests {
         assert!(toml.sub.is_none());
     }
 
-    /// On name conflict between engine and the runtime-disabled set (the
-    /// operator disable IPC raced with the projection), the engine row wins
-    /// — its insertion comes first and the runtime row's `or_insert_with`
-    /// is a no-op.
+    /// On name conflict between engine and the runtime-disabled set (the operator disable IPC raced
+    /// with the projection), the engine row wins — its insertion comes first and the runtime row's
+    /// `or_insert_with` is a no-op.
     #[test]
     fn list_engine_wins_on_name_conflict_with_runtime_set() {
         let config = config_from_watches(&[("alpha", "/tmp/a", true)]);
         let guard = EngineGuard::wrap(engine_with(&config));
         let mut disabled = BTreeSet::new();
-        // Same name in the runtime-disabled set — should NOT shadow the
-        // engine row.
+        // Same name in the runtime-disabled set — should NOT shadow the engine row.
         disabled.insert(CompactString::const_new("alpha"));
 
         let resp = list(guard.engine(), &fresh_state(), &disabled, &config);
@@ -276,9 +261,8 @@ mod tests {
         assert!(row.sub.is_some(), "engine row carries SubId");
     }
 
-    /// Insertion order across sources does not break sort — the BTreeMap
-    /// reorders deterministically. Construct in reverse and observe
-    /// alphabetic output.
+    /// Insertion order across sources does not break sort — the BTreeMap reorders
+    /// deterministically. Construct in reverse and observe alphabetic output.
     #[test]
     fn list_alphabetic_order_across_sources() {
         // Source order: TOML first (disabled), then runtime, then engine.
@@ -299,9 +283,8 @@ mod tests {
         );
     }
 
-    /// Attached row carries every engine-derived field: state, sub id,
-    /// profile id, fire counters (`Some(0)` for a never-fired Sub), settle
-    /// ms, and a null `source_promoter` for static Subs.
+    /// Attached row carries every engine-derived field: state, sub id, profile id, fire counters
+    /// (`Some(0)` for a never-fired Sub), settle ms, and a null `source_promoter` for static Subs.
     #[test]
     fn list_attached_row_carries_every_engine_field() {
         let config = config_from_watches(&[("only", "/tmp/foo", true)]);
@@ -327,11 +310,9 @@ mod tests {
         assert!(row.disabled.is_none(), "attached row's disabled is None");
     }
 
-    /// A dynamic Sub (`source_promoter: Some(_)`) projects with the
-    /// discriminator populated. Construct it by directly attaching a
-    /// `SubAttachRequest` whose `source_promoter` is `Some(_)` — the engine's
-    /// `attach_sub` does not require a Promoter to exist for this
-    /// projection-side test.
+    /// A dynamic Sub (`source_promoter: Some(_)`) projects with the discriminator populated.
+    /// Construct it by directly attaching a `SubAttachRequest` whose `source_promoter` is `Some(_)` —
+    /// the engine's `attach_sub` does not require a Promoter to exist for this projection-side test.
     #[test]
     fn list_dynamic_sub_carries_source_promoter() {
         use specter_core::{ClassSet, ProfileIdentity};

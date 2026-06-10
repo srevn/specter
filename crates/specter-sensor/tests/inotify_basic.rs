@@ -1,21 +1,19 @@
-//! Real-fs round-trip on Linux inotify. Each test installs one watch,
-//! performs one filesystem operation, and asserts that the corresponding
-//! [`FsEvent`] arrives at [`FsWatcher::drain_ready`]. Mirror of
-//! `kqueue_basic.rs`.
+//! Real-fs round-trip on Linux inotify. Each test installs one watch, performs one filesystem
+//! operation, and asserts that the corresponding [`FsEvent`] arrives at [`FsWatcher::drain_ready`].
+//! Mirror of `kqueue_basic.rs`.
 //!
-//! Each test passes the minimum [`ClassSet`] needed to fire the event it
-//! asserts on (identity floor + class-aware mapping):
-//! - Terminal events ([`FsEvent::Removed`], [`FsEvent::Renamed`]) work
-//!   with [`ClassSet::EMPTY`] because `IDENTITY_FLOOR =
-//!   IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT` is OR-ed onto every
+//! Each test passes the minimum [`ClassSet`] needed to fire the event it asserts on (identity floor
+//! + class-aware mapping):
+//! - Terminal events ([`FsEvent::Removed`], [`FsEvent::Renamed`]) work with [`ClassSet::EMPTY`]
+//!   because `IDENTITY_FLOOR = IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT` is OR-ed onto every
 //!   registration.
 //! - [`FsEvent::StructureChanged`] on a Dir needs [`ClassSet::STRUCTURE`].
 //! - [`FsEvent::ContentChanged`] on a File needs [`ClassSet::CONTENT`].
 //! - [`FsEvent::MetadataChanged`] needs [`ClassSet::METADATA`].
 
-// `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a
-// `Vec` while preserving its allocation. Required here because the helper
-// reuses the same buffer across the drain-loop's iterations.
+// `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a `Vec` while preserving its
+// allocation. Required here because the helper reuses the same buffer across the drain-loop's
+// iterations.
 #![allow(clippy::iter_with_drain)]
 #![cfg(target_os = "linux")]
 
@@ -31,10 +29,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-/// Build a `mio::Poll` registered on the watcher's inotify fd. The
-/// helper centralises the "register `as_fd()` for READABLE" boilerplate
-/// the drain loops below share — `drain_ready` is non-blocking by
-/// trait, so the caller blocks via the reactor.
+/// Build a `mio::Poll` registered on the watcher's inotify fd. The helper centralises the "register
+/// `as_fd()` for READABLE" boilerplate the drain loops below share — `drain_ready` is non-blocking
+/// by trait, so the caller blocks via the reactor.
 fn poll_for(w: &InotifyWatcher) -> Poll {
     let poll = Poll::new().expect("mio Poll");
     let raw = w.as_fd().as_raw_fd();
@@ -44,10 +41,9 @@ fn poll_for(w: &InotifyWatcher) -> Poll {
     poll
 }
 
-/// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator until
-/// at least one matches `pred` or the deadline elapses. Returns the
-/// accumulated events. Inotify can emit [`WatcherEvent::Overflow`], so
-/// the helper records but does not panic on it.
+/// Drain events from `w` into a `(ResourceId, FsEvent)` accumulator until at least one matches
+/// `pred` or the deadline elapses. Returns the accumulated events. Inotify can emit
+/// [`WatcherEvent::Overflow`], so the helper records but does not panic on it.
 fn drain_until<F: Fn(&(ResourceId, FsEvent)) -> bool>(
     w: &mut InotifyWatcher,
     pred: F,
@@ -235,9 +231,8 @@ fn watch_path_with_nul_byte_returns_error() {
     let bad: &OsStr = OsStrExt::from_bytes(b"/tmp/has\0nul");
     let bad_path = std::path::Path::new(bad);
 
-    // Path with embedded NUL → `CString::new` rejects → `Error::other`
-    // which carries no `raw_os_error`, so the trait wrapper hits the
-    // `_ → Invariant { errno: 0 }` arm.
+    // Path with embedded NUL → `CString::new` rejects → `Error::other` which carries no
+    // `raw_os_error`, so the trait wrapper hits the `_ → Invariant { errno: 0 }` arm.
     let res = w.watch(r, bad_path, ResourceKind::Unknown, ClassSet::EMPTY);
     assert_eq!(
         res,
@@ -252,9 +247,8 @@ fn watch_nonexistent_path_returns_resource_enoent() {
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r = fresh_id(&mut sm);
 
-    // `Unknown` kind: `open_o_path` fails with ENOENT before fstat, so
-    // kind verification never runs. The trait wrapper classifies ENOENT
-    // as `WatchFailure::Resource` per `WatchFailureExt::from_io`.
+    // `Unknown` kind: `open_o_path` fails with ENOENT before fstat, so kind verification never runs.
+    // The trait wrapper classifies ENOENT as `WatchFailure::Resource` per `WatchFailureExt::from_io`.
     let res = w.watch(
         r,
         std::path::Path::new("/this/path/does/not/exist/specter"),
@@ -278,19 +272,17 @@ fn unwatch_after_event_does_not_panic_on_subsequent_poll() {
     let mut w = InotifyWatcher::new().unwrap();
     let mut sm = SlotMap::<ResourceId, ()>::with_key();
     let r_file = fresh_id(&mut sm);
-    // CONTENT so the kernel actually queues an event for the write
-    // below — exercising the late-event-drain path the test's contract
-    // covers.
+    // CONTENT so the kernel actually queues an event for the write below — exercising the
+    // late-event-drain path the test's contract covers.
     w.watch(r_file, &path, ResourceKind::File, ClassSet::CONTENT)
         .unwrap();
 
     std::fs::write(&path, "changed").unwrap();
     w.unwatch(r_file);
 
-    // Late event drain — kernel may still deliver an event whose wd is
-    // now in `draining_wds`. Watcher drops the event silently; the
-    // `IN_IGNORED` consumption clears the flag. Test contract is "no
-    // panic / no error".
+    // Late event drain — kernel may still deliver an event whose wd is now in `draining_wds`.
+    // Watcher drops the event silently; the `IN_IGNORED` consumption clears the flag. Test contract
+    // is "no panic / no error".
     let mut poll = poll_for(&w);
     let mut events = Events::with_capacity(8);
     let mut out: Vec<WatcherEvent> = Vec::new();

@@ -1,14 +1,12 @@
 //! `Effect`, [`EffectCompletion`], and friends.
 //!
-//! No baseline/current snapshot on `Effect`: the engine re-probes after
-//! `EffectComplete::Ok` rather than trust a snapshot taken at emission
-//! time. A diff is carried only when the Sub's program references
-//! diff-derived placeholders (Subtree, optional) or the fire is
-//! per-stable-file (mandatory).
+//! No baseline/current snapshot on `Effect`: the engine re-probes after `EffectComplete::Ok` rather
+//! than trust a snapshot taken at emission time. A diff is carried only when the Sub's program
+//! references diff-derived placeholders (Subtree, optional) or the fire is per-stable-file
+//! (mandatory).
 //!
-//! [`EffectCompletion`] is the engine-facing envelope for one effect
-//! completion — built once at the actuator's wait thread, threaded
-//! unchanged through the controller, consumed by the engine via
+//! [`EffectCompletion`] is the engine-facing envelope for one effect completion — built once at the
+//! actuator's wait thread, threaded unchanged through the controller, consumed by the engine via
 //! `Input::EffectComplete(EffectCompletion)`.
 
 use crate::diff::Diff;
@@ -20,44 +18,34 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Effect — a command-to-be plus the bookkeeping needed to spawn and
-/// coalesce it.
+/// Effect — a command-to-be plus the bookkeeping needed to spawn and coalesce it.
 ///
-/// The flat fields are irreducible identity scalars (frozen at emit
-/// time; `(sub, profile, anchor)` survives any post-emit state churn)
-/// plus the substitution payload the actuator-side resolver reads to
-/// render argv/env/cwd. The fire *shape* — whole-subtree vs
-/// per-stable-file — is the [`EffectTarget`] sum. Every cross-cutting
-/// concern ([`key`](Effect::key), [`sort_key`](Effect::sort_key),
-/// [`target_path`](Effect::target_path), [`diff`](Effect::diff),
-/// [`relative`](Effect::relative)) is a derived method, never a stored
-/// field, so a stored projection cannot drift from the shape.
+/// The flat fields are irreducible identity scalars (frozen at emit time; `(sub, profile, anchor)`
+/// survives any post-emit state churn) plus the substitution payload the actuator-side resolver
+/// reads to render argv/env/cwd. The fire *shape* — whole-subtree vs per-stable-file — is the
+/// [`EffectTarget`] sum. Every cross-cutting concern ([`key`](Effect::key),
+/// [`sort_key`](Effect::sort_key), [`target_path`](Effect::target_path), [`diff`](Effect::diff),
+/// [`relative`](Effect::relative)) is a derived method, never a stored field, so a stored
+/// projection cannot drift from the shape.
 ///
-/// `capture_output` mirrors the Sub's `log_output` at emit time: the
-/// actuator picks `Stdio::null()` (discard) vs `Stdio::inherit()`
-/// (forward to Specter's stdout/stderr, where the supervisor's log
-/// facility captures it). `program` / `anchor_path` / `exclude` are
-/// `Arc`-shared so coalesced Effects from one emit call reuse one
-/// allocation each.
+/// `capture_output` mirrors the Sub's `log_output` at emit time: the actuator picks `Stdio::null()`
+/// (discard) vs `Stdio::inherit()` (forward to Specter's stdout/stderr, where the supervisor's log
+/// facility captures it). `program` / `anchor_path` / `exclude` are `Arc`-shared so coalesced
+/// Effects from one emit call reuse one allocation each.
 #[derive(Clone, Debug)]
 pub struct Effect {
     pub sub: SubId,
     pub profile: ProfileId,
-    /// The Profile's anchor resource (frozen `Profile.resource`). Not
-    /// derivable from [`Effect::key`] — `DedupKey::Subtree` does not
-    /// carry it — so it is an irreducible identity scalar.
+    /// The Profile's anchor resource (frozen `Profile.resource`). Not derivable from [`Effect::key`]
+    /// — `DedupKey::Subtree` does not carry it — so it is an irreducible identity scalar.
     pub anchor: ResourceId,
-    /// Operator-narration only — not part of the engine↔actuator
-    /// completion-routing contract. The engine resolves a
-    /// [`crate::Input::EffectComplete`] back to its Profile via
-    /// `DedupKey::profile()` (in `on_effect_complete`'s pass-1 route)
-    /// and the actuator coalesces by [`DedupKey`] alone; this id is
-    /// consumed only for the `SPECTER_CORRELATION` env, the diff tmp
-    /// filename, and tracing keys. The engine mints it because the
-    /// monotone floor already lives at engine scope
-    /// (`Engine.effect_correlations`); moving the mint actuator-side
-    /// would buy nothing — the same operator-narration id with one
-    /// extra cross-actor hop.
+    /// Operator-narration only — not part of the engine↔actuator completion-routing contract. The
+    /// engine resolves a [`crate::Input::EffectComplete`] back to its Profile via
+    /// `DedupKey::profile()` (in `on_effect_complete`'s pass-1 route) and the actuator coalesces by
+    /// [`DedupKey`] alone; this id is consumed only for the `SPECTER_CORRELATION` env, the diff tmp
+    /// filename, and tracing keys. The engine mints it because the monotone floor already lives at
+    /// engine scope (`Engine.effect_correlations`); moving the mint actuator-side would buy nothing
+    /// — the same operator-narration id with one extra cross-actor hop.
     pub correlation: CorrelationId,
     pub forced: bool,
     pub capture_output: bool,
@@ -71,19 +59,16 @@ pub struct Effect {
 
 /// The fire shape of an [`Effect`].
 ///
-/// Named `EffectTarget` (not `EffectScope` — that is `sub.rs`'s
-/// user-intent axis) so the two Subtree/PerFile vocabularies stay
-/// distinct. Carries the only fields whose meaning differs per shape;
-/// shared identity/payload stays flat on [`Effect`].
+/// Named `EffectTarget` (not `EffectScope` — that is `sub.rs`'s user-intent axis) so the two
+/// Subtree/PerFile vocabularies stay distinct. Carries the only fields whose meaning differs per
+/// shape; shared identity/payload stays flat on [`Effect`].
 #[derive(Clone, Debug)]
 pub enum EffectTarget {
-    /// Whole-subtree fire. `target_path == anchor_path`. `diff` is
-    /// `Some` iff the Sub needs a diff-derived placeholder and a
-    /// baseline existed.
+    /// Whole-subtree fire. `target_path == anchor_path`. `diff` is `Some` iff the Sub needs a
+    /// diff-derived placeholder and a baseline existed.
     Subtree { diff: Option<Arc<Diff>> },
-    /// Per-stable-file fire. `target_path == anchor_path.join(segment)`.
-    /// `diff` is mandatory: the type guarantees the
-    /// `PerStableFile ⇒ needs_diff` invariant.
+    /// Per-stable-file fire. `target_path == anchor_path.join(segment)`. `diff` is mandatory: the
+    /// type guarantees the `PerStableFile ⇒ needs_diff` invariant.
     PerFile {
         resource: ResourceId,
         segment: CompactString,
@@ -93,10 +78,9 @@ pub enum EffectTarget {
 
 /// Constructor input for [`Effect`].
 ///
-/// Destructured into the flat identity/payload fields, never stored.
-/// Shared by both engine emit arms and every test fixture; the multiple
-/// consumers earn it a name (a stored field group with no second
-/// consumer would not).
+/// Destructured into the flat identity/payload fields, never stored. Shared by both engine emit
+/// arms and every test fixture; the multiple consumers earn it a name (a stored field group with no
+/// second consumer would not).
 #[derive(Debug)]
 pub struct EffectCommon {
     pub sub: SubId,
@@ -113,8 +97,8 @@ pub struct EffectCommon {
 }
 
 impl Effect {
-    /// Whole-subtree Effect. `diff` is `Some` iff the Sub needs a
-    /// diff-derived placeholder and a baseline existed.
+    /// Whole-subtree Effect. `diff` is `Some` iff the Sub needs a diff-derived placeholder and a
+    /// baseline existed.
     #[must_use]
     pub fn subtree(common: EffectCommon, diff: Option<Arc<Diff>>) -> Self {
         Self::from_common(common, EffectTarget::Subtree { diff })
@@ -138,8 +122,8 @@ impl Effect {
         )
     }
 
-    /// Single construction choke: destructure the parameter struct into
-    /// the flat fields and attach the shape.
+    /// Single construction choke: destructure the parameter struct into the flat fields and attach
+    /// the shape.
     fn from_common(common: EffectCommon, target: EffectTarget) -> Self {
         Self {
             sub: common.sub,
@@ -157,10 +141,9 @@ impl Effect {
         }
     }
 
-    /// Coalescing identity — the actuator's `BTreeMap<DedupKey, Slot>`.
-    /// The engine's fire-history is per-Sub ([`crate::Sub::has_fired`]),
-    /// not a projection of this key. Slotmap keys are `Copy`, so this
-    /// is cheap; callers need it owned anyway.
+    /// Coalescing identity — the actuator's `BTreeMap<DedupKey, Slot>`. The engine's fire-history
+    /// is per-Sub ([`crate::Sub::has_fired`]), not a projection of this key. Slotmap keys are
+    /// `Copy`, so this is cheap; callers need it owned anyway.
     #[must_use]
     pub const fn key(&self) -> DedupKey {
         match &self.target {
@@ -176,15 +159,12 @@ impl Effect {
         }
     }
 
-    /// Total order for [`crate::output::StepOutput`] effects: Subtree
-    /// keys on the anchor resource, PerFile on the file resource.
-    /// Replay determinism depends on this being stable.
+    /// Total order for [`crate::output::StepOutput`] effects: Subtree keys on the anchor resource,
+    /// PerFile on the file resource. Replay determinism depends on this being stable.
     ///
-    /// No `ProfileId` in the tuple. `SubId` already determines the
-    /// Profile (`Sub.profile` is functional), so adding it cannot
-    /// refine the partition. [`DedupKey::PerFile`] carries it for an
-    /// unrelated reason — that key doubles as the actuator's
-    /// per-Profile completion-credit lookup.
+    /// No `ProfileId` in the tuple. `SubId` already determines the Profile (`Sub.profile` is
+    /// functional), so adding it cannot refine the partition. [`DedupKey::PerFile`] carries it for an
+    /// unrelated reason — that key doubles as the actuator's per-Profile completion-credit lookup.
     #[must_use]
     pub const fn sort_key(&self) -> (SubId, ResourceId) {
         let resource = match &self.target {
@@ -194,9 +174,8 @@ impl Effect {
         (self.sub, resource)
     }
 
-    /// Spawn `target_path`. Subtree borrows `anchor_path` (no alloc);
-    /// PerFile joins the segment at call time, keeping the `PathBuf`
-    /// allocation at the resolve boundary (post-coalesce).
+    /// Spawn `target_path`. Subtree borrows `anchor_path` (no alloc); PerFile joins the segment at
+    /// call time, keeping the `PathBuf` allocation at the resolve boundary (post-coalesce).
     #[must_use]
     pub fn target_path(&self) -> Cow<'_, Path> {
         match &self.target {
@@ -207,8 +186,8 @@ impl Effect {
         }
     }
 
-    /// `${specter.relative}` / `SPECTER_RELATIVE_PATH` source: empty for
-    /// Subtree, the file segment for PerFile.
+    /// `${specter.relative}` / `SPECTER_RELATIVE_PATH` source: empty for Subtree, the file segment
+    /// for PerFile.
     #[must_use]
     pub fn relative(&self) -> &str {
         match &self.target {
@@ -229,19 +208,16 @@ impl Effect {
 
 /// Coalescing identity.
 ///
-/// Both variants carry the owning Profile. The `profile` field on
-/// `PerFile` adds no partitioning power (the `sub` already determines
-/// the Profile), but it makes the `key → profile` lookup constant-time
-/// symmetrically across both arms — the engine credits the per-Profile
-/// `PostFirePhase::Awaiting` counter on every `EffectComplete`, so this
-/// lookup is hot.
+/// Both variants carry the owning Profile. The `profile` field on `PerFile` adds no partitioning
+/// power (the `sub` already determines the Profile), but it makes the `key → profile` lookup
+/// constant-time symmetrically across both arms — the engine credits the per-Profile
+/// `PostFirePhase::Awaiting` counter on every `EffectComplete`, so this lookup is hot.
 ///
-/// `Ord` drives the actuator's `BTreeMap<DedupKey, Slot>`. The engine's
-/// fire-history is per-Sub ([`crate::Sub::has_fired`]) — not this type
-/// nor any projection of it. `Hash` is intentionally not derived — the
-/// total order above is the load-bearing key shape (sorted iteration is
-/// the contract for replay), so a `HashMap`-shaped lookup would be a
-/// strictly weaker substitute that nothing in the engine asks for.
+/// `Ord` drives the actuator's `BTreeMap<DedupKey, Slot>`. The engine's fire-history is per-Sub
+/// ([`crate::Sub::has_fired`]) — not this type nor any projection of it. `Hash` is intentionally
+/// not derived — the total order above is the load-bearing key shape (sorted iteration is the
+/// contract for replay), so a `HashMap`-shaped lookup would be a strictly weaker substitute that
+/// nothing in the engine asks for.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
 pub enum DedupKey {
     PerFile {
@@ -256,8 +232,8 @@ pub enum DedupKey {
 }
 
 impl DedupKey {
-    /// The Profile that owns this key's emission record. Both variants
-    /// carry the field; the match is exhaustive and `const`.
+    /// The Profile that owns this key's emission record. Both variants carry the field; the match
+    /// is exhaustive and `const`.
     #[must_use]
     pub const fn profile(&self) -> ProfileId {
         match *self {
@@ -265,10 +241,9 @@ impl DedupKey {
         }
     }
 
-    /// The Sub that emitted this key. Both variants carry the field;
-    /// callers needing the `(sub, target)` sort key for
-    /// [`crate::StepOutput::sort_for_emission`] reach through here
-    /// rather than re-implementing the match.
+    /// The Sub that emitted this key. Both variants carry the field; callers needing the `(sub,
+    /// target)` sort key for [`crate::StepOutput::sort_for_emission`] reach through here rather
+    /// than re-implementing the match.
     #[must_use]
     pub const fn sub(&self) -> SubId {
         match *self {
@@ -278,11 +253,10 @@ impl DedupKey {
 }
 
 impl Default for DedupKey {
-    /// Null `DedupKey` for test fodder — used by tests that synthesize
-    /// `Input::EffectComplete` with a Sub that is not in the registry
-    /// (engine emits `EffectCompleteForUnknownSub` and drops). Not a
-    /// `SmallVec` sentinel: `DedupKey` is stored inside `Effect`, not
-    /// directly in `StepOutput.effects`.
+    /// Null `DedupKey` for test fodder — used by tests that synthesize `Input::EffectComplete` with
+    /// a Sub that is not in the registry (engine emits `EffectCompleteForUnknownSub` and drops).
+    /// Not a `SmallVec` sentinel: `DedupKey` is stored inside `Effect`, not directly in
+    /// `StepOutput.effects`.
     fn default() -> Self {
         Self::Subtree {
             sub: SubId::default(),
@@ -293,15 +267,13 @@ impl Default for DedupKey {
 
 /// Terminal outcome of an Effect's plan at the engine boundary.
 ///
-/// The engine's v1 policy is Ignore — it discriminates only `Ok` vs
-/// `Failed`. The [`Termination`] payload is diagnostic (logging) and
-/// drives the actuator's internal pipe re-aggregation; it is not a
-/// routing input.
+/// The engine's v1 policy is Ignore — it discriminates only `Ok` vs `Failed`. The [`Termination`]
+/// payload is diagnostic (logging) and drives the actuator's internal pipe re-aggregation; it is
+/// not a routing input.
 ///
-/// `Hash` is intentionally not derived — outcomes are consumed by name
-/// (`Ok` vs `Failed`) at the engine's effect-completion dispatcher; no
-/// caller keys a map by an outcome, so a `Hash` impl would be dead
-/// surface.
+/// `Hash` is intentionally not derived — outcomes are consumed by name (`Ok` vs `Failed`) at the
+/// engine's effect-completion dispatcher; no caller keys a map by an outcome, so a `Hash` impl
+/// would be dead surface.
 #[derive(Debug, Default, Clone, Eq, PartialEq)]
 pub enum EffectOutcome {
     #[default]
@@ -309,39 +281,33 @@ pub enum EffectOutcome {
     Failed(Termination),
 }
 
-/// Why a plan terminated unsuccessfully. The four variants are exactly
-/// the four reachable `(exit_code, signal)` shapes — a total, named
-/// encoding, not a state-space change.
+/// Why a plan terminated unsuccessfully. The four variants are exactly the four reachable
+/// `(exit_code, signal)` shapes — a total, named encoding, not a state-space change.
 ///
-/// `Hash` is intentionally not derived — variants are consumed by name
-/// for diagnostic formatting; no caller keys a map by a termination
-/// payload, so a `Hash` impl would be dead surface.
+/// `Hash` is intentionally not derived — variants are consumed by name for diagnostic formatting;
+/// no caller keys a map by a termination payload, so a `Hash` impl would be dead surface.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum Termination {
-    /// Resolver/spawn failure, waiter panic, or a synthesised plan
-    /// outcome — no exit code and no signal.
+    /// Resolver/spawn failure, waiter panic, or a synthesised plan outcome — no exit code and no
+    /// signal.
     Internal,
-    /// Clean non-zero exit: a single process, or a pipe with no
-    /// signalled stage.
+    /// Clean non-zero exit: a single process, or a pipe with no signalled stage.
     Exit(i32),
-    /// Killed by signal: a single process, or a pipe with no non-zero
-    /// exit.
+    /// Killed by signal: a single process, or a pipe with no non-zero exit.
     Signal(i32),
-    /// A pipe where one stage exited non-zero and another was
-    /// signalled (last non-zero exit, first observed signal).
+    /// A pipe where one stage exited non-zero and another was signalled (last non-zero exit, first
+    /// observed signal).
     PipeMixed { last_exit: i32, first_signal: i32 },
 }
 
 /// Engine-facing envelope for one effect completion.
 ///
-/// One identity across three layers: the actuator's wait thread builds
-/// it, the controller threads it through unchanged, the engine consumes
-/// it via [`crate::Input::EffectComplete`].
+/// One identity across three layers: the actuator's wait thread builds it, the controller threads
+/// it through unchanged, the engine consumes it via [`crate::Input::EffectComplete`].
 ///
-/// `Clone` is derived so [`crate::Input`] (which the bin's wake-bearing
-/// adapters lift the value into) can stay `Clone` symmetric with every
-/// other variant — production code moves the envelope by value through
-/// each layer, but tests that record `Input` streams need it cloneable.
+/// `Clone` is derived so [`crate::Input`] (which the bin's wake-bearing adapters lift the value
+/// into) can stay `Clone` symmetric with every other variant — production code moves the envelope
+/// by value through each layer, but tests that record `Input` streams need it cloneable.
 #[derive(Debug, Clone)]
 pub struct EffectCompletion {
     pub sub: SubId,
@@ -349,22 +315,19 @@ pub struct EffectCompletion {
     pub outcome: EffectOutcome,
 }
 
-/// Sender-side error vocabulary for every cross-thread sink that lands
-/// at the engine boundary.
+/// Sender-side error vocabulary for every cross-thread sink that lands at the engine boundary.
 ///
-/// Both the sensor's [`crate::Input::ProbeResponse`] path and the
-/// actuator's [`crate::Input::EffectComplete`] path classify the same
-/// failure mode: "the engine's input consumer is gone." Single shared
-/// vocabulary lets the workspace-wide adapter glue stay symmetric
+/// Both the sensor's [`crate::Input::ProbeResponse`] path and the actuator's
+/// [`crate::Input::EffectComplete`] path classify the same failure mode: "the engine's input
+/// consumer is gone." Single shared vocabulary lets the workspace-wide adapter glue stay symmetric
 /// across both sinks.
 ///
-/// One variant today; reserved as an `enum` rather than `()` so future
-/// transports (bounded backpressure, batch submit) can extend the
-/// vocabulary without churning every call site.
+/// One variant today; reserved as an `enum` rather than `()` so future transports (bounded
+/// backpressure, batch submit) can extend the vocabulary without churning every call site.
 #[derive(Debug)]
 pub enum SendError {
-    /// The consumer dropped its receiver. No further send will
-    /// succeed on this sender; the calling worker should exit.
+    /// The consumer dropped its receiver. No further send will succeed on this sender; the calling
+    /// worker should exit.
     Disconnected,
 }
 

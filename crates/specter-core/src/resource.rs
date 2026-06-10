@@ -1,58 +1,43 @@
 //! `Resource` and friends.
 //!
-//! `Resource` lives inside `Tree`'s `SlotMap`. The structurally
-//! load-bearing fields (`parent`, `segment`, `children`) are
-//! `pub(crate)`; `profiles` is module-private (the typed-mutator
-//! paragraph below). Mutating any of them outside the routes that
-//! maintain the corresponding indices corrupts the Tree. Cross-crate
-//! read access is via the accessor methods (`parent()`, `children()`,
-//! `profiles()`); a slot's own segment string is read through
-//! [`crate::Tree::name`] (no standalone `segment()` accessor — the
-//! key type is a Tree-internal detail).
+//! `Resource` lives inside `Tree`'s `SlotMap`. The structurally load-bearing fields (`parent`,
+//! `segment`, `children`) are `pub(crate)`; `profiles` is module-private (the typed-mutator
+//! paragraph below). Mutating any of them outside the routes that maintain the corresponding
+//! indices corrupts the Tree. Cross-crate read access is via the accessor methods (`parent()`,
+//! `children()`, `profiles()`); a slot's own segment string is read through [`crate::Tree::name`]
+//! (no standalone `segment()` accessor — the key type is a Tree-internal detail).
 //!
-//! `kind` is `pub(crate)` — external read sites disagree on what
-//! `Unknown` means (pattern bypass vs File-shape vs not-Dir). Forcing
-//! reads through [`Resource::kind`] (returns `Option<ResourceKind>`)
-//! and [`Resource::kind_or_file`] (collapses Unknown to File-shape, the
-//! backend-mask convention) makes that choice explicit at every call
-//! site. Writes go through [`crate::Tree::set_kind`].
+//! `kind` is `pub(crate)` — external read sites disagree on what `Unknown` means (pattern bypass vs
+//! File-shape vs not-Dir). Forcing reads through [`Resource::kind`] (returns `Option<ResourceKind>`)
+//! and [`Resource::kind_or_file`] (collapses Unknown to File-shape, the backend-mask convention)
+//! makes that choice explicit at every call site. Writes go through [`crate::Tree::set_kind`].
 //!
-//! `contributions` is `pub(crate)` — every engine-side mutation flows
-//! through the typed methods on `Resource`
-//! ([`Resource::insert_contribution`] / [`Resource::remove_contribution`]
-//! / [`Resource::clear_contributions`]). The mutators return the edge
-//! information the refcount helpers need (the prior mask on insert /
-//! remove, the prior count on `clear_*`), so the 0↔non-empty emission
-//! decision sits at the engine helper layer without leaking the
-//! underlying field shape. Read access for the demand summary goes
-//! through [`Resource::contributions`], [`Resource::watch_demand`],
-//! [`Resource::events_union`].
+//! `contributions` is `pub(crate)` — every engine-side mutation flows through the typed methods on
+//! `Resource` ([`Resource::insert_contribution`] / [`Resource::remove_contribution`] /
+//! [`Resource::clear_contributions`]). The mutators return the edge information the refcount
+//! helpers need (the prior mask on insert / remove, the prior count on `clear_*`), so the
+//! 0↔non-empty emission decision sits at the engine helper layer without leaking the underlying
+//! field shape. Read access for the demand summary goes through [`Resource::contributions`],
+//! [`Resource::watch_demand`], [`Resource::events_union`].
 //!
-//! `proxy_promoters` is `pub(crate)` — a back-ref vector kept in
-//! lockstep with `Promoter.proxies` (the engine's promoter side). A
-//! raw push / retain could desynchronise the two halves of that join,
-//! so the sole mutators are the typed
-//! [`Resource::insert_proxy_promoter`] /
-//! [`Resource::remove_proxy_promoter`]; each returns the
-//! empty ↔ non-empty retention-edge `bool` (the same edge-reporting
-//! convention as the contributions mutators) and absorbs the dedup /
-//! no-op guard internally. Read access is via
-//! [`Resource::proxy_promoters`]; the vector is also one of the four
-//! structural claimants on [`Resource::has_anchors`].
+//! `proxy_promoters` is `pub(crate)` — a back-ref vector kept in lockstep with `Promoter.proxies`
+//! (the engine's promoter side). A raw push / retain could desynchronise the two halves of that
+//! join, so the sole mutators are the typed [`Resource::insert_proxy_promoter`] /
+//! [`Resource::remove_proxy_promoter`]; each returns the empty ↔ non-empty retention-edge `bool`
+//! (the same edge-reporting convention as the contributions mutators) and absorbs the dedup / no-op
+//! guard internally. Read access is via [`Resource::proxy_promoters`]; the vector is also one of
+//! the four structural claimants on [`Resource::has_anchors`].
 //!
-//! `profiles` is module-private — a back-ref vector kept in lockstep
-//! with `ProfileMap.by_resource` (the engine's Profile side). A raw
-//! push / retain could desynchronise the two halves of that join, so
-//! the sole mutators are the typed
-//! [`Resource::insert_profile_anchor`] /
-//! [`Resource::remove_profile_anchor`]; each returns the
-//! empty ↔ non-empty retention-edge `bool` (the same edge-reporting
-//! convention as the contributions / `proxy_promoters` mutators). Read
-//! access is via [`Resource::profiles`]; the vector is also one of the
-//! four structural claimants on [`Resource::has_anchors`].
+//! `profiles` is module-private — a back-ref vector kept in lockstep with `ProfileMap.by_resource`
+//! (the engine's Profile side). A raw push / retain could desynchronise the two halves of that
+//! join, so the sole mutators are the typed [`Resource::insert_profile_anchor`] /
+//! [`Resource::remove_profile_anchor`]; each returns the empty ↔ non-empty retention-edge `bool`
+//! (the same edge-reporting convention as the contributions / `proxy_promoters` mutators). Read
+//! access is via [`Resource::profiles`]; the vector is also one of the four structural claimants on
+//! [`Resource::has_anchors`].
 //!
-//! `role` is `pub`; the engine writes it directly. Role is metadata
-//! (no refcount edges), so a typed setter would buy nothing.
+//! `role` is `pub`; the engine writes it directly. Role is metadata (no refcount edges), so a typed
+//! setter would buy nothing.
 
 use crate::ids::{ProfileId, PromoterId, ResourceId};
 use crate::sub::ClassSet;
@@ -64,156 +49,113 @@ use std::sync::Arc;
 
 /// Identity of a single contributor to a Resource's contributions map.
 ///
-/// Each `(Resource, ContribKey)` pair holds at most one entry — the
-/// value is the contributor's `ClassSet` mask, which the per-Resource
-/// union OR-folds for the kqueue / inotify fflags. The seven variants
-/// partition the cross-layer "who claims me" graph by owner role: a
-/// Profile holds at most one claim of each kind per Resource (anchor
-/// / parent / descent / descendant); a Promoter holds at most one of
-/// each kind per Resource (prefix-descent / proxy / prefix-parent),
-/// with prefix-descent and proxy mutually exclusive
-/// (`PrefixPending` XOR `Active`) while prefix-parent coexists with
-/// proxies — the structural analogue of a Profile's
-/// `ProfileAnchor` ⊕ `ProfileParent`.
+/// Each `(Resource, ContribKey)` pair holds at most one entry — the value is the contributor's
+/// `ClassSet` mask, which the per-Resource union OR-folds for the kqueue / inotify fflags. The seven
+/// variants partition the cross-layer "who claims me" graph by owner role: a Profile holds at most
+/// one claim of each kind per Resource (anchor / parent / descent / descendant); a Promoter holds at
+/// most one of each kind per Resource (prefix-descent / proxy / prefix-parent), with prefix-descent
+/// and proxy mutually exclusive (`PrefixPending` XOR `Active`) while prefix-parent coexists with
+/// proxies — the structural analogue of a Profile's `ProfileAnchor` ⊕ `ProfileParent`.
 ///
-/// Each variant carries the owner id so the contribution can be
-/// removed by key without re-deriving from owner state — contribution
-/// attribution is **data**, not a derivation. The engine's refcount
-/// helpers ([`crate::Tree::vacate`], `add_watch` / `sub_watch`) read
-/// and write the map directly; there is no walk-the-registry
-/// recompute.
+/// Each variant carries the owner id so the contribution can be removed by key without re-deriving
+/// from owner state — contribution attribution is **data**, not a derivation. The engine's refcount
+/// helpers ([`crate::Tree::vacate`], `add_watch` / `sub_watch`) read and write the map directly;
+/// there is no walk-the-registry recompute.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum ContribKey {
-    /// Profile is anchored at this Resource —
-    /// `Profile.anchor_claim == AnchorClaim::Held` AND
+    /// Profile is anchored at this Resource — `Profile.anchor_claim == AnchorClaim::Held` AND
     /// `Profile.resource == resource`. Mask is `Profile.events`.
     ProfileAnchor(ProfileId),
-    /// Profile's watch-root parent points at this Resource —
-    /// `Profile.watch_root_parent == Some(resource)`. Mask is
-    /// `STRUCTURE` (parent-edge watch is for anchor-reappearance
-    /// detection only).
+    /// Profile's watch-root parent points at this Resource — `Profile.watch_root_parent ==
+    /// Some(resource)`. Mask is `STRUCTURE` (parent-edge watch is for anchor-reappearance detection
+    /// only).
     ProfileParent(ProfileId),
-    /// Profile is in `Pending` descent with `current_prefix ==
-    /// resource`. Mask is `STRUCTURE` (descent prefix watch is for
-    /// next-segment materialisation only).
+    /// Profile is in `Pending` descent with `current_prefix == resource`. Mask is `STRUCTURE`
+    /// (descent prefix watch is for next-segment materialisation only).
     ProfileDescent(ProfileId),
-    /// Profile holds a covered-descendant claim at this Resource
-    /// (`resource != Profile.resource` AND
-    /// `covers(Profile, resource, tree) == true` for a covered Dir,
-    /// or under `Profile.has_per_file_fds` for a covered Leaf). Mask
-    /// is `Profile.events`. Per-resource fan-out is
-    /// 1-to-N across the snapshot but each (Resource, Profile) pair
-    /// contributes at most one entry.
+    /// Profile holds a covered-descendant claim at this Resource (`resource != Profile.resource` AND
+    /// `covers(Profile, resource, tree) == true` for a covered Dir, or under
+    /// `Profile.has_per_file_fds` for a covered Leaf). Mask is `Profile.events`. Per-resource fan-out
+    /// is 1-to-N across the snapshot but each (Resource, Profile) pair contributes at most one entry.
     ProfileDescendant(ProfileId),
-    /// Promoter is in `PrefixPending` descent with `current_prefix ==
-    /// resource`. Mask is `STRUCTURE`. Mutually exclusive with
-    /// [`Self::PromoterProxy`] for the same Promoter.
+    /// Promoter is in `PrefixPending` descent with `current_prefix == resource`. Mask is
+    /// `STRUCTURE`. Mutually exclusive with [`Self::PromoterProxy`] for the same Promoter.
     PromoterPrefix(PromoterId),
-    /// Promoter is in `Active` state with a proxy entry at this
-    /// Resource (`proxies.contains_key(&resource)`). Mask is
-    /// `STRUCTURE`. Mutually exclusive with [`Self::PromoterPrefix`]
-    /// for the same Promoter.
+    /// Promoter is in `Active` state with a proxy entry at this Resource
+    /// (`proxies.contains_key(&resource)`). Mask is `STRUCTURE`. Mutually exclusive with
+    /// [`Self::PromoterPrefix`] for the same Promoter.
     PromoterProxy(PromoterId),
-    /// Promoter is `Active` with `prefix_parent == Some(resource)`: the
-    /// preserved terminus-parent recovery edge. Mask is `STRUCTURE`
-    /// (parent-edge watch is for terminus-reappearance detection only).
-    /// **Coexists** with [`Self::PromoterProxy`] for the same Promoter
-    /// (the parent slot is distinct from the proxy slots, and the edge
-    /// is preserved across terminus loss when proxies empty) — the
-    /// structural analogue of [`Self::ProfileParent`] ⊕
-    /// [`Self::ProfileAnchor`], in contrast to [`Self::PromoterPrefix`]
-    /// which is mutually exclusive with proxies.
+    /// Promoter is `Active` with `prefix_parent == Some(resource)`: the preserved terminus-parent
+    /// recovery edge. Mask is `STRUCTURE` (parent-edge watch is for terminus-reappearance detection
+    /// only). **Coexists** with [`Self::PromoterProxy`] for the same Promoter (the parent slot is
+    /// distinct from the proxy slots, and the edge is preserved across terminus loss when proxies
+    /// empty) — the structural analogue of [`Self::ProfileParent`] ⊕ [`Self::ProfileAnchor`], in
+    /// contrast to [`Self::PromoterPrefix`] which is mutually exclusive with proxies.
     PromoterPrefixParent(PromoterId),
 }
 
 #[derive(Debug)]
 pub struct Resource {
     pub(crate) parent: Option<ResourceId>,
-    /// This slot's own path segment — the second half of the
-    /// `(parent, segment)` identity. Owned outright (`CompactString`,
-    /// inline and allocation-free for the typical ≤24-byte path
-    /// component) and **write-once**: set in `Resource::new`, never
-    /// reparented (a rename mints a fresh slot under a new
-    /// `ResourceId`; the chain is append-only). The parent's
-    /// `children` map holds an equal key — the duplication is the
-    /// intrusive-tree trade-off that buys O(1) self-naming
-    /// ([`crate::Tree::name`]) without a reverse parent-map scan, and
-    /// it is bounded by the live-slot count: the segment dies with
-    /// the slot, so there is no second arena to keep in lockstep.
+    /// This slot's own path segment — the second half of the `(parent, segment)` identity. Owned
+    /// outright (`CompactString`, inline and allocation-free for the typical ≤24-byte path component)
+    /// and **write-once**: set in `Resource::new`, never reparented (a rename mints a fresh slot
+    /// under a new `ResourceId`; the chain is append-only). The parent's `children` map holds an
+    /// equal key — the duplication is the intrusive-tree trade-off that buys O(1) self-naming
+    /// ([`crate::Tree::name`]) without a reverse parent-map scan, and it is bounded by the live-slot
+    /// count: the segment dies with the slot, so there is no second arena to keep in lockstep.
     pub(crate) segment: CompactString,
-    /// Path from the root chain down to this slot, materialised once at
-    /// construction. **Function-of-data, by construction**: the
-    /// equality `path == join(root..=self segments)` holds because
-    /// `(parent, segment)` are write-once — set only in
-    /// [`Resource::new`] and never reparented (a rename mints a fresh
-    /// slot under a new `ResourceId`; the chain is append-only). So
-    /// `path` cannot drift from the chain it projects.
+    /// Path from the root chain down to this slot, materialised once at construction.
+    /// **Function-of-data, by construction**: the equality `path == join(root..=self segments)`
+    /// holds because `(parent, segment)` are write-once — set only in [`Resource::new`] and never
+    /// reparented (a rename mints a fresh slot under a new `ResourceId`; the chain is append-only).
+    /// So `path` cannot drift from the chain it projects.
     ///
-    /// `Arc<Path>` so every reader ([`crate::Tree::path_of`], the
-    /// engine's probe / watch emission) is an `Arc::clone` refcount
-    /// bump — never a parent-walk or re-allocation — and the same
-    /// allocation ships read-only across the engine→sensor actor
-    /// boundary.
+    /// `Arc<Path>` so every reader ([`crate::Tree::path_of`], the engine's probe / watch emission)
+    /// is an `Arc::clone` refcount bump — never a parent-walk or re-allocation — and the same
+    /// allocation ships read-only across the engine→sensor actor boundary.
     pub(crate) path: Arc<Path>,
-    /// Direct children keyed by segment string. Each key equals the
-    /// child's own `segment`. `BTreeMap` ⇒ iteration is lexicographic
-    /// by segment — deterministic and local to this directory, with
-    /// no dependency on global Tree attach history
-    /// ([`crate::Tree::children_ids`]).
+    /// Direct children keyed by segment string. Each key equals the child's own `segment`.
+    /// `BTreeMap` ⇒ iteration is lexicographic by segment — deterministic and local to this
+    /// directory, with no dependency on global Tree attach history ([`crate::Tree::children_ids`]).
     pub(crate) children: BTreeMap<CompactString, ResourceId>,
-    /// Profile back-ref — the right side of the
-    /// `ProfileMap.by_resource` join, one entry per
-    /// `(config_hash, ProfileId)` Profile anchored at this slot. The
-    /// engine's `ProfileMap::attach` inserts (via
-    /// [`Resource::insert_profile_anchor`]) and `ProfileMap::detach`
-    /// removes (via [`Resource::remove_profile_anchor`]), keeping this
-    /// vector and `ProfileMap.by_resource` in lockstep. Module-private
-    /// so a raw push / retain can't break that lockstep. Inline cap 1
-    /// covers the typical case: most Resources have at most one
-    /// Profile anchored at them; cross-`ScanConfig` sharing on one
-    /// slot is rare.
+    /// Profile back-ref — the right side of the `ProfileMap.by_resource` join, one entry per
+    /// `(config_hash, ProfileId)` Profile anchored at this slot. The engine's `ProfileMap::attach`
+    /// inserts (via [`Resource::insert_profile_anchor`]) and `ProfileMap::detach` removes (via
+    /// [`Resource::remove_profile_anchor`]), keeping this vector and `ProfileMap.by_resource` in
+    /// lockstep. Module-private so a raw push / retain can't break that lockstep. Inline cap 1
+    /// covers the typical case: most Resources have at most one Profile anchored at them;
+    /// cross-`ScanConfig` sharing on one slot is rare.
     profiles: SmallVec<[(u64, ProfileId); 1]>,
-    /// Promoter back-ref — the right side of the `Promoter.proxies`
-    /// join, one entry per Promoter proxying this slot. The engine's
-    /// `register_proxy` inserts (via
-    /// [`Resource::insert_proxy_promoter`]) and
-    /// `release_promoter_proxy_claim` removes (via
-    /// [`Resource::remove_proxy_promoter`]), keeping this vector and
-    /// `Promoter.proxies` in lockstep. `pub(crate)` so a raw push /
-    /// retain can't break that lockstep. Inline cap 1 covers the
-    /// typical case: most Resources have zero proxies, and
-    /// cross-Promoter sharing on one slot is rare.
+    /// Promoter back-ref — the right side of the `Promoter.proxies` join, one entry per Promoter
+    /// proxying this slot. The engine's `register_proxy` inserts (via
+    /// [`Resource::insert_proxy_promoter`]) and `release_promoter_proxy_claim` removes (via
+    /// [`Resource::remove_proxy_promoter`]), keeping this vector and `Promoter.proxies` in lockstep.
+    /// `pub(crate)` so a raw push / retain can't break that lockstep. Inline cap 1 covers the typical
+    /// case: most Resources have zero proxies, and cross-Promoter sharing on one slot is rare.
     pub(crate) proxy_promoters: SmallVec<[PromoterId; 1]>,
-    /// Probed kind of this slot. `ResourceKind::Unknown` is the
-    /// pre-classification placeholder — fresh slots created by
-    /// `Tree::ensure_root` / `Tree::ensure_child`, `Tree::vacate`-reset
-    /// slots, and descent scaffolds all start here. The engine writes
-    /// the classified kind via [`crate::Tree::set_kind`] once a probe
-    /// response or reconcile pass observes the inode. Read via
-    /// [`Resource::kind`] (returns `Option<ResourceKind>`, with
-    /// `Unknown` as `None`) or [`Resource::kind_or_file`]
-    /// (Unknown → File, the backend-mask convention).
+    /// Probed kind of this slot. `ResourceKind::Unknown` is the pre-classification placeholder —
+    /// fresh slots created by `Tree::ensure_root` / `Tree::ensure_child`, `Tree::vacate`-reset
+    /// slots, and descent scaffolds all start here. The engine writes the classified kind via
+    /// [`crate::Tree::set_kind`] once a probe response or reconcile pass observes the inode. Read
+    /// via [`Resource::kind`] (returns `Option<ResourceKind>`, with `Unknown` as `None`) or
+    /// [`Resource::kind_or_file`] (Unknown → File, the backend-mask convention).
     pub(crate) kind: ResourceKind,
-    /// Per-Resource map of contributors to the kernel-watch demand.
-    /// `contributions.len()` is the refcount; `OR` over the values is
-    /// the per-Resource events mask passed to the sensor on
-    /// `WatchOp::Watch`. Maintained by the engine's `add_watch` /
-    /// `sub_watch` helpers (see `specter-engine::refcounts`) — direct
-    /// mutation outside those helpers (and [`crate::Tree::vacate`])
-    /// breaks the 0↔non-empty Watch / Unwatch invariant.
+    /// Per-Resource map of contributors to the kernel-watch demand. `contributions.len()` is the
+    /// refcount; `OR` over the values is the per-Resource events mask passed to the sensor on
+    /// `WatchOp::Watch`. Maintained by the engine's `add_watch` / `sub_watch` helpers (see
+    /// `specter-engine::refcounts`) — direct mutation outside those helpers (and
+    /// [`crate::Tree::vacate`]) breaks the 0↔non-empty Watch / Unwatch invariant.
     ///
-    /// **Source of truth.** Coverage / Profile-state / Promoter-state
-    /// are no longer walked to recompute the union; the map is
-    /// directly read. Each call site that bumps or releases a
-    /// contribution passes the explicit [`ContribKey`], so removal is
-    /// O(log k) by key, not O(registry).
+    /// **Source of truth.** Coverage / Profile-state / Promoter-state are no longer walked to
+    /// recompute the union; the map is directly read. Each call site that bumps or releases a
+    /// contribution passes the explicit [`ContribKey`], so removal is O(log k) by key, not
+    /// O(registry).
     ///
-    /// `pub(crate)` — the legitimate external mutators are the typed
-    /// methods on `Resource` ([`Resource::insert_contribution`],
-    /// [`Resource::remove_contribution`],
-    /// [`Resource::clear_contributions`]). Outside the engine, the
-    /// read surface is [`Resource::contributions`] /
-    /// [`Resource::watch_demand`] / [`Resource::events_union`].
+    /// `pub(crate)` — the legitimate external mutators are the typed methods on `Resource`
+    /// ([`Resource::insert_contribution`], [`Resource::remove_contribution`],
+    /// [`Resource::clear_contributions`]). Outside the engine, the read surface is
+    /// [`Resource::contributions`] / [`Resource::watch_demand`] / [`Resource::events_union`].
     pub(crate) contributions: BTreeMap<ContribKey, ClassSet>,
     pub role: ResourceRole,
 }
@@ -227,14 +169,11 @@ pub enum ResourceKind {
 }
 
 impl From<crate::snapshot::EntryKind> for ResourceKind {
-    /// Project a diff-side leaf kind into the Tree's slot kind. The
-    /// non-directory flavors (`Symlink`, `Other`) fold into [`Self::File`]
-    /// — a slot occupies one file inode regardless of which flavor of
-    /// non-directory it carries; the kqueue / inotify translators and
-    /// [`Resource::kind_or_file`] use the same convention. Single
-    /// declaration of the projection — call sites use `.into()` /
-    /// `ResourceKind::from(k)` so the mapping never drifts across
-    /// re-implementations.
+    /// Project a diff-side leaf kind into the Tree's slot kind. The non-directory flavors (`Symlink`,
+    /// `Other`) fold into [`Self::File`] — a slot occupies one file inode regardless of which flavor
+    /// of non-directory it carries; the kqueue / inotify translators and [`Resource::kind_or_file`]
+    /// use the same convention. Single declaration of the projection — call sites use `.into()` /
+    /// `ResourceKind::from(k)` so the mapping never drifts across re-implementations.
     fn from(k: crate::snapshot::EntryKind) -> Self {
         match k {
             crate::snapshot::EntryKind::Dir => Self::Dir,
@@ -246,22 +185,17 @@ impl From<crate::snapshot::EntryKind> for ResourceKind {
 }
 
 impl ResourceKind {
-    /// "Effective" kind for backend-mask decisions: [`Self::Unknown`]
-    /// collapses to [`Self::File`].
+    /// "Effective" kind for backend-mask decisions: [`Self::Unknown`] collapses to [`Self::File`].
     ///
-    /// Single declaration of the "treat unclassified slots as File-shape"
-    /// convention shared by:
-    /// - `sensor::kqueue::translate::class_set_to_fflags` (CONTENT /
-    ///   METADATA branches register file bits on Unknown).
-    /// - `sensor::kqueue::normalize::kevent_to_fs_event`
-    ///   (NOTE_LINK / NOTE_WRITE on Unknown surface as File-shape
-    ///   FsEvents).
-    /// - `engine::transitions::fs_event_to_class` (terminal events on
-    ///   Unknown classify as CONTENT).
+    /// Single declaration of the "treat unclassified slots as File-shape" convention shared by:
+    /// - `sensor::kqueue::translate::class_set_to_fflags` (CONTENT / METADATA branches register
+    ///   file bits on Unknown).
+    /// - `sensor::kqueue::normalize::kevent_to_fs_event` (NOTE_LINK / NOTE_WRITE on Unknown surface
+    ///   as File-shape FsEvents).
+    /// - `engine::transitions::fs_event_to_class` (terminal events on Unknown classify as CONTENT).
     ///
-    /// The inotify backend shares the same convention. The actuator's
-    /// `compute_cwd` is a different concern (subprocess working
-    /// directory) and does not consume Unknown: emitted Effects carry
+    /// The inotify backend shares the same convention. The actuator's `compute_cwd` is a different
+    /// concern (subprocess working directory) and does not consume Unknown: emitted Effects carry
     /// `anchor_kind ∈ { File, Dir }` by construction.
     #[must_use]
     pub const fn effective(self) -> Self {
@@ -271,23 +205,19 @@ impl ResourceKind {
         }
     }
 
-    /// Verification predicate for `WatchOp::Watch.kind` against the
-    /// inode the watcher's open fd resolved to.
+    /// Verification predicate for `WatchOp::Watch.kind` against the inode the watcher's open fd
+    /// resolved to.
     ///
-    /// Returns `true` when `self` (the engine's expected kind on the
-    /// `WatchOp`) matches `observed` (the watcher's `fstat` of the
-    /// freshly opened fd), with [`Self::Unknown`] acting as a
-    /// wildcard. Backends use it from their fresh-watch path to reject
-    /// installs where the path's on-disk kind diverges from the
-    /// engine's expectation — closing the TOCTOU window between
-    /// `stat(path)` and `inotify_add_watch(path)` (linux) or
-    /// `open(path)` and `kevent(EV_ADD)` (kqueue).
+    /// Returns `true` when `self` (the engine's expected kind on the `WatchOp`) matches `observed`
+    /// (the watcher's `fstat` of the freshly opened fd), with [`Self::Unknown`] acting as a wildcard.
+    /// Backends use it from their fresh-watch path to reject installs where the path's on-disk kind
+    /// diverges from the engine's expectation — closing the TOCTOU window between `stat(path)` and
+    /// `inotify_add_watch(path)` (linux) or `open(path)` and `kevent(EV_ADD)` (kqueue).
     ///
-    /// `Unknown` is the engine's sentinel for unclassified slots
-    /// (descent prefix placeholder, post-`add_watch` before the first
-    /// probe). Treating it as a wildcard lets the watcher proceed
-    /// against whatever inode resolved and cache the observed kind
-    /// for downstream normalization / mask translation.
+    /// `Unknown` is the engine's sentinel for unclassified slots (descent prefix placeholder,
+    /// post-`add_watch` before the first probe). Treating it as a wildcard lets the watcher proceed
+    /// against whatever inode resolved and cache the observed kind for downstream normalization /
+    /// mask translation.
     #[must_use]
     pub const fn matches_or_unknown(self, observed: Self) -> bool {
         matches!(self, Self::Unknown) || self as u8 == observed as u8
@@ -322,37 +252,29 @@ impl Resource {
         }
     }
 
-    /// Slot retention rule: `Tree::try_reap` removes the slot iff this
-    /// returns `false`.
+    /// Slot retention rule: `Tree::try_reap` removes the slot iff this returns `false`.
     ///
-    /// Retention is **structural** — a slot stays alive while *something*
-    /// claims it. Four canonical claimants:
+    /// Retention is **structural** — a slot stays alive while *something* claims it. Four canonical
+    /// claimants:
     ///
     /// - `children` — a descendant slot's `parent` edge points here.
     /// - `profiles` — one or more Profiles are anchored at this slot.
     /// - `proxy_promoters` — one or more Promoter proxies are pinned here.
-    /// - `contributions` — at least one [`ContribKey`] entry holds a
-    ///   kernel-watch demand here (Profile anchor / parent / descent /
-    ///   descendant, or Promoter prefix / proxy).
+    /// - `contributions` — at least one [`ContribKey`] entry holds a kernel-watch demand here
+    ///   (Profile anchor / parent / descent / descendant, or Promoter prefix / proxy).
     ///
-    /// [`ResourceRole`] is **metadata, not retention**. The role tag
-    /// records *what* the slot is (User anchor / watch-root parent /
-    /// descent scaffold) for diagnostic clarity; whether the slot
-    /// *survives* is a question for the structural claimants above. The
-    /// canonical retention question is "does any owner still hold this
-    /// slot?", and the contributions map (in lockstep with owner state
-    /// via [`crate::Tree::vacate`] and the engine's refcount helpers)
-    /// answers it directly.
+    /// [`ResourceRole`] is **metadata, not retention**. The role tag records *what* the slot is (User
+    /// anchor / watch-root parent / descent scaffold) for diagnostic clarity; whether the slot
+    /// *survives* is a question for the structural claimants above. The canonical retention question
+    /// is "does any owner still hold this slot?", and the contributions map (in lockstep with owner
+    /// state via [`crate::Tree::vacate`] and the engine's refcount helpers) answers it directly.
     ///
-    /// **Why all four fields, not just contributions.** The three
-    /// back-ref vectors (`children`, `profiles`, `proxy_promoters`)
-    /// describe live ownership *without* implying a kernel-watch demand:
-    /// a Pending Profile's User-roled leaf carries `profiles` but no
-    /// contribution at the leaf (the leaf's only contribution arrives
-    /// at materialization); a non-leaf descent scaffold carries
-    /// `children` but no contribution of its own (its descent
-    /// contribution belongs to its deepest-existing descendant). The
-    /// union of all four is "anything reaches into this slot from
+    /// **Why all four fields, not just contributions.** The three back-ref vectors (`children`,
+    /// `profiles`, `proxy_promoters`) describe live ownership *without* implying a kernel-watch
+    /// demand: a Pending Profile's User-roled leaf carries `profiles` but no contribution at the
+    /// leaf (the leaf's only contribution arrives at materialization); a non-leaf descent scaffold
+    /// carries `children` but no contribution of its own (its descent contribution belongs to its
+    /// deepest-existing descendant). The union of all four is "anything reaches into this slot from
     /// somewhere."
     #[must_use]
     pub fn has_anchors(&self) -> bool {
@@ -362,33 +284,29 @@ impl Resource {
             || !self.contributions.is_empty()
     }
 
-    /// Number of distinct contributors holding watch-demand at this
-    /// Resource. Derived from [`Self::contributions`]; `0` ⇔ the
-    /// Resource is not watched.
+    /// Number of distinct contributors holding watch-demand at this Resource. Derived from
+    /// [`Self::contributions`]; `0` ⇔ the Resource is not watched.
     ///
-    /// Callers comparing `> 0` should prefer [`Self::is_watched`] for
-    /// clarity; the numeric accessor exists for tests and diagnostic
-    /// logs that quote the count.
+    /// Callers comparing `> 0` should prefer [`Self::is_watched`] for clarity; the numeric accessor
+    /// exists for tests and diagnostic logs that quote the count.
     #[must_use]
     pub fn watch_demand(&self) -> u32 {
-        // Typical fan-out is single-digit; cast is safe well below
-        // `u32::MAX`. Saturating cast as defence-in-depth.
+        // Typical fan-out is single-digit; cast is safe well below `u32::MAX`. Saturating cast as
+        // defence-in-depth.
         u32::try_from(self.contributions.len()).unwrap_or(u32::MAX)
     }
 
-    /// True iff this Resource has at least one contributor, i.e., the
-    /// kernel-watch refcount is `> 0`.
+    /// True iff this Resource has at least one contributor, i.e., the kernel-watch refcount is `> 0`.
     #[must_use]
     pub fn is_watched(&self) -> bool {
         !self.contributions.is_empty()
     }
 
-    /// OR-fold of every contributor's `ClassSet` mask — the
-    /// per-Resource events mask the sensor sees on `WatchOp::Watch`.
-    /// `ClassSet::EMPTY` when the Resource has no contributors.
+    /// OR-fold of every contributor's `ClassSet` mask — the per-Resource events mask the sensor
+    /// sees on `WatchOp::Watch`. `ClassSet::EMPTY` when the Resource has no contributors.
     ///
-    /// The fold is O(k) over the contributions map; k is bounded by
-    /// typical multi-Profile fan-out (single-digit).
+    /// The fold is O(k) over the contributions map; k is bounded by typical multi-Profile fan-out
+    /// (single-digit).
     #[must_use]
     pub fn events_union(&self) -> ClassSet {
         self.contributions
@@ -402,10 +320,9 @@ impl Resource {
         self.parent
     }
 
-    /// Materialised path from the root chain to this slot. `Arc::clone`
-    /// at the call site is a refcount bump — the join was paid once at
-    /// construction. See the field rustdoc for the by-construction
-    /// invariant.
+    /// Materialised path from the root chain to this slot. `Arc::clone` at the call site is a
+    /// refcount bump — the join was paid once at construction. See the field rustdoc for the
+    /// by-construction invariant.
     #[must_use]
     pub const fn path(&self) -> &Arc<Path> {
         &self.path
@@ -416,38 +333,31 @@ impl Resource {
         &self.children
     }
 
-    /// `(config_hash, profile)` pairs anchoring this Resource.
-    /// Read-only view; the lockstep with `ProfileMap.by_resource` is
-    /// held through [`Resource::insert_profile_anchor`] /
+    /// `(config_hash, profile)` pairs anchoring this Resource. Read-only view; the lockstep with
+    /// `ProfileMap.by_resource` is held through [`Resource::insert_profile_anchor`] /
     /// [`Resource::remove_profile_anchor`].
     #[must_use]
     pub fn profiles(&self) -> &[(u64, ProfileId)] {
         &self.profiles
     }
 
-    /// Promoter back-references at this slot. Each entry corresponds to
-    /// a live `Promoter.proxies` entry keyed by this Resource.
-    /// Read-only view; the lockstep with `Promoter.proxies` is held
-    /// through [`Resource::insert_proxy_promoter`] /
-    /// [`Resource::remove_proxy_promoter`].
+    /// Promoter back-references at this slot. Each entry corresponds to a live `Promoter.proxies`
+    /// entry keyed by this Resource. Read-only view; the lockstep with `Promoter.proxies` is held
+    /// through [`Resource::insert_proxy_promoter`] / [`Resource::remove_proxy_promoter`].
     #[must_use]
     pub fn proxy_promoters(&self) -> &[PromoterId] {
         &self.proxy_promoters
     }
 
-    /// Register `id` as a Promoter back-ref, keeping this slot's
-    /// `proxy_promoters` in lockstep with `Promoter.proxies`.
-    /// Idempotent: an `id` already present (cross-Promoter sharing on
-    /// one slot, or a re-registration of the same Promoter) is left
-    /// untouched and reports no edge — this mutator owns the dedup the
-    /// engine's `register_proxy` relies on.
+    /// Register `id` as a Promoter back-ref, keeping this slot's `proxy_promoters` in lockstep with
+    /// `Promoter.proxies`. Idempotent: an `id` already present (cross-Promoter sharing on one slot,
+    /// or a re-registration of the same Promoter) is left untouched and reports no edge — this
+    /// mutator owns the dedup the engine's `register_proxy` relies on.
     ///
-    /// Returns `true` iff this call traversed the empty → non-empty
-    /// retention edge (the slot just gained its first proxy back-ref),
-    /// so an edge-driven caller can react without the `SmallVec` shape
-    /// leaking. The current caller does not consume the edge; the
-    /// signal is kept symmetric with the contribution mutators rather
-    /// than special-cased away.
+    /// Returns `true` iff this call traversed the empty → non-empty retention edge (the slot just
+    /// gained its first proxy back-ref), so an edge-driven caller can react without the `SmallVec`
+    /// shape leaking. The current caller does not consume the edge; the signal is kept symmetric
+    /// with the contribution mutators rather than special-cased away.
     pub fn insert_proxy_promoter(&mut self, id: PromoterId) -> bool {
         if self.proxy_promoters.contains(&id) {
             return false;
@@ -457,14 +367,12 @@ impl Resource {
         was_empty
     }
 
-    /// Drop `id`'s back-ref, leaving every co-resident Promoter's entry
-    /// in place (filter, not clear). Idempotent: an absent `id`, or an
-    /// already-empty vector (reachable post-[`crate::Tree::vacate`] or
-    /// on a double release), is a no-op that reports no edge.
+    /// Drop `id`'s back-ref, leaving every co-resident Promoter's entry in place (filter, not
+    /// clear). Idempotent: an absent `id`, or an already-empty vector (reachable post
+    /// [`crate::Tree::vacate`] or on a double release), is a no-op that reports no edge.
     ///
-    /// Returns `true` iff this call traversed the non-empty → empty
-    /// retention edge (the slot just lost its last proxy back-ref) —
-    /// the symmetric inverse of [`Self::insert_proxy_promoter`]'s
+    /// Returns `true` iff this call traversed the non-empty → empty retention edge (the slot just
+    /// lost its last proxy back-ref) — the symmetric inverse of [`Self::insert_proxy_promoter`]'s
     /// empty → non-empty edge.
     pub fn remove_proxy_promoter(&mut self, id: PromoterId) -> bool {
         if self.proxy_promoters.is_empty() {
@@ -474,18 +382,14 @@ impl Resource {
         self.proxy_promoters.is_empty()
     }
 
-    /// Register a `(config_hash, pid)` Profile anchor at this slot,
-    /// keeping `Resource.profiles` in lockstep with
-    /// `ProfileMap.by_resource`. Idempotent: a `(config_hash, pid)`
-    /// pair already present is left untouched and reports no edge.
-    /// `ProfileMap::attach`'s upstream `debug_assert!` already rules
-    /// out the double-attach path in production; the dedup check here
-    /// mirrors [`Self::insert_proxy_promoter`]'s shape and is cheap on
-    /// the inline-cap-1 `SmallVec`.
+    /// Register a `(config_hash, pid)` Profile anchor at this slot, keeping `Resource.profiles` in
+    /// lockstep with `ProfileMap.by_resource`. Idempotent: a `(config_hash, pid)` pair already
+    /// present is left untouched and reports no edge. `ProfileMap::attach`'s upstream
+    /// `debug_assert!` already rules out the double-attach path in production; the dedup check here
+    /// mirrors [`Self::insert_proxy_promoter`]'s shape and is cheap on the inline-cap-1 `SmallVec`.
     ///
-    /// Returns `true` iff this call traversed the empty → non-empty
-    /// retention edge (the slot just gained its first Profile anchor),
-    /// matching the `proxy_promoters` mutator's edge-reporting
+    /// Returns `true` iff this call traversed the empty → non-empty retention edge (the slot just
+    /// gained its first Profile anchor), matching the `proxy_promoters` mutator's edge-reporting
     /// convention.
     pub fn insert_profile_anchor(&mut self, config_hash: u64, pid: ProfileId) -> bool {
         if self
@@ -500,15 +404,13 @@ impl Resource {
         was_empty
     }
 
-    /// Drop the `(config_hash, pid)` Profile anchor at this slot,
-    /// leaving every co-resident `(_, _)` pair in place (filter, not
-    /// clear). Idempotent: an absent pair, or an already-empty vector
-    /// (reachable post-[`crate::Tree::vacate`] or on a double detach),
-    /// is a no-op that reports no edge.
+    /// Drop the `(config_hash, pid)` Profile anchor at this slot, leaving every co-resident `(_,
+    /// _)` pair in place (filter, not clear). Idempotent: an absent pair, or an already-empty
+    /// vector (reachable post-[`crate::Tree::vacate`] or on a double detach), is a no-op that
+    /// reports no edge.
     ///
-    /// Returns `true` iff this call traversed the non-empty → empty
-    /// retention edge (the slot just lost its last Profile anchor) —
-    /// the symmetric inverse of [`Self::insert_profile_anchor`]'s
+    /// Returns `true` iff this call traversed the non-empty → empty retention edge (the slot just
+    /// lost its last Profile anchor) — the symmetric inverse of [`Self::insert_profile_anchor`]'s
     /// empty → non-empty edge.
     pub fn remove_profile_anchor(&mut self, config_hash: u64, pid: ProfileId) -> bool {
         if self.profiles.is_empty() {
@@ -519,14 +421,12 @@ impl Resource {
         self.profiles.is_empty()
     }
 
-    /// Probed kind of this slot. `None` means the slot has not yet been
-    /// classified — descent prefix placeholder, freshly-`ensure`'d slot
-    /// before the first probe response, or post-`vacate` slot whose
-    /// kind was reset. Consumers must explicitly handle the unprobed
-    /// case.
+    /// Probed kind of this slot. `None` means the slot has not yet been classified — descent prefix
+    /// placeholder, freshly-`ensure`'d slot before the first probe response, or post-`vacate` slot
+    /// whose kind was reset. Consumers must explicitly handle the unprobed case.
     ///
-    /// Use [`Resource::kind_or_file`] when the call site wants the
-    /// backend-mask "Unknown collapses to File" convention.
+    /// Use [`Resource::kind_or_file`] when the call site wants the backend-mask "Unknown collapses
+    /// to File" convention.
     #[must_use]
     pub const fn kind(&self) -> Option<ResourceKind> {
         match self.kind {
@@ -536,29 +436,23 @@ impl Resource {
         }
     }
 
-    /// Probed kind, with the unprobed case collapsed to
-    /// [`ResourceKind::File`]. This is the backend-mask convention: the
-    /// kqueue / inotify translators register file-shape bits for
-    /// unclassified slots, terminal events on Unknown classify as
-    /// CONTENT, etc. See [`ResourceKind::effective`] for the same
-    /// semantic on a bare `ResourceKind` value.
+    /// Probed kind, with the unprobed case collapsed to [`ResourceKind::File`]. This is the
+    /// backend-mask convention: the kqueue / inotify translators register file-shape bits for
+    /// unclassified slots, terminal events on Unknown classify as CONTENT, etc. See
+    /// [`ResourceKind::effective`] for the same semantic on a bare `ResourceKind` value.
     #[must_use]
     pub const fn kind_or_file(&self) -> ResourceKind {
         self.kind.effective()
     }
 
-    /// Raw kind including [`ResourceKind::Unknown`]. Use only when the
-    /// consumer needs to **preserve** the unprobed signal — the
-    /// kqueue / inotify watcher's [`ResourceKind::matches_or_unknown`]
-    /// verification expects `Unknown` as the engine's intentional
-    /// wildcard, so [`crate::WatchOp::Watch`] construction sites pass
-    /// it through unchanged.
+    /// Raw kind including [`ResourceKind::Unknown`]. Use only when the consumer needs to **preserve**
+    /// the unprobed signal — the kqueue / inotify watcher's [`ResourceKind::matches_or_unknown`]
+    /// verification expects `Unknown` as the engine's intentional wildcard, so
+    /// [`crate::WatchOp::Watch`] construction sites pass it through unchanged.
     ///
-    /// All other engine-side sites should prefer [`Resource::kind`]
-    /// (Option, `None` for unprobed) or [`Resource::kind_or_file`]
-    /// (collapses unprobed to File-shape). The accessor exists to make
-    /// "I want the raw value as a wildcard" an explicit choice
-    /// distinguishable from a stale-bypass bug.
+    /// All other engine-side sites should prefer [`Resource::kind`] (Option, `None` for unprobed) or
+    /// [`Resource::kind_or_file`] (collapses unprobed to File-shape). The accessor exists to make "I
+    /// want the raw value as a wildcard" an explicit choice distinguishable from a stale-bypass bug.
     #[must_use]
     pub const fn kind_raw(&self) -> ResourceKind {
         self.kind
@@ -566,41 +460,36 @@ impl Resource {
 
     /// Read-only view of the per-Resource contributions map.
     ///
-    /// Sole mutators are [`Self::insert_contribution`],
-    /// [`Self::remove_contribution`], and [`Self::clear_contributions`].
-    /// The engine's [`add_watch`] / [`sub_watch`] helpers and
-    /// [`crate::Tree::vacate`]'s protocol terminus are the legitimate
-    /// production callers.
+    /// Sole mutators are [`Self::insert_contribution`], [`Self::remove_contribution`], and
+    /// [`Self::clear_contributions`]. The engine's [`add_watch`] / [`sub_watch`] helpers and
+    /// [`crate::Tree::vacate`]'s protocol terminus are the legitimate production callers.
     ///
-    /// [`add_watch`]: ../../specter_engine/refcounts/fn.add_watch.html
-    /// [`sub_watch`]: ../../specter_engine/refcounts/fn.sub_watch.html
+    /// [`add_watch`]: ../../specter_engine/refcounts/fn.add_watch.html [`sub_watch`]:
+    /// ../../specter_engine/refcounts/fn.sub_watch.html
     #[must_use]
     pub const fn contributions(&self) -> &BTreeMap<ContribKey, ClassSet> {
         &self.contributions
     }
 
-    /// Insert or overwrite the contribution at `key` with `mask`.
-    /// Returns the prior mask iff `key` was already present.
+    /// Insert or overwrite the contribution at `key` with `mask`. Returns the prior mask iff `key`
+    /// was already present.
     ///
-    /// Engine helpers use the return value (along with
-    /// [`Self::events_union`] before/after) to detect the 0→1 existence
-    /// edge and union-widening transitions that drive `WatchOp::Watch`
+    /// Engine helpers use the return value (along with [`Self::events_union`] before/after) to
+    /// detect the 0→1 existence edge and union-widening transitions that drive `WatchOp::Watch`
     /// emission. Tests may use it to assert overwrite semantics.
     pub fn insert_contribution(&mut self, key: ContribKey, mask: ClassSet) -> Option<ClassSet> {
         self.contributions.insert(key, mask)
     }
 
-    /// Remove the contribution at `key`. Returns the prior mask iff
-    /// `key` was present; `None` is the idempotent absent-key path —
-    /// safe against post-`vacate` slots and slots a prior sub-walk in
-    /// the same step already drained.
+    /// Remove the contribution at `key`. Returns the prior mask iff `key` was present; `None` is
+    /// the idempotent absent-key path — safe against post-`vacate` slots and slots a prior sub-walk
+    /// in the same step already drained.
     pub fn remove_contribution(&mut self, key: ContribKey) -> Option<ClassSet> {
         self.contributions.remove(&key)
     }
 
-    /// Atomically clear every contribution. Returns the prior count
-    /// (`> 0` ⇒ caller should emit the closing `WatchOp::Unwatch`;
-    /// `0` ⇒ no-op already drained). Used by [`crate::Tree::vacate`]'s
+    /// Atomically clear every contribution. Returns the prior count (`> 0` ⇒ caller should emit the
+    /// closing `WatchOp::Unwatch`; `0` ⇒ no-op already drained). Used by [`crate::Tree::vacate`]'s
     /// protocol terminus.
     pub fn clear_contributions(&mut self) -> usize {
         let n = self.contributions.len();
@@ -623,9 +512,8 @@ mod tests {
         std::sync::Arc::from(std::path::Path::new(""))
     }
 
-    /// Role is metadata; a fresh slot with no children, no profiles, no
-    /// proxy back-refs, and no contributions has no anchors regardless
-    /// of its role tag.
+    /// Role is metadata; a fresh slot with no children, no profiles, no proxy back-refs, and no
+    /// contributions has no anchors regardless of its role tag.
     #[test]
     fn fresh_resource_has_no_anchors_regardless_of_role() {
         for role in [
@@ -641,9 +529,9 @@ mod tests {
         }
     }
 
-    /// A live contribution is itself a retention anchor — paired with
-    /// the slot's owner-side bookkeeping, it is the canonical "this
-    /// slot is claimed" signal that drives the kernel-watch lifetime.
+    /// A live contribution is itself a retention anchor — paired with the slot's owner-side
+    /// bookkeeping, it is the canonical "this slot is claimed" signal that drives the kernel-watch
+    /// lifetime.
     #[test]
     fn anchored_when_contribution_present() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
@@ -696,9 +584,8 @@ mod tests {
         assert_eq!(ResourceKind::Dir.effective(), ResourceKind::Dir);
     }
 
-    /// `matches_or_unknown` is the watcher-side verification predicate
-    /// for `WatchOp::Watch.kind`. It matches when both kinds agree OR
-    /// the expected kind is `Unknown` (the engine's wildcard).
+    /// `matches_or_unknown` is the watcher-side verification predicate for `WatchOp::Watch.kind`.
+    /// It matches when both kinds agree OR the expected kind is `Unknown` (the engine's wildcard).
     #[test]
     fn matches_or_unknown_accepts_exact_matches() {
         assert!(ResourceKind::File.matches_or_unknown(ResourceKind::File));
@@ -720,18 +607,16 @@ mod tests {
 
     #[test]
     fn matches_or_unknown_is_one_directional_in_unknown() {
-        // `expected` Unknown is a wildcard; `observed` Unknown is not —
-        // the watcher's fstat must always classify to a concrete kind,
-        // and a concrete-expected kind paired with an unknown-observed
-        // signals a broken sensor invariant rather than a wildcard.
+        // `expected` Unknown is a wildcard; `observed` Unknown is not — the watcher's fstat must
+        // always classify to a concrete kind, and a concrete-expected kind paired with an
+        // unknown-observed signals a broken sensor invariant rather than a wildcard.
         assert!(!ResourceKind::File.matches_or_unknown(ResourceKind::Unknown));
         assert!(!ResourceKind::Dir.matches_or_unknown(ResourceKind::Unknown));
     }
 
-    /// Fresh `Resource` carries an empty contributions map ⇒
-    /// `events_union()` returns `EMPTY` and `watch_demand()` returns
-    /// `0`. Refcount helpers insert into the map as covering Profiles
-    /// / Promoters attach.
+    /// Fresh `Resource` carries an empty contributions map ⇒ `events_union()` returns `EMPTY` and
+    /// `watch_demand()` returns `0`. Refcount helpers insert into the map as covering Profiles /
+    /// Promoters attach.
     #[test]
     fn fresh_resource_events_union_is_empty() {
         let r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
@@ -740,9 +625,8 @@ mod tests {
         assert!(!r.is_watched());
     }
 
-    /// `watch_demand()` counts distinct contributors; `events_union()`
-    /// OR-folds their masks. Two contributors with disjoint masks
-    /// produce a union containing both.
+    /// `watch_demand()` counts distinct contributors; `events_union()` OR-folds their masks. Two
+    /// contributors with disjoint masks produce a union containing both.
     #[test]
     fn contributions_map_yields_count_and_union() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
@@ -750,10 +634,9 @@ mod tests {
             ContribKey::ProfileAnchor(ProfileId::default()),
             ClassSet::CONTENT,
         );
-        // A second `ProfileAnchor` from a different Profile would
-        // normally collide on the slotmap key; use a distinct
-        // [`ContribKey`] variant to keep the test free of slotmap
-        // setup boilerplate.
+        // A second `ProfileAnchor` from a different Profile would normally collide on the slotmap
+        // key; use a distinct [`ContribKey`] variant to keep the test free of slotmap setup
+        // boilerplate.
         r.insert_contribution(
             ContribKey::ProfileParent(ProfileId::default()),
             ClassSet::STRUCTURE,
@@ -763,8 +646,8 @@ mod tests {
         assert!(r.is_watched());
     }
 
-    /// Same-key re-insert overwrites the prior mask; the count and
-    /// the union reflect the freshest value.
+    /// Same-key re-insert overwrites the prior mask; the count and the union reflect the freshest
+    /// value.
     #[test]
     fn contributions_same_key_overwrites_mask() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
@@ -781,9 +664,8 @@ mod tests {
         assert_eq!(r.events_union(), ClassSet::CONTENT | ClassSet::METADATA);
     }
 
-    /// `remove_contribution` returns the prior mask iff the key was
-    /// present. The idempotent absent-key path returns `None` so
-    /// callers (engine's `sub_watch`) can short-circuit silently
+    /// `remove_contribution` returns the prior mask iff the key was present. The idempotent
+    /// absent-key path returns `None` so callers (engine's `sub_watch`) can short-circuit silently
     /// against post-`vacate` slots.
     #[test]
     fn remove_contribution_returns_prior_mask_or_none() {
@@ -798,8 +680,8 @@ mod tests {
         assert!(r.contributions().is_empty());
     }
 
-    /// `clear_contributions` returns the prior count. The vacate
-    /// terminus uses `> 0` to decide whether to emit `Unwatch`.
+    /// `clear_contributions` returns the prior count. The vacate terminus uses `> 0` to decide
+    /// whether to emit `Unwatch`.
     #[test]
     fn clear_contributions_returns_prior_count() {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
@@ -816,11 +698,10 @@ mod tests {
         assert!(r.contributions().is_empty());
     }
 
-    /// `insert_proxy_promoter` reports the empty → non-empty retention
-    /// edge exactly once. A second *distinct* id is an intermediate
-    /// (vector already non-empty: no edge); a *duplicate* id is an
-    /// idempotent no-op (no edge, no growth) — the dedup the engine's
-    /// `register_proxy` relies on lives in the mutator.
+    /// `insert_proxy_promoter` reports the empty → non-empty retention edge exactly once. A second
+    /// *distinct* id is an intermediate (vector already non-empty: no edge); a *duplicate* id is an
+    /// idempotent no-op (no edge, no growth) — the dedup the engine's `register_proxy` relies on
+    /// lives in the mutator.
     #[test]
     fn insert_proxy_promoter_reports_edge_dedups_and_is_intermediate_for_second_id() {
         use crate::ids::PromoterId;
@@ -842,10 +723,9 @@ mod tests {
         assert_eq!(r.proxy_promoters().len(), 2);
     }
 
-    /// `remove_proxy_promoter` reports the non-empty → empty retention
-    /// edge exactly once and leaves co-resident Promoters' entries in
-    /// place (filter, not clear). Removing an absent id, or hitting an
-    /// already-empty vector, is an idempotent no-op (no edge, no panic).
+    /// `remove_proxy_promoter` reports the non-empty → empty retention edge exactly once and leaves
+    /// co-resident Promoters' entries in place (filter, not clear). Removing an absent id, or
+    /// hitting an already-empty vector, is an idempotent no-op (no edge, no panic).
     #[test]
     fn remove_proxy_promoter_reports_edge_retains_coresidents_and_is_idempotent() {
         use crate::ids::PromoterId;

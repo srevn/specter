@@ -1,15 +1,11 @@
-//! `specter show <name>` projection — four-way discrimination
-//! across engine-attached, runtime-disabled, TOML-disabled, and
-//! Unknown.
+//! `specter show <name>` projection — four-way discrimination across engine-attached,
+//! runtime-disabled, TOML-disabled, and Unknown.
 //!
-//! Resolution order matches the `disable` resolver in
-//! [`crate::driver::ipc`] so an operator who can `show foo` can also
-//! `disable foo`. Dynamic Subs are addressed through `list -o json`,
-//! not `show`: a synthesised name resolves through
-//! `SubRegistry::find_by_name` to a live id, but a local guard at
-//! the lookup site returns `Unknown` for any Sub with
-//! `source_promoter = Some(_)`. The verb's contract lives at its own
-//! callsite, not inside the index.
+//! Resolution order matches the `disable` resolver in [`crate::driver::ipc`] so an operator who can
+//! `show foo` can also `disable foo`. Dynamic Subs are addressed through `list -o json`, not
+//! `show`: a synthesised name resolves through `SubRegistry::find_by_name` to a live id, but a
+//! local guard at the lookup site returns `Unknown` for any Sub with `source_promoter = Some(_)`.
+//! The verb's contract lives at its own callsite, not inside the index.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -30,16 +26,13 @@ use super::{program, project_wall};
 /// Resolve `name` and emit the matching [`ShowResponse`] arm.
 ///
 /// Resolution is total:
-/// 1. `engine.subs().find_by_name(name)` resolves to a Sub. If it is
-///    static (`source_promoter.is_none()`) → `Active`; if dynamic →
-///    `Unknown` (the verb's contract: dynamic Subs are reached
-///    through `list`, not `show`). A dynamic-Sub hit short-circuits
-///    to `Unknown` rather than falling through, because by the
-///    `@`-byte reservation a dynamic synthesised name never appears
-///    in `disabled_runtime` or `config.watches`.
+/// 1. `engine.subs().find_by_name(name)` resolves to a Sub. If it is static
+///    (`source_promoter.is_none()`) → `Active`; if dynamic → `Unknown` (the verb's contract:
+///    dynamic Subs are reached through `list`, not `show`). A dynamic-Sub hit short-circuits to
+///    `Unknown` rather than falling through, because by the `@`-byte reservation a dynamic
+///    synthesised name never appears in `disabled_runtime` or `config.watches`.
 /// 2. `disabled_runtime.contains(name)?`  → `Disabled { Runtime }`
-/// 3. `config.watches[*].name == name && !enabled` →
-///    `Disabled { Toml }`
+/// 3. `config.watches[*].name == name && !enabled` → `Disabled { Toml }`
 /// 4. otherwise → `Unknown`
 pub(crate) fn show(
     engine: &Engine,
@@ -83,20 +76,15 @@ pub(crate) fn show(
 
 /// Project a registry-attached `(SubId, &Sub)` into a [`SubDetails`].
 ///
-/// Profile-lookup verdict: graceful, mirroring
-/// `super::list::project_attached`. Every attached Sub has a
-/// Profile by engine construction (`SubRegistry::insert` runs in
-/// the same engine step as `ProfileMap::attach`), but the IPC
-/// projection layer never panics on engine-invariant breach — it
-/// surfaces `state: None` / `anchor: None` so the operator's
-/// introspection lifeline keeps serving every other concurrent
-/// session during incidents. The engine's own panic discipline
-/// (the `ProbeSlot` tripwire, the registry `debug_assert!`s)
-/// catches the breach loudly engine-side.
+/// Profile-lookup verdict: graceful, mirroring `super::list::project_attached`. Every attached Sub
+/// has a Profile by engine construction (`SubRegistry::insert` runs in the same engine step as
+/// `ProfileMap::attach`), but the IPC projection layer never panics on engine-invariant breach — it
+/// surfaces `state: None` / `anchor: None` so the operator's introspection lifeline keeps serving
+/// every other concurrent session during incidents. The engine's own panic discipline (the
+/// `ProbeSlot` tripwire, the registry `debug_assert!`s) catches the breach loudly engine-side.
 ///
-/// `anchor: Option<WirePath>`: `None` signals "anchor vanished /
-/// not yet resolved" (a Pending descent in flight, an Unwatch event
-/// that hasn't reconciled). The shape mirrors
+/// `anchor: Option<WirePath>`: `None` signals "anchor vanished / not yet resolved" (a Pending
+/// descent in flight, an Unwatch event that hasn't reconciled). The shape mirrors
 /// [`crate::ipc::protocol::ListRow::anchor`].
 fn project_details(
     sid: SubId,
@@ -110,11 +98,10 @@ fn project_details(
     let anchor = profile
         .and_then(|p| engine.tree().path_of(p.resource()))
         .map(|arc| WirePath::from(&arc));
-    // Live-gate via the engine's own predicate: lazy expiry leaves an
-    // inert window resident in Profile state, and `absorb_window_if_live`
-    // is the single owner of the `now < expiry` rule, so the projection
-    // drops an inert window without re-stating the liveness test. The
-    // wall-clock projection runs only for the live `Some` the operator sees.
+    // Live-gate via the engine's own predicate: lazy expiry leaves an inert window resident in
+    // Profile state, and `absorb_window_if_live` is the single owner of the `now < expiry` rule, so
+    // the projection drops an inert window without re-stating the liveness test. The wall-clock
+    // projection runs only for the live `Some` the operator sees.
     let absorb = profile
         .and_then(|p| p.absorb_window_if_live(now))
         .map(|w| WireAbsorbWindow {
@@ -192,10 +179,9 @@ mod tests {
         engine
     }
 
-    /// RAII guard — see [`crate::driver::ipc::project::list::tests::EngineGuard`]
-    /// for the linear-edge `ProbeSlot` rationale. Inlined here rather
-    /// than reaching across the inline tests to keep the test modules
-    /// self-contained.
+    /// RAII guard — see [`crate::driver::ipc::project::list::tests::EngineGuard`] for the
+    /// linear-edge `ProbeSlot` rationale. Inlined here rather than reaching across the inline tests
+    /// to keep the test modules self-contained.
     struct EngineGuard {
         engine: Option<Engine>,
     }
@@ -231,10 +217,9 @@ mod tests {
         Arc::new(b.build().unwrap())
     }
 
-    /// An engine-attached name returns `Active` with a populated
-    /// `SubDetails`. Anchor is `Some(path)` for a freshly attached Sub (the
-    /// engine descends synchronously when the path exists); `last_fired_at`
-    /// is `None` until first fire.
+    /// An engine-attached name returns `Active` with a populated `SubDetails`. Anchor is
+    /// `Some(path)` for a freshly attached Sub (the engine descends synchronously when the path
+    /// exists); `last_fired_at` is `None` until first fire.
     #[test]
     fn show_active_returns_full_details() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -269,10 +254,9 @@ mod tests {
         }
     }
 
-    /// A name in the runtime-disabled set returns `Disabled { Runtime }`.
-    /// The Sub is not in the engine; the config may or may not also list
-    /// it (this test omits the TOML entry to pin the runtime branch in
-    /// isolation).
+    /// A name in the runtime-disabled set returns `Disabled { Runtime }`. The Sub is not in the
+    /// engine; the config may or may not also list it (this test omits the TOML entry to pin the
+    /// runtime branch in isolation).
     #[test]
     fn show_runtime_disabled() {
         let engine = Engine::new();
@@ -295,9 +279,8 @@ mod tests {
         }
     }
 
-    /// A name with `enabled = false` in the TOML returns `Disabled { Toml }`.
-    /// The runtime set is empty here so the TOML branch is reached in
-    /// isolation.
+    /// A name with `enabled = false` in the TOML returns `Disabled { Toml }`. The runtime set is
+    /// empty here so the TOML branch is reached in isolation.
     #[test]
     fn show_toml_disabled() {
         let config = config_from_watches(&[("off_by_toml", "/tmp/foo", false)]);
@@ -319,8 +302,8 @@ mod tests {
         }
     }
 
-    /// A name that appears nowhere returns `Unknown`. Operators chain
-    /// `specter show foo && do-thing` to gate on this.
+    /// A name that appears nowhere returns `Unknown`. Operators chain `specter show foo &&
+    /// do-thing` to gate on this.
     #[test]
     fn show_unknown_for_typo() {
         let engine = Engine::new();
@@ -338,10 +321,9 @@ mod tests {
         }
     }
 
-    /// With a name present in the engine AND the runtime-disabled set AND
-    /// TOML-disabled, resolution returns Active — engine wins the precedence
-    /// ladder. Pins the resolution order; the `disable` handler reuses the
-    /// same ladder.
+    /// With a name present in the engine AND the runtime-disabled set AND TOML-disabled, resolution
+    /// returns Active — engine wins the precedence ladder. Pins the resolution order; the `disable`
+    /// handler reuses the same ladder.
     #[test]
     fn show_engine_wins_over_disabled_sources_on_name_conflict() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -349,8 +331,8 @@ mod tests {
         let config = config_from_watches(&[("engaged", tmp.path().to_str().unwrap(), true)]);
         let guard = EngineGuard::wrap(engine_with(&config));
         let mut disabled = BTreeSet::new();
-        // Hypothetical race: operator pushed `disable engaged` and the
-        // projection raced ahead of the engine's detach.
+        // Hypothetical race: operator pushed `disable engaged` and the projection raced ahead of
+        // the engine's detach.
         disabled.insert(CompactString::const_new("engaged"));
 
         let r = show(
@@ -367,14 +349,11 @@ mod tests {
         );
     }
 
-    /// An armed-and-live `absorb` window projects to
-    /// `SubDetails.absorb = Some(..)` with the matching mode, and an
-    /// inert (expired) window projects to `None` — the projection's
-    /// `expiry > now` live-gate. `absorb_count` projects independently
-    /// (0 here — arming does not fold). Arming with `Some(duration)`
-    /// yields `PersistUntil`; the window's `expiry` is `arm_now +
-    /// duration`, so a `now` before it is live and a `now` past it is
-    /// inert.
+    /// An armed-and-live `absorb` window projects to `SubDetails.absorb = Some(..)` with the
+    /// matching mode, and an inert (expired) window projects to `None` — the projection's `expiry >
+    /// now` live-gate. `absorb_count` projects independently (0 here — arming does not fold).
+    /// Arming with `Some(duration)` yields `PersistUntil`; the window's `expiry` is `arm_now +
+    /// duration`, so a `now` before it is live and a `now` past it is inert.
     #[test]
     fn show_absorb_window_live_gated_by_now() {
         let tmp = tempfile::TempDir::new().unwrap();
@@ -439,11 +418,9 @@ mod tests {
         }
     }
 
-    /// A dynamic Sub's synthesised name resolves through
-    /// `SubRegistry::find_by_name` to a live id, but the verb's local guard
-    /// maps `source_promoter.is_some()` back to `Unknown` — preserving the
-    /// operator contract that dynamic Subs are addressed through `list`,
-    /// not `show`.
+    /// A dynamic Sub's synthesised name resolves through `SubRegistry::find_by_name` to a live id,
+    /// but the verb's local guard maps `source_promoter.is_some()` back to `Unknown` — preserving
+    /// the operator contract that dynamic Subs are addressed through `list`, not `show`.
     #[test]
     fn show_dynamic_sub_name_resolves_unknown() {
         let req = SubAttachRequest::from_parts(
@@ -465,9 +442,8 @@ mod tests {
         let mut engine = Engine::new();
         let _ = engine.step(Input::AttachSub(req), Instant::now());
 
-        // The dynamic Sub IS in the registry — and now `by_name`
-        // indexes it. The Unknown verdict comes from the guard at the
-        // show callsite, not from a `None` lookup.
+        // The dynamic Sub IS in the registry — and now `by_name` indexes it. The Unknown verdict
+        // comes from the guard at the show callsite, not from a `None` lookup.
         assert_eq!(engine.subs().len(), 1, "Sub did land in the registry");
         assert!(
             engine

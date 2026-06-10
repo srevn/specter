@@ -1,32 +1,24 @@
 //! Builder for [`super::ActionProgram`].
 //!
-//! Emit each op once, then patch its two outgoing edges. The builder
-//! enforces:
+//! Emit each op once, then patch its two outgoing edges. The builder enforces:
 //!
-//! - **Bounded size.** Every emitted op gets a `u32` index. The
-//!   builder upholds the post-condition `pending.len() <= u32::MAX`
-//!   after every successful emit by refusing to push when
-//!   `pending.len() == u32::MAX`. This is a precondition failure
-//!   (panic, not Result) — a program with `u32::MAX + 1` ops is
-//!   physically impossible to load (~128 GiB of in-memory builder
-//!   state). Downstream casts of `pending.len()` to `u32` rely on
-//!   this invariant.
-//! - **Forward-only.** A `Continue(target)` may only point past the
-//!   origin op (`target > origin`).
-//! - **In-bounds.** A `Continue(target)` must land on an emitted op
-//!   (`target < final_ops_len`). The patch-time check is the loose bound
-//!   `target <= pending.len()` — the `==` case is the "future slot"
-//!   produced by [`ProgramBuilder::continue_to_next`], promised to be
-//!   filled by a follow-up emit. [`ProgramBuilder::build`] re-checks the
-//!   strict bound and reports [`ProgramError::OutOfBoundsEdge`] if the
-//!   promise was broken (no emit filled the deferred slot).
-//! - **Total patching.** Every emitted op must have both edges patched
-//!   before [`ProgramBuilder::build`]; an unpatched edge surfaces as
-//!   [`ProgramError::UnpatchedEdge`] with the offending edge identity.
+//! - **Bounded size.** Every emitted op gets a `u32` index. The builder upholds the post-condition
+//!   `pending.len() <= u32::MAX` after every successful emit by refusing to push when
+//!   `pending.len() == u32::MAX`. This is a precondition failure (panic, not Result) — a program
+//!   with `u32::MAX + 1` ops is physically impossible to load (~128 GiB of in-memory builder
+//!   state). Downstream casts of `pending.len()` to `u32` rely on this invariant.
+//! - **Forward-only.** A `Continue(target)` may only point past the origin op (`target > origin`).
+//! - **In-bounds.** A `Continue(target)` must land on an emitted op (`target < final_ops_len`). The
+//!   patch-time check is the loose bound `target <= pending.len()` — the `==` case is the "future
+//!   slot" produced by [`ProgramBuilder::continue_to_next`], promised to be filled by a follow-up
+//!   emit. [`ProgramBuilder::build`] re-checks the strict bound and reports
+//!   [`ProgramError::OutOfBoundsEdge`] if the promise was broken (no emit filled the deferred slot).
+//! - **Total patching.** Every emitted op must have both edges patched before
+//!   [`ProgramBuilder::build`]; an unpatched edge surfaces as [`ProgramError::UnpatchedEdge`] with
+//!   the offending edge identity.
 //!
-//! The terminal targets [`super::BranchTarget::Terminate`] and
-//! [`super::BranchTarget::Escape`] carry no payload and are always
-//! valid — they get no bounds check.
+//! The terminal targets [`super::BranchTarget::Terminate`] and [`super::BranchTarget::Escape`]
+//! carry no payload and are always valid — they get no bounds check.
 
 use super::ActionProgram;
 use super::error::ProgramError;
@@ -35,14 +27,12 @@ use std::fmt;
 
 /// Stepwise constructor for an [`ActionProgram`].
 ///
-/// Build by interleaving [`Self::emit`] (push an op with both edges
-/// pending) and [`Self::patch_on_ok`] / [`Self::patch_on_failed`] (set
-/// each edge). Finalise with [`Self::build`].
+/// Build by interleaving [`Self::emit`] (push an op with both edges pending) and
+/// [`Self::patch_on_ok`] / [`Self::patch_on_failed`] (set each edge). Finalise with [`Self::build`].
 ///
-/// The builder is the *sole* construction path for [`ActionProgram`]
-/// values that contain [`BranchTarget::Continue`] edges:
-/// [`BranchIndex`]'s constructor is sealed to `program::*`, so external
-/// callers cannot mint a `Continue` target without routing through
+/// The builder is the *sole* construction path for [`ActionProgram`] values that contain
+/// [`BranchTarget::Continue`] edges: [`BranchIndex`]'s constructor is sealed to `program::*`, so
+/// external callers cannot mint a `Continue` target without routing through
 /// [`Self::continue_to_next`].
 #[derive(Debug, Default)]
 pub struct ProgramBuilder {
@@ -51,10 +41,9 @@ pub struct ProgramBuilder {
 
 /// Opaque handle to an emitted op.
 ///
-/// Returned by [`ProgramBuilder::emit`] and consumed by the patch
-/// methods. `Copy` so the same handle can be passed to both
-/// [`ProgramBuilder::patch_on_ok`] and [`ProgramBuilder::patch_on_failed`]
-/// without re-emitting.
+/// Returned by [`ProgramBuilder::emit`] and consumed by the patch methods. `Copy` so the same
+/// handle can be passed to both [`ProgramBuilder::patch_on_ok`] and
+/// [`ProgramBuilder::patch_on_failed`] without re-emitting.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub struct OpHandle(u32);
 
@@ -65,8 +54,8 @@ struct PendingOp {
     on_failed: Option<BranchTarget>,
 }
 
-/// Identifies which edge of a [`ProgramOp`] an error refers to. Carried
-/// on [`ProgramError::UnpatchedEdge`].
+/// Identifies which edge of a [`ProgramOp`] an error refers to. Carried on
+/// [`ProgramError::UnpatchedEdge`].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum Edge {
     OnOk,
@@ -88,24 +77,20 @@ impl ProgramBuilder {
         Self::default()
     }
 
-    /// Push an op with both edges pending. The returned handle is the
-    /// only way to later patch this op's edges; it is `Copy`, so both
-    /// patches can share one handle.
+    /// Push an op with both edges pending. The returned handle is the only way to later patch this
+    /// op's edges; it is `Copy`, so both patches can share one handle.
     ///
     /// # Panics
     ///
-    /// Panics if the builder already holds `u32::MAX` pending ops —
-    /// the next index would not fit in `u32`, and the post-condition
-    /// `pending.len() <= u32::MAX` would break. In practice this is
-    /// unreachable (such a program would need 100+ GiB of memory to
-    /// even hold); treating it as a precondition failure keeps the
-    /// downstream casts of `pending.len()` to `u32` infallible.
+    /// Panics if the builder already holds `u32::MAX` pending ops — the next index would not fit in
+    /// `u32`, and the post-condition `pending.len() <= u32::MAX` would break. In practice this is
+    /// unreachable (such a program would need 100+ GiB of memory to even hold); treating it as a
+    /// precondition failure keeps the downstream casts of `pending.len()` to `u32` infallible.
     pub fn emit(&mut self, body: SpawnBody) -> OpHandle {
-        // Two-step bound: the new index must fit in `u32`, AND the
-        // resulting `pending.len()` after push must also fit (so the
-        // post-condition `pending.len() <= u32::MAX` holds — downstream
-        // casts of `pending.len()` rely on it). `checked_add(1)` over
-        // the converted index covers both in one path.
+        // Two-step bound: the new index must fit in `u32`, AND the resulting `pending.len()` after
+        // push must also fit (so the post-condition `pending.len() <= u32::MAX` holds — downstream
+        // casts of `pending.len()` rely on it). `checked_add(1)` over the converted index covers
+        // both in one path.
         let index =
             u32::try_from(self.pending.len()).expect("program length cannot exceed u32::MAX");
         index
@@ -119,14 +104,14 @@ impl ProgramBuilder {
         OpHandle(index)
     }
 
-    /// Patch the `on_ok` edge of `h`. The internal `patch_target_check`
-    /// helper enforces the patch-time invariants.
+    /// Patch the `on_ok` edge of `h`. The internal `patch_target_check` helper enforces the
+    /// patch-time invariants.
     pub fn patch_on_ok(&mut self, h: OpHandle, target: BranchTarget) -> Result<(), ProgramError> {
         self.patch(h, Edge::OnOk, target)
     }
 
-    /// Patch the `on_failed` edge of `h`. The internal
-    /// `patch_target_check` helper enforces the patch-time invariants.
+    /// Patch the `on_failed` edge of `h`. The internal `patch_target_check` helper enforces the
+    /// patch-time invariants.
     pub fn patch_on_failed(
         &mut self,
         h: OpHandle,
@@ -135,27 +120,22 @@ impl ProgramBuilder {
         self.patch(h, Edge::OnFailed, target)
     }
 
-    /// Patch the named `edge` of `h`. Equivalent to
-    /// [`Self::patch_on_ok`] / [`Self::patch_on_failed`] but selects
-    /// the edge by [`Edge`] value — for callers (the lowering pass)
-    /// that carry the edge as a runtime token alongside the handle.
+    /// Patch the named `edge` of `h`. Equivalent to [`Self::patch_on_ok`] /
+    /// [`Self::patch_on_failed`] but selects the edge by [`Edge`] value — for callers (the lowering
+    /// pass) that carry the edge as a runtime token alongside the handle.
     ///
     /// Two independent preconditions:
     ///
-    /// - **Origin in range.** `h` must index this builder's pending ops
-    ///   (this method indexes `pending[h.0]`). A handle that does not is
-    ///   only obtainable by reusing one minted by a different builder;
-    ///   it is rejected as [`ProgramError::StaleHandle`]. This is
-    ///   `patch`'s own precondition, totally checked here.
-    /// - **Target valid.** Delegated to `patch_target_check`, which
-    ///   validates `Continue` targets and is a no-op for the
-    ///   payload-free `Terminate` / `Escape`.
+    /// - **Origin in range.** `h` must index this builder's pending ops (this method indexes
+    ///   `pending[h.0]`). A handle that does not is only obtainable by reusing one minted by a
+    ///   different builder; it is rejected as [`ProgramError::StaleHandle`]. This is `patch`'s own
+    ///   precondition, totally checked here.
+    /// - **Target valid.** Delegated to `patch_target_check`, which validates `Continue` targets
+    ///   and is a no-op for the payload-free `Terminate` / `Escape`.
     ///
-    /// The origin check runs *first* and unconditionally: a stale
-    /// handle is a stale handle regardless of the target, and the
-    /// target check early-returns for `Terminate` / `Escape`, so
-    /// deferring to it would leave `pending[h.0]` to panic on those
-    /// targets (release-mode: silent out-of-bounds).
+    /// The origin check runs *first* and unconditionally: a stale handle is a stale handle regardless
+    /// of the target, and the target check early-returns for `Terminate` / `Escape`, so deferring to
+    /// it would leave `pending[h.0]` to panic on those targets (release-mode: silent out-of-bounds).
     pub fn patch(
         &mut self,
         h: OpHandle,
@@ -177,10 +157,9 @@ impl ProgramBuilder {
         Ok(())
     }
 
-    /// `BranchTarget::Continue(<next-emission-position>)`. Use to wire
-    /// the current op's `on_ok` to the slot the next emit will fill.
-    /// The returned target is provisional: if no follow-up emit lands,
-    /// [`Self::build`] reports it as [`ProgramError::OutOfBoundsEdge`].
+    /// `BranchTarget::Continue(<next-emission-position>)`. Use to wire the current op's `on_ok` to
+    /// the slot the next emit will fill. The returned target is provisional: if no follow-up emit
+    /// lands, [`Self::build`] reports it as [`ProgramError::OutOfBoundsEdge`].
     #[must_use]
     pub fn continue_to_next(&self) -> BranchTarget {
         let next = u32::try_from(self.pending.len())
@@ -190,9 +169,8 @@ impl ProgramBuilder {
 
     /// Convert the pending sequence into a finalised [`ActionProgram`].
     ///
-    /// Validates: at least one op ([`ProgramError::EmptyProgram`]);
-    /// every op's edges are patched ([`ProgramError::UnpatchedEdge`]);
-    /// every `Continue(target)` lands within the final op count
+    /// Validates: at least one op ([`ProgramError::EmptyProgram`]); every op's edges are patched
+    /// ([`ProgramError::UnpatchedEdge`]); every `Continue(target)` lands within the final op count
     /// ([`ProgramError::OutOfBoundsEdge`]).
     pub fn build(self) -> Result<ActionProgram, ProgramError> {
         if self.pending.is_empty() {
@@ -213,8 +191,7 @@ impl ProgramBuilder {
                 op_index: origin,
                 edge: Edge::OnFailed,
             })?;
-            // Build-time strict in-bounds check — catches the
-            // "continue_to_next never filled" case.
+            // Build-time strict in-bounds check — catches the "continue_to_next never filled" case.
             check_final_in_bounds(origin, on_ok, final_len)?;
             check_final_in_bounds(origin, on_failed, final_len)?;
             ops.push(ProgramOp::new(pending_op.body, on_ok, on_failed));
@@ -224,14 +201,11 @@ impl ProgramBuilder {
         })
     }
 
-    /// Patch-time invariant check for a `Continue` target: forward of
-    /// origin AND within the loose bound `target <= pending.len()`. The
-    /// upper-bound `==` case is the deferred future slot produced by
-    /// [`Self::continue_to_next`] — accepted here, re-checked strictly
-    /// at build.
+    /// Patch-time invariant check for a `Continue` target: forward of origin AND within the loose
+    /// bound `target <= pending.len()`. The upper-bound `==` case is the deferred future slot
+    /// produced by [`Self::continue_to_next`] — accepted here, re-checked strictly at build.
     ///
-    /// `Terminate` / `Escape` never carry an index, so the check is a
-    /// no-op for them.
+    /// `Terminate` / `Escape` never carry an index, so the check is a no-op for them.
     fn patch_target_check(&self, origin: u32, target: BranchTarget) -> Result<(), ProgramError> {
         let BranchTarget::Continue(idx) = target else {
             return Ok(());
@@ -243,8 +217,8 @@ impl ProgramBuilder {
                 target: target_idx,
             });
         }
-        // `pending.len()` is the loose bound — equal-to is the deferred
-        // future slot; greater-than is unambiguously out of range.
+        // `pending.len()` is the loose bound — equal-to is the deferred future slot; greater-than
+        // is unambiguously out of range.
         let pending_len = u32::try_from(self.pending.len())
             .expect("program length cannot exceed u32::MAX; emit() enforces this");
         if target_idx > pending_len {
@@ -297,8 +271,8 @@ mod tests {
         assert!(matches!(b.build(), Err(ProgramError::EmptyProgram)));
     }
 
-    /// `continue_to_next` returns `Continue(pending.len())` — the slot
-    /// the next `emit` will fill. After one emit, the next slot is 1.
+    /// `continue_to_next` returns `Continue(pending.len())` — the slot the next `emit` will fill.
+    /// After one emit, the next slot is 1.
     #[test]
     fn continue_to_next_returns_pending_emission_position() {
         let mut b = ProgramBuilder::new();
@@ -318,8 +292,8 @@ mod tests {
         );
     }
 
-    /// Forward-only-in-bounds patches succeed and build produces a
-    /// program of matching length with edges that match the patches.
+    /// Forward-only-in-bounds patches succeed and build produces a program of matching length with
+    /// edges that match the patches.
     #[test]
     fn forward_in_bounds_patches_succeed() {
         let mut b = ProgramBuilder::new();
@@ -348,8 +322,8 @@ mod tests {
         assert_eq!(program.ops[1].on_failed(), BranchTarget::Terminate);
     }
 
-    /// `patch_on_ok` with a backward `Continue` target → `BackwardEdge`.
-    /// `target == origin` is also backward (self-loop is not forward).
+    /// `patch_on_ok` with a backward `Continue` target → `BackwardEdge`. `target == origin` is also
+    /// backward (self-loop is not forward).
     #[test]
     fn patch_on_ok_backward_target_returns_backward_edge() {
         let mut b = ProgramBuilder::new();
@@ -382,9 +356,8 @@ mod tests {
         );
     }
 
-    /// `patch_on_failed` validates the same way as `patch_on_ok` — both
-    /// route through `patch_target_check`. Pinning this ensures
-    /// drift between the two paths is caught.
+    /// `patch_on_failed` validates the same way as `patch_on_ok` — both route through
+    /// `patch_target_check`. Pinning this ensures drift between the two paths is caught.
     #[test]
     fn patch_on_failed_backward_target_returns_backward_edge() {
         let mut b = ProgramBuilder::new();
@@ -402,9 +375,8 @@ mod tests {
         );
     }
 
-    /// `patch_on_ok` with a target past `pending.len() + 0` (the
-    /// loose patch-time bound — `==` is the deferred slot) →
-    /// `OutOfBoundsEdge`.
+    /// `patch_on_ok` with a target past `pending.len() + 0` (the loose patch-time bound — `==` is
+    /// the deferred slot) → `OutOfBoundsEdge`.
     #[test]
     fn patch_on_ok_target_past_pending_returns_out_of_bounds() {
         let mut b = ProgramBuilder::new();
@@ -424,10 +396,9 @@ mod tests {
         );
     }
 
-    /// At patch time, `target == pending.len()` is the *deferred future
-    /// slot* — accepted by the patch. If no follow-up emit fills it,
-    /// `build` catches the unfilled promise via `OutOfBoundsEdge`.
-    /// This test pins both sides of the contract.
+    /// At patch time, `target == pending.len()` is the *deferred future slot* — accepted by the
+    /// patch. If no follow-up emit fills it, `build` catches the unfilled promise via
+    /// `OutOfBoundsEdge`. This test pins both sides of the contract.
     #[test]
     fn patch_to_pending_len_accepted_then_caught_at_build_if_unfilled() {
         let mut b = ProgramBuilder::new();
@@ -453,8 +424,7 @@ mod tests {
         );
     }
 
-    /// When the deferred slot IS filled by a follow-up emit, the
-    /// program builds successfully.
+    /// When the deferred slot IS filled by a follow-up emit, the program builds successfully.
     #[test]
     fn deferred_slot_filled_builds_successfully() {
         let mut b = ProgramBuilder::new();
@@ -479,8 +449,8 @@ mod tests {
         );
     }
 
-    /// An emitted op with one (or both) edge unpatched → `UnpatchedEdge`
-    /// at build, with the edge identity in the error.
+    /// An emitted op with one (or both) edge unpatched → `UnpatchedEdge` at build, with the edge
+    /// identity in the error.
     #[test]
     fn unpatched_on_ok_at_build_reports_edge_identity() {
         let mut b = ProgramBuilder::new();
@@ -514,9 +484,8 @@ mod tests {
         );
     }
 
-    /// When both edges are unpatched, `on_ok` is reported first
-    /// (deterministic — UnpatchedEdge enumeration order is by edge
-    /// then op).
+    /// When both edges are unpatched, `on_ok` is reported first (deterministic — UnpatchedEdge
+    /// enumeration order is by edge then op).
     #[test]
     fn build_reports_first_unpatched_edge_deterministically() {
         let mut b = ProgramBuilder::new();
@@ -532,8 +501,7 @@ mod tests {
         );
     }
 
-    /// The earliest-op rule: with two unpatched ops, op 0 surfaces
-    /// first.
+    /// The earliest-op rule: with two unpatched ops, op 0 surfaces first.
     #[test]
     fn build_reports_earliest_unpatched_op_first() {
         let mut b = ProgramBuilder::new();
@@ -553,8 +521,8 @@ mod tests {
         );
     }
 
-    /// `Terminate` and `Escape` skip every bounds check — they carry
-    /// no payload that needs validation.
+    /// `Terminate` and `Escape` skip every bounds check — they carry no payload that needs
+    /// validation.
     #[test]
     fn terminate_and_escape_targets_unconditionally_accepted() {
         let mut b = ProgramBuilder::new();
@@ -567,9 +535,8 @@ mod tests {
         assert_eq!(program.ops[0].on_failed(), BranchTarget::Terminate);
     }
 
-    /// Re-patching an edge overwrites the previous value. Documented
-    /// behaviour — lowering produces each patch exactly once by
-    /// construction, but the API itself is permissive.
+    /// Re-patching an edge overwrites the previous value. Documented behaviour — lowering produces
+    /// each patch exactly once by construction, but the API itself is permissive.
     #[test]
     fn re_patching_overwrites_previous_value() {
         let mut b = ProgramBuilder::new();
@@ -593,21 +560,17 @@ mod tests {
         );
     }
 
-    /// A handle minted by one builder used against a smaller one is
-    /// *guaranteed* detected — the origin range-check is total and runs
-    /// before the target is examined, so detection does not depend on
-    /// the target accidentally tripping a bounds check. Here the target
-    /// is a forward `Continue`; the stale origin is caught by the origin
-    /// check before the target (which would also surface
-    /// `OutOfBoundsEdge`) is examined. The `Terminate` / `Escape`
-    /// targets (where the target check is a no-op) are pinned by
-    /// `stale_handle_on_terminate_or_escape_is_reported_not_panicked` —
-    /// together they cover every `BranchTarget`.
+    /// A handle minted by one builder used against a smaller one is *guaranteed* detected — the
+    /// origin range-check is total and runs before the target is examined, so detection does not
+    /// depend on the target accidentally tripping a bounds check. Here the target is a forward
+    /// `Continue`; the stale origin is caught by the origin check before the target (which would also
+    /// surface `OutOfBoundsEdge`) is examined. The `Terminate` / `Escape` targets (where the target
+    /// check is a no-op) are pinned by `stale_handle_on_terminate_or_escape_is_reported_not_panicked`
+    /// — together they cover every `BranchTarget`.
     #[test]
     fn handle_with_out_of_range_index_rejected_at_patch() {
-        // `OpHandle` is `Copy` and minted only by `emit`; reuse one from
-        // a larger builder against a smaller one to forge the
-        // cross-builder misuse without constructing a handle by hand.
+        // `OpHandle` is `Copy` and minted only by `emit`; reuse one from a larger builder against a
+        // smaller one to forge the cross-builder misuse without constructing a handle by hand.
         let mut larger = ProgramBuilder::new();
         let _ = larger.emit(exec_body());
         let _ = larger.emit(exec_body());
@@ -616,23 +579,20 @@ mod tests {
         let mut smaller = ProgramBuilder::new();
         let _ = smaller.emit(exec_body()); // pending.len() == 1
 
-        // h_into_larger has index 2; smaller holds 1 op. The origin
-        // check fires first and rejects the handle as stale — the
-        // forward `Continue(5)` target is never reached.
+        // h_into_larger has index 2; smaller holds 1 op. The origin check fires first and rejects
+        // the handle as stale — the forward `Continue(5)` target is never reached.
         let err = smaller
             .patch_on_ok(h_into_larger, BranchTarget::Continue(BranchIndex::new(5)))
             .expect_err("cross-builder handle must be rejected as stale");
         assert_eq!(err, ProgramError::StaleHandle { handle: 2, len: 1 });
     }
 
-    /// A handle that does not index this builder's pending ops is the
-    /// caller's hygiene bug (only obtainable by reusing a handle minted
-    /// by a *different* builder). `patch` owns this precondition because
-    /// it indexes `pending[h.0]`; `patch_target_check` validates only
-    /// the TARGET and early-returns for `Terminate` / `Escape`, so
-    /// without an explicit origin range-check those targets would
-    /// panic-index a non-existent slot (release-mode: silent UB). Both
-    /// terminal targets must surface `StaleHandle` instead of panicking.
+    /// A handle that does not index this builder's pending ops is the caller's hygiene bug (only
+    /// obtainable by reusing a handle minted by a *different* builder). `patch` owns this
+    /// precondition because it indexes `pending[h.0]`; `patch_target_check` validates only the
+    /// TARGET and early-returns for `Terminate` / `Escape`, so without an explicit origin
+    /// range-check those targets would panic-index a non-existent slot (release-mode: silent UB).
+    /// Both terminal targets must surface `StaleHandle` instead of panicking.
     #[test]
     fn stale_handle_on_terminate_or_escape_is_reported_not_panicked() {
         let mut larger = ProgramBuilder::new();
@@ -643,9 +603,8 @@ mod tests {
         let mut smaller = ProgramBuilder::new();
         let _ = smaller.emit(exec_body()); // pending.len() == 1
 
-        // Terminate: `patch_target_check` is a no-op for it, so the
-        // origin range-check is the only thing between this and a
-        // panic-index of `pending[2]`.
+        // Terminate: `patch_target_check` is a no-op for it, so the origin range-check is the only
+        // thing between this and a panic-index of `pending[2]`.
         let err = smaller
             .patch_on_failed(stale, BranchTarget::Terminate)
             .expect_err("stale handle on Terminate must be reported, not panic");
@@ -658,8 +617,7 @@ mod tests {
         assert_eq!(err, ProgramError::StaleHandle { handle: 2, len: 1 });
     }
 
-    /// `OpHandle` is `Copy` — the same handle can be used for both
-    /// patches without re-emitting.
+    /// `OpHandle` is `Copy` — the same handle can be used for both patches without re-emitting.
     #[test]
     fn op_handle_is_copy() {
         let mut b = ProgramBuilder::new();
@@ -671,8 +629,8 @@ mod tests {
         assert_eq!(program.ops.len(), 1);
     }
 
-    /// `Edge`'s Display formatting — surfaces in `UnpatchedEdge`
-    /// rendering. Pinned to catch accidental rename.
+    /// `Edge`'s Display formatting — surfaces in `UnpatchedEdge` rendering. Pinned to catch
+    /// accidental rename.
     #[test]
     fn edge_display_strings() {
         assert_eq!(Edge::OnOk.to_string(), "on_ok");

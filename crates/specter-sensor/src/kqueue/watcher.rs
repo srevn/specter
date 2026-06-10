@@ -1,40 +1,30 @@
 //! `KqueueWatcher` — kqueue-backed `FsWatcher` impl.
 //!
-//! Single-threaded: one thread owns the `KqueueWatcher` value and
-//! drives every `watch` / `unwatch` / `drain_ready` call. The kqueue
-//! fd is exposed via [`AsFd`] so a reactor can register it for
-//! edge-triggered readiness; `drain_ready` is non-blocking and
-//! drains the kqueue to empty on every call (satisfying the
-//! edge-triggered contract without caller discipline).
+//! Single-threaded: one thread owns the `KqueueWatcher` value and drives every `watch` / `unwatch`
+//! / `drain_ready` call. The kqueue fd is exposed via [`AsFd`] so a reactor can register it for
+//! edge-triggered readiness; `drain_ready` is non-blocking and drains the kqueue to empty on every
+//! call (satisfying the edge-triggered contract without caller discipline).
 //!
 //! # Drop semantics
 //!
 //! Default field-order drop:
-//! - `by_resource` drops every [`KqueueEntry`] — the contained
-//!   [`OwnedFd`] closes and the kernel removes its vnode
-//!   registration on close; the `fflags` and `kind` bookkeeping
-//!   drops alongside.
-//! - `kq` ([`OwnedFd`]) closes, kernel-reaping any remaining queued
-//!   events.
+//! - `by_resource` drops every [`KqueueEntry`] — the contained [`OwnedFd`] closes and the kernel
+//!   removes its vnode registration on close; the `fflags` and `kind` bookkeeping drops alongside.
+//! - `kq` ([`OwnedFd`]) closes, kernel-reaping any remaining queued events.
 //!
 //! # Per-resource entry cache
 //!
-//! Each entry caches `(fd, fflags, kind)`: the watched fd, the
-//! post-translation kqueue fflags last installed via `EV_ADD`, and the
-//! fstat-verified inode shape from fresh-watch time. The triple is
-//! stored as a single struct (not three parallel maps keyed by
-//! `ResourceId`) so every install path writes it atomically and every
-//! teardown clears it atomically. Mirror of inotify's
-//! `InotifyEntry { wd, mask, kind }`.
+//! Each entry caches `(fd, fflags, kind)`: the watched fd, the post-translation kqueue fflags last
+//! installed via `EV_ADD`, and the fstat-verified inode shape from fresh-watch time. The triple is
+//! stored as a single struct (not three parallel maps keyed by `ResourceId`) so every install path
+//! writes it atomically and every teardown clears it atomically. Mirror of inotify's `InotifyEntry
+//! { wd, mask, kind }`.
 //!
-//! The engine emits `WatchOp::Watch` whenever `Resource.events_union`
-//! changes, not only on the 0→1 refcount edge. A re-`watch()` with an
-//! unchanged mask skips the syscall entirely; a re-`watch()` with a
-//! widened/narrowed mask re-registers via `EV_ADD` (which overwrites
-//! the prior fflags) without closing or reopening the fd. The cache
-//! is invalidated only on `unwatch` (the engine-side `Unwatch` op,
-//! sourced from `sub_watch`'s non-empty → empty edge or
-//! `Tree::vacate`'s terminus emission).
+//! The engine emits `WatchOp::Watch` whenever `Resource.events_union` changes, not only on the 0→1
+//! refcount edge. A re-`watch()` with an unchanged mask skips the syscall entirely; a re-`watch()`
+//! with a widened/narrowed mask re-registers via `EV_ADD` (which overwrites the prior fflags) without
+//! closing or reopening the fd. The cache is invalidated only on `unwatch` (the engine-side `Unwatch`
+//! op, sourced from `sub_watch`'s non-empty → empty edge or `Tree::vacate`'s terminus emission).
 
 use crate::kqueue::{ffi, normalize, translate};
 use crate::{FsWatcher, WatchFailure, WatchFailureExt, WatcherEvent};
@@ -44,60 +34,47 @@ use std::io;
 use std::os::fd::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 
-/// Maximum events drained per `kevent` syscall. Excess sit in the
-/// kernel queue until the next iteration of the drain-to-empty loop
-/// inside `drain_ready`. 64 mirrors notify-rs and is well above the
-/// per-iteration burst the engine produces.
+/// Maximum events drained per `kevent` syscall. Excess sit in the kernel queue until the next
+/// iteration of the drain-to-empty loop inside `drain_ready`. 64 mirrors notify-rs and is well
+/// above the per-iteration burst the engine produces.
 const EVENT_BATCH: usize = 64;
 
 #[derive(Debug)]
 pub struct KqueueWatcher {
-    /// `ResourceId → (fd, fflags, kind)`. Populated by `watch()` on
-    /// successful install, cleared by `unwatch()`. The fflags cache
-    /// lets a re-`watch()` skip the syscall when the install mask is
-    /// unchanged; the kind cache is consumed by
-    /// `normalize::kevent_to_fs_event` for File-vs-Dir disambiguation.
-    /// See [`KqueueEntry`] for the field-level lifecycle.
+    /// `ResourceId → (fd, fflags, kind)`. Populated by `watch()` on successful install, cleared by
+    /// `unwatch()`. The fflags cache lets a re-`watch()` skip the syscall when the install mask is
+    /// unchanged; the kind cache is consumed by `normalize::kevent_to_fs_event` for File-vs-Dir
+    /// disambiguation. See [`KqueueEntry`] for the field-level lifecycle.
     by_resource: SecondaryMap<ResourceId, KqueueEntry>,
-    /// The kqueue fd. Exposed through [`AsFd`] so a reactor can
-    /// register it for edge-triggered readiness; drop closes the fd
-    /// and kernel-reaps any queued events.
+    /// The kqueue fd. Exposed through [`AsFd`] so a reactor can register it for edge-triggered
+    /// readiness; drop closes the fd and kernel-reaps any queued events.
     kq: OwnedFd,
 }
 
-/// Per-resource cached install state — the `(fd, fflags, kind)` triple
-/// installed at fresh-watch time.
+/// Per-resource cached install state — the `(fd, fflags, kind)` triple installed at fresh-watch time.
 ///
-/// - `fd` is the watched [`OwnedFd`]. The kernel keys the vnode
-///   registration off the fd; closing the fd auto-removes the
-///   registration. Held for the entry's lifetime — kqueue's re-watch
-///   never reopens (the fd is inode-bound, so the cached `kind` cannot
-///   become stale relative to the kernel-side registration).
-/// - `fflags` is the post-translation kqueue mask last passed to
-///   `EV_ADD`. A re-`watch()` recomputes from the user's `events` set
-///   and the cached kind; an unchanged mask short-circuits without a
-///   syscall — `EV_ADD` is idempotent in mask, so the kernel would
-///   produce the same registration.
-/// - `kind` is the fstat-verified inode shape at fresh-watch time,
-///   closing the TOCTOU window between the engine's
-///   `WatchOp::Watch.kind` and the kernel's path-resolution at install
-///   time. Invariant for the entry's lifetime — the fd is inode-bound
-///   (open() resolves the path once); an inode swap at the path
-///   surfaces as `NOTE_DELETE` / `NOTE_RENAME` on the original fd, the
-///   engine reseeds via `Unwatch` (which drops the entry; fd close
-///   auto-removes the kernel-side registration) followed by a fresh
-///   `Watch` against the new inode. Consumed by
-///   [`crate::kqueue::normalize::kevent_to_fs_event`] to disambiguate
-///   `NOTE_WRITE` / `NOTE_LINK` on Dir vs File, and by
-///   `translate::class_set_to_fflags` to compute the per-FD mask.
+/// - `fd` is the watched [`OwnedFd`]. The kernel keys the vnode registration off the fd; closing
+///   the fd auto-removes the registration. Held for the entry's lifetime — kqueue's re-watch never
+///   reopens (the fd is inode-bound, so the cached `kind` cannot become stale relative to the
+///   kernel-side registration).
+/// - `fflags` is the post-translation kqueue mask last passed to `EV_ADD`. A re-`watch()` recomputes
+///   from the user's `events` set and the cached kind; an unchanged mask short-circuits without a
+///   syscall — `EV_ADD` is idempotent in mask, so the kernel would produce the same registration.
+/// - `kind` is the fstat-verified inode shape at fresh-watch time, closing the TOCTOU window
+///   between the engine's `WatchOp::Watch.kind` and the kernel's path-resolution at install time.
+///   Invariant for the entry's lifetime — the fd is inode-bound (open() resolves the path once); an
+///   inode swap at the path surfaces as `NOTE_DELETE` / `NOTE_RENAME` on the original fd, the
+///   engine reseeds via `Unwatch` (which drops the entry; fd close auto-removes the kernel-side
+///   registration) followed by a fresh `Watch` against the new inode. Consumed by
+///   [`crate::kqueue::normalize::kevent_to_fs_event`] to disambiguate `NOTE_WRITE` / `NOTE_LINK` on
+///   Dir vs File, and by `translate::class_set_to_fflags` to compute the per-FD mask.
 ///
-/// Stored as a single struct so the triple is atomic: every install
-/// path writes all three fields together, every teardown clears them
-/// together. Mirror of inotify's `InotifyEntry { wd, mask, kind }`.
+/// Stored as a single struct so the triple is atomic: every install path writes all three fields
+/// together, every teardown clears them together. Mirror of inotify's `InotifyEntry { wd, mask,
+/// kind }`.
 ///
-/// `OwnedFd` is not `Copy`, so the entry isn't either — callers that
-/// need to read `fflags` / `kind` while preserving the fd hold the
-/// entry by reference.
+/// `OwnedFd` is not `Copy`, so the entry isn't either — callers that need to read `fflags` / `kind`
+/// while preserving the fd hold the entry by reference.
 #[derive(Debug)]
 struct KqueueEntry {
     fd: OwnedFd,
@@ -106,9 +83,8 @@ struct KqueueEntry {
 }
 
 impl KqueueWatcher {
-    /// Create a fresh kqueue. Returns the syscall error on `kqueue()`
-    /// failure (`EMFILE`, `ENOMEM` are the only cases — the bin
-    /// should treat startup failures as fatal).
+    /// Create a fresh kqueue. Returns the syscall error on `kqueue()` failure (`EMFILE`, `ENOMEM`
+    /// are the only cases — the bin should treat startup failures as fatal).
     pub fn new() -> io::Result<Self> {
         let kq = ffi::kqueue_new()?;
         Ok(Self {
@@ -117,22 +93,18 @@ impl KqueueWatcher {
         })
     }
 
-    /// Internal `watch` body — dispatches by entry presence. The trait
-    /// wrapper maps the inner `io::Error` set into a typed
-    /// [`WatchFailure`] at the boundary so `?` propagation stays
+    /// Internal `watch` body — dispatches by entry presence. The trait wrapper maps the inner
+    /// `io::Error` set into a typed [`WatchFailure`] at the boundary so `?` propagation stays
     /// uniform across the open / stat / register chain.
     ///
-    /// - `by_resource[r]` populated → [`Self::rewatch_inner`]
-    ///   (re-register via `EV_ADD` on the cached fd; no reopen).
-    /// - `by_resource[r]` empty → [`Self::fresh_watch_inner`]
-    ///   (open + fstat verify + register).
+    /// - `by_resource[r]` populated → [`Self::rewatch_inner`] (re-register via `EV_ADD` on the
+    ///   cached fd; no reopen).
+    /// - `by_resource[r]` empty → [`Self::fresh_watch_inner`] (open + fstat verify + register).
     ///
-    /// The engine-supplied `kind` is structurally irrelevant on
-    /// rewatch (the cached kind is the authoritative value; the fd
-    /// is inode-bound so the kind cannot become stale relative to
-    /// the kernel-side registration). The split makes this explicit
-    /// at the call boundary — [`Self::rewatch_inner`] does not take
-    /// `kind` or `path` (it reuses the cached fd).
+    /// The engine-supplied `kind` is structurally irrelevant on rewatch (the cached kind is the
+    /// authoritative value; the fd is inode-bound so the kind cannot become stale relative to the
+    /// kernel-side registration). The split makes this explicit at the call boundary —
+    /// [`Self::rewatch_inner`] does not take `kind` or `path` (it reuses the cached fd).
     fn watch_inner(
         &mut self,
         r: ResourceId,
@@ -147,22 +119,18 @@ impl KqueueWatcher {
         }
     }
 
-    /// Re-register `r`'s entry via `EV_ADD` on the cached fd. Engine
-    /// triggers this when `Resource.events_union` changes at non-zero
-    /// refcount.
+    /// Re-register `r`'s entry via `EV_ADD` on the cached fd. Engine triggers this when
+    /// `Resource.events_union` changes at non-zero refcount.
     ///
-    /// The cached fflags short-circuit when the install mask is
-    /// unchanged. On a changed mask, the watcher re-registers via
-    /// `EV_ADD` (which overwrites the prior fflags) without closing
-    /// or reopening the fd — kqueue's vnode registration is fd-bound,
-    /// so the cached kind is invariant and `path` is unused on this
-    /// path.
+    /// The cached fflags short-circuit when the install mask is unchanged. On a changed mask, the
+    /// watcher re-registers via `EV_ADD` (which overwrites the prior fflags) without closing or
+    /// reopening the fd — kqueue's vnode registration is fd-bound, so the cached kind is invariant
+    /// and `path` is unused on this path.
     ///
     /// # Precondition
     ///
-    /// `by_resource[r]` must be populated. The dispatcher
-    /// [`Self::watch_inner`] enforces this; calling this directly
-    /// with an empty entry panics.
+    /// `by_resource[r]` must be populated. The dispatcher [`Self::watch_inner`] enforces this;
+    /// calling this directly with an empty entry panics.
     fn rewatch_inner(&mut self, r: ResourceId, events: ClassSet) -> io::Result<()> {
         let prior = self
             .by_resource
@@ -181,8 +149,8 @@ impl KqueueWatcher {
             return Ok(());
         }
         ffi::register_vnode(&self.kq, &prior.fd, r.data().as_ffi(), install_fflags)?;
-        // NLL: `prior`'s immutable borrow ends here — its final use
-        // was `&prior.fd` above. Now safe to mutate.
+        // NLL: `prior`'s immutable borrow ends here — its final use was `&prior.fd` above. Now safe
+        // to mutate.
         self.by_resource
             .get_mut(r)
             .expect("entry was just observed via `get`")
@@ -199,9 +167,8 @@ impl KqueueWatcher {
 
     /// First-install for `r` on the 0→1 `watch_demand` edge.
     ///
-    /// Five steps; each failure drops anything earlier (the
-    /// [`OwnedFd`] auto-closes) so a partially-failed `watch` leaves
-    /// zero state:
+    /// Five steps; each failure drops anything earlier (the [`OwnedFd`] auto-closes) so a
+    /// partially-failed `watch` leaves zero state:
     ///
     /// 1. Open the path.
     /// 2. Stat the fd and verify against the engine's expected kind.
@@ -211,8 +178,7 @@ impl KqueueWatcher {
     ///
     /// # Precondition
     ///
-    /// `by_resource[r]` must be empty. The dispatcher
-    /// [`Self::watch_inner`] enforces this.
+    /// `by_resource[r]` must be empty. The dispatcher [`Self::watch_inner`] enforces this.
     fn fresh_watch_inner(
         &mut self,
         r: ResourceId,
@@ -230,17 +196,15 @@ impl KqueueWatcher {
                 observed = ?observed_kind,
                 "kqueue watch kind mismatch — engine expected != fstat",
             );
-            // ENOTDIR is the canonical "kind disagreement" signal both
-            // kqueue and inotify use; the trait wrapper classifies it
-            // as `WatchFailure::Resource` so the engine routes through
+            // ENOTDIR is the canonical "kind disagreement" signal both kqueue and inotify use; the
+            // trait wrapper classifies it as `WatchFailure::Resource` so the engine routes through
             // the path-fatal recovery channel.
             return Err(io::Error::from_raw_os_error(libc::ENOTDIR));
         }
         let install_fflags = translate::class_set_to_fflags(events, observed_kind);
         ffi::register_vnode(&self.kq, &fd, r.data().as_ffi(), install_fflags)?;
-        // Commit the (fd, fflags, kind) triple atomically. The fd
-        // moves into the entry; subsequent `register_vnode` calls on
-        // re-watch reuse `&prior.fd`.
+        // Commit the (fd, fflags, kind) triple atomically. The fd moves into the entry; subsequent
+        // `register_vnode` calls on re-watch reuse `&prior.fd`.
         self.by_resource.insert(
             r,
             KqueueEntry {
@@ -262,9 +226,9 @@ impl KqueueWatcher {
 }
 
 impl FsWatcher for KqueueWatcher {
-    /// Trait wrapper around `Self::watch_inner`: classifies the inner
-    /// `io::Error` into a typed [`WatchFailure`] at the boundary so the
-    /// engine demuxes on the variant rather than on raw errno values.
+    /// Trait wrapper around `Self::watch_inner`: classifies the inner `io::Error` into a typed
+    /// [`WatchFailure`] at the boundary so the engine demuxes on the variant rather than on raw
+    /// errno values.
     fn watch(
         &mut self,
         r: ResourceId,
@@ -277,33 +241,26 @@ impl FsWatcher for KqueueWatcher {
     }
 
     fn unwatch(&mut self, r: ResourceId) {
-        // Drop the entry — `OwnedFd`'s `Drop` closes the fd, and the
-        // kernel auto-removes the vnode registration as the fd closes.
-        // The `(fd, fflags, kind)` triple lives in one struct, so a
-        // single `remove(r)` covers all three pieces. Idempotent on
-        // stale ids.
+        // Drop the entry — `OwnedFd`'s `Drop` closes the fd, and the kernel auto-removes the vnode
+        // registration as the fd closes. The `(fd, fflags, kind)` triple lives in one struct, so a
+        // single `remove(r)` covers all three pieces. Idempotent on stale ids.
         let removed = self.by_resource.remove(r).is_some();
         tracing::debug!(?r, removed, "kqueue unwatch");
     }
 
-    /// Non-blocking drain-to-empty of the kqueue queue. Loops on
-    /// `ffi::kevent_drain` (zero `timespec`) until the kernel
-    /// returns `0`, normalising each event to [`WatcherEvent::Fs`]
-    /// in the process. kqueue never emits
-    /// [`WatcherEvent::Overflow`] — `EV_CLEAR` coalesces but never
+    /// Non-blocking drain-to-empty of the kqueue queue. Loops on `ffi::kevent_drain` (zero
+    /// `timespec`) until the kernel returns `0`, normalising each event to [`WatcherEvent::Fs`] in
+    /// the process. kqueue never emits [`WatcherEvent::Overflow`] — `EV_CLEAR` coalesces but never
     /// silently drops; overflow is an inotify-only concept.
     ///
-    /// The drain-to-empty loop is the structural enforcement of the
-    /// edge-triggered contract: with the kqueue fd registered in
-    /// the reactor's edge-triggered mode, residual records would
-    /// strand future events until the next edge transition.
-    /// Excess events past `EVENT_BATCH` sit in the kernel queue
-    /// across loop iterations; the loop terminates only when the
-    /// kernel returns `0`, guaranteeing the queue is empty.
+    /// The drain-to-empty loop is the structural enforcement of the edge-triggered contract: with
+    /// the kqueue fd registered in the reactor's edge-triggered mode, residual records would strand
+    /// future events until the next edge transition. Excess events past `EVENT_BATCH` sit in the
+    /// kernel queue across loop iterations; the loop terminates only when the kernel returns `0`,
+    /// guaranteeing the queue is empty.
     ///
-    /// `EINTR` retry lives inside `ffi::kevent_drain`. Any other
-    /// syscall error classifies through [`WatchFailureExt::from_io`]
-    /// and terminates the drain mid-stream; `out` may be partially
+    /// `EINTR` retry lives inside `ffi::kevent_drain`. Any other syscall error classifies through
+    /// [`WatchFailureExt::from_io`] and terminates the drain mid-stream; `out` may be partially
     /// populated on `Err`.
     fn drain_ready(&mut self, out: &mut Vec<WatcherEvent>) -> Result<usize, WatchFailure> {
         let mut events = [ffi::Kevent::zeroed(); EVENT_BATCH];
@@ -312,9 +269,8 @@ impl FsWatcher for KqueueWatcher {
             let n =
                 ffi::kevent_drain(&self.kq, &mut events).map_err(|e| WatchFailure::from_io(&e))?;
             if n == 0 {
-                // Kernel queue drained; edge-triggered contract
-                // satisfied. One log per drain_ready call — per-
-                // iteration logging would explode on bursts.
+                // Kernel queue drained; edge-triggered contract satisfied. One log per drain_ready
+                // call — per- iteration logging would explode on bursts.
                 tracing::trace!(total = total_emitted, "kqueue drain complete");
                 return Ok(total_emitted);
             }
@@ -325,10 +281,9 @@ impl FsWatcher for KqueueWatcher {
                     continue;
                 }
                 let r = ResourceId::from(KeyData::from_ffi(raw));
-                // Kind cache miss is possible if the resource was
-                // unwatched between the kernel's queue-add and our
-                // drain; default to `Unknown` and let `normalize`
-                // apply its defensive map.
+                // Kind cache miss is possible if the resource was unwatched between the kernel's
+                // queue-add and our drain; default to `Unknown` and let `normalize` apply its
+                // defensive map.
                 let kind = self
                     .by_resource
                     .get(r)
@@ -337,11 +292,9 @@ impl FsWatcher for KqueueWatcher {
                 else {
                     continue;
                 };
-                // Stale-event passthrough: `r` may already have been
-                // removed from `by_resource` between kernel queue-up
-                // and our drain. Emit anyway — engine's
-                // `EventOnUnwatchedResource` Diagnostic handles the
-                // race.
+                // Stale-event passthrough: `r` may already have been removed from `by_resource`
+                // between kernel queue-up and our drain. Emit anyway — engine's
+                // `EventOnUnwatchedResource` Diagnostic handles the race.
                 out.push(WatcherEvent::Fs {
                     resource: r,
                     event: fs_event,

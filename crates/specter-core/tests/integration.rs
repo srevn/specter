@@ -1,10 +1,8 @@
-//! Cross-module integration: shared Profile via `config_hash`, distinct
-//! Profile across `max_settle`/`pattern`, detach clears both indices, slot
-//! semantics under Profile anchoring.
+//! Cross-module integration: shared Profile via `config_hash`, distinct Profile across
+//! `max_settle`/`pattern`, detach clears both indices, slot semantics under Profile anchoring.
 //!
-//! These tests intentionally exercise the Sub addition flow (find then
-//! attach if absent) so any future shape change here is visible at this
-//! seam.
+//! These tests intentionally exercise the Sub addition flow (find then attach if absent) so any
+//! future shape change here is visible at this seam.
 
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::{
@@ -214,12 +212,10 @@ fn detach_clears_back_references_on_both_sides() {
 
 #[test]
 fn rename_after_detach_yields_fresh_id() {
-    // Mimics the engine's rename handling: detach Profile → vacate +
-    // try_reap → ensure with a new segment. The cascade in `try_reap`
-    // also frees the now-orphaned `/dir` parent (no other claims), so
-    // the post-reap re-attach re-creates the full path — the engine's
-    // own `attach_sub_inner` does exactly this via
-    // `materialize_path_or_pending`.
+    // Mimics the engine's rename handling: detach Profile → vacate + try_reap → ensure with a new
+    // segment. The cascade in `try_reap` also frees the now-orphaned `/dir` parent (no other
+    // claims), so the post-reap re-attach re-creates the full path — the engine's own
+    // `attach_sub_inner` does exactly this via `materialize_path_or_pending`.
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
     let parent = tree.ensure_root("/dir", ResourceRole::User);
@@ -252,8 +248,8 @@ fn rename_after_detach_yields_fresh_id() {
         "cascade reaped the now-orphaned parent",
     );
 
-    // Re-ensure the path (the engine's own re-attach flow). The fresh
-    // `/dir` slot gets a new id; the renamed `bar.c` under it likewise.
+    // Re-ensure the path (the engine's own re-attach flow). The fresh `/dir` slot gets a new id;
+    // the renamed `bar.c` under it likewise.
     let parent_fresh = tree.ensure_root("/dir", ResourceRole::User);
     let id_new = tree
         .ensure_child(parent_fresh, "bar.c", ResourceRole::User)
@@ -264,8 +260,7 @@ fn rename_after_detach_yields_fresh_id() {
 
 #[test]
 fn recreate_at_anchored_slot_keeps_id() {
-    // Mimics `touch foo.c` recreating after a delete that didn't detach the
-    // Profile.
+    // Mimics `touch foo.c` recreating after a delete that didn't detach the Profile.
     let mut tree = Tree::new();
     let mut profiles = ProfileMap::new();
     let parent = tree.ensure_root("/dir", ResourceRole::User);

@@ -1,11 +1,9 @@
 //! Sub-count derivation invariance.
 //!
-//! `SubRegistry::at(profile).len()` is the *sole* source of a Profile's
-//! live-Sub count, and the `detach_sub_inner` choreography derives its
-//! post-detach count from it directly. This pins the invariant: across
-//! an arbitrary attach/detach permutation on Subs sharing one Profile,
-//! the derived count tracks the live set exactly — no drift, since
-//! there is no second counter to drift from.
+//! `SubRegistry::at(profile).len()` is the *sole* source of a Profile's live-Sub count, and the
+//! `detach_sub_inner` choreography derives its post-detach count from it directly. This pins the
+//! invariant: across an arbitrary attach/detach permutation on Subs sharing one Profile, the derived
+//! count tracks the live set exactly — no drift, since there is no second counter to drift from.
 
 use specter_core::{Input, ResourceRole, ScanConfig, SubAttachAnchor, SubId};
 use specter_engine::Engine;
@@ -17,8 +15,8 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, specter_core::ResourceKind::Dir);
-    // Identical (resource, ScanConfig, max_settle, settle, events) ⇒
-    // identical config_hash ⇒ every Sub attaches to one shared Profile.
+    // Identical (resource, ScanConfig, max_settle, settle, events) ⇒ identical config_hash ⇒ every
+    // Sub attaches to one shared Profile.
     let cfg = ScanConfig::builder().recursive(true).build();
     let now = Instant::now();
 
@@ -78,8 +76,8 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
     );
     assert_eq!(e.subs().at(pid).len(), 3, "count climbs back to three");
 
-    // Drain to empty. Each detach derives the next count from the
-    // registry alone; the last one leaves zero.
+    // Drain to empty. Each detach derives the next count from the registry alone; the last one
+    // leaves zero.
     for (sid, expected) in [(s1, 2), (s3, 1), (s4, 0)] {
         e.step(Input::DetachSub(sid), now);
         assert_eq!(

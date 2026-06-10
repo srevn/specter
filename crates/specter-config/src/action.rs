@@ -1,43 +1,37 @@
 //! Validation-only surface-syntax tree for `[[watch.actions]]`.
 //!
-//! The TOML `actions = [{ ... }, ...]` array deserialises into a flat
-//! sequence of [`crate::raw::RawAction`] entries. Validation rewrites
-//! each entry into one [`Action`] node (a discriminated union over the
-//! variants the surface grammar supports); [`lower_to_program`] then
+//! The TOML `actions = [{ ... }, ...]` array deserialises into a flat sequence of
+//! [`crate::raw::RawAction`] entries. Validation rewrites each entry into one [`Action`] node (a
+//! discriminated union over the variants the surface grammar supports); [`lower_to_program`] then
 //! folds the tree into the engine/actuator-side [`ActionProgram`].
 //!
 //! # Why a separate AST
 //!
-//! The runtime sees only the lowered CFG-shaped op program — there is no
-//! benefit to teaching the engine or actuator about pipes, conditionals,
-//! or other surface-grammar shapes. Keeping the AST in `specter-config`
-//! means future variants land here without bloating `specter-core`'s
-//! public surface; the lowering pass is the single seam between the two
-//! layers.
+//! The runtime sees only the lowered CFG-shaped op program — there is no benefit to teaching the
+//! engine or actuator about pipes, conditionals, or other surface-grammar shapes. Keeping the AST
+//! in `specter-config` means future variants land here without bloating `specter-core`'s public
+//! surface; the lowering pass is the single seam between the two layers.
 //!
 //! # Lowering invariants
 //!
 //! Each op has explicit `on_ok` / `on_failed` edges. Lowering produces:
 //!
-//! - **`Exec` / `Pipe`** — `on_ok` continues to the next action's first
-//!   op (or [`BranchTarget::Escape`] at scope tail); `on_failed` is
-//!   [`BranchTarget::Terminate`] (stop-on-failure, outcome propagates).
-//! - **`Conditional`** — the predicate (lowered as `SpawnBody::Exec`)'s
-//!   edges depend on then/else presence:
-//!     - `on_ok` → then-branch's first op when non-empty; otherwise the
-//!       post-conditional slot (`after`).
-//!     - `on_failed` → else-branch's first op when non-empty; otherwise
-//!       `after`. When `after` resolves to [`BranchTarget::Escape`], the
-//!       "branch, not guard" outcome elision is preserved: a Failed
-//!       predicate with no else terminates Ok rather than propagating
-//!       Failed.
+//! - **`Exec` / `Pipe`** — `on_ok` continues to the next action's first op (or
+//!   [`BranchTarget::Escape`] at scope tail); `on_failed` is [`BranchTarget::Terminate`]
+//!   (stop-on-failure, outcome propagates).
+//! - **`Conditional`** — the predicate (lowered as `SpawnBody::Exec`)'s edges depend on then/else
+//!   presence:
+//!     - `on_ok` → then-branch's first op when non-empty; otherwise the post-conditional slot
+//!       (`after`).
+//!     - `on_failed` → else-branch's first op when non-empty; otherwise `after`. When `after`
+//!       resolves to [`BranchTarget::Escape`], the "branch, not guard" outcome elision is
+//!       preserved: a Failed predicate with no else terminates Ok rather than propagating Failed.
 //!
-//!   Then-body and else-body tails are patched with the post-conditional
-//!   `after` slot the same way sequence tails are.
+//!   Then-body and else-body tails are patched with the post-conditional `after` slot the same way
+//!   sequence tails are.
 //!
-//! The [`ProgramBuilder`] enforces forward-only edges and in-bounds
-//! Continue targets at patch time; backward jumps are unrepresentable
-//! by construction (no `Loop`-like surface).
+//! The [`ProgramBuilder`] enforces forward-only edges and in-bounds Continue targets at patch time;
+//! backward jumps are unrepresentable by construction (no `Loop`-like surface).
 
 use specter_core::program::{
     ActionProgram, BranchTarget, Edge, ExecAction, MultiStage, OpHandle, ProgramBuilder,
@@ -45,63 +39,53 @@ use specter_core::program::{
 };
 use std::sync::Arc;
 
-/// Surface-syntax tree produced by validation. Lives in `specter-config`
-/// because it's a validation artifact — it never reaches the engine or
-/// actuator. After validation, lowering folds it into an
+/// Surface-syntax tree produced by validation. Lives in `specter-config` because it's a validation
+/// artifact — it never reaches the engine or actuator. After validation, lowering folds it into an
 /// `Arc<ActionProgram>`; the tree is dropped at the function boundary.
 ///
-/// `pub(crate)` because the tree never escapes this crate. Future
-/// variants land here as additional arms; the runtime stays oblivious.
+/// `pub(crate)` because the tree never escapes this crate. Future variants land here as additional
+/// arms; the runtime stays oblivious.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Action {
     /// Spawn a single process with this argv template.
     Exec(ExecAction),
-    /// Spawn N processes wired stdout→stdin. `stages` is the spawn
-    /// order — stage 0's stdout feeds stage 1's stdin, etc. Each
-    /// stage carries its own [`ExecAction::timeout`]; the actuator's
+    /// Spawn N processes wired stdout→stdin. `stages` is the spawn order — stage 0's stdout feeds
+    /// stage 1's stdin, etc. Each stage carries its own [`ExecAction::timeout`]; the actuator's
     /// per-stage timer thread enforces them independently.
     ///
-    /// `stages: Arc<[ExecAction]>` (not `Box<[…]>`) so lowering can
-    /// `Arc::clone` it into [`MultiStage::new`], which reifies the
-    /// validated `stages.len() >= 2` guarantee into [`SpawnBody::Pipe`]
-    /// without re-allocating the leaf vector (`MultiStage` is a
-    /// zero-cost wrapper over the shared `Arc`). Validation rejects
-    /// 0/1-stage pipes upstream as
-    /// [`crate::error::IssueKind::EmptyPipe`] /
-    /// [`crate::error::IssueKind::SingleStagePipe`] — one command uses
-    /// top-level `exec`.
+    /// `stages: Arc<[ExecAction]>` (not `Box<[…]>`) so lowering can `Arc::clone` it into
+    /// [`MultiStage::new`], which reifies the validated `stages.len() >= 2` guarantee into
+    /// [`SpawnBody::Pipe`] without re-allocating the leaf vector (`MultiStage` is a zero-cost
+    /// wrapper over the shared `Arc`). Validation rejects 0/1-stage pipes upstream as
+    /// [`crate::error::IssueKind::EmptyPipe`] / [`crate::error::IssueKind::SingleStagePipe`] — one
+    /// command uses top-level `exec`.
     Pipe { stages: Arc<[ExecAction]> },
     /// Predicate + then-branch + optional else-branch.
     ///
-    /// `when` runs first; on Ok the `then` body runs to completion (in
-    /// order, stop-on-failure); on Failed (or spawn failure / resolver
-    /// failure) the `otherwise` body runs (if `Some`), or the
-    /// conditional is skipped entirely (if `None`). The predicate's own
-    /// Failed outcome does NOT propagate to plan terminus — the
-    /// conditional is a branch, not a guard.
+    /// `when` runs first; on Ok the `then` body runs to completion (in order, stop-on-failure); on
+    /// Failed (or spawn failure / resolver failure) the `otherwise` body runs (if `Some`), or the
+    /// conditional is skipped entirely (if `None`). The predicate's own Failed outcome does NOT
+    /// propagate to plan terminus — the conditional is a branch, not a guard.
     ///
-    /// `then` / `otherwise` are `Box<[Action]>` because lowering walks
-    /// them element-by-element; the slice doesn't need to survive past
-    /// the tree's drop.
+    /// `then` / `otherwise` are `Box<[Action]>` because lowering walks them element-by-element; the
+    /// slice doesn't need to survive past the tree's drop.
     Conditional {
         when: ExecAction,
         then: Box<[Self]>,
-        /// TOML field name is `else` (Rust keyword); the Rust struct
-        /// field on [`crate::raw::RawAction`] is `otherwise` via
-        /// `#[serde(rename = "else")]`. `None` means no else-branch was
-        /// supplied; empty `Some(_)` is normalised to `None` by
-        /// validation so the lowering pass has one shape to handle.
+        /// TOML field name is `else` (Rust keyword); the Rust struct field on
+        /// [`crate::raw::RawAction`] is `otherwise` via `#[serde(rename = "else")]`. `None` means
+        /// no else-branch was supplied; empty `Some(_)` is normalised to `None` by validation so
+        /// the lowering pass has one shape to handle.
         otherwise: Option<Box<[Self]>>,
     },
 }
 
-/// One unpatched edge from a lowered op. Returned by [`lower_action`]
-/// and propagated up to the enclosing block, which patches each tail
-/// with the slot where execution should continue after this body.
+/// One unpatched edge from a lowered op. Returned by [`lower_action`] and propagated up to the
+/// enclosing block, which patches each tail with the slot where execution should continue after
+/// this body.
 ///
-/// The `edge` discriminates the two flavours: a no-else conditional's
-/// pred carries its tail on `on_failed` (Failed predicate falls
-/// through); every other case has its tail on `on_ok`.
+/// The `edge` discriminates the two flavours: a no-else conditional's pred carries its tail on
+/// `on_failed` (Failed predicate falls through); every other case has its tail on `on_ok`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 struct Tail {
     handle: OpHandle,
@@ -124,15 +108,13 @@ impl Tail {
     }
 }
 
-/// Walk a validated `[Action]` sequence and emit the equivalent
-/// [`ActionProgram`]. The Arc is the same allocation that the engine's
-/// `Sub.program` and every emitted `Effect.program` references — one
-/// shared CFG-shaped op program per validated Sub.
+/// Walk a validated `[Action]` sequence and emit the equivalent [`ActionProgram`]. The Arc is the
+/// same allocation that the engine's `Sub.program` and every emitted `Effect.program` references —
+/// one shared CFG-shaped op program per validated Sub.
 ///
-/// Returns [`ProgramError`] on builder-hygiene violations (unreachable
-/// from a correct lowering pass); the caller maps these to validation
-/// issues so an internal bug surfaces as a config-load error rather
-/// than a panic.
+/// Returns [`ProgramError`] on builder-hygiene violations (unreachable from a correct lowering
+/// pass); the caller maps these to validation issues so an internal bug surfaces as a config-load
+/// error rather than a panic.
 pub(crate) fn lower_to_program(tree: &[Action]) -> Result<Arc<ActionProgram>, ProgramError> {
     let mut b = ProgramBuilder::new();
     let top_tails = lower_block(tree, &mut b)?;
@@ -143,14 +125,12 @@ pub(crate) fn lower_to_program(tree: &[Action]) -> Result<Arc<ActionProgram>, Pr
     Ok(Arc::new(b.build()?))
 }
 
-/// Lower a block (a slice of [`Action`]s in execution order), returning
-/// the tails of the block's last action that need to be patched with
-/// "where execution continues after this block."
+/// Lower a block (a slice of [`Action`]s in execution order), returning the tails of the block's
+/// last action that need to be patched with "where execution continues after this block."
 ///
-/// For each non-last action, the tails are patched inline to point at
-/// the next action's first op slot — known at iteration end via
-/// [`ProgramBuilder::continue_to_next`] (the next iteration's first
-/// emit fills the deferred slot).
+/// For each non-last action, the tails are patched inline to point at the next action's first op
+/// slot — known at iteration end via [`ProgramBuilder::continue_to_next`] (the next iteration's
+/// first emit fills the deferred slot).
 fn lower_block(actions: &[Action], b: &mut ProgramBuilder) -> Result<Vec<Tail>, ProgramError> {
     let n = actions.len();
     let mut returned_tails: Vec<Tail> = Vec::new();
@@ -162,10 +142,9 @@ fn lower_block(actions: &[Action], b: &mut ProgramBuilder) -> Result<Vec<Tail>, 
         if is_last {
             returned_tails.extend(action_tails);
         } else {
-            // The next iteration's first emit lands at the slot
-            // `continue_to_next` names right now — patch-time
-            // deferred-slot promise (accepted as `target == pending.len()`,
-            // filled by the upcoming emit).
+            // The next iteration's first emit lands at the slot `continue_to_next` names right now
+            // — patch-time deferred-slot promise (accepted as `target == pending.len()`, filled by
+            // the upcoming emit).
             let next_slot = b.continue_to_next();
             for tail in action_tails {
                 b.patch(tail.handle, tail.edge, next_slot)?;
@@ -178,14 +157,13 @@ fn lower_block(actions: &[Action], b: &mut ProgramBuilder) -> Result<Vec<Tail>, 
 
 /// Lower one [`Action`], returning its tail handles.
 ///
-/// `Exec` and `Pipe` produce one op with `on_failed = Terminate` and
-/// `on_ok` unpatched (the single tail) via [`lower_spawn`].
+/// `Exec` and `Pipe` produce one op with `on_failed = Terminate` and `on_ok` unpatched (the single
+/// tail) via [`lower_spawn`].
 ///
-/// `Conditional` produces the predicate op plus the lowered then- and
-/// else-bodies. The predicate's edges are patched here for the
-/// non-empty-body sides; the empty-body side becomes a tail (pred's
-/// `on_ok` for empty-then, pred's `on_failed` for no-else). Body tails
-/// bubble up to the caller for patching with the post-conditional slot.
+/// `Conditional` produces the predicate op plus the lowered then- and else-bodies. The predicate's
+/// edges are patched here for the non-empty-body sides; the empty-body side becomes a tail (pred's
+/// `on_ok` for empty-then, pred's `on_failed` for no-else). Body tails bubble up to the caller for
+/// patching with the post-conditional slot.
 fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, ProgramError> {
     match action {
         Action::Exec(e) => lower_spawn(SpawnBody::Exec(e.clone()), b),
@@ -200,8 +178,8 @@ fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, Pr
             let pred = b.emit(SpawnBody::Exec(when.clone()));
             let mut tails: Vec<Tail> = Vec::new();
 
-            // pred.on_ok: chain to then's first slot, or surface as a
-            // tail for empty-then (the caller patches it with `after`).
+            // pred.on_ok: chain to then's first slot, or surface as a tail for empty-then (the
+            // caller patches it with `after`).
             if then.is_empty() {
                 tails.push(Tail::on_ok(pred));
             } else {
@@ -210,10 +188,9 @@ fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, Pr
                 tails.extend(lower_block(then, b)?);
             }
 
-            // pred.on_failed: chain to else's first slot when present and
-            // non-empty; otherwise surface as a tail (no-else fall-through
-            // → `after`, which preserves "branch, not guard" outcome
-            // elision when `after` resolves to `Escape`).
+            // pred.on_failed: chain to else's first slot when present and non-empty; otherwise
+            // surface as a tail (no-else fall-through → `after`, which preserves "branch, not
+            // guard" outcome elision when `after` resolves to `Escape`).
             match otherwise {
                 Some(body) if !body.is_empty() => {
                     let else_first = b.continue_to_next();
@@ -230,10 +207,9 @@ fn lower_action(action: &Action, b: &mut ProgramBuilder) -> Result<Vec<Tail>, Pr
     }
 }
 
-/// Lower a "spawn-and-stop-on-failure" body (Exec or Pipe) — emit one
-/// op, patch `on_failed = Terminate`, surface `on_ok` as the tail.
-/// Shared by [`Action::Exec`] and [`Action::Pipe`] since they differ
-/// only in the [`SpawnBody`] discriminant.
+/// Lower a "spawn-and-stop-on-failure" body (Exec or Pipe) — emit one op, patch `on_failed =
+/// Terminate`, surface `on_ok` as the tail. Shared by [`Action::Exec`] and [`Action::Pipe`] since
+/// they differ only in the [`SpawnBody`] discriminant.
 fn lower_spawn(body: SpawnBody, b: &mut ProgramBuilder) -> Result<Vec<Tail>, ProgramError> {
     let h = b.emit(body);
     b.patch_on_failed(h, BranchTarget::Terminate)?;
@@ -252,9 +228,8 @@ mod tests {
         ExecAction::new([ArgTemplate::new([ArgPart::literal(literal)])], None)
     }
 
-    /// Build a `Continue(idx)` for assertion ergonomics. The
-    /// `BranchIndex::new` constructor is sealed to `program::*`, so test
-    /// assertions reach for the [`ProgramOp`]'s actual edge enum.
+    /// Build a `Continue(idx)` for assertion ergonomics. The `BranchIndex::new` constructor is
+    /// sealed to `program::*`, so test assertions reach for the [`ProgramOp`]'s actual edge enum.
     fn ops(program: &Arc<ActionProgram>) -> &[ProgramOp] {
         program.ops()
     }
@@ -271,8 +246,7 @@ mod tests {
         }
     }
 
-    /// Single Exec lowers to a one-op program. on_ok escapes; on_failed
-    /// terminates (stop-on-failure).
+    /// Single Exec lowers to a one-op program. on_ok escapes; on_failed terminates (stop-on-failure).
     #[test]
     fn single_exec_lowers_to_one_op() {
         let tree = [Action::Exec(exec_with_literal("/bin/build"))];
@@ -283,8 +257,8 @@ mod tests {
         assert_eq!(ops(&program)[0].on_failed(), BranchTarget::Terminate);
     }
 
-    /// Multiple Execs chain via `Continue` on_ok; the last one escapes.
-    /// on_failed is Terminate at every step (stop-on-failure).
+    /// Multiple Execs chain via `Continue` on_ok; the last one escapes. on_failed is Terminate at
+    /// every step (stop-on-failure).
     #[test]
     fn multi_exec_chains_via_continue() {
         let tree = [
@@ -304,8 +278,8 @@ mod tests {
         }
     }
 
-    /// `Action::Pipe` lowers to a single `SpawnBody::Pipe` carrying the
-    /// same `Arc` — no per-leaf re-allocation.
+    /// `Action::Pipe` lowers to a single `SpawnBody::Pipe` carrying the same `Arc` — no per-leaf
+    /// re-allocation.
     #[test]
     fn pipe_lowers_to_one_op_sharing_arc() {
         let stages: Arc<[ExecAction]> = Arc::from(vec![
@@ -354,10 +328,9 @@ mod tests {
         assert_eq!(ops(&program)[2].on_ok(), BranchTarget::Escape);
     }
 
-    /// Conditional with no else: predicate's on_failed = Escape ("branch,
-    /// not guard" outcome elision); on_ok chains into then-body, whose
-    /// tail escapes. At top level there's no propagation of predicate
-    /// Failed.
+    /// Conditional with no else: predicate's on_failed = Escape ("branch, not guard" outcome
+    /// elision); on_ok chains into then-body, whose tail escapes. At top level there's no
+    /// propagation of predicate Failed.
     #[test]
     fn conditional_no_else_predicate_failed_escapes() {
         let tree = [Action::Conditional {
@@ -377,9 +350,8 @@ mod tests {
         assert_eq!(ops(&program)[1].on_failed(), BranchTarget::Terminate);
     }
 
-    /// Conditional with else: predicate routes Ok→then-first,
-    /// Failed→else-first. Both then-tail and else-tail escape at the
-    /// post-conditional slot (= Escape at top level).
+    /// Conditional with else: predicate routes Ok→then-first, Failed→else-first. Both then-tail and
+    /// else-tail escape at the post-conditional slot (= Escape at top level).
     #[test]
     fn conditional_with_else_routes_both_branches() {
         let tree = [Action::Conditional {
@@ -400,10 +372,9 @@ mod tests {
         assert_eq!(ops(&program)[2].on_failed(), BranchTarget::Terminate);
     }
 
-    /// Conditional with empty then and non-empty else: predicate's
-    /// on_ok escapes directly (no then-body to enter); on_failed enters
-    /// the else-branch. Validation rejects empty-then-empty-else, so
-    /// this shape always has a non-empty else when then is empty.
+    /// Conditional with empty then and non-empty else: predicate's on_ok escapes directly (no
+    /// then-body to enter); on_failed enters the else-branch. Validation rejects
+    /// empty-then-empty-else, so this shape always has a non-empty else when then is empty.
     #[test]
     fn conditional_empty_then_nonempty_else() {
         let tree = [Action::Conditional {
@@ -425,11 +396,10 @@ mod tests {
         assert_eq!(ops(&program)[1].on_failed(), BranchTarget::Terminate);
     }
 
-    /// `Some(empty)` else is shape-equivalent to `None`: lowering emits
-    /// pred.on_failed = Escape (the no-else fall-through). Validation
-    /// rejects this shape upstream (EmptyConditional fires for
-    /// then=[]+else=[]); pinning the lowering's response keeps the IR
-    /// well-formed even if the validator's check is bypassed.
+    /// `Some(empty)` else is shape-equivalent to `None`: lowering emits pred.on_failed = Escape
+    /// (the no-else fall-through). Validation rejects this shape upstream (EmptyConditional fires
+    /// for then=[]+else=[]); pinning the lowering's response keeps the IR well-formed even if the
+    /// validator's check is bypassed.
     #[test]
     fn conditional_some_empty_else_falls_through_like_none() {
         let tree = [Action::Conditional {
@@ -443,11 +413,9 @@ mod tests {
         assert_eq!(ops(&program)[0].on_failed(), BranchTarget::Escape);
     }
 
-    /// Nested conditional in the then-branch produces 5 ops with the
-    /// CFG-shaped IR (no intermediate Jump opcodes needed). Outer
-    /// predicate routes Ok→inner-pred, Failed→outer-else. Inner
-    /// predicate routes Ok→inner-then, Failed→inner-else. All body tails
-    /// escape at the top level.
+    /// Nested conditional in the then-branch produces 5 ops with the CFG-shaped IR (no intermediate
+    /// Jump opcodes needed). Outer predicate routes Ok→inner-pred, Failed→outer-else. Inner
+    /// predicate routes Ok→inner-then, Failed→inner-else. All body tails escape at the top level.
     #[test]
     fn nested_conditional_in_then_lowers_to_five_ops() {
         let tree = [Action::Conditional {
@@ -481,10 +449,9 @@ mod tests {
         }
     }
 
-    /// Conditional inside a non-last sequence position: the conditional's
-    /// tails (then-tail and else-tail / pred.on_failed for no-else) chain
-    /// to the next iteration's first slot, not to Escape. The next
-    /// iteration's own tail is what escapes.
+    /// Conditional inside a non-last sequence position: the conditional's tails (then-tail and
+    /// else-tail / pred.on_failed for no-else) chain to the next iteration's first slot, not to
+    /// Escape. The next iteration's own tail is what escapes.
     #[test]
     fn conditional_in_non_last_position_chains_to_next() {
         let tree = [
@@ -511,10 +478,9 @@ mod tests {
         assert_eq!(ops(&program)[2].on_failed(), BranchTarget::Terminate);
     }
 
-    /// Empty surface trees lower to a [`ProgramError::EmptyProgram`].
-    /// The `validate_actions` entry point rejects the empty case before
-    /// calling `lower_to_program`, so this is purely a defensive contract
-    /// test for the lowering primitive.
+    /// Empty surface trees lower to a [`ProgramError::EmptyProgram`]. The `validate_actions` entry
+    /// point rejects the empty case before calling `lower_to_program`, so this is purely a
+    /// defensive contract test for the lowering primitive.
     #[test]
     fn empty_tree_returns_empty_program_error() {
         let err = lower_to_program(&[]).expect_err("empty tree must error");

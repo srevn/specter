@@ -1,10 +1,8 @@
 //! Translator: `(ClassSet, ResourceKind) → inotify mask`.
 //!
-//! Single platform-specific translation point for Linux. Mirror of
-//! [`crate::kqueue::translate`]. The identity floor is OR-ed
-//! unconditionally onto every registration so the engine's reconciler
-//! always sees terminal events (delete / rename / unmount) regardless of
-//! the user's class mask.
+//! Single platform-specific translation point for Linux. Mirror of [`crate::kqueue::translate`].
+//! The identity floor is OR-ed unconditionally onto every registration so the engine's reconciler
+//! always sees terminal events (delete / rename / unmount) regardless of the user's class mask.
 //!
 //! ## Mapping table
 //!
@@ -14,52 +12,42 @@
 //! | `CONTENT`   | ∅                                                         | `IN_MODIFY \| IN_CLOSE_WRITE`      |
 //! | `METADATA`  | `IN_ATTRIB`                                               | `IN_ATTRIB`                        |
 //!
-//! Identity floor (always OR-ed): `IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT`.
-//! Defensive flags (always OR-ed): `IN_EXCL_UNLINK`.
+//! Identity floor (always OR-ed): `IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT`. Defensive flags
+//! (always OR-ed): `IN_EXCL_UNLINK`.
 //!
-//! Dir-anchored watches additionally OR `IN_ONLYDIR` at install time;
-//! that lives in the watcher, not in the translator — it's an
-//! `inotify_add_watch` directional flag, not part of the event mask.
+//! Dir-anchored watches additionally OR `IN_ONLYDIR` at install time; that lives in the watcher, not
+//! in the translator — it's an `inotify_add_watch` directional flag, not part of the event mask.
 //!
 //! ## Why no `IN_DONT_FOLLOW`
 //!
-//! kqueue's `O_NOFOLLOW` symlink defense lives at the file-open seam, and
-//! the inotify port preserves that discipline by passing `O_NOFOLLOW` to
-//! the [`crate::inotify::ffi::open_o_path`] step that fronts every
-//! `add_watch`. The follow-up `inotify_add_watch` is then issued on a
-//! `/proc/self/fd/N` magic-symlink path, which the kernel resolves to
-//! the exact inode the fd refers to.
+//! kqueue's `O_NOFOLLOW` symlink defense lives at the file-open seam, and the inotify port preserves
+//! that discipline by passing `O_NOFOLLOW` to the [`crate::inotify::ffi::open_o_path`] step that
+//! fronts every `add_watch`. The follow-up `inotify_add_watch` is then issued on a `/proc/self/fd/N`
+//! magic-symlink path, which the kernel resolves to the exact inode the fd refers to.
 //!
-//! Including `IN_DONT_FOLLOW` would tell the kernel to *not* follow the
-//! `/proc/self/fd/N` magic symlink — i.e., to install on the symlink
-//! itself rather than the inode it points at. The kernel rejects such
-//! installs (`EACCES` on a regular-file underlying inode; `ENOTDIR` when
-//! `IN_ONLYDIR` is also set) because magic symlinks aren't watchable
-//! inodes. The user-path symlink defense is satisfied entirely by
-//! `O_NOFOLLOW`; adding `IN_DONT_FOLLOW` would actively break the
-//! race-free install.
+//! Including `IN_DONT_FOLLOW` would tell the kernel to *not* follow the `/proc/self/fd/N` magic
+//! symlink — i.e., to install on the symlink itself rather than the inode it points at. The kernel
+//! rejects such installs (`EACCES` on a regular-file underlying inode; `ENOTDIR` when `IN_ONLYDIR`
+//! is also set) because magic symlinks aren't watchable inodes. The user-path symlink defense is
+//! satisfied entirely by `O_NOFOLLOW`; adding `IN_DONT_FOLLOW` would actively break the race-free
+//! install.
 //!
 //! ## kqueue parity
 //!
-//! kqueue's `NOTE_LINK` is kind-aware: STRUCTURE on Dir, METADATA on File.
-//! inotify has no `NOTE_LINK` analogue — hardlink count changes on a File
-//! surface as `IN_ATTRIB` (per `inotify(7)`: "link count since Linux
-//! 2.6.25"), which the translator already routes through METADATA. The
-//! kind-disambiguating branch the kqueue translator carries is therefore
-//! collapsed: `IN_ATTRIB` is set whenever METADATA is requested,
-//! regardless of kind.
+//! kqueue's `NOTE_LINK` is kind-aware: STRUCTURE on Dir, METADATA on File. inotify has no
+//! `NOTE_LINK` analogue — hardlink count changes on a File surface as `IN_ATTRIB` (per
+//! `inotify(7)`: "link count since Linux 2.6.25"), which the translator already routes through
+//! METADATA. The kind-disambiguating branch the kqueue translator carries is therefore collapsed:
+//! `IN_ATTRIB` is set whenever METADATA is requested, regardless of kind.
 //!
 //! ## Unknown kind
 //!
-//! [`ResourceKind::Unknown`] (defensive path; the engine has not yet
-//! classified the slot) collapses to `File` via [`ResourceKind::effective`]
-//! — single source of truth shared with the kqueue translator and the
-//! engine's entry filter. STRUCTURE on Unknown therefore registers no
-//! extra bits (Unknown ≡ File-shape; STRUCTURE is dir-only); CONTENT on
-//! Unknown registers the file bits. This branch is effectively dead in
-//! v1's flow (the watcher caches the observed kind from `fstat`), but
-//! kept as forward-compatible defence for the descent placeholder edge
-//! case.
+//! [`ResourceKind::Unknown`] (defensive path; the engine has not yet classified the slot) collapses
+//! to `File` via [`ResourceKind::effective`] — single source of truth shared with the kqueue
+//! translator and the engine's entry filter. STRUCTURE on Unknown therefore registers no extra bits
+//! (Unknown ≡ File-shape; STRUCTURE is dir-only); CONTENT on Unknown registers the file bits. This
+//! branch is effectively dead in v1's flow (the watcher caches the observed kind from `fstat`), but
+//! kept as forward-compatible defence for the descent placeholder edge case.
 
 use libc::{
     IN_ATTRIB, IN_CLOSE_WRITE, IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_EXCL_UNLINK, IN_MODIFY,
@@ -67,45 +55,37 @@ use libc::{
 };
 use specter_core::{ClassSet, ResourceKind};
 
-/// Identity floor — OR-ed onto every inotify registration regardless of
-/// the user's `events` mask. These three bits drive Tree integrity (slot
-/// vacate on `IN_DELETE_SELF`) and watch lifecycle (re-resolve on
-/// `IN_MOVE_SELF` / `IN_UNMOUNT`); they must always reach
-/// the engine even when the user opted out of CONTENT / STRUCTURE /
-/// METADATA. The engine's entry filter folds terminal events into the
-/// appropriate class for per-Profile filtering (CONTENT for files,
-/// STRUCTURE for dirs); see `engine::transitions::fs_event_to_class`.
+/// Identity floor — OR-ed onto every inotify registration regardless of the user's `events` mask.
+/// These three bits drive Tree integrity (slot vacate on `IN_DELETE_SELF`) and watch lifecycle
+/// (re-resolve on `IN_MOVE_SELF` / `IN_UNMOUNT`); they must always reach the engine even when the
+/// user opted out of CONTENT / STRUCTURE / METADATA. The engine's entry filter folds terminal
+/// events into the appropriate class for per-Profile filtering (CONTENT for files, STRUCTURE for
+/// dirs); see `engine::transitions::fs_event_to_class`.
 ///
-/// `IN_IGNORED` is *not* in this floor: it is not part of the user-
-/// visible class surface. The kernel emits it unconditionally as a
-/// cleanup signal when a watch descriptor is reaped; the watcher
-/// consumes it before normalization.
+/// `IN_IGNORED` is *not* in this floor: it is not part of the user- visible class surface. The
+/// kernel emits it unconditionally as a cleanup signal when a watch descriptor is reaped; the
+/// watcher consumes it before normalization.
 pub(super) const IDENTITY_FLOOR: u32 = IN_DELETE_SELF | IN_MOVE_SELF | IN_UNMOUNT;
 
 /// Defensive flags applied on every `inotify_add_watch`:
 ///
-/// - `IN_EXCL_UNLINK` — stop firing events on an unlinked-but-still-open
-///   inode. kqueue auto-removes the registration when the fd closes;
-///   inotify's path-based registration would otherwise keep delivering
-///   `IN_MODIFY` on a deleted inode held open by a writer. Setting
-///   `IN_EXCL_UNLINK` aligns inotify's semantics with kqueue's
-///   "registration ends when the inode is unreachable."
+/// - `IN_EXCL_UNLINK` — stop firing events on an unlinked-but-still-open inode. kqueue auto-removes
+///   the registration when the fd closes; inotify's path-based registration would otherwise keep
+///   delivering `IN_MODIFY` on a deleted inode held open by a writer. Setting `IN_EXCL_UNLINK`
+///   aligns inotify's semantics with kqueue's "registration ends when the inode is unreachable."
 ///
 /// Symlink defense lives at the file-open seam (`O_NOFOLLOW` on
-/// [`crate::inotify::ffi::open_o_path`]), not in the install mask — see
-/// the module docs above. `IN_DONT_FOLLOW` is incompatible with the
-/// `/proc/self/fd/N` race-free install path and is therefore not
-/// included here.
+/// [`crate::inotify::ffi::open_o_path`]), not in the install mask — see the module docs above.
+/// `IN_DONT_FOLLOW` is incompatible with the `/proc/self/fd/N` race-free install path and is
+/// therefore not included here.
 pub(super) const ADD_WATCH_DEFENCE: u32 = IN_EXCL_UNLINK;
 
-/// Compute the inotify mask for an `inotify_add_watch` call given the
-/// user's [`ClassSet`] and the resource's kind. The result always
-/// contains `IDENTITY_FLOOR | ADD_WATCH_DEFENCE`.
+/// Compute the inotify mask for an `inotify_add_watch` call given the user's [`ClassSet`] and the
+/// resource's kind. The result always contains `IDENTITY_FLOOR | ADD_WATCH_DEFENCE`.
 ///
-/// Pure / `const fn`: no I/O, no allocation, branches only on its
-/// inputs. Excludes `IN_ONLYDIR` — that is an `add_watch` directional
-/// flag the watcher OR-s post-fstat once the kind has been verified,
-/// not part of the event-mask translation.
+/// Pure / `const fn`: no I/O, no allocation, branches only on its inputs. Excludes `IN_ONLYDIR` —
+/// that is an `add_watch` directional flag the watcher OR-s post-fstat once the kind has been
+/// verified, not part of the event-mask translation.
 #[must_use]
 pub(super) const fn class_set_to_mask(events: ClassSet, kind: ResourceKind) -> u32 {
     let mut mask = IDENTITY_FLOOR | ADD_WATCH_DEFENCE;
@@ -121,9 +101,8 @@ pub(super) const fn class_set_to_mask(events: ClassSet, kind: ResourceKind) -> u
         mask |= IN_MODIFY | IN_CLOSE_WRITE;
     }
 
-    // METADATA — both kinds. inotify has no NOTE_LINK analogue (hardlink
-    // count changes surface as IN_ATTRIB on Linux), so the kind-aware
-    // branching kqueue's translator carries collapses here.
+    // METADATA — both kinds. inotify has no NOTE_LINK analogue (hardlink count changes surface as
+    // IN_ATTRIB on Linux), so the kind-aware branching kqueue's translator carries collapses here.
     if events.intersects(ClassSet::METADATA) {
         mask |= IN_ATTRIB;
     }
@@ -141,8 +120,8 @@ mod tests {
     };
     use specter_core::{ClassSet, ResourceKind};
 
-    /// `IDENTITY_FLOOR` membership is a load-bearing invariant;
-    /// pin it explicitly so a refactor that drops a bit fails this test.
+    /// `IDENTITY_FLOOR` membership is a load-bearing invariant; pin it explicitly so a refactor
+    /// that drops a bit fails this test.
     #[test]
     fn identity_floor_includes_delete_move_unmount() {
         assert_ne!(IDENTITY_FLOOR & IN_DELETE_SELF, 0, "DELETE_SELF missing");
@@ -154,18 +133,16 @@ mod tests {
         assert_eq!(IDENTITY_FLOOR & IN_ATTRIB, 0, "floor leaks ATTRIB");
     }
 
-    /// `ADD_WATCH_DEFENCE` membership is the kqueue-parity invariant
-    /// (`IN_EXCL_UNLINK` mirrors kqueue's auto-detach on unlink-then-fd-
-    /// close). Symlink defense lives at the file-open seam
-    /// (`open_o_path`'s `O_NOFOLLOW`), not in the install mask — see
-    /// module docs.
+    /// `ADD_WATCH_DEFENCE` membership is the kqueue-parity invariant (`IN_EXCL_UNLINK` mirrors
+    /// kqueue's auto-detach on unlink-then-fd- close). Symlink defense lives at the file-open seam
+    /// (`open_o_path`'s `O_NOFOLLOW`), not in the install mask — see module docs.
     #[test]
     fn add_watch_defence_pins_excl_unlink() {
         assert_ne!(ADD_WATCH_DEFENCE & IN_EXCL_UNLINK, 0, "EXCL_UNLINK missing");
     }
 
-    /// `ADD_WATCH_DEFENCE` must not include `IN_DONT_FOLLOW` — it would
-    /// break the `/proc/self/fd/N` race-free install path.
+    /// `ADD_WATCH_DEFENCE` must not include `IN_DONT_FOLLOW` — it would break the `/proc/self/fd/N`
+    /// race-free install path.
     #[test]
     fn add_watch_defence_excludes_dont_follow() {
         assert_eq!(
@@ -177,10 +154,9 @@ mod tests {
         );
     }
 
-    /// `ADD_WATCH_DEFENCE` must not include `IN_ONLYDIR` either — that
-    /// directional flag is applied per-install in
-    /// `super::compute_install_mask` only when the resource is a Dir.
-    /// Including it unconditionally would reject every File watch.
+    /// `ADD_WATCH_DEFENCE` must not include `IN_ONLYDIR` either — that directional flag is applied
+    /// per-install in `super::compute_install_mask` only when the resource is a Dir. Including it
+    /// unconditionally would reject every File watch.
     #[test]
     fn add_watch_defence_excludes_onlydir() {
         assert_eq!(
@@ -191,9 +167,8 @@ mod tests {
         );
     }
 
-    /// EMPTY × any-kind always degrades to identity-floor + defence
-    /// only. v1 fallback for fixture-defaulted `ClassSet::EMPTY`
-    /// watches.
+    /// EMPTY × any-kind always degrades to identity-floor + defence only. v1 fallback for
+    /// fixture-defaulted `ClassSet::EMPTY` watches.
     #[test]
     fn empty_class_set_yields_floor_and_defence_only() {
         for kind in [ResourceKind::Dir, ResourceKind::File, ResourceKind::Unknown] {
@@ -279,9 +254,8 @@ mod tests {
 
     #[test]
     fn metadata_on_file_adds_attrib() {
-        // No NOTE_LINK analogue under inotify — IN_ATTRIB covers
-        // hardlink count changes on its own (per inotify(7)). The kind-
-        // aware branch the kqueue translator carries is collapsed here.
+        // No NOTE_LINK analogue under inotify — IN_ATTRIB covers hardlink count changes on its own
+        // (per inotify(7)). The kind- aware branch the kqueue translator carries is collapsed here.
         let m = class_set_to_mask(ClassSet::METADATA, ResourceKind::File);
         assert_eq!(m, IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_ATTRIB);
     }
@@ -331,8 +305,8 @@ mod tests {
     fn all_classes_on_dir_yields_full_dir_mask() {
         let all = ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA;
         let m = class_set_to_mask(all, ResourceKind::Dir);
-        // Dir gets STRUCTURE (CREATE | DELETE | MOVED_*) + METADATA
-        // (ATTRIB); CONTENT is no-op on Dir.
+        // Dir gets STRUCTURE (CREATE | DELETE | MOVED_*) + METADATA (ATTRIB); CONTENT is no-op on
+        // Dir.
         assert_eq!(
             m,
             IDENTITY_FLOOR
@@ -349,17 +323,15 @@ mod tests {
     fn all_classes_on_file_yields_full_file_mask() {
         let all = ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA;
         let m = class_set_to_mask(all, ResourceKind::File);
-        // File gets CONTENT (MODIFY | CLOSE_WRITE) + METADATA (ATTRIB);
-        // STRUCTURE is no-op on File.
+        // File gets CONTENT (MODIFY | CLOSE_WRITE) + METADATA (ATTRIB); STRUCTURE is no-op on File.
         assert_eq!(
             m,
             IDENTITY_FLOOR | ADD_WATCH_DEFENCE | IN_MODIFY | IN_CLOSE_WRITE | IN_ATTRIB,
         );
     }
 
-    /// Re-translation determinism: pure function ⇒ same input always
-    /// yields the same mask. Protects the diff-skip optimization the
-    /// watcher's `watch` relies on.
+    /// Re-translation determinism: pure function ⇒ same input always yields the same mask. Protects
+    /// the diff-skip optimization the watcher's `watch` relies on.
     #[test]
     fn translate_is_deterministic() {
         for events in [

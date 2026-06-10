@@ -3,39 +3,32 @@ use std::path::{Component, Path, PathBuf};
 
 /// Typed failure mode of [`canonicalize_lenient`].
 ///
-/// Each variant maps to exactly one operator-actionable cause; the
-/// validator translates them into specific
-/// [`IssueKind`](crate::error::IssueKind)s rather than collapsing
-/// through a single arm.
+/// Each variant maps to exactly one operator-actionable cause; the validator translates them into
+/// specific [`IssueKind`](crate::error::IssueKind)s rather than collapsing through a single arm.
 #[derive(Debug)]
 pub(crate) enum PathError {
-    /// Input failed `Path::is_absolute()`. Pre-normalisation rejects
-    /// without touching the filesystem.
+    /// Input failed `Path::is_absolute()`. Pre-normalisation rejects without touching the filesystem.
     NotAbsolute,
-    /// Input's `OsStr` is empty. Pre-normalisation rejects before any
-    /// further structural check.
+    /// Input's `OsStr` is empty. Pre-normalisation rejects before any further structural check.
     Empty,
-    /// Input contains a `..` component (anywhere — leading, middle, or
-    /// trailing). Pre-normalisation rejects before any I/O; the operator
-    /// must supply a literal absolute path without parent-dir traversal.
+    /// Input contains a `..` component (anywhere — leading, middle, or trailing). Pre-normalisation
+    /// rejects before any I/O; the operator must supply a literal absolute path without parent-dir
+    /// traversal.
     ///
-    /// `.` is intentionally **not** rejected: `Path::components` already
-    /// normalises away every `.` except leading, and a leading `.` makes
-    /// the path non-absolute (caught above). The remaining accepted
-    /// shape (`/foo/./bar` ≡ `/foo/bar`) is harmless — the kernel treats
-    /// `.` as a no-op during canonicalisation.
+    /// `.` is intentionally **not** rejected: `Path::components` already normalises away every `.`
+    /// except leading, and a leading `.` makes the path non-absolute (caught above). The remaining
+    /// accepted shape (`/foo/./bar` ≡ `/foo/bar`) is harmless — the kernel treats `.` as a no-op
+    /// during canonicalisation.
     ContainsParentDir,
-    /// `canonicalize` surfaced a non-`NotFound` `io::Error` — `PermissionDenied`,
-    /// symlink loop, `NotADirectory`, EIO, etc. `at` carries the cursor
-    /// at the point of failure (equal to the input on a top-level fail,
-    /// a deeper ancestor on a mid-walk fail), and `source` preserves the
+    /// `canonicalize` surfaced a non-`NotFound` `io::Error` — `PermissionDenied`, symlink loop,
+    /// `NotADirectory`, EIO, etc. `at` carries the cursor at the point of failure (equal to the
+    /// input on a top-level fail, a deeper ancestor on a mid-walk fail), and `source` preserves the
     /// raw `io::Error` for the operator-visible detail line.
     Inaccessible { at: PathBuf, source: std::io::Error },
-    /// The canonicalised buffer carries one or more non-UTF-8 segments —
-    /// typically via symlink resolution onto a non-UTF-8 byte path. The
-    /// engine's [`specter_core::Tree::parse_attach_path`] gate requires
-    /// UTF-8; the validator rejects up front rather than passing the
-    /// buck. `resolved` is the canonical buffer with the offending bytes.
+    /// The canonicalised buffer carries one or more non-UTF-8 segments — typically via symlink
+    /// resolution onto a non-UTF-8 byte path. The engine's [`specter_core::Tree::parse_attach_path`]
+    /// gate requires UTF-8; the validator rejects up front rather than passing the buck. `resolved`
+    /// is the canonical buffer with the offending bytes.
     NonUtf8 { resolved: PathBuf },
 }
 
@@ -69,45 +62,36 @@ impl std::error::Error for PathError {
     }
 }
 
-/// Canonicalize as much of `input` as exists, leaving the trailing
-/// non-existent components literal. Always returns an absolute, UTF-8
-/// path on success.
+/// Canonicalize as much of `input` as exists, leaving the trailing non-existent components literal.
+/// Always returns an absolute, UTF-8 path on success.
 ///
 /// Internally three phases:
 ///
-/// 1. **Structural pre-normalisation** ([`normalize_structure`]): no
-///    I/O — rejects empty, non-absolute, and `..`-bearing inputs.
-///    The downstream phases rely on its post-condition (every cursor
-///    has a `file_name`; walk-up terminates at root).
-/// 2. **Filesystem resolution** ([`resolve_filesystem`]): walks the
-///    parent chain via in-place `cursor.pop()` until `canonicalize`
-///    succeeds; reattaches the missing tail. Non-`NotFound` errors
-///    collapse to [`PathError::Inaccessible`] carrying the cursor at
-///    fault.
-/// 3. **UTF-8 enforcement** ([`enforce_utf8`]): post-resolution check.
-///    The engine's path gate requires UTF-8 — symlink resolution can
-///    surface non-UTF-8 segments that the structural check (UTF-8 by
-///    construction from TOML) can't see.
+/// 1. **Structural pre-normalisation** ([`normalize_structure`]): no I/O — rejects empty,
+///    non-absolute, and `..`-bearing inputs. The downstream phases rely on its post-condition
+///    (every cursor has a `file_name`; walk-up terminates at root).
+/// 2. **Filesystem resolution** ([`resolve_filesystem`]): walks the parent chain via in-place
+///    `cursor.pop()` until `canonicalize` succeeds; reattaches the missing tail. Non-`NotFound`
+///    errors collapse to [`PathError::Inaccessible`] carrying the cursor at fault.
+/// 3. **UTF-8 enforcement** ([`enforce_utf8`]): post-resolution check. The engine's path gate
+///    requires UTF-8 — symlink resolution can surface non-UTF-8 segments that the structural check
+///    (UTF-8 by construction from TOML) can't see.
 pub(crate) fn canonicalize_lenient(input: &Path) -> Result<PathBuf, PathError> {
     normalize_structure(input)?;
     let resolved = resolve_filesystem(input)?;
     enforce_utf8(resolved)
 }
 
-/// Pure structural pre-normalisation — no I/O. Rejects empty,
-/// non-absolute, and `..`-bearing inputs.
+/// Pure structural pre-normalisation — no I/O. Rejects empty, non-absolute, and `..`-bearing inputs.
 ///
-/// Post-condition for downstream phases: any cursor derived from
-/// `input` by `pop()` has a `Some` `file_name` (the only path shape
-/// with `None` `file_name` after absoluteness — a trailing `..` — is
-/// rejected here), and walk-up always reaches the filesystem root,
-/// which canonicalises. Both invariants are load-bearing for
-/// [`resolve_filesystem`]'s loop termination.
+/// Post-condition for downstream phases: any cursor derived from `input` by `pop()` has a `Some`
+/// `file_name` (the only path shape with `None` `file_name` after absoluteness — a trailing `..` —
+/// is rejected here), and walk-up always reaches the filesystem root, which canonicalises. Both
+/// invariants are load-bearing for [`resolve_filesystem`]'s loop termination.
 ///
-/// `Component::CurDir` is intentionally accepted: `Path::components`
-/// normalises `.` away in every non-leading position and a leading `.`
-/// fails `is_absolute()` above, so `CurDir` reaches us only in shapes
-/// already vetted as harmless.
+/// `Component::CurDir` is intentionally accepted: `Path::components` normalises `.` away in every
+/// non-leading position and a leading `.` fails `is_absolute()` above, so `CurDir` reaches us only
+/// in shapes already vetted as harmless.
 fn normalize_structure(input: &Path) -> Result<(), PathError> {
     if input.as_os_str().is_empty() {
         return Err(PathError::Empty);
@@ -118,10 +102,9 @@ fn normalize_structure(input: &Path) -> Result<(), PathError> {
     for c in input.components() {
         match c {
             Component::ParentDir => return Err(PathError::ContainsParentDir),
-            // Exhaustive remainder: forward-compat against future
-            // `Component` variants. `Prefix` is Windows-only; never
-            // appears on Unix targets but matched explicitly so a new
-            // variant fails to compile rather than silently passes.
+            // Exhaustive remainder: forward-compat against future `Component` variants. `Prefix` is
+            // Windows-only; never appears on Unix targets but matched explicitly so a new variant
+            // fails to compile rather than silently passes.
             Component::CurDir
             | Component::RootDir
             | Component::Normal(_)
@@ -131,15 +114,14 @@ fn normalize_structure(input: &Path) -> Result<(), PathError> {
     Ok(())
 }
 
-/// Walk up the parent chain until canonicalisation succeeds; reattach
-/// the popped tail. `cursor` mutates in place via `pop()`; the only
-/// per-iteration allocation is the popped `OsString` pushed onto `tail`.
+/// Walk up the parent chain until canonicalisation succeeds; reattach the popped tail. `cursor`
+/// mutates in place via `pop()`; the only per-iteration allocation is the popped `OsString` pushed
+/// onto `tail`.
 ///
 /// Pre-normalisation guarantees:
 /// - `cursor.file_name()` returns `Some` until `pop()` returns `false`.
-/// - `pop()` returns `false` only at the filesystem root, which always
-///   canonicalises — so the loop terminates without ever needing the
-///   defensive fallback below.
+/// - `pop()` returns `false` only at the filesystem root, which always canonicalises — so the loop
+///   terminates without ever needing the defensive fallback below.
 fn resolve_filesystem(input: &Path) -> Result<PathBuf, PathError> {
     let mut cursor = input.to_owned();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
@@ -158,10 +140,9 @@ fn resolve_filesystem(input: &Path) -> Result<PathBuf, PathError> {
                     .to_owned();
                 tail.push(name);
                 if !cursor.pop() {
-                    // Unreachable on Unix post-normalisation: `pop()`
-                    // returns false only at the filesystem root, and
-                    // the root always canonicalises. Defend the release
-                    // build with a typed error rather than panicking.
+                    // Unreachable on Unix post-normalisation: `pop()` returns false only at the
+                    // filesystem root, and the root always canonicalises. Defend the release build
+                    // with a typed error rather than panicking.
                     debug_assert!(false, "walk-up reached root via NotFound chain");
                     return Err(PathError::Inaccessible {
                         at: cursor,
@@ -177,12 +158,10 @@ fn resolve_filesystem(input: &Path) -> Result<PathBuf, PathError> {
     }
 }
 
-/// Post-resolution UTF-8 check. Symlink resolution can surface a
-/// non-UTF-8 segment that the engine's
-/// [`specter_core::Tree::parse_attach_path`] gate would reject; catch
-/// it here so the validator's contract ("ok ⇒ engine accepts the
-/// path") holds. Original TOML input is UTF-8 by construction, so the
-/// only way this fails is through symlink resolution.
+/// Post-resolution UTF-8 check. Symlink resolution can surface a non-UTF-8 segment that the
+/// engine's [`specter_core::Tree::parse_attach_path`] gate would reject; catch it here so the
+/// validator's contract ("ok ⇒ engine accepts the path") holds. Original TOML input is UTF-8 by
+/// construction, so the only way this fails is through symlink resolution.
 fn enforce_utf8(p: PathBuf) -> Result<PathBuf, PathError> {
     if p.to_str().is_some() {
         Ok(p)
@@ -224,9 +203,8 @@ mod tests {
         assert!(matches!(err, PathError::ContainsParentDir), "got {err:?}");
     }
 
-    /// `.` is intentionally accepted by pre-norm because `Path::components`
-    /// normalises it away in every non-leading position. The kernel
-    /// canonicalises the input as if the `.` were absent.
+    /// `.` is intentionally accepted by pre-norm because `Path::components` normalises it away in
+    /// every non-leading position. The kernel canonicalises the input as if the `.` were absent.
     #[test]
     fn cur_dir_component_silently_normalized() {
         let td = tempfile::tempdir().unwrap();
@@ -317,9 +295,8 @@ mod tests {
         symlink(canon.join("never-exists"), &dangling).unwrap();
         let pending = dangling.join("leaf");
 
-        // Walk-up pops past the dangling symlink (which fails NotFound
-        // because its target doesn't exist) and reattaches the literal
-        // tail under the existing ancestor.
+        // Walk-up pops past the dangling symlink (which fails NotFound because its target doesn't
+        // exist) and reattaches the literal tail under the existing ancestor.
         let result = canonicalize_lenient(&pending).unwrap();
         assert!(
             result.ends_with(Path::new("dangling/leaf")),
@@ -332,12 +309,10 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn non_directory_traversal_rejected_as_inaccessible() {
-        // `/regular-file/missing` triggers ENOTDIR — a non-`NotFound`
-        // `io::Error` — which collapses to `Inaccessible`. Exercises the
-        // arm that maps any non-`NotFound` I/O error to `Inaccessible`,
-        // without root-skip gymnastics. EACCES via `chmod 0` follows the
-        // same code path; verified manually (we can't drop privileges
-        // inside a test process).
+        // `/regular-file/missing` triggers ENOTDIR — a non-`NotFound` `io::Error` — which collapses
+        // to `Inaccessible`. Exercises the arm that maps any non-`NotFound` I/O error to
+        // `Inaccessible`, without root-skip gymnastics. EACCES via `chmod 0` follows the same code
+        // path; verified manually (we can't drop privileges inside a test process).
         let td = tempfile::tempdir().unwrap();
         let canon = canon_tempdir(&td);
         let file = canon.join("regular-file");
@@ -348,9 +323,8 @@ mod tests {
         assert!(matches!(err, PathError::Inaccessible { .. }), "got {err:?}");
     }
 
-    /// Non-UTF-8 must surface via the `enforce_utf8` arm. Linux-only:
-    /// ext4 / tmpfs accept raw bytes in filenames; APFS rejects
-    /// non-UTF-8 at the FS layer, so we can't construct the scenario on
+    /// Non-UTF-8 must surface via the `enforce_utf8` arm. Linux-only: ext4 / tmpfs accept raw bytes
+    /// in filenames; APFS rejects non-UTF-8 at the FS layer, so we can't construct the scenario on
     /// macOS.
     #[cfg(target_os = "linux")]
     #[test]

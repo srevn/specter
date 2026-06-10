@@ -1,13 +1,11 @@
 //! Non-blocking-drain semantics on the inotify watcher.
 //!
-//! The trait contract: [`FsWatcher::drain_ready`] is non-blocking,
-//! [`AsFd::as_fd`] is the readiness substrate, and the caller blocks
-//! via a reactor (mio::Poll) on the fd. Linux twin of
-//! `kqueue_wake.rs` — pins the same contract against the
-//! kernel-backed inotify fd.
+//! The trait contract: [`FsWatcher::drain_ready`] is non-blocking, [`AsFd::as_fd`] is the readiness
+//! substrate, and the caller blocks via a reactor (mio::Poll) on the fd. Linux twin of
+//! `kqueue_wake.rs` — pins the same contract against the kernel-backed inotify fd.
 
-// `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a
-// `Vec` while preserving its allocation across drain-loop iterations.
+// `iter_with_drain`: `buf.drain(..)` is the canonical way to consume a `Vec` while preserving its
+// allocation across drain-loop iterations.
 #![allow(clippy::iter_with_drain)]
 #![cfg(target_os = "linux")]
 
@@ -20,10 +18,9 @@ use std::os::fd::{AsFd, AsRawFd};
 use std::time::{Duration, Instant};
 use tempfile::TempDir;
 
-/// `drain_ready` on a watcher with no pending kernel records returns
-/// `Ok(0)` promptly without blocking. The trait's non-blocking
-/// contract: the caller blocks via a reactor on `AsFd::as_fd`, not
-/// inside the watcher.
+/// `drain_ready` on a watcher with no pending kernel records returns `Ok(0)` promptly without
+/// blocking. The trait's non-blocking contract: the caller blocks via a reactor on `AsFd::as_fd`,
+/// not inside the watcher.
 #[test]
 fn drain_ready_returns_promptly_on_empty_queue() {
     let mut w = InotifyWatcher::new().unwrap();
@@ -40,10 +37,9 @@ fn drain_ready_returns_promptly_on_empty_queue() {
     drop(w);
 }
 
-/// A `mio::Poll` registered on the watcher's `AsFd::as_fd()` observes
-/// the canonical "register → poll → drain → idle" sequence the
-/// production driver exercises against a real inotify fd. Linux twin of
-/// `kqueue_wake::poll_then_drain_returns_kernel_events`.
+/// A `mio::Poll` registered on the watcher's `AsFd::as_fd()` observes the canonical "register →
+/// poll → drain → idle" sequence the production driver exercises against a real inotify fd. Linux
+/// twin of `kqueue_wake::poll_then_drain_returns_kernel_events`.
 #[test]
 fn poll_then_drain_returns_kernel_events() {
     let tmp = TempDir::new().unwrap();
@@ -62,8 +58,8 @@ fn poll_then_drain_returns_kernel_events() {
     // Trigger a kernel event.
     std::fs::write(tmp.path().join("a"), "x").unwrap();
 
-    // Block on the reactor; drain on every readable edge until the
-    // expected event lands or the deadline elapses.
+    // Block on the reactor; drain on every readable edge until the expected event lands or the
+    // deadline elapses.
     let mut events = Events::with_capacity(4);
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut saw_event = false;
