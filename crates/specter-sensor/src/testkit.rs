@@ -14,7 +14,7 @@
 
 use crate::{FsWatcher, OverflowScope, Prober, WatchFailure, WatcherEvent};
 use slotmap::SecondaryMap;
-use specter_core::{ClassSet, FsEvent, ProbeOwner, ProbeRequest, ResourceId, ResourceKind};
+use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, ResourceKind};
 use std::io::{self, Read, Write};
 use std::os::fd::{AsFd, BorrowedFd};
 use std::os::unix::net::UnixStream;
@@ -261,7 +261,7 @@ impl AsFd for MockFsWatcher {
 #[derive(Debug, Default)]
 pub struct MockProber {
     pub submitted: Mutex<Vec<ProbeRequest>>,
-    pub cancelled: Mutex<Vec<ProbeOwner>>,
+    pub cancelled: Mutex<Vec<ProfileId>>,
 }
 
 impl MockProber {
@@ -278,7 +278,7 @@ impl MockProber {
 
     /// Drain the recorded `cancel` calls.
     #[must_use]
-    pub fn take_cancelled(&self) -> Vec<ProbeOwner> {
+    pub fn take_cancelled(&self) -> Vec<ProfileId> {
         std::mem::take(&mut self.cancelled.lock().expect("MockProber poisoned"))
     }
 }
@@ -291,7 +291,7 @@ impl Prober for MockProber {
             .push(req);
     }
 
-    fn cancel(&self, owner: ProbeOwner) {
+    fn cancel(&self, owner: ProfileId) {
         self.cancelled
             .lock()
             .expect("MockProber poisoned")
@@ -305,8 +305,7 @@ mod tests {
     use crate::{FsWatcher, OverflowScope, Prober, WatchFailure, WatcherEvent};
     use slotmap::SlotMap;
     use specter_core::{
-        ClassSet, FsEvent, ProbeCorrelation, ProbeOwner, ProbeRequest, ProfileId, ResourceId,
-        ResourceKind,
+        ClassSet, FsEvent, ProbeCorrelation, ProbeRequest, ProfileId, ResourceId, ResourceKind,
     };
     use std::os::fd::AsFd;
     use std::path::PathBuf;
@@ -621,7 +620,7 @@ mod tests {
 
     fn mk_req(profile: ProfileId, c: u64) -> ProbeRequest {
         ProbeRequest::AnchorFile {
-            owner: ProbeOwner::Profile(profile),
+            owner: profile,
             correlation: ProbeCorrelation::from(c),
             target_path: Arc::from(PathBuf::from("/dev/null")),
         }
@@ -635,7 +634,7 @@ mod tests {
         mp.submit(mk_req(pids[0], 1));
         let drained = mp.take_submitted();
         assert_eq!(drained.len(), 1);
-        assert_eq!(drained[0].owner(), ProbeOwner::Profile(pids[0]));
+        assert_eq!(drained[0].owner(), pids[0]);
         assert_eq!(drained[0].correlation(), ProbeCorrelation::from(1));
     }
 
@@ -644,9 +643,9 @@ mod tests {
         let pids = fresh_profile_ids(1);
         let mp = MockProber::new();
 
-        mp.cancel(ProbeOwner::Profile(pids[0]));
+        mp.cancel(pids[0]);
         let drained = mp.take_cancelled();
-        assert_eq!(drained, vec![ProbeOwner::Profile(pids[0])]);
+        assert_eq!(drained, vec![pids[0]]);
     }
 
     #[test]

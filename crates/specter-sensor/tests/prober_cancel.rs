@@ -7,7 +7,7 @@
 
 use crossbeam::channel::{Sender, unbounded};
 use slotmap::SlotMap;
-use specter_core::{Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProfileId};
+use specter_core::{Input, ProbeCorrelation, ProbeOutcome, ProbeRequest, ProfileId};
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -44,7 +44,7 @@ fn sink(tx: Sender<Input>) -> Arc<dyn ProberResponseSender> {
 
 fn mk_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
-        owner: ProbeOwner::Profile(profile),
+        owner: profile,
         correlation: ProbeCorrelation::from(correlation),
         target_path: Arc::from(target_path),
     }
@@ -57,7 +57,7 @@ fn cancel_without_prior_submit_is_noop() {
     let p = fresh_profile_id();
 
     // No panic; subsequent submits unaffected.
-    prober.cancel(ProbeOwner::Profile(p));
+    prober.cancel(p);
 
     let _ = prober.shutdown();
 }
@@ -80,7 +80,7 @@ fn cancel_after_completion_is_noop() {
     assert!(matches!(resp.outcome, ProbeOutcome::AnchorOk(_)));
 
     // Cancel after completion: no panic; no spurious second response.
-    prober.cancel(ProbeOwner::Profile(p));
+    prober.cancel(p);
     assert!(rx.recv_timeout(Duration::from_millis(100)).is_err());
 
     let _ = prober.shutdown();
@@ -97,7 +97,7 @@ fn resubmit_after_cancel_runs_with_new_correlation() {
     let p = fresh_profile_id();
 
     prober.submit(mk_request(p, path.clone(), 1));
-    prober.cancel(ProbeOwner::Profile(p));
+    prober.cancel(p);
     prober.submit(mk_request(p, path, 2));
 
     // c1 may or may not arrive (race). c2 must arrive.

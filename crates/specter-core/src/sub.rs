@@ -12,7 +12,7 @@
 //!
 //! v1 surface is argv-only — no shell variant.
 
-use crate::ids::{ProfileId, PromoterId, ResourceId, SubId};
+use crate::ids::{ProfileId, ResourceId, SubId};
 use crate::program::ActionProgram;
 use crate::scan_config::{ProfileIdentity, ScanConfig};
 use compact_str::CompactString;
@@ -81,10 +81,6 @@ pub struct SubParams {
     /// Forward subprocess stdout/stderr to Specter's own stdio (`Stdio::inherit()`); `false` routes
     /// child output to `/dev/null`. Threaded to `Effect.capture_output`; not identity.
     pub log_output: bool,
-    /// Promoter that synthesised this Sub — `None` for static (operator-declared) Subs, `Some(pid)`
-    /// for dynamic Subs. Read at the engine's recovery fan-out (`on_anchor_terminal_event`) to
-    /// distinguish all-dynamic Profiles (wholesale teardown) from mixed/static ones.
-    pub source_promoter: Option<PromoterId>,
     /// `Some` ⇒ this Sub is a discovery template; its Profile's scan shape is `MatchChain` — the
     /// two are coupled iff (the engine's attach boundary asserts both directions: a template on a
     /// non-chain Profile and a plain Sub on a chain Profile are equally unconstructable). Minted
@@ -94,9 +90,9 @@ pub struct SubParams {
     /// `Arc`: every reconcile pass collects the Profile's template set before minting — a refcount
     /// bump per pass instead of a `ScanConfig` deep-clone, and `SubParams: Clone` stays cheap.
     pub template: Option<Arc<MintTemplate>>,
-    /// Discovery Sub that minted this Sub — `None` for operator-declared and Promoter-synthesised
-    /// Subs. The discovery sibling of `source_promoter`: read at the engine's recovery fan-out and
-    /// by the detach cascade (`source_discovery == detached id` reaps the minted set).
+    /// Discovery Sub that minted this Sub — `None` for operator-declared Subs. Read at the
+    /// engine's recovery fan-out ([`Sub::is_dynamic`]) and by the detach cascade
+    /// (`source_discovery == detached id` reaps the minted set).
     pub source_discovery: Option<SubId>,
 }
 
@@ -119,8 +115,8 @@ pub struct SubAttachRequest {
 
 impl SubAttachRequest {
     /// Canonical constructor. [`Self::for_anchor`] is the flat-argument ergonomic over this for the
-    /// config layer and tests; the engine's `try_promote` builds dynamic (Promoter-synthesised)
-    /// Subs through this directly.
+    /// config layer and tests; the engine's discovery reconcile builds minted Subs through this
+    /// directly.
     #[must_use]
     pub const fn from_parts(
         anchor: SubAttachAnchor,
@@ -134,10 +130,9 @@ impl SubAttachRequest {
         }
     }
 
-    /// Build a static (operator-declared) attach request — `source_promoter`, `template`, and
-    /// `source_discovery` are all `None`. Dynamic (Promoter-synthesised) Subs are built by the
-    /// engine's `try_promote` via [`Self::from_parts`] directly; discovery templates and their
-    /// minted Subs likewise carry their extra fields through `from_parts`.
+    /// Build a static (operator-declared) attach request — `template` and `source_discovery` are
+    /// both `None`. Discovery templates and their minted Subs carry their extra fields through
+    /// [`Self::from_parts`] directly.
     #[must_use]
     pub const fn for_anchor(
         name: CompactString,
@@ -163,7 +158,6 @@ impl SubAttachRequest {
                 scope,
                 settle,
                 log_output,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -391,10 +385,6 @@ pub struct Sub {
     /// [`crate::Effect`] as `capture_output`; the actuator switches between `Stdio::null()` (false,
     /// the default) and `Stdio::inherit()` (true).
     pub log_output: bool,
-    /// Promoter that synthesised this Sub — `None` for static (operator-declared) Subs, `Some(pid)`
-    /// for dynamic Subs spawned by a Promoter's `try_promote`. Read at the engine's recovery
-    /// fan-out (`on_anchor_terminal_event`); never mutated post-attach.
-    pub source_promoter: Option<PromoterId>,
     /// `Some` ⇒ this Sub is a discovery template (see [`SubParams::template`] for the ⟺ coupling
     /// with the `MatchChain` Profile shape). The carried `spec` is never mutated post-attach: a
     /// template change is an identity change at the config layer (reap + reattach), never an
@@ -402,8 +392,8 @@ pub struct Sub {
     /// strand them on stale reaction state. The carrier's `fanout_warned` latch is the one runtime
     /// field, mutated only through [`SubRegistry::latch_fanout_warning`].
     pub template: Option<DiscoveryTemplate>,
-    /// Discovery Sub that minted this Sub — the discovery sibling of [`Self::source_promoter`].
-    /// Never mutated post-attach.
+    /// Discovery Sub that minted this Sub — `None` for operator-declared Subs. Read at the
+    /// engine's recovery fan-out (`on_anchor_terminal_event`); never mutated post-attach.
     pub source_discovery: Option<SubId>,
     /// The per-Sub Effect fire history: `true` once this Sub has emitted at least one Effect. Sole
     /// load-bearing reader is the B1 dedup suppress (`!forced && nothing_changed && has_fired` — a
@@ -461,7 +451,6 @@ impl Sub {
             settle: params.settle,
             needs_diff,
             log_output: params.log_output,
-            source_promoter: params.source_promoter,
             template: params.template.map(|spec| DiscoveryTemplate {
                 spec,
                 fanout_warned: false,
@@ -481,15 +470,15 @@ impl Sub {
         self.profile
     }
 
-    /// Whether this Sub was synthesised by the engine rather than declared by the operator — a
-    /// Promoter promotion or a discovery mint. The anchor-terminal recovery fan-out reads it to
-    /// split all-dynamic Profiles (wholesale teardown; the source re-mints on reappearance) from
-    /// mixed/static ones (the static Sub's `watch_root_parent` recovery channel keeps the Profile
-    /// alive). A discovery *template* is operator-declared (`false`) — its recovery is the static
-    /// channel, exactly like any other `[[watch]]`.
+    /// Whether this Sub was minted by a discovery reconcile rather than declared by the operator.
+    /// The anchor-terminal recovery fan-out reads it to split all-dynamic Profiles (wholesale
+    /// teardown; the source re-mints on reappearance) from mixed/static ones (the static Sub's
+    /// `watch_root_parent` recovery channel keeps the Profile alive). A discovery *template* is
+    /// operator-declared (`false`) — its recovery is the static channel, exactly like any other
+    /// `[[watch]]`.
     #[must_use]
     pub const fn is_dynamic(&self) -> bool {
-        self.source_promoter.is_some() || self.source_discovery.is_some()
+        self.source_discovery.is_some()
     }
 }
 
@@ -497,17 +486,17 @@ impl Sub {
 ///
 /// - `by_profile` groups Subs by `ProfileId` (insertion order within a Profile).
 /// - `by_name` resolves an operator-facing or synthesised name to its `SubId`. Indexes **every**
-///   Sub regardless of `source_promoter`: the config validator reserves the `@` byte, so a
-///   `[[watch]].name` never carries one and a synthesised `<promoter>@<path>` always does — the two
-///   populations are disjoint by construction and their union is unique. Callers that need the
-///   static-vs-dynamic discrimination read `sub.source_promoter` on the resolved Sub. The index is
-///   load-bearing — hot-reload resolves every `removed`/`modified` name to an id through
+///   Sub regardless of `source_discovery`: the config validator reserves the `@` byte, so a
+///   `[[watch]].name` never carries one and a minted `<template_name>@<matched_path>` always does
+///   — the two populations are disjoint by construction and their union is unique. Callers that
+///   need the static-vs-dynamic discrimination read [`Sub::is_dynamic`] on the resolved Sub. The
+///   index is load-bearing — hot-reload resolves every `removed`/`modified` name to an id through
 ///   [`Self::find_by_name`] (O(log N)).
 ///
 /// `by_name` mirrors the slotmap entry's lifetime: [`Self::insert`] populates it, [`Self::remove`]
 /// clears it id-checked. The `insert` `debug_assert!` is the dev/CI signal for a duplicate name;
-/// the validator (static side) and the promoter's per-resolved-path uniqueness (dynamic side) make
-/// a collision unreachable in correct operation, and the `@`-disjointness keeps the two
+/// the validator (static side) and the discovery reconcile's registry-derived dedup (dynamic side)
+/// make a collision unreachable in correct operation, and the `@`-disjointness keeps the two
 /// construction sites from racing each other. A release-mode breach is contained by the id-checked
 /// `remove`: the *mapping* stays 1:1; only a hypothetical orphaned slotmap entry (never the wrong
 /// name→id edge) could survive.
@@ -529,10 +518,10 @@ impl SubRegistry {
     /// populated for every Sub.
     ///
     /// The `debug_assert!` fires on a duplicate name — the dev/CI signal only. Static-name
-    /// uniqueness is validator-enforced; dynamic-name uniqueness is promoter-enforced (one Sub per
-    /// resolved-path per promoter); cross-population uniqueness is structural via the `@`-byte
-    /// reservation. A release-mode breach is contained by the id-checked [`Self::remove`] (the
-    /// mapping stays consistent).
+    /// uniqueness is validator-enforced; dynamic-name uniqueness is reconcile-enforced (the
+    /// registry-derived dedup mints one Sub per terminus per template); cross-population uniqueness
+    /// is structural via the `@`-byte reservation. A release-mode breach is contained by the
+    /// id-checked [`Self::remove`] (the mapping stays consistent).
     pub fn insert(&mut self, sub: Sub) -> SubId {
         let profile = sub.profile;
         let name = sub.name.clone();
@@ -593,9 +582,9 @@ impl SubRegistry {
     /// holds `name`.
     ///
     /// Returns hits for both static and dynamic Subs — callers that need the discrimination read
-    /// `sub.source_promoter` on the resolved Sub. The config validator reserves the `@` byte, so a
-    /// static name and a synthesised `<promoter>@<path>` cannot collide; uniqueness across the
-    /// union is structural.
+    /// [`Sub::is_dynamic`] on the resolved Sub. The config validator reserves the `@` byte, so a
+    /// static name and a minted `<template_name>@<matched_path>` cannot collide; uniqueness across
+    /// the union is structural.
     ///
     /// Load-bearing: the engine's hot-reload shim resolves every `removed`/`modified` name through
     /// here.
@@ -643,12 +632,12 @@ impl SubRegistry {
     /// Replace `sub`'s per-Sub fields with `new_params` in place — the `modified_params` arm of
     /// hot-reload's [`SubRegistryDiff`] split.
     ///
-    /// **Preserves**: [`SubId`], `profile`, `name`, `source_promoter`, `has_fired`,
+    /// **Preserves**: [`SubId`], `profile`, `name`, `source_discovery`, `has_fired`,
     /// `last_fired_at`, `fire_count`, `dedup_suppressed_count`. The first two are structural (the
     /// slotmap key and the Profile join are invariants of this Sub's lifetime); `name` and
-    /// `source_promoter` are pinned by the rebind invariant (callers route through
-    /// [`Self::find_by_name`], which keys on `name`, and a `source_promoter` change would cross the
-    /// static↔dynamic boundary the diff already maps to add+remove). `has_fired` is preserved
+    /// `source_discovery` are pinned by the rebind invariant (callers route through
+    /// [`Self::find_by_name`], which keys on `name`, and a `source_discovery` change would cross
+    /// the static↔dynamic boundary the diff already maps to add+remove). `has_fired` is preserved
     /// because the B1 dedup floor reads it as "this Sub has already announced the current stable
     /// tree state"; a program swap changes *what runs*, not *whether the tree changed*. The three
     /// observational counters (`last_fired_at` / `fire_count` / `dedup_suppressed_count`) are
@@ -670,7 +659,7 @@ impl SubRegistry {
     /// [`Self::find_by_name`] in the same step as the rebind, so a stale id is structurally
     /// unexpected; the caller surfaces it via [`crate::Diagnostic::RebindUnknownSub`].
     ///
-    /// `debug_assert!`s pin the `name` / `source_promoter` / `source_discovery` invariants — a
+    /// `debug_assert!`s pin the `name` / `source_discovery` invariants — a
     /// release-mode breach would silently rewrite the identifying fields under the registry's
     /// `by_name` index, leaving the index pointing at the wrong [`SubId`]; the assertions catch the
     /// breach at the call site. The template assertion is both-`None`, not equality
@@ -683,10 +672,6 @@ impl SubRegistry {
         debug_assert_eq!(
             s.name, new_params.name,
             "rebind cannot change Sub name (rebind identity invariant)",
-        );
-        debug_assert_eq!(
-            s.source_promoter, new_params.source_promoter,
-            "rebind cannot change source_promoter (static↔dynamic boundary)",
         );
         debug_assert_eq!(
             s.source_discovery, new_params.source_discovery,
@@ -796,7 +781,7 @@ mod tests {
         ActionProgram, ClassSet, EffectScope, MintTemplate, ProfileIdentity, ScanConfig, Sub,
         SubParams, SubRegistry, SubRegistryDiff,
     };
-    use crate::ids::{ProfileId, PromoterId, SubId};
+    use crate::ids::{ProfileId, SubId};
     use crate::program::{
         ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder, SpawnBody,
     };
@@ -882,7 +867,6 @@ mod tests {
                 scope: EffectScope::PerStableFile,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -900,7 +884,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -918,7 +901,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -942,7 +924,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -968,7 +949,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1010,7 +990,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1043,7 +1022,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1056,7 +1034,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1091,7 +1068,6 @@ mod tests {
                     scope: EffectScope::SubtreeRoot,
                     settle: SETTLE,
                     log_output: false,
-                    source_promoter: None,
                     template: None,
                     source_discovery: None,
                 },
@@ -1139,7 +1115,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1165,7 +1140,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1174,14 +1148,15 @@ mod tests {
         assert!(reg.find_by_name("build").is_none());
     }
 
-    /// `by_name` indexes every Sub regardless of `source_promoter` — both a static operator name and
-    /// a synthesised `<promoter>@<path>` resolve through `find_by_name`. The two populations are
-    /// disjoint by the config validator's `@`-byte reservation, so their indexed union is unique.
+    /// `by_name` indexes every Sub regardless of `source_discovery` — both a static operator name
+    /// and a minted `<template_name>@<matched_path>` resolve through `find_by_name`. The two
+    /// populations are disjoint by the config validator's `@`-byte reservation, so their indexed
+    /// union is unique.
     #[test]
     fn by_name_indexes_static_and_dynamic_subs() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        let mk = |name: &str, source: Option<PromoterId>| {
+        let mk = |name: &str, source: Option<SubId>| {
             Sub::from_request(
                 pid,
                 SubParams {
@@ -1190,15 +1165,14 @@ mod tests {
                     scope: EffectScope::SubtreeRoot,
                     settle: SETTLE,
                     log_output: false,
-                    source_promoter: source,
                     template: None,
-                    source_discovery: None,
+                    source_discovery: source,
                 },
             )
         };
 
         let static_id = reg.insert(mk("foo", None));
-        let dynamic_id = reg.insert(mk("p@/tmp/x", Some(PromoterId::default())));
+        let dynamic_id = reg.insert(mk("p@/tmp/x", Some(SubId::default())));
 
         assert_eq!(
             reg.find_by_name("foo"),
@@ -1230,9 +1204,8 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: Some(PromoterId::default()),
                 template: None,
-                source_discovery: None,
+                source_discovery: Some(SubId::default()),
             },
         ));
         assert_eq!(reg.find_by_name("p@/tmp/x"), Some(dynamic_id));
@@ -1260,7 +1233,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1285,7 +1257,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1319,7 +1290,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1405,7 +1375,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1425,7 +1394,6 @@ mod tests {
                 scope: EffectScope::PerStableFile,
                 settle: new_settle,
                 log_output: true,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1450,7 +1418,7 @@ mod tests {
         );
         assert_eq!(s.name, "build", "name preserved");
         assert_eq!(s.profile, pid, "profile preserved");
-        assert!(s.source_promoter.is_none(), "source_promoter preserved");
+        assert!(s.source_discovery.is_none(), "source_discovery preserved");
         assert_eq!(s.scope, EffectScope::PerStableFile, "scope replaced");
         assert_eq!(s.settle, new_settle, "settle replaced");
         assert!(s.log_output, "log_output replaced");
@@ -1479,7 +1447,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1493,7 +1460,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1511,7 +1477,6 @@ mod tests {
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
             log_output: false,
-            source_promoter: None,
             template: Some(Arc::new(MintTemplate {
                 identity: ProfileIdentity {
                     config: ScanConfig::builder().build(),
@@ -1573,7 +1538,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1605,7 +1569,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },
@@ -1618,7 +1581,6 @@ mod tests {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: Some(SubId::default()),
             },
@@ -1662,7 +1624,6 @@ mod tests {
                 scope: EffectScope::PerStableFile,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },

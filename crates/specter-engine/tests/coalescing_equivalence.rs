@@ -12,8 +12,8 @@
 //!
 //! Diagnostics and exact `StepOutput` multiplicity are deliberately *not* compared: a
 //! coalesced-dropped recency hint legitimately elides only duplicate diagnostics and idempotent
-//! re-work, and the promoter-proxy collapse is lossy-hint-equivalent, not `StepOutput`-identical —
-//! so equality is asserted on the engine's decision, never on the byte-shape of its narration.
+//! re-work — so equality is asserted on the engine's decision, never on the byte-shape of its
+//! narration.
 
 use proptest::prelude::*;
 use specter_core::testkit::dir_snap;

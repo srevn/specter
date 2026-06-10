@@ -69,8 +69,7 @@ pub(crate) struct RawWatch {
     pub log_output: bool,
     /// Suppress this entry without removing it from the TOML. Default `true` — present entries are
     /// effective by default; `false` is structurally equivalent to "absent from the config"
-    /// (filtered by [`crate::Config::active_watches`] / [`crate::Config::active_promoters`] before
-    /// the engine sees anything).
+    /// (filtered by [`crate::Config::active_watches`] before the engine sees anything).
     #[serde(default = "default_true")]
     pub enabled: bool,
 }

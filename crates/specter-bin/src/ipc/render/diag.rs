@@ -34,10 +34,9 @@ use crate::ipc::wire::{WireDiagnostic, WireTime};
 /// Writer-shape so the call site amortizes the line buffer across iterations — `specter tail`
 /// reuses one [`String`] for the lifetime of the stream loop, symmetric with
 /// [`crate::ipc::client::subscribe::Subscription`]'s reused inbound `line_buf`. A 1000-evt/s tail
-/// carries no per-event allocation through the human path; the three compound-enum Display impls
-/// ([`crate::ipc::wire::WireProbeOwner`] / [`crate::ipc::wire::WireOverflowScope`] /
-/// [`crate::ipc::wire::WireWatchFailure`]) write through the same formatter so the compound fields
-/// likewise carry no allocation.
+/// carries no per-event allocation through the human path; the compound-enum Display impls
+/// ([`crate::ipc::wire::WireOverflowScope`] / [`crate::ipc::wire::WireWatchFailure`]) write
+/// through the same formatter so the compound fields likewise carry no allocation.
 pub(crate) fn render(out: &mut String, d: &WireDiagnostic, sty: Styler) {
     let _ = write!(
         out,
@@ -60,7 +59,6 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::EffectCompleteForUnknownSub { at, .. }
         | WireDiagnostic::DetachUnknownSub { at, .. }
         | WireDiagnostic::ConfigDiffUnknownSub { at, .. }
-        | WireDiagnostic::ConfigDiffUnknownPromoter { at, .. }
         | WireDiagnostic::ConfigDiffRebindFallbackAttach { at, .. }
         | WireDiagnostic::ProbeVanished { at, .. }
         | WireDiagnostic::ProbeFailed { at, .. }
@@ -73,7 +71,6 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::ReapPendingCancelled { at, .. }
         | WireDiagnostic::ProfileReaped { at, .. }
         | WireDiagnostic::ProfileClaimPurged { at, .. }
-        | WireDiagnostic::PromoterClaimPurged { at, .. }
         | WireDiagnostic::AttachPathInvalid { at, .. }
         | WireDiagnostic::AttachResourceStale { at, .. }
         | WireDiagnostic::AnchorKindMismatch { at, .. }
@@ -86,7 +83,6 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::RebaseCeilingForced { at, .. }
         | WireDiagnostic::RebaseCeilingUnreadable { at, .. }
         | WireDiagnostic::SensorOverflow { at, .. }
-        | WireDiagnostic::PromoterReseededForOverflow { at, .. }
         | WireDiagnostic::PerFileDriftDroppedOnRecovery { at, .. }
         | WireDiagnostic::PerFileFireSkippedOnFreshSeed { at, .. }
         | WireDiagnostic::SubAttached { at, .. }
@@ -96,16 +92,6 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::SubDetached { at, .. }
         | WireDiagnostic::SubRebound { at, .. }
         | WireDiagnostic::RebindUnknownSub { at, .. }
-        | WireDiagnostic::PromoterAttached { at, .. }
-        | WireDiagnostic::PromoterReaped { at, .. }
-        | WireDiagnostic::PromoterDescentVanished { at, .. }
-        | WireDiagnostic::PromoterDescentFailed { at, .. }
-        | WireDiagnostic::PromotionKindObserved { at, .. }
-        | WireDiagnostic::PromoterFanoutThreshold { at, .. }
-        | WireDiagnostic::PromoterProxyStaleEvent { at, .. }
-        | WireDiagnostic::PromoterEnumerationVanished { at, .. }
-        | WireDiagnostic::PromoterEnumerationFailed { at, .. }
-        | WireDiagnostic::DynamicSubReaped { at, .. }
         | WireDiagnostic::DiscoveryMinted { at, .. }
         | WireDiagnostic::DiscoveryFanoutThreshold { at, .. }
         | WireDiagnostic::DiscoverySubReaped { at, .. }
@@ -166,7 +152,6 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::PendingPathProbeVanished { .. }
         | W::PendingPathProbeFailed { .. }
         | W::ProfileClaimPurged { .. }
-        | W::PromoterClaimPurged { .. }
         | W::AttachResourceStale { .. }
         | W::SpliceCrossedUncovered { .. }
         | W::AwaitGateDeadlineForceRebasing { .. }
@@ -178,36 +163,24 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::SensorOverflow { .. }
         | W::PerFileDriftDroppedOnRecovery { .. }
         | W::RebindUnknownSub { .. }
-        | W::PromoterDescentFailed { .. }
-        | W::PromoterFanoutThreshold { .. }
         | W::DiscoveryFanoutThreshold { .. }
-        | W::PromoterEnumerationFailed { .. }
         | W::InvalidBurstTransition { .. }
         | W::Missed { .. } => Severity::Warn,
 
         // `info!` / `debug!` / `trace!` — routine lifecycle, benign races, class / consumer drops.
         W::ConfigDiffUnknownSub { .. }
-        | W::ConfigDiffUnknownPromoter { .. }
         | W::ConfigDiffRebindFallbackAttach { .. }
         | W::EventClassDropped { .. }
         | W::EventNoConsumer { .. }
         | W::ReapPendingCancelled { .. }
         | W::ProfileReaped { .. }
         | W::EventAbsorbedByFireTail { .. }
-        | W::PromoterReseededForOverflow { .. }
         | W::PerFileFireSkippedOnFreshSeed { .. }
         | W::SubAttached { .. }
         | W::QuiescenceAbsorbed { .. }
         | W::AbsorbArmed { .. }
         | W::SubDetached { .. }
         | W::SubRebound { .. }
-        | W::PromoterAttached { .. }
-        | W::PromoterReaped { .. }
-        | W::PromoterDescentVanished { .. }
-        | W::PromotionKindObserved { .. }
-        | W::PromoterProxyStaleEvent { .. }
-        | W::PromoterEnumerationVanished { .. }
-        | W::DynamicSubReaped { .. }
         | W::DiscoveryMinted { .. }
         | W::DiscoverySubReaped { .. } => Severity::Info,
     }
@@ -241,7 +214,7 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         WireDiagnostic::StaleProbeResponse {
             owner, correlation, ..
         } => {
-            field(out, sty, "owner", owner);
+            field(out, sty, "owner", owner.0);
             field(out, sty, "correlation", correlation);
         }
         WireDiagnostic::StaleTimer { id, .. } => {
@@ -258,7 +231,6 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "sub", sub.0);
         }
         WireDiagnostic::ConfigDiffUnknownSub { name, .. }
-        | WireDiagnostic::ConfigDiffUnknownPromoter { name, .. }
         | WireDiagnostic::ConfigDiffRebindFallbackAttach { name, .. } => {
             field(out, sty, "name", name);
         }
@@ -337,18 +309,6 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             ..
         } => {
             field(out, sty, "profile", profile.0);
-            field(out, sty, "claim", claim);
-            field(out, sty, "resource", resource.0);
-            field(out, sty, "failure", failure);
-        }
-        WireDiagnostic::PromoterClaimPurged {
-            promoter,
-            claim,
-            resource,
-            failure,
-            ..
-        } => {
-            field(out, sty, "promoter", promoter.0);
             field(out, sty, "claim", claim);
             field(out, sty, "resource", resource.0);
             field(out, sty, "failure", failure);
@@ -435,20 +395,16 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         WireDiagnostic::SensorOverflow { scope, .. } => {
             field(out, sty, "scope", scope);
         }
-        WireDiagnostic::PromoterReseededForOverflow { promoter, .. }
-        | WireDiagnostic::PromoterReaped { promoter, .. } => {
-            field(out, sty, "promoter", promoter.0);
-        }
         WireDiagnostic::SubAttached {
             sub,
             name,
-            source_promoter,
+            source_discovery,
             ..
         } => {
             field(out, sty, "sub", sub.0);
             field(out, sty, "name", name);
-            if let Some(p) = source_promoter {
-                field(out, sty, "source_promoter", p.0);
+            if let Some(src) = source_discovery {
+                field(out, sty, "source_discovery", src.0);
             }
         }
         WireDiagnostic::SubFired {
@@ -473,74 +429,6 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         }
         WireDiagnostic::SubRebound { sub, .. } | WireDiagnostic::RebindUnknownSub { sub, .. } => {
             field(out, sty, "sub", sub.0);
-        }
-        WireDiagnostic::PromoterAttached { promoter, name, .. } => {
-            field(out, sty, "promoter", promoter.0);
-            field(out, sty, "name", name);
-        }
-        WireDiagnostic::PromoterDescentVanished {
-            promoter, prefix, ..
-        } => {
-            field(out, sty, "promoter", promoter.0);
-            field(out, sty, "prefix", prefix.0);
-        }
-        WireDiagnostic::PromoterDescentFailed {
-            promoter,
-            prefix,
-            errno,
-            ..
-        } => {
-            field(out, sty, "promoter", promoter.0);
-            field(out, sty, "prefix", prefix.0);
-            field(out, sty, "errno", errno);
-        }
-        WireDiagnostic::PromotionKindObserved {
-            promoter,
-            path,
-            kind,
-            ..
-        } => {
-            field(out, sty, "promoter", promoter.0);
-            field(out, sty, "path", path);
-            field(out, sty, "kind", kind);
-        }
-        WireDiagnostic::PromoterFanoutThreshold {
-            promoter, count, ..
-        } => {
-            field(out, sty, "promoter", promoter.0);
-            field(out, sty, "count", count);
-        }
-        WireDiagnostic::PromoterProxyStaleEvent {
-            promoter, resource, ..
-        } => {
-            field(out, sty, "promoter", promoter.0);
-            field(out, sty, "resource", resource.0);
-        }
-        WireDiagnostic::PromoterEnumerationVanished {
-            promoter, proxy, ..
-        } => {
-            field(out, sty, "promoter", promoter.0);
-            field(out, sty, "proxy", proxy.0);
-        }
-        WireDiagnostic::PromoterEnumerationFailed {
-            promoter,
-            proxy,
-            errno,
-            ..
-        } => {
-            field(out, sty, "promoter", promoter.0);
-            field(out, sty, "proxy", proxy.0);
-            field(out, sty, "errno", errno);
-        }
-        WireDiagnostic::DynamicSubReaped {
-            promoter,
-            sub,
-            path,
-            ..
-        } => {
-            field(out, sty, "promoter", promoter.0);
-            field(out, sty, "sub", sub.0);
-            field(out, sty, "path", path);
         }
         WireDiagnostic::DiscoveryMinted {
             source, path, kind, ..
@@ -571,7 +459,7 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "observed", observed);
         }
         WireDiagnostic::WalkerContractViolated { owner, .. } => {
-            field(out, sty, "owner", owner);
+            field(out, sty, "owner", owner.0);
         }
         WireDiagnostic::Missed { count, .. } => {
             field(out, sty, "count", count);
@@ -585,8 +473,7 @@ mod tests {
     use crate::ipc::protocol::WireId;
     use crate::ipc::render::style::Styler;
     use crate::ipc::wire::{
-        WireBurstIntent, WireDetachReason, WireDiagnostic, WireFsEvent, WireOverflowScope,
-        WireProbeOwner, WireTime,
+        WireBurstIntent, WireDetachReason, WireDiagnostic, WireFsEvent, WireOverflowScope, WireTime,
     };
     use std::time::UNIX_EPOCH;
 
@@ -637,11 +524,11 @@ mod tests {
         assert!(s.ends_with('\n'), "newline-terminated: {s:?}");
     }
 
-    /// `SubAttached.source_promoter = Some(_)` renders an extra `source_promoter=N` field; `None`
-    /// omits it entirely. Operators distinguishing static vs promoter-minted Subs read the
-    /// presence/absence of the field.
+    /// `SubAttached.source_discovery = Some(_)` renders an extra `source_discovery=N` field;
+    /// `None` omits it entirely. Operators distinguishing operator-declared vs discovery-minted
+    /// Subs read the presence/absence of the field.
     #[test]
-    fn render_sub_attached_promoter_field_optional() {
+    fn render_sub_attached_discovery_field_optional() {
         let mut static_attach = String::new();
         render(
             &mut static_attach,
@@ -649,14 +536,14 @@ mod tests {
                 at: WireTime::from(UNIX_EPOCH),
                 sub: WireId(1),
                 name: "static_watch".into(),
-                source_promoter: None,
+                source_discovery: None,
             },
             Styler::Plain,
         );
         assert!(static_attach.contains("name=static_watch"));
         assert!(
-            !static_attach.contains("source_promoter"),
-            "None must omit source_promoter: {static_attach:?}",
+            !static_attach.contains("source_discovery"),
+            "None must omit source_discovery: {static_attach:?}",
         );
 
         let mut dynamic_attach = String::new();
@@ -665,12 +552,12 @@ mod tests {
             &WireDiagnostic::SubAttached {
                 at: WireTime::from(UNIX_EPOCH),
                 sub: WireId(2),
-                name: "p@/tmp/x".into(),
-                source_promoter: Some(WireId(99)),
+                name: "t@/tmp/x".into(),
+                source_discovery: Some(WireId(99)),
             },
             Styler::Plain,
         );
-        assert!(dynamic_attach.contains("source_promoter=99"));
+        assert!(dynamic_attach.contains("source_discovery=99"));
     }
 
     /// `SubDetached.reason` renders through the typed [`WireDetachReason`] label table
@@ -713,57 +600,6 @@ mod tests {
             !s.contains("sub="),
             "Profile-keyed variant must not carry a sub field: {s:?}",
         );
-    }
-
-    /// Promoter-keyed variants (`PromoterAttached`) render the `promoter=N` key. Sanity-checks the
-    /// cross-cutting helper coverage.
-    #[test]
-    fn render_promoter_attached_carries_promoter_and_name() {
-        let mut s = String::new();
-        render(
-            &mut s,
-            &WireDiagnostic::PromoterAttached {
-                at: WireTime::from(UNIX_EPOCH),
-                promoter: WireId(42),
-                name: "watch_glob".into(),
-            },
-            Styler::Plain,
-        );
-        assert!(s.contains("  promoter=42"));
-        assert!(s.contains("  name=watch_glob"));
-    }
-
-    /// Compound enums render through their helper — `WireProbeOwner` projects through
-    /// `probe_owner_str` to `<kind>/<id>` form, which is more operator-readable than two separate
-    /// fields.
-    #[test]
-    fn render_probe_owner_compound_label() {
-        let mut profile_owner = String::new();
-        render(
-            &mut profile_owner,
-            &WireDiagnostic::StaleProbeResponse {
-                at: WireTime::from(UNIX_EPOCH),
-                owner: WireProbeOwner::Profile { profile: WireId(1) },
-                correlation: 9,
-            },
-            Styler::Plain,
-        );
-        assert!(profile_owner.contains("  owner=profile/1"));
-        assert!(profile_owner.contains("  correlation=9"));
-
-        let mut promoter_owner = String::new();
-        render(
-            &mut promoter_owner,
-            &WireDiagnostic::StaleProbeResponse {
-                at: WireTime::from(UNIX_EPOCH),
-                owner: WireProbeOwner::Promoter {
-                    promoter: WireId(2),
-                },
-                correlation: 11,
-            },
-            Styler::Plain,
-        );
-        assert!(promoter_owner.contains("  owner=promoter/2"));
     }
 
     /// `EventClassDropped` is the canonical multi-field per-Resource variant; its rendered line
@@ -853,12 +689,11 @@ mod tests {
     fn synthesize_min_value(tag: &str, at: &serde_json::Value) -> serde_json::Value {
         use serde_json::json;
         let id = json!(1);
-        let profile_owner = json!({ "kind": "profile", "profile": id });
         let global_scope = json!({ "scope": "global" });
         let pressure = json!({ "kind": "pressure", "errno": 24 });
         match tag {
             "stale_probe_response" => {
-                json!({"diag": tag, "at": at, "owner": profile_owner, "correlation": 1})
+                json!({"diag": tag, "at": at, "owner": id, "correlation": 1})
             }
             "stale_timer" => json!({"diag": tag, "at": at, "id": 1}),
             "effect_complete_outside_awaiting" => {
@@ -867,9 +702,7 @@ mod tests {
             "effect_complete_for_unknown_sub" | "detach_unknown_sub" => {
                 json!({"diag": tag, "at": at, "sub": id})
             }
-            "config_diff_unknown_sub"
-            | "config_diff_unknown_promoter"
-            | "config_diff_rebind_fallback_attach" => {
+            "config_diff_unknown_sub" | "config_diff_rebind_fallback_attach" => {
                 json!({"diag": tag, "at": at, "name": "x"})
             }
             "probe_vanished" => {
@@ -905,10 +738,6 @@ mod tests {
                 "diag": tag, "at": at, "profile": id, "claim": "anchor",
                 "resource": id, "failure": pressure,
             }),
-            "promoter_claim_purged" => json!({
-                "diag": tag, "at": at, "promoter": id, "claim": "active_proxy",
-                "resource": id, "failure": pressure,
-            }),
             "attach_path_invalid" => {
                 json!({"diag": tag, "at": at, "path": "/x", "hint": "h"})
             }
@@ -939,11 +768,8 @@ mod tests {
                 "intent": "standard", "observed_change": false,
             }),
             "sensor_overflow" => json!({"diag": tag, "at": at, "scope": global_scope}),
-            "promoter_reseeded_for_overflow" | "promoter_reaped" => {
-                json!({"diag": tag, "at": at, "promoter": id})
-            }
             "sub_attached" => json!({
-                "diag": tag, "at": at, "sub": id, "name": "x", "source_promoter": null,
+                "diag": tag, "at": at, "sub": id, "name": "x", "source_discovery": null,
             }),
             "sub_fired" => {
                 json!({"diag": tag, "at": at, "sub": id, "profile": id, "count": 1})
@@ -956,33 +782,6 @@ mod tests {
                 "diag": tag, "at": at, "sub": id, "profile": id, "reason": "ipc_disabled",
             }),
             "sub_rebound" | "rebind_unknown_sub" => json!({"diag": tag, "at": at, "sub": id}),
-            "promoter_attached" => {
-                json!({"diag": tag, "at": at, "promoter": id, "name": "p"})
-            }
-            "promoter_descent_vanished" => {
-                json!({"diag": tag, "at": at, "promoter": id, "prefix": id})
-            }
-            "promoter_descent_failed" => json!({
-                "diag": tag, "at": at, "promoter": id, "prefix": id, "errno": 0,
-            }),
-            "promotion_kind_observed" => json!({
-                "diag": tag, "at": at, "promoter": id, "path": "/x", "kind": "dir",
-            }),
-            "promoter_fanout_threshold" => {
-                json!({"diag": tag, "at": at, "promoter": id, "count": 0})
-            }
-            "promoter_proxy_stale_event" => {
-                json!({"diag": tag, "at": at, "promoter": id, "resource": id})
-            }
-            "promoter_enumeration_vanished" => {
-                json!({"diag": tag, "at": at, "promoter": id, "proxy": id})
-            }
-            "promoter_enumeration_failed" => json!({
-                "diag": tag, "at": at, "promoter": id, "proxy": id, "errno": 0,
-            }),
-            "dynamic_sub_reaped" => json!({
-                "diag": tag, "at": at, "promoter": id, "sub": id, "path": "/x",
-            }),
             "discovery_minted" => json!({
                 "diag": tag, "at": at, "source": id, "path": "/x", "kind": "dir",
             }),
@@ -997,7 +796,7 @@ mod tests {
                 "helper": "transition_to_verifying", "observed": "idle",
             }),
             "walker_contract_violated" => {
-                json!({"diag": tag, "at": at, "owner": profile_owner})
+                json!({"diag": tag, "at": at, "owner": id})
             }
             "_missed" => json!({"diag": tag, "at": at, "count": 1}),
             other => panic!("synthesize_min_value: unknown tag {other}"),
@@ -1044,7 +843,7 @@ mod tests {
         assert_eq!(
             severity(&WireDiagnostic::WalkerContractViolated {
                 at: WireTime::from(UNIX_EPOCH),
-                owner: WireProbeOwner::Profile { profile: WireId(1) },
+                owner: WireId(1),
             }),
             Severity::Error,
         );
@@ -1066,7 +865,7 @@ mod tests {
                 at: WireTime::from(UNIX_EPOCH),
                 sub: WireId(1),
                 name: "w".into(),
-                source_promoter: None,
+                source_discovery: None,
             }),
             Severity::Info,
         );
@@ -1115,7 +914,7 @@ mod tests {
         // Red is reserved for a violated invariant.
         let breach = WireDiagnostic::WalkerContractViolated {
             at: WireTime::from(UNIX_EPOCH),
-            owner: WireProbeOwner::Profile { profile: WireId(1) },
+            owner: WireId(1),
         };
         let mut active = String::new();
         render(&mut active, &breach, Styler::Active);

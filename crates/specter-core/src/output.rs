@@ -7,7 +7,7 @@
 //!   the boundary by [`StepOutput::sort_for_emission`].
 //! - **`effects`** — private [`SortedEffects`] (`SmallVec`). Sorted by [`Effect::sort_key`];
 //!   resealed at the boundary by [`StepOutput::sort_for_emission`].
-//! - **`probe_ops`** — private [`ProbeOps`] (`BTreeMap`). Order is intrinsic to the [`ProbeOwner`]
+//! - **`probe_ops`** — private [`ProbeOps`] (`BTreeMap`). Order is intrinsic to the [`ProfileId`]
 //!   key; sealed structurally — a per-owner last-writer-wins upsert ([`StepOutput::push_probe_op`])
 //!   makes "at most one op per owner, in owner order" unrepresentable to violate.
 //! - **`cancel_effects`** — private [`CancelEffects`] (`BTreeSet`). Per-profile dedup set; order
@@ -24,14 +24,13 @@
 //!
 //! Residual discipline: every `StepOutput`-returning entry point calls
 //! [`StepOutput::sort_for_emission`] before returning. Pinned at the engine boundary by
-//! `tests/integration.rs` — `step_output_is_sorted`,
-//! `cancel_all_in_flight_probes_returns_sealed_output`, and
-//! `reap_promoter_active_returns_sealed_output`.
+//! `tests/integration.rs` — `step_output_is_sorted` and
+//! `cancel_all_in_flight_probes_returns_sealed_output`.
 
 use crate::diag::Diagnostic;
 use crate::effect::Effect;
 use crate::ids::ProfileId;
-use crate::op::{ProbeOp, ProbeOwner, WatchOp};
+use crate::op::{ProbeOp, WatchOp};
 use smallvec::SmallVec;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -65,16 +64,16 @@ impl std::ops::Deref for SortedEffects {
 
 /// The `probe_ops` stream as a sealed per-owner map.
 ///
-/// Isomorphic to the sensor's `WorkerProber.expected: BTreeMap<ProbeOwner, ProbeCorrelation>`
+/// Isomorphic to the sensor's `WorkerProber.expected: BTreeMap<ProfileId, ProbeCorrelation>`
 /// (`submit` inserts, `cancel` removes, both owner-keyed). Producer and consumer share one shape;
-/// `BTreeMap<ProbeOwner, ProbeOp>` is type-honest, not a dedup tactic.
+/// `BTreeMap<ProfileId, ProbeOp>` is type-honest, not a dedup tactic.
 ///
 /// Append-only from outside the module ([`StepOutput::push_probe_op`], a per-owner upsert); read
 /// via [`ProbeOps::iter`] or, at the terminal drain, [`StepOutput::into_parts`]. An empty map does
 /// not allocate (the common case), so the sealed shape is lighter on the hot `StepOutput` than
 /// always-resident inline slots would be.
 #[derive(Clone, Debug, Default)]
-pub struct ProbeOps(BTreeMap<ProbeOwner, ProbeOp>);
+pub struct ProbeOps(BTreeMap<ProfileId, ProbeOp>);
 
 impl ProbeOps {
     /// Record `op`, replacing any prior op for the same owner (last-writer-wins — see type
@@ -83,7 +82,7 @@ impl ProbeOps {
         self.0.insert(op.owner(), op);
     }
 
-    /// The ops in [`ProbeOwner`] order (`Profile` < `Promoter`, then payload id).
+    /// The ops in [`ProfileId`] order.
     #[must_use]
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ProbeOp> {
         self.0.values()
@@ -157,7 +156,7 @@ impl CancelEffects {
 /// production, but if it ever did, this ordering is the correctness contract).
 pub type StepOutputParts = (
     SmallVec<[WatchOp; 2]>,
-    BTreeMap<ProbeOwner, ProbeOp>,
+    BTreeMap<ProfileId, ProbeOp>,
     SmallVec<[Effect; 2]>,
     BTreeSet<ProfileId>,
     SmallVec<[Diagnostic; 2]>,
@@ -329,31 +328,28 @@ mod tests {
         assert_eq!(resources, vec![r1, r2, r3]);
     }
 
-    /// [`ProbeOps`] iterates in [`ProbeOwner`] order *intrinsically* — the order is the map key,
+    /// [`ProbeOps`] iterates in [`ProfileId`] order *intrinsically* — the order is the map key,
     /// established at insert, not by a sort. Push out of owner order and assert iteration order
     /// *before* any `sort_for_emission`; the seal call then leaves it unchanged (it is a no-op for
     /// `probe_ops`).
     #[test]
     fn probe_ops_iterate_in_owner_order_without_a_sort() {
-        use crate::op::ProbeOwner;
         let p1 = pidn(1);
         let p2 = pidn(2);
         let mut out = StepOutput::default();
-        out.push_probe_op(ProbeOp::Cancel {
-            owner: ProbeOwner::Profile(p2),
-        });
+        out.push_probe_op(ProbeOp::Cancel { owner: p2 });
         out.push_probe_op(ProbeOp::Probe {
             request: ProbeRequest::AnchorFile {
-                owner: ProbeOwner::Profile(p1),
+                owner: p1,
                 correlation: ProbeCorrelation::from(7),
                 target_path: Arc::from(std::path::Path::new("/y")),
             },
         });
 
-        let owners = |o: &StepOutput| -> Vec<ProbeOwner> {
+        let owners = |o: &StepOutput| -> Vec<ProfileId> {
             o.probe_ops().iter().map(ProbeOp::owner).collect()
         };
-        let expected = vec![ProbeOwner::Profile(p1), ProbeOwner::Profile(p2)];
+        let expected = vec![p1, p2];
         // Owner-ordered by construction, before any seal.
         assert_eq!(owners(&out), expected);
         out.sort_for_emission();
@@ -366,24 +362,21 @@ mod tests {
     /// violation is unrepresentable, not asserted-against.
     #[test]
     fn push_probe_op_replaces_prior_op_for_same_owner() {
-        use crate::op::ProbeOwner;
         let p = pidn(1);
         let mut out = StepOutput::default();
         out.push_probe_op(ProbeOp::Probe {
             request: ProbeRequest::AnchorFile {
-                owner: ProbeOwner::Profile(p),
+                owner: p,
                 correlation: ProbeCorrelation::from(7),
                 target_path: Arc::from(std::path::Path::new("/y")),
             },
         });
-        out.push_probe_op(ProbeOp::Cancel {
-            owner: ProbeOwner::Profile(p),
-        });
+        out.push_probe_op(ProbeOp::Cancel { owner: p });
 
         assert_eq!(out.probe_ops().len(), 1);
         let only = out.probe_ops().iter().next().expect("one op for p");
         assert!(
-            matches!(only, ProbeOp::Cancel { owner } if *owner == ProbeOwner::Profile(p)),
+            matches!(only, ProbeOp::Cancel { owner } if *owner == p),
             "the later Cancel must replace the earlier Probe (last-writer-wins)",
         );
     }
@@ -392,27 +385,21 @@ mod tests {
     /// not a single slot — the per-owner replace must not collapse different owners.
     #[test]
     fn push_probe_op_keeps_distinct_owners() {
-        use crate::op::ProbeOwner;
         let p1 = pidn(1);
         let p2 = pidn(2);
         let mut out = StepOutput::default();
-        out.push_probe_op(ProbeOp::Cancel {
-            owner: ProbeOwner::Profile(p2),
-        });
+        out.push_probe_op(ProbeOp::Cancel { owner: p2 });
         out.push_probe_op(ProbeOp::Probe {
             request: ProbeRequest::AnchorFile {
-                owner: ProbeOwner::Profile(p1),
+                owner: p1,
                 correlation: ProbeCorrelation::from(7),
                 target_path: Arc::from(std::path::Path::new("/y")),
             },
         });
 
         assert_eq!(out.probe_ops().len(), 2);
-        let owners: Vec<ProbeOwner> = out.probe_ops().iter().map(ProbeOp::owner).collect();
-        assert_eq!(
-            owners,
-            vec![ProbeOwner::Profile(p1), ProbeOwner::Profile(p2)]
-        );
+        let owners: Vec<ProfileId> = out.probe_ops().iter().map(ProbeOp::owner).collect();
+        assert_eq!(owners, vec![p1, p2]);
     }
 
     /// `sort_for_emission` orders mixed-arm effects by `(sub, target)`. Mixing `PerFile` and

@@ -1,7 +1,7 @@
 //! Watch and Probe ops, plus their request/response payloads.
 
 use crate::effect::Effect;
-use crate::ids::{ProbeCorrelation, ProfileId, PromoterId, ResourceId};
+use crate::ids::{ProbeCorrelation, ProfileId, ResourceId};
 use crate::resource::ResourceKind;
 use crate::scan_config::ScanConfig;
 use crate::snapshot::tree::{DirSnapshot, LeafEntry};
@@ -9,32 +9,6 @@ use crate::sub::ClassSet;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
-
-/// The engine-resident entity that minted a probe — the key the engine demuxes a response back to.
-///
-/// Echoed verbatim through [`ProbeRequest`] / [`ProbeResponse`] / [`ProbeOp::Cancel`] so the engine
-/// can route each response to the entity that's awaiting it.
-///
-/// Two owner kinds. [`Self::Profile`] drives the burst / descent / rebase lifecycle.
-/// [`Self::Promoter`] drives the literal-prefix descent and proxy-enumeration lifecycle. There is
-/// no outstanding-probe map this enum keys: "at most one in-flight probe per owner" (I5) is a
-/// *representability* property of the owner's single state-resident `ProbeSlot`, so one Profile and
-/// one Promoter can each carry an in-flight probe simultaneously without collision by construction.
-///
-/// **Determinism.** Derived `Ord` (variant order Profile < Promoter, then payload [`ProfileId`] /
-/// [`PromoterId`]) is the [`crate::StepOutput::probe_ops`] map key — per-owner last-writer-wins,
-/// mirroring the sensor's `expected` map.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub enum ProbeOwner {
-    /// Profile-driven probe. The engine homes this owner's in-flight `ProbeCorrelation` on a
-    /// state-resident `ProbeSlot` (descent / verify / rebase, one per state variant); the response
-    /// routes by inspecting that state.
-    Profile(ProfileId),
-    /// Promoter-driven probe. The engine homes this owner's in-flight `ProbeCorrelation` on a
-    /// state-resident `ProbeSlot` (descent, or the `Active` enumeration slot tagged with the proxy
-    /// target); the response routes by inspecting that state.
-    Promoter(PromoterId),
-}
 
 /// Non-empty carrier for the [`ProofObligation::Chains`] chain set.
 ///
@@ -146,9 +120,9 @@ pub enum ProbeRequest {
     /// `lstat` is definitionally authoritative — no subtree to discharge a proof over), no `forced`
     /// (mtime-skip is not a concept for `lstat`).
     AnchorFile {
-        /// Owner the engine demuxes the response back to. Echoed back on `ProbeResponse` and used
-        /// by the Sensor's expectation-map insertion.
-        owner: ProbeOwner,
+        /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and
+        /// used by the Sensor's expectation-map insertion.
+        owner: ProfileId,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
         /// Filesystem path of the anchor at probe-emission time. `Arc::clone` of the slot's
@@ -160,9 +134,9 @@ pub enum ProbeRequest {
     /// (or `Vanished` / `Failed`); the `authority` certifies whether the response discharged the
     /// `obligation`.
     Subtree {
-        /// Owner the engine demuxes the response back to. Echoed back on `ProbeResponse` and used
-        /// by the Sensor's expectation-map insertion.
-        owner: ProbeOwner,
+        /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and
+        /// used by the Sensor's expectation-map insertion.
+        owner: ProfileId,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
         /// Filesystem path of the directory to walk — the **recursion root** and graft point. The
@@ -232,25 +206,24 @@ pub enum ProbeRequest {
     /// snapshot (it is never spliced into `Profile.current`). No `obligation` (a structural query
     /// is not a quiescence observation).
     Descent {
-        /// Owner the engine demuxes the response back to. Echoed back on `ProbeResponse` and used
-        /// by the Sensor's expectation-map insertion.
-        owner: ProbeOwner,
+        /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and
+        /// used by the Sensor's expectation-map insertion.
+        owner: ProfileId,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
         /// Filesystem path of the descent prefix at probe-emission time. The engine routes
         /// responses by `(owner, correlation)` against the owner's state-resident `ProbeSlot` (the
-        /// descent prefix lives on `DescentState`; the promoter enumeration target is the `Active`
-        /// slot's tag); the walker only needs the path. `Arc::clone` of the slot's materialised
-        /// path — no rebuild.
+        /// descent prefix lives on `DescentState`); the walker only needs the path. `Arc::clone`
+        /// of the slot's materialised path — no rebuild.
         target_path: Arc<Path>,
     },
 }
 
 impl ProbeRequest {
-    /// Owner the engine demuxes the response back to. Determinism-sort key for
+    /// Profile the engine demuxes the response back to. Determinism-sort key for
     /// [`crate::StepOutput::probe_ops`] (via [`ProbeOp::owner`]).
     #[must_use]
-    pub const fn owner(&self) -> ProbeOwner {
+    pub const fn owner(&self) -> ProfileId {
         match self {
             Self::AnchorFile { owner, .. }
             | Self::Subtree { owner, .. }
@@ -287,7 +260,7 @@ impl ProbeRequest {
 /// gates against the owner's in-flight `ProbeSlot`; `outcome` carries the per-variant payload.
 #[derive(Debug, Clone)]
 pub struct ProbeResponse {
-    pub owner: ProbeOwner,
+    pub owner: ProfileId,
     pub correlation: ProbeCorrelation,
     pub outcome: ProbeOutcome,
 }
@@ -485,14 +458,14 @@ impl WatchFailure {
 #[derive(Debug, Clone)]
 pub enum ProbeOp {
     Probe { request: ProbeRequest },
-    Cancel { owner: ProbeOwner },
+    Cancel { owner: ProfileId },
 }
 
 impl ProbeOp {
-    /// The owner this op addresses. Both variants carry one (the `Probe` variant via its nested
+    /// The Profile this op addresses. Both variants carry one (the `Probe` variant via its nested
     /// [`ProbeRequest`]). This is the determinism-sort key for [`crate::StepOutput::probe_ops`].
     #[must_use]
-    pub const fn owner(&self) -> ProbeOwner {
+    pub const fn owner(&self) -> ProfileId {
         match self {
             Self::Probe { request } => request.owner(),
             Self::Cancel { owner } => *owner,
@@ -549,33 +522,5 @@ mod non_empty_chain_set_tests {
         populated.insert(Arc::from(Path::new("/w/a")));
         let wrapped = NonEmptyChainSet::new(populated).expect("non-empty wraps");
         assert_eq!(wrapped.len(), 1);
-    }
-}
-
-#[cfg(test)]
-mod probe_owner_tests {
-    use super::ProbeOwner;
-    use crate::ids::{ProfileId, PromoterId};
-    use slotmap::KeyData;
-
-    /// `ProbeOwner`'s derived `Ord` keys [`crate::StepOutput::probe_ops`] (the per-owner map) and
-    /// underlies cross-version log-shape stability. Pinning both inter- and intra-variant order
-    /// here makes a stylistic reorder of the variants fail on the file the reorder lives on — a
-    /// manual `Ord` impl would be ceremonial for a two-variant enum and would surface the
-    /// cross-variant invariant no earlier than this test.
-    #[test]
-    fn ord_is_profile_then_promoter_then_payload() {
-        let p_lo = ProfileId::from(KeyData::from_ffi(1));
-        let p_hi = ProfileId::from(KeyData::from_ffi(2));
-        let q_lo = PromoterId::from(KeyData::from_ffi(1));
-        let q_hi = PromoterId::from(KeyData::from_ffi(2));
-
-        // Inter-variant: every Profile precedes every Promoter, regardless of payload (high Profile
-        // id still < low Promoter id).
-        assert!(ProbeOwner::Profile(p_hi) < ProbeOwner::Promoter(q_lo));
-
-        // Intra-variant: payload ordering within each variant.
-        assert!(ProbeOwner::Profile(p_lo) < ProbeOwner::Profile(p_hi));
-        assert!(ProbeOwner::Promoter(q_lo) < ProbeOwner::Promoter(q_hi));
     }
 }

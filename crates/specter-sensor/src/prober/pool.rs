@@ -39,9 +39,8 @@
 //!
 //! # Cancellation discipline
 //!
-//! The `expected: Arc<Mutex<BTreeMap<ProbeOwner, ProbeCorrelation>>>` map records the *latest*
-//! expected correlation per probe-channel owner (Profile in v1; future owner kinds plug in via the
-//! [`ProbeOwner`] enum).
+//! The `expected: Arc<Mutex<BTreeMap<ProfileId, ProbeCorrelation>>>` map records the *latest*
+//! expected correlation per probe-owning Profile.
 //!
 //! - `submit(req)`: insert `(req.owner(), req.correlation())`, then channel-send. The lock-then-send
 //!   order guarantees the worker that races to `recv()` already sees the expectation.
@@ -71,7 +70,7 @@ use crate::prober::walk::{probe_anchor_file, probe_descent, probe_subtree};
 use crate::{Prober, ProberResponseSender};
 use crossbeam::channel::{Receiver, Sender};
 use specter_core::{
-    ProbeCorrelation, ProbeFailure, ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse,
+    ProbeCorrelation, ProbeFailure, ProbeOutcome, ProbeRequest, ProbeResponse, ProfileId,
 };
 use std::collections::BTreeMap;
 use std::io;
@@ -94,7 +93,7 @@ pub const fn default_concurrency() -> NonZeroUsize {
 /// and every worker thread; the `Mutex` body holds for ~10ns (`BTreeMap` lookup + insert/remove on
 /// a short map), so contention is negligible at v1's expected probe rates. Visible to sibling tests
 /// so they can drive `run_worker` directly with a hand-seeded map.
-pub(super) type ExpectedMap = Arc<Mutex<BTreeMap<ProbeOwner, ProbeCorrelation>>>;
+pub(super) type ExpectedMap = Arc<Mutex<BTreeMap<ProfileId, ProbeCorrelation>>>;
 
 /// Lock the expectation map, recovering from `Mutex` poisoning by extracting the inner state via
 /// `PoisonError::into_inner`.
@@ -112,7 +111,7 @@ pub(super) type ExpectedMap = Arc<Mutex<BTreeMap<ProbeOwner, ProbeCorrelation>>>
 /// we add inside the lock.
 pub(super) fn lock_expected(
     expected: &ExpectedMap,
-) -> std::sync::MutexGuard<'_, BTreeMap<ProbeOwner, ProbeCorrelation>> {
+) -> std::sync::MutexGuard<'_, BTreeMap<ProfileId, ProbeCorrelation>> {
     expected
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -300,7 +299,7 @@ impl Prober for WorkerProber {
         }
     }
 
-    fn cancel(&self, owner: ProbeOwner) {
+    fn cancel(&self, owner: ProfileId) {
         lock_expected(&self.expected).remove(&owner);
     }
 }

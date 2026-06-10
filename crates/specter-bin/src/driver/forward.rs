@@ -136,7 +136,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// **`WireTime` projection is also once per call.** The `humantime::format_rfc3339_seconds`
     /// allocation runs once here; every per-diag [`crate::ipc::wire::WireDiagnostic::from`]
     /// projection bumps the `Arc<str>` refcount instead of re-formatting. For a high-fanout
-    /// `StepOutput` (e.g., a 256-fanout `PromoterFanoutThreshold` burst) this collapses N format
+    /// `StepOutput` (e.g., a 256-fanout `DiscoveryMinted` burst) this collapses N format
     /// calls into 1 + N atomic refcount bumps.
     ///
     /// **Empty-slice short-circuit.** Most ticks emit zero diagnostics; the early return keeps the
@@ -207,11 +207,6 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             %name,
             "config reload removed a watch the engine never attached \
              (likely a prior path error); nothing to detach",
-        ),
-        Diagnostic::ConfigDiffUnknownPromoter { name } => tracing::info!(
-            %name,
-            "config reload removed a dynamic watch the engine never \
-             attached (likely a prior path error); nothing to reap",
         ),
         Diagnostic::ConfigDiffRebindFallbackAttach { name } => tracing::info!(
             %name,
@@ -294,19 +289,6 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?failure,
             errno = failure.errno(),
             "profile claim purged (WatchOpRejected at claimed resource)",
-        ),
-        Diagnostic::PromoterClaimPurged {
-            promoter,
-            claim,
-            resource,
-            failure,
-        } => tracing::warn!(
-            ?promoter,
-            ?claim,
-            ?resource,
-            ?failure,
-            errno = failure.errno(),
-            "promoter claim purged (WatchOpRejected at claimed resource)",
         ),
         Diagnostic::AttachPathInvalid { path, hint } => {
             tracing::error!(
@@ -429,10 +411,6 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?scope,
             "sensor reported overflow (kernel queue dropped events); reseeding in-scope Profiles",
         ),
-        Diagnostic::PromoterReseededForOverflow { promoter } => tracing::debug!(
-            ?promoter,
-            "promoter reseeded after sensor overflow (descent re-probed or proxies re-enumerated)",
-        ),
         Diagnostic::PerFileDriftDroppedOnRecovery { profile } => tracing::warn!(
             ?profile,
             "per-file Sub's loss-window reactions dropped on recovery (no per-leaf survival witness)",
@@ -445,19 +423,19 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::SubAttached {
             sub,
             name,
-            source_promoter,
-        } => match source_promoter {
-            // Static (operator-declared) attach: high signal, low rate (one per `[[watch]]` block
-            // per reload). INFO is the operator-facing default per the catalog severity table.
+            source_discovery,
+        } => match source_discovery {
+            // Operator-declared attach: high signal, low rate (one per `[[watch]]` block per
+            // reload). INFO is the operator-facing default per the catalog severity table.
             None => tracing::info!(?sub, %name, "sub attached"),
-            // Dynamic (Promoter-spawned) attach: same lifecycle event but emitted once per pattern
-            // match, which can be many per enumeration. DEBUG keeps operator logs uncluttered;
-            // `PromotionKindObserved` already carries the path-level signal at the same severity.
-            Some(promoter) => tracing::debug!(
+            // Discovery-minted attach: same lifecycle event but emitted once per pattern match,
+            // which can be many per reconcile. DEBUG keeps operator logs uncluttered;
+            // `DiscoveryMinted` already carries the path-level signal at the same severity.
+            Some(source) => tracing::debug!(
                 ?sub,
                 %name,
-                ?promoter,
-                "dynamic sub attached (promoter-spawned)",
+                ?source,
+                "dynamic sub attached (discovery-minted)",
             ),
         },
         Diagnostic::SubFired {
@@ -493,74 +471,6 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::RebindUnknownSub { sub } => tracing::warn!(
             ?sub,
             "rebind targeted an unknown Sub (dispatcher routing breach)",
-        ),
-        Diagnostic::PromoterAttached { promoter, name } => tracing::info!(
-            ?promoter,
-            %name,
-            "promoter attached",
-        ),
-        Diagnostic::PromoterReaped { promoter } => tracing::info!(?promoter, "promoter reaped",),
-        Diagnostic::PromoterDescentVanished { promoter, prefix } => tracing::debug!(
-            ?promoter,
-            ?prefix,
-            "promoter descent / enumeration probe Vanished",
-        ),
-        Diagnostic::PromoterDescentFailed {
-            promoter,
-            prefix,
-            failure,
-        } => tracing::warn!(
-            ?promoter,
-            ?prefix,
-            ?failure,
-            errno = failure.errno(),
-            "promoter descent / enumeration probe Failed",
-        ),
-        Diagnostic::PromotionKindObserved {
-            promoter,
-            path,
-            kind,
-        } => tracing::debug!(
-            ?promoter,
-            path = %path.display(),
-            ?kind,
-            "promoter promotion observed (dynamic Sub minted)",
-        ),
-        Diagnostic::PromoterFanoutThreshold { promoter, count } => tracing::warn!(
-            ?promoter,
-            count,
-            "promoter fanout exceeded warning threshold (consider tightening pattern)",
-        ),
-        Diagnostic::PromoterProxyStaleEvent { promoter, resource } => tracing::debug!(
-            ?promoter,
-            ?resource,
-            "fs event for promoter proxy that was unregistered earlier in step (stale; dropped)",
-        ),
-        Diagnostic::PromoterEnumerationVanished { promoter, proxy } => tracing::debug!(
-            ?promoter,
-            ?proxy,
-            "promoter enumeration probe Vanished (proxy gone; subtree unwound)",
-        ),
-        Diagnostic::PromoterEnumerationFailed {
-            promoter,
-            proxy,
-            failure,
-        } => tracing::warn!(
-            ?promoter,
-            ?proxy,
-            ?failure,
-            errno = failure.errno(),
-            "promoter enumeration probe Failed (retaining proxy state)",
-        ),
-        Diagnostic::DynamicSubReaped {
-            promoter,
-            sub,
-            path,
-        } => tracing::debug!(
-            ?promoter,
-            ?sub,
-            path = %path.display(),
-            "dynamic Sub reaped (anchor terminal — Profile all-dynamic teardown)",
         ),
         Diagnostic::DiscoveryMinted { source, path, kind } => tracing::debug!(
             ?source,
@@ -625,9 +535,8 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::EffectCompleteOutsideAwaiting { sub, .. } => Some(*sub),
 
         // The discovery trio keys to the *source* template — the entity an operator names in a
-        // per-Sub filter — exactly as the Promoter trio keys to its promoter (unprojectable there
-        // only because `PromoterId` is not a `SubId`). The minted/reaped Sub's own lifecycle
-        // signals (`SubAttached` / `SubDetached`) project their own ids alongside.
+        // per-Sub filter. The minted/reaped Sub's own lifecycle signals (`SubAttached` /
+        // `SubDetached`) project their own ids alongside.
         D::DiscoveryMinted { source, .. }
         | D::DiscoveryFanoutThreshold { source, .. }
         | D::DiscoverySubReaped { source, .. } => Some(*source),
@@ -635,7 +544,6 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         D::StaleProbeResponse { .. }
         | D::StaleTimer { .. }
         | D::ConfigDiffUnknownSub { .. }
-        | D::ConfigDiffUnknownPromoter { .. }
         | D::ConfigDiffRebindFallbackAttach { .. }
         | D::ProbeVanished { .. }
         | D::ProbeFailed { .. }
@@ -648,7 +556,6 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::ReapPendingCancelled { .. }
         | D::ProfileReaped { .. }
         | D::ProfileClaimPurged { .. }
-        | D::PromoterClaimPurged { .. }
         | D::AttachPathInvalid { .. }
         | D::AttachResourceStale { .. }
         | D::AnchorKindMismatch { .. }
@@ -661,21 +568,10 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::RebaseCeilingForced { .. }
         | D::RebaseCeilingUnreadable { .. }
         | D::SensorOverflow { .. }
-        | D::PromoterReseededForOverflow { .. }
         | D::PerFileDriftDroppedOnRecovery { .. }
         | D::PerFileFireSkippedOnFreshSeed { .. }
         | D::QuiescenceAbsorbed { .. }
         | D::AbsorbArmed { .. }
-        | D::PromoterAttached { .. }
-        | D::PromoterReaped { .. }
-        | D::PromoterDescentVanished { .. }
-        | D::PromoterDescentFailed { .. }
-        | D::PromotionKindObserved { .. }
-        | D::PromoterFanoutThreshold { .. }
-        | D::PromoterProxyStaleEvent { .. }
-        | D::PromoterEnumerationVanished { .. }
-        | D::PromoterEnumerationFailed { .. }
-        | D::DynamicSubReaped { .. }
         | D::InvalidBurstTransition { .. }
         | D::WalkerContractViolated { .. } => None,
     }
@@ -686,9 +582,7 @@ mod tests {
     use super::diag_sub_id;
     use compact_str::CompactString;
     use slotmap::KeyData;
-    use specter_core::{
-        BurstIntent, DetachReason, Diagnostic, ProbeCorrelation, ProbeOwner, ProfileId, SubId,
-    };
+    use specter_core::{BurstIntent, DetachReason, Diagnostic, ProbeCorrelation, ProfileId, SubId};
 
     /// Mint a non-default [`SubId`] from a raw FFI value — the fan-out filter keys on `Some(sid)`
     /// vs `None`, so a slotmap default would be indistinguishable from an absent id.
@@ -710,7 +604,7 @@ mod tests {
             diag_sub_id(&Diagnostic::SubAttached {
                 sub: s,
                 name: CompactString::const_new("x"),
-                source_promoter: None,
+                source_discovery: None,
             }),
             Some(s)
         );
@@ -775,7 +669,7 @@ mod tests {
         );
         assert_eq!(
             diag_sub_id(&Diagnostic::StaleProbeResponse {
-                owner: ProbeOwner::Profile(p),
+                owner: p,
                 correlation: ProbeCorrelation::from(7),
             }),
             None

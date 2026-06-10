@@ -12,14 +12,13 @@
 use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
     BurstIntent, ClassSet, Diagnostic, DirSnapshot, EntryKind, FsEvent, Input, ProbeCorrelation,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, Profile, ProfileIdentity, ProfileMap,
+    ProbeOp, ProbeOutcome, ProbeResponse, Profile, ProfileId, ProfileIdentity, ProfileMap,
     ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
     Tree, WatchOp,
 };
 use specter_engine::testkit::{
-    anchor_dir, assert_seed_verifying, attach_promoter, attach_returning,
-    complete_effect_to_rebasing, first_probe_correlation, pre_place_dir, rebase_post_fire_to_idle,
-    seed_to_idle,
+    anchor_dir, assert_seed_verifying, attach_returning, complete_effect_to_rebasing,
+    first_probe_correlation, rebase_post_fire_to_idle, seed_to_idle,
 };
 use specter_engine::{Engine, covers};
 use std::path::PathBuf;
@@ -119,7 +118,7 @@ fn drive_standard_burst_to_stable(
         if let Some(c) = correlation {
             let out = e.step(
                 Input::ProbeResponse(ProbeResponse {
-                    owner: ProbeOwner::Profile(pid),
+                    owner: pid,
                     correlation: c,
                     outcome: proven(std::sync::Arc::clone(snap)),
                 }),
@@ -303,7 +302,7 @@ fn trailing_latched_anchor_event_does_not_double_fire() {
         if let Some(c) = drain_to_probe_correlation(&mut e, t) {
             let out = e.step(
                 Input::ProbeResponse(ProbeResponse {
-                    owner: ProbeOwner::Profile(pid),
+                    owner: pid,
                     correlation: c,
                     outcome: proven(snap.clone()),
                 }),
@@ -355,7 +354,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
 
     let resp_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -410,7 +409,7 @@ fn pending_event_race_late_probe_response_discarded() {
     // Late ProbeResponse with the now-stale correlation arrives.
     let late_resp = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: stale_correlation,
             outcome: proven(dir_snap(&[])),
         }),
@@ -464,7 +463,7 @@ fn seed_burst_descendants_watched_via_first_probe() {
     let snap = dir_snap(&[("foo.rs", EntryKind::File, 1), ("bar", EntryKind::Dir, 2)]);
     let resp_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation,
             outcome: proven(snap),
         }),
@@ -524,7 +523,7 @@ fn force_fire_emits_effect_with_forced_true() {
         let snap = dir_snap(&[("x", EntryKind::File, 99)]);
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
+                owner: pid,
                 correlation: corr,
                 outcome: proven(snap),
             }),
@@ -576,7 +575,7 @@ fn step_output_is_sorted() {
     );
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation,
             outcome: proven(snap),
         }),
@@ -632,7 +631,7 @@ fn cancel_all_in_flight_probes_returns_sealed_output() {
 
     assert!(out.watch_ops.is_empty(), "cancel_all emits no watch ops");
     assert!(out.effects().is_empty(), "cancel_all emits no effects");
-    let owners: Vec<ProbeOwner> = out
+    let owners: Vec<ProfileId> = out
         .probe_ops()
         .iter()
         .map(|op| match op {
@@ -642,56 +641,7 @@ fn cancel_all_in_flight_probes_returns_sealed_output() {
         .collect();
     assert_eq!(
         owners,
-        vec![ProbeOwner::Profile(pid1), ProbeOwner::Profile(pid2)],
-        "Cancels emitted in ProbeOwner order",
+        vec![pid1, pid2],
+        "Cancels emitted in ProfileId order",
     );
-}
-
-#[test]
-fn reap_promoter_active_returns_sealed_output() {
-    // A Promoter with multiple proxies emits multiple `Unwatch` ops across dynamic-Sub teardown
-    // plus per-proxy release. The returned `StepOutput` must reseal `watch_ops` by `ResourceId` —
-    // the contract `bin/driver/forward.rs` assumes when dispatching by by-value destructure.
-    let mut e = Engine::new();
-    let _ = pre_place_dir(&mut e, &["var", "log"]);
-    let t0 = Instant::now();
-    let pid = attach_promoter(&mut e, "logs", "/var/log/*.log", t0);
-
-    // Drive the initial enumeration: respond with a directory of two matching files. The Promoter
-    // mints a dynamic Sub per match, leaving it in `Active` with two proxies.
-    let correlation = e
-        .pending_probe_for(ProbeOwner::Promoter(pid))
-        .expect("Promoter enumeration probe in flight after attach");
-    let snap = dir_snap(&[("a.log", EntryKind::File, 1), ("b.log", EntryKind::File, 2)]);
-    let _ = e.step(
-        Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Promoter(pid),
-            correlation,
-            outcome: ProbeOutcome::DirEnumerated(snap),
-        }),
-        t0,
-    );
-
-    let out = e.reap_promoter(pid);
-
-    let resources: Vec<ResourceId> = out.watch_ops.iter().map(WatchOp::resource).collect();
-    let mut sorted = resources.clone();
-    sorted.sort();
-    assert_eq!(
-        resources, sorted,
-        "reap_promoter must return watch_ops sealed by ResourceId",
-    );
-    assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::PromoterReaped { promoter } if *promoter == pid)),
-        "PromoterReaped diagnostic emitted",
-    );
-    // Under the cold-arm Verifying-first contract, each dynamic Sub's Profile lands in
-    // `Active(PreFire(Verifying))` with the cold-walk probe armed. `reap_promoter`'s
-    // `detach_sub_inner` routes each Active Profile through `DeferToBurstEnd` (marks for reap,
-    // keeps the burst alive for its Draining-sweep reconfirm). The Profiles outlive `reap_promoter`
-    // with armed slots until a fresh input drives them. Drop the test engine's Profiles cleanly via
-    // the engine-wide probe cancel.
-    let _ = e.cancel_all_in_flight_probes();
 }

@@ -6,7 +6,6 @@ use crate::effect::EffectCompletion;
 use crate::ids::{ProfileId, ResourceId, SubId, TimerId};
 use crate::op::{ProbeResponse, WatchFailure};
 use crate::profile::TimerKind;
-use crate::promoter::{PromoterAttachRequest, PromoterRegistryDiff};
 use crate::sub::{SubAttachRequest, SubRegistryDiff};
 
 /// Normalized filesystem event. `kqueue` / `inotify` / `FSEvents` flags fold into these six.
@@ -99,7 +98,11 @@ pub enum Input {
         resource: ResourceId,
         failure: WatchFailure,
     },
-    ConfigDiff(WatchRegistryDiff),
+    /// Hot-reload diff payload. **Name-keyed**: the loader carries operator names, never engine
+    /// ids. The engine's `on_config_diff` resolves each name to its live id through the registry's
+    /// `by_name` index, then applies the buckets atomically in one step — removals → modifications
+    /// → additions — all merging into a single sorted [`crate::StepOutput`].
+    ConfigDiff(SubRegistryDiff),
     /// Sensor reports it dropped events at the kernel level — the watch state is intact but the
     /// event stream is no longer trustworthy over `scope`. The engine response is to reseed every
     /// Profile in scope (`Engine::on_sensor_overflow`): cancel any in-flight burst and start a
@@ -147,72 +150,4 @@ pub enum Input {
         profile: ProfileId,
         duration: Option<Duration>,
     },
-    /// Attach a Promoter. The engine renders the literal-prefix path, materialises the Tree, arms
-    /// the Promoter's state-resident probe slot, and starts the Promoter in either `Active` (prefix
-    /// materialised) or `PrefixPending` (descent needed). The minted [`crate::PromoterId`] surfaces
-    /// via [`crate::Diagnostic::PromoterAttached`]; on path rejection, via
-    /// [`crate::Diagnostic::AttachPathInvalid`].
-    AttachPromoter(PromoterAttachRequest),
-}
-
-/// Hot-reload diff payload for [`Input::ConfigDiff`] — the watch-registry generalisation that
-/// carries both Sub and Promoter changes.
-///
-/// Composes the Sub side ([`SubRegistryDiff`]) and the Promoter side ([`PromoterRegistryDiff`]).
-/// Both halves are **name-keyed**: the loader carries operator names, never engine ids. The
-/// engine's `on_config_diff` resolves each name to its live id through the owning registry's
-/// `by_name` index, then applies both halves atomically in one step: Sub removals → Sub
-/// modifications → Sub additions → Promoter removals → Promoter modifications → Promoter additions,
-/// all merging into a single sorted [`crate::StepOutput`].
-///
-/// `Default` is derived so call sites that touch only one half can construct via struct-update
-/// syntax: `WatchRegistryDiff { subs, ..Default::default() }`.
-#[derive(Clone, Debug, Default)]
-pub struct WatchRegistryDiff {
-    pub subs: SubRegistryDiff,
-    pub promoters: PromoterRegistryDiff,
-}
-
-impl WatchRegistryDiff {
-    /// True iff both halves carry no changes — pure delegation to [`SubRegistryDiff::is_empty`] and
-    /// [`PromoterRegistryDiff::is_empty`]. The reload pipeline uses this as the "skip the engine
-    /// step" gate; keeping the predicate behind one method ensures future bucket additions stay
-    /// covered without touching call sites.
-    #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.subs.is_empty() && self.promoters.is_empty()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{SubRegistryDiff, WatchRegistryDiff};
-    use crate::promoter::PromoterRegistryDiff;
-    use compact_str::CompactString;
-
-    /// Composition contract: empty halves yield an empty whole; a single populated bucket on either
-    /// half flips the aggregate predicate.
-    #[test]
-    fn watch_registry_diff_is_empty_composes_both_halves() {
-        let empty = WatchRegistryDiff::default();
-        assert!(empty.is_empty());
-
-        let only_sub_side = WatchRegistryDiff {
-            subs: SubRegistryDiff {
-                removed: vec![CompactString::from("a")],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert!(!only_sub_side.is_empty());
-
-        let only_promoter_side = WatchRegistryDiff {
-            promoters: PromoterRegistryDiff {
-                removed: vec![CompactString::from("a")],
-                ..Default::default()
-            },
-            ..Default::default()
-        };
-        assert!(!only_promoter_side.is_empty());
-    }
 }

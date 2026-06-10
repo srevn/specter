@@ -6,8 +6,8 @@
 use crossbeam::channel::{Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
-    EntryKind, Input, ProbeCorrelation, ProbeOutcome, ProbeOwner, ProbeRequest, ProfileId,
-    ProofObligation, ScanConfig,
+    EntryKind, Input, ProbeCorrelation, ProbeOutcome, ProbeRequest, ProfileId, ProofObligation,
+    ScanConfig,
 };
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::num::NonZeroUsize;
@@ -45,7 +45,7 @@ fn sink(tx: Sender<Input>) -> Arc<dyn ProberResponseSender> {
 
 fn anchor_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
-        owner: ProbeOwner::Profile(profile),
+        owner: profile,
         correlation: ProbeCorrelation::from(correlation),
         target_path: Arc::from(target_path),
     }
@@ -55,7 +55,7 @@ fn subtree_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -
     let target_path: Arc<Path> = Arc::from(target_path);
     let anchor_path = Arc::clone(&target_path);
     ProbeRequest::Subtree {
-        owner: ProbeOwner::Profile(profile),
+        owner: profile,
         correlation: ProbeCorrelation::from(correlation),
         target_path,
         anchor_path,
@@ -90,7 +90,7 @@ fn anchor_file_round_trip_emits_anchor_ok_with_leaf() {
     prober.submit(anchor_request(p, path, 1));
 
     let resp = recv_response(&rx);
-    assert_eq!(resp.owner, ProbeOwner::Profile(p));
+    assert_eq!(resp.owner, p);
     assert_eq!(resp.correlation, ProbeCorrelation::from(1));
     let ProbeOutcome::AnchorOk(leaf) = resp.outcome else {
         panic!("expected AnchorOk, got {:?}", resp.outcome);
@@ -211,7 +211,7 @@ fn correlation_is_echoed_unchanged() {
 
     let resp = recv_response(&rx);
     assert_eq!(resp.correlation, ProbeCorrelation::from(99));
-    assert_eq!(resp.owner, ProbeOwner::Profile(p));
+    assert_eq!(resp.owner, p);
 
     let _ = prober.shutdown();
 }

@@ -7,7 +7,7 @@ use crossbeam::channel::{Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, DirChild, DirSnapshot, GlobPattern, Input, ProbeCorrelation, ProbeOutcome,
-    ProbeOwner, ProbeRequest, ProfileId, ProofObligation, ScanConfig,
+    ProbeRequest, ProfileId, ProofObligation, ScanConfig,
 };
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::collections::BTreeSet;
@@ -54,7 +54,7 @@ fn segments(
     let target_path: Arc<Path> = Arc::from(anchor);
     let anchor_path = Arc::clone(&target_path);
     prober.submit(ProbeRequest::Subtree {
-        owner: ProbeOwner::Profile(p),
+        owner: p,
         correlation: ProbeCorrelation::from(1),
         target_path,
         anchor_path,

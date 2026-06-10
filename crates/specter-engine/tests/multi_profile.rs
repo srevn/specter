@@ -10,9 +10,8 @@ use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
     ActiveBurst, BurstFinish, BurstIntent, ClassSet, EffectCompletion, EffectScope, EntryKind,
     FsEvent, Input, OverflowScope, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ProofAuthority,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId,
-    WatchOp,
+    ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState, ProofAuthority, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -257,7 +256,7 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         child_parked_at,
     );
     let rebase_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .pending_probe_for(pid_child)
         .expect("EffectComplete drove Awaiting → Rebasing with the rebase probe in flight");
     assert!(
         !reconfirm_probed(&rebase_out, pid_parent) && parent_is_draining(&e),
@@ -301,7 +300,7 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     let t_restart = t_absorb + Duration::from_millis(5);
     let restart_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_child),
+            owner: pid_child,
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: child_snap.clone(),
@@ -345,11 +344,11 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     let t_rdrain = t_restart + SETTLE;
     drain_due(&mut e, t_rdrain);
     let verify_corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid_child))
+        .pending_probe_for(pid_child)
         .expect("restarted burst's Verifying probe in flight");
     let finish_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_child),
+            owner: pid_child,
             correlation: verify_corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: child_snap.clone(),
@@ -528,7 +527,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
     assert!(
         !out_m.probe_ops().iter().any(|op| matches!(
             op,
-            ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_parent)
+            ProbeOp::Probe { request } if request.owner() == pid_parent
         )),
         "the interpose itself must not reconfirm the parent",
     );
@@ -1104,8 +1103,7 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
         "fixture: parent parked in Draining",
     );
     assert!(
-        e.pending_probe_for(ProbeOwner::Profile(pid_child))
-            .is_some(),
+        e.pending_probe_for(pid_child).is_some(),
         "fixture: child's Verify probe still in flight (gating descendant)",
     );
 
@@ -1151,7 +1149,7 @@ fn global_overflow_excludes_draining_ancestor_keeps_reconfirm() {
 
     // At most one probe op for the ancestor, and it is the sweep's reconfirm Probe — never a second
     // same-owner emit.
-    let owner = ProbeOwner::Profile(pid_parent);
+    let owner = pid_parent;
     let parent_ops: Vec<&ProbeOp> = out
         .probe_ops()
         .iter()
@@ -1326,7 +1324,7 @@ fn overflow_on_draining_reap_ancestor_defers_reap_to_reconfirm() {
         "ancestor reconfirms as Standard with the Reap directive preserved",
     );
 
-    let owner = ProbeOwner::Profile(pid_parent);
+    let owner = pid_parent;
     let parent_ops: Vec<&ProbeOp> = out
         .probe_ops()
         .iter()
@@ -1341,11 +1339,11 @@ fn overflow_on_draining_reap_ancestor_defers_reap_to_reconfirm() {
     // The deferred reap completes on the reconfirm's resolution: the child reseed left it
     // non-gating (Seed), so the reconfirm settles and `finish_burst_to_idle` honours `Reap`.
     let reconfirm = e
-        .pending_probe_for(ProbeOwner::Profile(pid_parent))
+        .pending_probe_for(pid_parent)
         .expect("ancestor reconfirm probe in flight");
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_parent),
+            owner: pid_parent,
             correlation: reconfirm,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: dir_snap(&[]),

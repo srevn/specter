@@ -23,7 +23,7 @@ use compact_str::CompactString;
 use crossbeam::channel::Sender;
 use specter_actuator::RunWiring;
 use specter_config::{Config, FileMeta};
-use specter_core::{Diagnostic, Input, ProbeOwner, ResourceId, StepOutput, SubId};
+use specter_core::{Diagnostic, Input, ResourceId, StepOutput, SubId};
 use specter_engine::Engine;
 use specter_sensor::testkit::{MockFsWatcher, MockProber};
 use std::io::{Read, Write};
@@ -200,7 +200,7 @@ settle    = "50ms"
 
 /// Dynamic single-watch config. Brace expansion makes `is_dynamic` auto-detect; the literal prefix
 /// is the supplied tempdir so the validator's path-canonicalisation pass succeeds.
-fn config_with_one_promoter(path: &std::path::Path) -> Config {
+fn config_with_one_discovery(path: &std::path::Path) -> Config {
     let toml = format!(
         r#"
 [log]
@@ -680,8 +680,7 @@ fn run_initial_attach_attaches_static_sub_and_emits_watch_op() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Static-only config attaches one Sub per `[[watch]]` into the engine's `by_name` index and leaves
-/// the Promoter registry empty.
+/// Static-only config attaches one Sub per `[[watch]]` into the engine's `by_name` index.
 #[test]
 fn run_initial_attach_attaches_static_only_config() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -698,18 +697,17 @@ fn run_initial_attach_attaches_static_only_config() {
         .find_by_name("build")
         .expect("static Sub 'build' attached");
     assert!(rig.driver.engine.subs().get(sid).is_some());
-    assert!(rig.driver.engine.promoters().is_empty());
 
     let _ = rig.driver.begin_shutdown();
 }
 
 /// A config with a dynamic `[[watch]]` lowers to a discovery Sub — a template-bearing Sub in the
-/// one registry; the Promoter path is never taken.
+/// one registry.
 #[test]
 fn run_initial_attach_registers_discovery_sub_for_dynamic_watch() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg_path = tmp.path().join("specter.toml");
-    let config = config_with_one_promoter(tmp.path());
+    let config = config_with_one_discovery(tmp.path());
     let mut rig = rig_for(config, cfg_path);
 
     let _ = rig.driver.run_initial_attach();
@@ -722,7 +720,6 @@ fn run_initial_attach_registers_discovery_sub_for_dynamic_watch() {
         .expect("discovery Sub 'logs' registered");
     let sub = rig.driver.engine.subs().get(sid).expect("live Sub");
     assert!(sub.template.is_some(), "dynamic watch lowers to a template");
-    assert!(rig.driver.engine.promoters().is_empty());
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -1992,19 +1989,13 @@ fn drop_after_begin_shutdown_is_silent_with_armed_probe() {
         .map(specter_core::Sub::profile)
         .expect("Sub has a Profile");
     assert!(
-        rig.driver
-            .engine
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .is_some(),
+        rig.driver.engine.pending_probe_for(pid).is_some(),
         "Seed-Verifying probe armed at attach time",
     );
 
     let _ = rig.driver.begin_shutdown();
     assert!(
-        rig.driver
-            .engine
-            .pending_probe_for(ProbeOwner::Profile(pid))
-            .is_none(),
+        rig.driver.engine.pending_probe_for(pid).is_none(),
         "begin_shutdown drained the probe",
     );
 
@@ -2771,7 +2762,7 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     let diag = Diagnostic::SubAttached {
         sub: sid,
         name: CompactString::const_new("build"),
-        source_promoter: None,
+        source_discovery: None,
     };
     rig.driver
         .ipc
@@ -2941,27 +2932,27 @@ fn ipc_disable_unknown_dynamic_shape_name_returns_unknown_sub() {
         &mut rig,
         &mut client,
         &WireRequest::Disable {
-            name: CompactString::const_new("promoter@/tmp/x"),
+            name: CompactString::const_new("template@/tmp/x"),
         },
     );
     match reply {
         ResponsePayload::Err { code, error } => {
             assert_eq!(code, WireErrorCode::UnknownSub);
-            assert!(error.contains("no watch named promoter@/tmp/x"));
+            assert!(error.contains("no watch named template@/tmp/x"));
         }
         other => panic!("expected Err, got {other:?}"),
     }
     assert!(rig.driver.disabled_runtime.is_empty());
 }
 
-/// Disable against a real dynamic (promoter-spawned) Sub returns [`WireErrorCode::DynamicSubNoOp`].
-/// Inject a dynamic Sub directly so the gate (which reads `source_promoter`) fires.
+/// Disable against a real discovery-minted Sub returns [`WireErrorCode::DynamicSubNoOp`].
+/// Inject a dynamic Sub directly so the gate (which reads `is_dynamic`) fires.
 #[test]
 fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
     use specter_core::{
         ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, ProfileIdentity,
-        PromoterId, ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
+        ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
     };
 
     fn trivial_program() -> Arc<ActionProgram> {
@@ -2980,7 +2971,7 @@ fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
 
-    let dynamic_name = "promoter@/tmp/dyn_anchor";
+    let dynamic_name = "template@/tmp/dyn_anchor";
     let req = SubAttachRequest::from_parts(
         SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
         ProfileIdentity {
@@ -2994,9 +2985,8 @@ fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
             scope: EffectScope::SubtreeRoot,
             settle: Duration::from_millis(100),
             log_output: false,
-            source_promoter: Some(PromoterId::default()),
             template: None,
-            source_discovery: None,
+            source_discovery: Some(SubId::default()),
         },
     );
     let _ = rig
@@ -3176,15 +3166,15 @@ fn ipc_absorb_unknown_name_returns_unknown_sub() {
     }
 }
 
-/// `absorb` against a promoter-spawned dynamic Sub refuses with [`WireErrorCode::DynamicSubNoOp`] —
-/// the synthesised name is unstable across reloads, the same reason `disable` refuses it. The
-/// dynamic Sub is injected directly so the `source_promoter` gate fires.
+/// `absorb` against a discovery-minted Sub refuses with [`WireErrorCode::DynamicSubNoOp`] —
+/// minted Subs vanish and re-mint with the match set, the same reason `disable` refuses them.
+/// The dynamic Sub is injected directly so the `is_dynamic` gate fires.
 #[test]
 fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
     use specter_core::{
         ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, ProfileIdentity,
-        PromoterId, ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
+        ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
     };
 
     fn trivial_program() -> Arc<ActionProgram> {
@@ -3203,7 +3193,7 @@ fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
 
-    let dynamic_name = "promoter@/tmp/dyn_anchor";
+    let dynamic_name = "template@/tmp/dyn_anchor";
     let req = SubAttachRequest::from_parts(
         SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
         ProfileIdentity {
@@ -3217,9 +3207,8 @@ fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
             scope: EffectScope::SubtreeRoot,
             settle: Duration::from_millis(100),
             log_output: false,
-            source_promoter: Some(PromoterId::default()),
             template: None,
-            source_discovery: None,
+            source_discovery: Some(SubId::default()),
         },
     );
     let _ = rig
@@ -3441,7 +3430,7 @@ fn subscribe_ack_precedes_diag_on_wire() {
     out.diagnostics.push(specter_core::Diagnostic::SubAttached {
         sub: sid,
         name: CompactString::const_new("build"),
-        source_promoter: None,
+        source_discovery: None,
     });
     let _ = rig.driver.forward(out);
 

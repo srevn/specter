@@ -76,7 +76,7 @@
 //!   anchor unconditionally and bypass this helper. `transition_to_verifying` resolves the target
 //!   through it and constructs [`PreFirePhase::Verifying`] with the target on the variant payload
 //!   for the choke to read back.
-//! - [`Engine::emit_owner_probe`] (in `probe`) — the single owner-polymorphic emission choke. Each
+//! - [`Engine::emit_owner_probe`] (in `probe`) — the single emission choke. Each
 //!   burst-launch helper is `mint → arm → emit_owner_probe(owner)`, with every post-gate state
 //!   resolution loud (`unreachable!()` on the gate-proven-impossible miss) and the arm guarded at
 //!   its re-acquire edge (`ProbeSlot::arm`) and destroy edge (`Drop` tripwire); the choke resolves
@@ -91,7 +91,7 @@ use crate::Engine;
 use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, BurstFinish, BurstHelper, BurstIntent, CeilingState, Diagnostic, DirtyProvenance,
-    FsEvent, PostFirePhase, PreFireBurst, PreFirePhase, ProbeOwner, ProbeSlot, Profile, ProfileId,
+    FsEvent, PostFirePhase, PreFireBurst, PreFirePhase, ProbeSlot, Profile, ProfileId,
     ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId, TimerKind, Tree,
 };
 use std::num::NonZeroU32;
@@ -308,8 +308,7 @@ impl Engine {
                 // the Authoritative response to `SilentPin`. `last_event_time = None` — no event
                 // drove this burst, no settle deadline to source.
                 debug_assert!(
-                    self.pending_probe_for(ProbeOwner::Profile(profile_id))
-                        .is_none(),
+                    self.pending_probe_for(profile_id).is_none(),
                     "I5: cold-Seed start with a probe already in flight \
                      for profile {profile_id:?}"
                 );
@@ -367,7 +366,7 @@ impl Engine {
         // Triggered Seeds do NOT emit here — the settle expiry's `transition_to_verifying` is their
         // emission edge.
         if emit_cold_walk {
-            self.emit_owner_probe(ProbeOwner::Profile(profile_id), out);
+            self.emit_owner_probe(profile_id, out);
         }
     }
 
@@ -500,7 +499,7 @@ impl Engine {
         // path this leaves a transient `Verifying { slot: empty, target }` until the phase is
         // rewritten to `Batching` below — a single-step, unobserved, fully representable window;
         // the consume is the disarm here, not the later phase rewrite.
-        self.cancel_owner_probe(ProbeOwner::Profile(profile_id), out);
+        self.cancel_owner_probe(profile_id, out);
 
         let new_settle_timer = if needs_fresh_timer {
             Some(
@@ -676,12 +675,11 @@ impl Engine {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToVerifying, out) {
             return;
         }
-        let owner = ProbeOwner::Profile(profile_id);
         // I5: no probe may already be in flight — the construct-armed slot below would orphan its
         // correlation. Holds by representability (the gated prior phase, `Batching` / `Draining`,
         // carries no slot); the assert is the loud dev/CI backstop.
         debug_assert!(
-            self.pending_probe_for(owner).is_none(),
+            self.pending_probe_for(profile_id).is_none(),
             "I5: transition_to_verifying with a probe already in flight \
              (the construct-armed slot would orphan the prior correlation, \
              profile = {profile_id:?})",
@@ -732,7 +730,7 @@ impl Engine {
             target,
         };
 
-        self.emit_owner_probe(owner, out);
+        self.emit_owner_probe(profile_id, out);
     }
 
     /// Phase: `Verifying` → `Draining`. Phase swap only — the exit body (`Draining` → `Verifying`
@@ -996,9 +994,8 @@ impl Engine {
         if !self.require_active_post_fire(profile_id, BurstHelper::TransitionToRebasing, out) {
             return;
         }
-        let owner = ProbeOwner::Profile(profile_id);
         debug_assert!(
-            self.pending_probe_for(owner).is_none(),
+            self.pending_probe_for(profile_id).is_none(),
             "I5: transition_to_rebasing with a probe already in flight \
              (the construct-armed slot would orphan the prior correlation, \
              profile = {profile_id:?})",
@@ -1031,7 +1028,7 @@ impl Engine {
         // The choke reads the correlation back off the `Rebasing` slot, targets the anchor
         // (`forced` is pre-fire-only ⇒ `false`), and ships the `WholeSubtree` obligation — no
         // accumulator drain.
-        self.emit_owner_probe(owner, out);
+        self.emit_owner_probe(profile_id, out);
     }
 
     /// `Rebasing → Settling`. Post-fire mirror of pre-fire's `retry_drives_batching`: a
@@ -1181,8 +1178,7 @@ impl Engine {
         //    projection ends before the &mut get_mut, and a stale id yields None so the assert
         //    holds trivially ahead of the get_mut early-return.
         debug_assert!(
-            self.pending_probe_for(ProbeOwner::Profile(profile_id))
-                .is_none(),
+            self.pending_probe_for(profile_id).is_none(),
             "finish_burst_to_idle: probe slot still armed — the caller \
              must consume it first (cancel_owner_probe on a teardown or \
              overflow-reap path; take_owner_probe on the response or \
@@ -1244,7 +1240,7 @@ impl Engine {
 
         // Honour the burst-finish directive captured from the prior state. `Reap` is set by
         // `detach_sub_inner` (last Sub detached mid-burst) or `on_anchor_terminal_all_dynamic`
-        // (all-dynamic Promoter teardown); we defer the reap to here so the Profile's burst doesn't
+        // (all-dynamic anchor teardown); we defer the reap to here so the Profile's burst doesn't
         // fire Effects against a Sub registry that no longer holds the reference. `ReturnToIdle`
         // leaves the Profile resting at Idle (the `map_state` Active arm above installed it as part
         // of the same single reconcile).
@@ -1347,8 +1343,7 @@ impl Engine {
         // &mut get below, and a stale id yields None so the assert holds trivially ahead of the
         // early-return.
         debug_assert!(
-            self.pending_probe_for(ProbeOwner::Profile(profile_id))
-                .is_none(),
+            self.pending_probe_for(profile_id).is_none(),
             "restart_burst_from_fire_tail_residual: probe slot still armed \
              — the caller must consume it first (take_owner_probe on the \
              rebase response path); profile = {profile_id:?}",
@@ -1534,9 +1529,9 @@ mod tests {
 
     use crate::Engine;
     use specter_core::{
-        ActiveBurst, BurstIntent, ClassSet, Input, PreFirePhase, ProbeOp, ProbeOwner, ProbeRequest,
-        ProbeSlot, Profile, ProfileIdentity, ProfileState, ProofObligation, ResourceKind,
-        ResourceRole, ScanConfig, StepOutput, TimerKind,
+        ActiveBurst, BurstIntent, ClassSet, Input, PreFirePhase, ProbeOp, ProbeRequest, ProbeSlot,
+        Profile, ProfileIdentity, ProfileState, ProofObligation, ResourceKind, ResourceRole,
+        ScanConfig, StepOutput, TimerKind,
     };
     use std::time::{Duration, Instant};
 
@@ -1644,7 +1639,7 @@ mod tests {
             _ => panic!("expected Active(PreFire)"),
         }
         let correlation = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
+            .pending_probe_for(pid)
             .expect("Verifying probe in flight on the state slot");
 
         // Output: one Probe whose correlation matches.
@@ -1668,9 +1663,8 @@ mod tests {
         e.start_standard_burst(pid, r, &rp, Instant::now(), &mut out);
         e.transition_to_verifying(pid, &mut out);
 
-        let owner = ProbeOwner::Profile(pid);
         let projected = e
-            .pending_probe_for(owner)
+            .pending_probe_for(pid)
             .expect("a verify probe is in flight");
 
         // Identity is on the Verifying slot itself.
@@ -1768,7 +1762,7 @@ mod tests {
         let mut out = StepOutput::default();
         // Production reaches `retry_drives_batching` only from `on_profile_probe_response`, which
         // has already disarmed the Verifying slot via `take_owner_probe`. Mirror that consume.
-        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
+        let _ = e.take_owner_probe(pid);
 
         e.retry_drives_batching(pid, now, &mut out);
 
@@ -1797,7 +1791,7 @@ mod tests {
         // Genuinely armed: NO `take_owner_probe` pre-consume. This is the whole point — the slot
         // reaches finish_burst_to_idle armed.
         assert!(
-            e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
+            e.pending_probe_for(pid).is_some(),
             "fixture: Verifying slot genuinely armed (NOT pre-consumed)",
         );
 
@@ -1821,9 +1815,9 @@ mod tests {
         e.transition_to_verifying(pid, &mut out);
         // Mirror the real response path: the Verifying slot is disarmed via `take_owner_probe`
         // before burst-end.
-        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
+        let _ = e.take_owner_probe(pid);
         assert!(
-            e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
+            e.pending_probe_for(pid).is_none(),
             "slot consumed, mirroring on_probe_response",
         );
 
@@ -1964,7 +1958,7 @@ mod tests {
         out.watch_ops.clear();
         // Production reaches `finish_burst_to_idle` from a probe-response / effect-complete path
         // that has already disarmed the in-flight slot via `take_owner_probe`. Mirror that consume.
-        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
+        let _ = e.take_owner_probe(pid);
 
         e.finish_burst_to_idle(pid, &mut out);
 
@@ -2014,7 +2008,7 @@ mod tests {
         // Cold-arm: Verifying-at-construction. Production reaches `transition_to_draining` only
         // from a Verifying probe response, which has already disarmed the slot via
         // `take_owner_probe`. Mirror that consume here.
-        let _ = e.take_owner_probe(ProbeOwner::Profile(pid));
+        let _ = e.take_owner_probe(pid);
 
         e.transition_to_draining(pid, &mut out);
 

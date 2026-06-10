@@ -2,10 +2,10 @@
 //!
 //! Two families share this module, each with its own discipline:
 //!
-//! - **Slotmap keys.** [`ResourceId`], [`ProfileId`], [`SubId`], [`PromoterId`] are generational
-//!   handles minted by [`slotmap::SlotMap`]; a stale id looks up to `None`. Reused slot indices
-//!   carry distinct generations, so equality is exact identity over the slot's lifetime, not over
-//!   the underlying index.
+//! - **Slotmap keys.** [`ResourceId`], [`ProfileId`], [`SubId`] are generational handles minted by
+//!   [`slotmap::SlotMap`]; a stale id looks up to `None`. Reused slot indices carry distinct
+//!   generations, so equality is exact identity over the slot's lifetime, not over the underlying
+//!   index.
 //! - **Monotonic correlation tokens.** [`TimerId`], [`CorrelationId`], [`ProbeCorrelation`] are
 //!   plain `u64` wrappers minted by the engine's `MonotonicCounter`; they pair an engine emission
 //!   with the external actor's echo (timer fire, effect completion, probe response) over the
@@ -23,7 +23,6 @@ slotmap::new_key_type! {
     pub struct ResourceId;
     pub struct ProfileId;
     pub struct SubId;
-    pub struct PromoterId;
 }
 
 /// Declare a strongly-typed monotonic correlation token.

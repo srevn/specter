@@ -19,30 +19,27 @@ mod output;
 mod pattern;
 mod probe;
 mod profile;
-mod promoter;
 mod resource;
 mod scan_config;
 mod snapshot;
 mod sub;
 mod tree;
 
-pub use diag::{
-    BurstHelper, ClaimKind, DetachReason, Diagnostic, PromoterClaimKind, SpliceFailureCause,
-};
+pub use diag::{BurstHelper, ClaimKind, DetachReason, Diagnostic, SpliceFailureCause};
 pub use diff::{Diff, EntryRef, Rename};
 pub use effect::{
     DedupKey, Effect, EffectCommon, EffectCompletion, EffectOutcome, EffectTarget, SendError,
     Termination,
 };
 pub use fs_id::FsIdentity;
-pub use ids::{CorrelationId, ProbeCorrelation, ProfileId, PromoterId, ResourceId, SubId, TimerId};
-pub use input::{FsEvent, Input, OverflowScope, WatchRegistryDiff};
+pub use ids::{CorrelationId, ProbeCorrelation, ProfileId, ResourceId, SubId, TimerId};
+pub use input::{FsEvent, Input, OverflowScope};
 pub use op::{
-    EffectOp, NonEmptyChainSet, ProbeFailure, ProbeOp, ProbeOutcome, ProbeOwner, ProbeRequest,
-    ProbeResponse, ProofAuthority, ProofObligation, WatchFailure, WatchOp,
+    EffectOp, NonEmptyChainSet, ProbeFailure, ProbeOp, ProbeOutcome, ProbeRequest, ProbeResponse,
+    ProofAuthority, ProofObligation, WatchFailure, WatchOp,
 };
 pub use output::{CancelEffects, ProbeOps, SortedEffects, StepOutput, StepOutputParts};
-pub use pattern::{PatternComponent, PatternError, PatternSpec};
+pub use pattern::{PatternError, PatternSpec};
 pub use probe::ProbeSlot;
 pub use profile::{
     AbsorbMode, AbsorbWindow, ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent,
@@ -52,10 +49,6 @@ pub use profile::{
     StateLabel, TimerKind, quiescence_verdict,
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
-pub use promoter::{
-    Promoter, PromoterAttachRequest, PromoterRegistry, PromoterRegistryDiff, PromoterState,
-    ProxyState,
-};
 pub use resource::{ContribKey, Resource, ResourceKind, ResourceRole};
 pub use scan_config::{ConfigError, GlobPattern, ProfileIdentity, ScanConfig, ScanConfigBuilder};
 pub use snapshot::EntryKind;

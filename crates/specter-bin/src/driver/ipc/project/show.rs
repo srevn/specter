@@ -4,7 +4,7 @@
 //! Resolution order matches the `disable` resolver in [`crate::driver::ipc`] so an operator who can
 //! `show foo` can also `disable foo`. Dynamic Subs are addressed through `list -o json`, not
 //! `show`: a synthesised name resolves through `SubRegistry::find_by_name` to a live id, but a
-//! local guard at the lookup site returns `Unknown` for any Sub with `source_promoter = Some(_)`.
+//! local guard at the lookup site returns `Unknown` for any discovery-minted Sub.
 //! The verb's contract lives at its own callsite, not inside the index.
 
 use std::collections::BTreeSet;
@@ -26,11 +26,11 @@ use super::{program, project_wall};
 /// Resolve `name` and emit the matching [`ShowResponse`] arm.
 ///
 /// Resolution is total:
-/// 1. `engine.subs().find_by_name(name)` resolves to a Sub. If it is static
-///    (`source_promoter.is_none()`) → `Active`; if dynamic → `Unknown` (the verb's contract:
-///    dynamic Subs are reached through `list`, not `show`). A dynamic-Sub hit short-circuits to
-///    `Unknown` rather than falling through, because by the `@`-byte reservation a dynamic
-///    synthesised name never appears in `disabled_runtime` or `config.watches`.
+/// 1. `engine.subs().find_by_name(name)` resolves to a Sub. If it is operator-declared
+///    (`!is_dynamic()`, discovery templates included) → `Active`; if minted → `Unknown` (the
+///    verb's contract: minted Subs are reached through `list`, not `show`). A minted-Sub hit
+///    short-circuits to `Unknown` rather than falling through, because by the `@`-byte
+///    reservation a synthesised name never appears in `disabled_runtime` or `config.watches`.
 /// 2. `disabled_runtime.contains(name)?`  → `Disabled { Runtime }`
 /// 3. `config.watches[*].name == name && !enabled` → `Disabled { Toml }`
 /// 4. otherwise → `Unknown`
@@ -47,7 +47,7 @@ pub(crate) fn show(
             .subs()
             .get(sid)
             .expect("by_name resolves to live SubId — registry lockstep invariant");
-        if sub.source_promoter.is_none() {
+        if !sub.is_dynamic() {
             return ShowResponse::Active(project_details(sid, sub, engine, ds, now));
         }
         return ShowResponse::Unknown {
@@ -123,7 +123,7 @@ fn project_details(
         absorb_count: profile.map_or(0, Profile::absorb_count),
         settle_ms: u64::try_from(sub.settle.as_millis())
             .expect("Duration::as_millis fits u64 for any operator-meaningful settle window"),
-        source_promoter: sub.source_promoter.map(WireId::from),
+        source_discovery: sub.source_discovery.map(WireId::from),
         scope: WireEffectScope::from(sub.scope),
         program: program::render(&sub.program),
     }
@@ -139,7 +139,7 @@ mod tests {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
     use specter_core::{
         ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Input,
-        ProfileIdentity, PromoterId, ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
+        ProfileIdentity, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
     };
     use specter_engine::Engine;
     use std::collections::BTreeSet;
@@ -246,8 +246,8 @@ mod tests {
                 assert!(d.last_fired_at.is_none(), "never fired ⇒ None");
                 assert!(!d.program.is_empty(), "program renders ≥1 line");
                 assert!(
-                    d.source_promoter.is_none(),
-                    "static Sub has no source_promoter",
+                    d.source_discovery.is_none(),
+                    "static Sub has no source_discovery",
                 );
             }
             other => panic!("expected Active, got {other:?}"),
@@ -418,9 +418,9 @@ mod tests {
         }
     }
 
-    /// A dynamic Sub's synthesised name resolves through `SubRegistry::find_by_name` to a live id,
-    /// but the verb's local guard maps `source_promoter.is_some()` back to `Unknown` — preserving
-    /// the operator contract that dynamic Subs are addressed through `list`, not `show`.
+    /// A minted Sub's synthesised name resolves through `SubRegistry::find_by_name` to a live
+    /// id, but the verb's local guard maps `is_dynamic()` back to `Unknown` — preserving the
+    /// operator contract that minted Subs are addressed through `list`, not `show`.
     #[test]
     fn show_dynamic_sub_name_resolves_unknown() {
         let req = SubAttachRequest::from_parts(
@@ -431,14 +431,13 @@ mod tests {
                 events: ClassSet::DEFAULT_SUBTREE_ROOT,
             },
             SubParams {
-                name: CompactString::const_new("promoter@/tmp/dyn_anchor"),
+                name: CompactString::const_new("template@/tmp/dyn_anchor"),
                 program: trivial_program(),
                 scope: EffectScope::SubtreeRoot,
                 settle: Duration::from_millis(100),
                 log_output: false,
-                source_promoter: Some(PromoterId::default()),
                 template: None,
-                source_discovery: None,
+                source_discovery: Some(SubId::default()),
             },
         );
         let mut engine = Engine::new();
@@ -450,7 +449,7 @@ mod tests {
         assert!(
             engine
                 .subs()
-                .find_by_name("promoter@/tmp/dyn_anchor")
+                .find_by_name("template@/tmp/dyn_anchor")
                 .is_some(),
             "registry indexes the dynamic name (load-bearing precondition for the guard test)",
         );
@@ -460,12 +459,12 @@ mod tests {
             &fresh_state(),
             &BTreeSet::new(),
             &Config::from_str("").expect("empty"),
-            "promoter@/tmp/dyn_anchor",
+            "template@/tmp/dyn_anchor",
             Instant::now(),
         );
         match r {
             ShowResponse::Unknown { name } => {
-                assert_eq!(name, "promoter@/tmp/dyn_anchor");
+                assert_eq!(name, "template@/tmp/dyn_anchor");
             }
             other => panic!("expected Unknown for dynamic Sub name, got {other:?}"),
         }

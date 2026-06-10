@@ -15,9 +15,8 @@ use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
     ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DedupKey, DirMeta, DirSnapshot,
     EntryKind, FsEvent, FsIdentity, Input, LeafEntry, PreFireBurst, PreFirePhase, ProbeCorrelation,
-    ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ProofAuthority,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubId,
-    TimerKind,
+    ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState, ProofAuthority, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubId, TimerKind,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -94,11 +93,11 @@ fn seed_cycle(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Insta
         );
     }
     let correlation = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
+        .pending_probe_for(pid)
         .expect("Seed Verifying probe in flight");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation,
             outcome: proven(Arc::clone(snap)),
         }),
@@ -149,7 +148,7 @@ fn drive_standard_fire_once(
         if let Some(c) = probe_corr {
             let out = e.step(
                 Input::ProbeResponse(ProbeResponse {
-                    owner: ProbeOwner::Profile(pid),
+                    owner: pid,
                     correlation: c,
                     outcome: proven(Arc::clone(snap_new)),
                 }),
@@ -425,14 +424,14 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
         now + MAX_SETTLE + Duration::from_millis(1),
     );
     let corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
+        .pending_probe_for(pid)
         .expect("forced Seed verify probe still in flight");
     // `ProofAuthority::Undischarged` + forced ⇒ the fold projects to `QuiescenceVerdict::Abandon`
     // (the ceiling terminal): finish to Idle, NO apply_snapshot, NO rebase_baseline.
     let unread: Arc<std::path::Path> = Arc::from(std::path::Path::new("/src/unreadable"));
     let ceil_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: dir_snap(&[]),
@@ -664,7 +663,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         let parent_reconfirmed = |out: &StepOutput| {
             out.probe_ops().iter().any(|op| {
                 matches!(op, ProbeOp::Probe { request }
-                    if request.owner() == ProbeOwner::Profile(pid_parent))
+                    if request.owner() == pid_parent)
             })
         };
 
@@ -691,11 +690,11 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         // A single Authoritative verify response fires the child's Effect. The child never fired ⇒
         // Emit (not B1 dedup).
         let child_corr = e
-            .pending_probe_for(ProbeOwner::Profile(pid_child))
+            .pending_probe_for(pid_child)
             .expect("child Verifying probe in flight");
         let child_fire_out = e.step(
             Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid_child),
+                owner: pid_child,
                 correlation: child_corr,
                 outcome: proven(child_snap.clone()),
             }),
@@ -793,7 +792,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
         // must fire exactly one Effect.
         let reconfirm_out = e.step(
             Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid_parent),
+                owner: pid_parent,
                 correlation: parent_reconfirm_corr,
                 outcome: proven(parent_snap.clone()),
             }),
@@ -838,7 +837,7 @@ fn fresh_seed_with_activity_gated_by_draining_then_fires_one() {
                 if let Some(c) = probe_corr {
                     let out = e.step(
                         Input::ProbeResponse(ProbeResponse {
-                            owner: ProbeOwner::Profile(pid_parent),
+                            owner: pid_parent,
                             correlation: c,
                             outcome: proven(parent_snap.clone()),
                         }),

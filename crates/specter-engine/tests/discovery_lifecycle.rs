@@ -2,28 +2,26 @@
 //!
 //! Drives one `Engine` per scenario through attach → cold-Seed reconcile (mint per terminus ×
 //! template) → Standard re-reconcile → vanish/recovery/overflow/cascade with synthetic
-//! [`ProbeResponse`] injections, the same pattern `promoter_lifecycle.rs` uses. The inline tests
-//! (`src/discovery_tests.rs`) pin the pure collector and the attach-boundary asserts; this file
-//! pins the composed behaviour: consequence routing, dedup convergence, lifecycle diagnostics, the
-//! Draining-gate shape filter, and the converged-state equivalence with the live Promoter.
+//! [`ProbeResponse`] injections. The inline tests (`src/discovery_tests.rs`) pin the pure
+//! collector and the attach-boundary asserts; this file pins the composed behaviour: consequence
+//! routing, dedup convergence, lifecycle diagnostics, and the Draining-gate shape filter.
 //!
-//! Assertions are **converged-state**, never step traces, wherever the Promoter is the reference:
-//! probe cadences legitimately differ between the two machines (per-level enumeration vs one
-//! settle-debounced pruned walk); only the resulting registries must agree.
+//! Assertions are **converged-state** (the minted registry after quiescence), never step traces —
+//! probe cadence is an implementation detail; only the resulting registry is the contract.
 
 use specter_core::testkit::{
     anchor_ok, covered, dir_snap, dir_snap_nested, file_leaf, leaf, proven, uncovered,
 };
 use specter_core::{
     ActiveBurst, ClassSet, DetachReason, Diagnostic, DirSnapshot, EffectScope, EntryKind, FsEvent,
-    Input, OverflowScope, ProbeOp, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId,
-    ResourceKind, ScanConfig, StepOutput, Sub, SubAttachAnchor, SubId,
+    Input, OverflowScope, ProbeOp, ProbeResponse, ProfileId, ProfileState, ResourceId,
+    ResourceKind, ScanConfig, StepOutput, SubAttachAnchor, SubId,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
     DEFAULT_EVENTS, MAX_SETTLE, SETTLE, attach, attach_discovery, attach_discovery_returning,
-    attach_promoter, descent_advance, discovery_subs_of, drain_due, dynamic_subs_of, is_draining,
-    mint_template, pid_of, pre_place_dir, seed_to_idle,
+    descent_advance, discovery_subs_of, drain_due, is_draining, mint_template, pid_of,
+    pre_place_dir, seed_to_idle,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -31,12 +29,10 @@ use std::time::{Duration, Instant};
 
 /// Answer `pid`'s single in-flight probe with `proven(snap)` at `at`.
 fn respond(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Instant) -> StepOutput {
-    let corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
-        .expect("probe in flight");
+    let corr = e.pending_probe_for(pid).expect("probe in flight");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: corr,
             outcome: proven(Arc::clone(snap)),
         }),
@@ -71,7 +67,7 @@ fn settle_minted_seeds(e: &mut Engine, source: SubId, at: Instant) {
     let minted: Vec<SubId> = discovery_subs_of(e, source).into_values().collect();
     for mid in minted {
         let pid = pid_of(e, mid);
-        let Some(corr) = e.pending_probe_for(ProbeOwner::Profile(pid)) else {
+        let Some(corr) = e.pending_probe_for(pid) else {
             continue;
         };
         let outcome = match e.profiles().get(pid).expect("minted Profile live").kind() {
@@ -80,7 +76,7 @@ fn settle_minted_seeds(e: &mut Engine, source: SubId, at: Instant) {
         };
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
+                owner: pid,
                 correlation: corr,
                 outcome,
             }),
@@ -186,7 +182,7 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
         assert!(
             out.probe_ops().iter().any(|op| matches!(
                 op,
-                ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(mp)
+                ProbeOp::Probe { request } if request.owner() == mp
             )),
             "minted Profile {mp:?} cold-Seed probe rides the reconcile step",
         );
@@ -194,14 +190,12 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
         assert_eq!(s.source_discovery, Some(sid), "mint carries its source");
         assert!(s.template.is_none(), "minted Subs are never templates");
     }
-    // Transitional Stage 2 honesty: the minted SubAttached narrates `source_promoter: None`; the
-    // source lives on the DiscoveryMinted pair until the Stage 3 re-key.
     let attached = out
         .diagnostics
         .iter()
-        .filter(|d| matches!(d, Diagnostic::SubAttached { source_promoter, .. } if source_promoter.is_none()))
+        .filter(|d| matches!(d, Diagnostic::SubAttached { source_discovery, .. } if *source_discovery == Some(sid)))
         .count();
-    assert_eq!(attached, 2, "one SubAttached per mint");
+    assert_eq!(attached, 2, "one SubAttached per mint, keyed to its source");
 
     settle_minted_seeds(&mut e, sid, now);
 
@@ -219,9 +213,8 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
     );
 }
 
-/// A storm of chain events inside one settle window coalesces into one Batching window, one probe,
-/// one reconcile that mints everything — the unification's storm-cost claim (the Promoter ran one
-/// enumeration per event).
+/// A storm of chain events inside one settle window coalesces into one Batching window, one
+/// probe, one reconcile that mints everything — never one probe per event.
 #[test]
 fn storm_coalesces_to_one_probe_and_one_reconcile() {
     let mut e = Engine::new();
@@ -248,7 +241,7 @@ fn storm_coalesces_to_one_probe_and_one_reconcile() {
             at,
         );
         assert!(
-            e.pending_probe_for(ProbeOwner::Profile(pid)).is_none(),
+            e.pending_probe_for(pid).is_none(),
             "still Batching mid-storm — no probe until the window settles",
         );
         at += Duration::from_millis(10);
@@ -557,7 +550,7 @@ fn prefix_rm_rf_recovery_remints_without_per_file_warning() {
     ));
     outs.push(descent_advance(
         &mut e,
-        ProbeOwner::Profile(pid),
+        pid,
         &dir_snap(&[("data", EntryKind::Dir, 7)]),
         t2,
     ));
@@ -609,7 +602,7 @@ fn overflow_reseed_recovers_missed_mints() {
         t1,
     );
     assert!(
-        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
+        e.pending_probe_for(pid).is_some(),
         "Idle overflow arm reseeds with a fresh cold probe",
     );
     let out = respond(
@@ -633,7 +626,7 @@ fn overflow_reseed_recovers_missed_mints() {
         },
         t2,
     );
-    assert!(e.pending_probe_for(ProbeOwner::Profile(pid)).is_none());
+    assert!(e.pending_probe_for(pid).is_none());
     let _ = e.step(
         Input::SensorOverflow {
             scope: OverflowScope::Global,
@@ -641,7 +634,7 @@ fn overflow_reseed_recovers_missed_mints() {
         t2,
     );
     assert!(
-        e.pending_probe_for(ProbeOwner::Profile(pid)).is_some(),
+        e.pending_probe_for(pid).is_some(),
         "mid-burst overflow arm reseeds immediately",
     );
     let out2 = respond(
@@ -799,7 +792,7 @@ fn mid_burst_discovery_descendant_does_not_drain_covering_profile() {
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
     assert!(
-        e.pending_probe_for(ProbeOwner::Profile(disc_pid)).is_some(),
+        e.pending_probe_for(disc_pid).is_some(),
         "discovery mid-burst at the outer verdict",
     );
     let out = respond(&mut e, outer_pid, &outer_base, t2);
@@ -861,8 +854,7 @@ fn mid_burst_minted_descendant_still_drains_through_discovery() {
     drain_due(&mut e, t2);
     let minted_pid = pid_of(&e, *discovery_subs_of(&e, tpl_sid).values().next().unwrap());
     assert!(
-        e.pending_probe_for(ProbeOwner::Profile(minted_pid))
-            .is_some(),
+        e.pending_probe_for(minted_pid).is_some(),
         "minted Profile mid-burst at the outer verdict",
     );
     let out = respond(&mut e, outer_pid, &outer_base, t2);
@@ -993,148 +985,6 @@ fn fanout_threshold_warns_exactly_once() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// The converged dynamic-Sub set as `(name, config_hash, settle, scope)` — the machine-independent
-/// projection both engines of the differential test are compared on.
-fn converged(
-    e: &Engine,
-    dynamic: impl Fn(&Sub) -> bool,
-) -> BTreeSet<(String, u64, Duration, EffectScope)> {
-    e.subs()
-        .iter()
-        .filter(|(_, s)| dynamic(s))
-        .map(|(_, s)| {
-            let hash = e
-                .profiles()
-                .get(s.profile())
-                .expect("live dynamic Sub's Profile")
-                .config_hash();
-            (s.name.to_string(), hash, s.settle, s.scope)
-        })
-        .collect()
-}
-
-/// Differential vs the live Promoter: identical pattern, same operator name, two engines, each
-/// driven to convergence per its own probe protocol over the same logical tree — including one
-/// vanish/reappear round. Converged minted sets compare equal; step traces deliberately don't.
-#[test]
-fn discovery_converges_to_the_promoter_registry_shape() {
-    let logical_tree_full = [
-        ("bar.txt", EntryKind::File, 11),
-        ("foo.log", EntryKind::File, 10),
-    ];
-    let now = Instant::now();
-
-    // Engine A — the live Promoter. Per-level enumeration sees the raw listing and filters.
-    let mut a = Engine::new();
-    let var_log_a = pre_place_dir(&mut a, &["var", "log"]);
-    let qid = attach_promoter(&mut a, "logs", "/var/log/*.log", now);
-    let _ = descent_advance(
-        &mut a,
-        ProbeOwner::Promoter(qid),
-        &dir_snap(&logical_tree_full),
-        now,
-    );
-    let promoted = dynamic_subs_of(&a, qid);
-    assert_eq!(promoted.len(), 1, "one match promotes");
-    let (&foo_a, _) = promoted.iter().next().unwrap();
-    // Settle the promoted Sub's File-anchored Seed.
-    {
-        let mp = pid_of(&a, *promoted.values().next().unwrap());
-        let corr = a.pending_probe_for(ProbeOwner::Profile(mp)).unwrap();
-        let _ = a.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(mp),
-                correlation: corr,
-                outcome: anchor_ok(file_leaf(EntryKind::File, 10)),
-            }),
-            now,
-        );
-    }
-    // Vanish + reappear round, per the Promoter's protocol (re-enumeration on proxy events).
-    let t1 = now + Duration::from_millis(10);
-    let _ = a.step(
-        Input::FsEvent {
-            resource: foo_a,
-            event: FsEvent::Removed,
-        },
-        t1,
-    );
-    let _ = a.step(
-        Input::FsEvent {
-            resource: var_log_a,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
-    let _ = descent_advance(
-        &mut a,
-        ProbeOwner::Promoter(qid),
-        &dir_snap(&[("bar.txt", EntryKind::File, 11)]),
-        t1,
-    );
-    let t2 = t1 + Duration::from_millis(10);
-    let _ = a.step(
-        Input::FsEvent {
-            resource: var_log_a,
-            event: FsEvent::StructureChanged,
-        },
-        t2,
-    );
-    let _ = descent_advance(
-        &mut a,
-        ProbeOwner::Promoter(qid),
-        &dir_snap(&logical_tree_full),
-        t2,
-    );
-
-    // Engine B — discovery. The pruned chain walk sees only matches.
-    let mut b = Engine::new();
-    let var_log_b = pre_place_dir(&mut b, &["var", "log"]);
-    let (sid, pid) = attach_discovery(
-        &mut b,
-        "logs",
-        SubAttachAnchor::Resource(var_log_b),
-        "/var/log/*.log",
-        mint_template(),
-        now,
-    );
-    let _ = respond(
-        &mut b,
-        pid,
-        &dir_snap(&[("foo.log", EntryKind::File, 10)]),
-        now,
-    );
-    settle_minted_seeds(&mut b, sid, now);
-    let foo_b = *discovery_subs_of(&b, sid).keys().next().unwrap();
-    let _ = b.step(
-        Input::FsEvent {
-            resource: foo_b,
-            event: FsEvent::Removed,
-        },
-        t1,
-    );
-    let (gone, _) = burst_and_respond(&mut b, pid, var_log_b, &dir_snap(&[]), t1);
-    assert!(minted_paths(&gone).is_empty());
-    let (_, _) = burst_and_respond(
-        &mut b,
-        pid,
-        var_log_b,
-        &dir_snap(&[("foo.log", EntryKind::File, 10)]),
-        t2 + SETTLE * 4,
-    );
-    settle_minted_seeds(&mut b, sid, t2 + SETTLE * 8);
-
-    let a_set = converged(&a, |s| s.source_promoter.is_some());
-    let b_set = converged(&b, |s| s.source_discovery.is_some());
-    assert_eq!(
-        a_set, b_set,
-        "converged (name, config_hash, settle, scope) sets agree across the two machines",
-    );
-    assert!(!a_set.is_empty(), "the comparison is not vacuous");
-    let _ = a.cancel_all_in_flight_probes();
-    let _ = b.cancel_all_in_flight_probes();
-}
-
 /// Two identically-driven engines produce identical mint narration and identical minted-Sub / anchor
 /// id sequences — reconcile order is deterministic (lexicographic termini × SubId-sorted templates).
 #[test]
@@ -1202,22 +1052,12 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
     assert!(
         attach_out.probe_ops().iter().any(|op| matches!(
             op,
-            ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)
+            ProbeOp::Probe { request } if request.owner() == pid
         )),
         "descent probe emitted at attach",
     );
-    let _ = descent_advance(
-        &mut e,
-        ProbeOwner::Profile(pid),
-        &dir_snap(&[("data", EntryKind::Dir, 1)]),
-        now,
-    );
-    let _ = descent_advance(
-        &mut e,
-        ProbeOwner::Profile(pid),
-        &dir_snap(&[("x", EntryKind::Dir, 2)]),
-        now,
-    );
+    let _ = descent_advance(&mut e, pid, &dir_snap(&[("data", EntryKind::Dir, 1)]), now);
+    let _ = descent_advance(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 2)]), now);
     let out = respond(&mut e, pid, &dir_snap(&[("m", EntryKind::Dir, 3)]), now);
     assert_eq!(
         minted_paths(&out),

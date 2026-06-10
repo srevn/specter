@@ -19,9 +19,9 @@ use compact_str::CompactString;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirChild, DirMeta,
-    DirSnapshot, EffectScope, EntryKind, FsIdentity, Input, LeafEntry, ProbeOutcome, ProbeOwner,
-    ProbeResponse, ProfileId, ProofAuthority, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchOp,
+    DirSnapshot, EffectScope, EntryKind, FsIdentity, Input, LeafEntry, ProbeOutcome, ProbeResponse,
+    ProfileId, ProofAuthority, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
+    SubAttachAnchor, SubAttachRequest, SubId, WatchOp,
 };
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -65,11 +65,11 @@ fn dir_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
 /// flight at burst construction, so this helper answers it directly — no settle expiry step.
 fn drive_fresh_seed_to_idle(e: &mut Engine, pid: ProfileId, snap: Arc<DirSnapshot>, t0: Instant) {
     let corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
+        .pending_probe_for(pid)
         .expect("cold-arm Seed Verifying probe in flight at burst construction");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: Arc::clone(&snap),

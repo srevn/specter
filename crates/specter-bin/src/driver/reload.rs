@@ -175,13 +175,7 @@ impl<W: FsWatcher> EngineDriver<W> {
             let modified_identity_n = diff.modified_identity.len();
             let modified_params_n = diff.modified_params.len();
 
-            let out = self.engine.step(
-                Input::ConfigDiff(specter_core::WatchRegistryDiff {
-                    subs: diff,
-                    ..Default::default()
-                }),
-                now,
-            );
+            let out = self.engine.step(Input::ConfigDiff(diff), now);
             tracing::info!(
                 added = added_n,
                 removed = removed_n,

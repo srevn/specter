@@ -32,13 +32,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Threshold beyond which the engine emits a one-shot fan-out diagnostic for a synthesis source —
-/// [`Diagnostic::DiscoveryFanoutThreshold`] for a discovery template,
-/// [`Diagnostic::PromoterFanoutThreshold`] for a Promoter (`promoter.rs` imports this). Operator
-/// signal that the pattern is matching more targets than typical — likely a too-broad pattern. The
-/// registry-side check-and-latch (`SubRegistry::latch_fanout_warning` /
-/// `Promoter::latch_fanout_warning`) is atomic, so a steady-state busy source warns once per
-/// lifetime by construction.
+/// Threshold beyond which the engine emits a one-shot
+/// [`Diagnostic::DiscoveryFanoutThreshold`] for a discovery template. Operator signal that the
+/// pattern is matching more targets than typical — likely a too-broad pattern. The registry-side
+/// check-and-latch (`SubRegistry::latch_fanout_warning`) is atomic, so a steady-state busy source
+/// warns once per lifetime by construction.
 pub(crate) const FANOUT_WARNING_THRESHOLD: usize = 1000;
 
 /// One matched chain terminus: the anchor-relative path as root-first snapshot entry names, plus
@@ -230,7 +228,6 @@ impl Engine {
                             scope: t.scope,
                             settle: t.spec.settle,
                             log_output: t.log_output,
-                            source_promoter: None,
                             template: None,
                             source_discovery: Some(t.sid),
                         },

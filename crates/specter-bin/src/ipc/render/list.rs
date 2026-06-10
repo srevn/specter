@@ -290,7 +290,7 @@ mod tests {
             disabled: None,
             sub: Some(crate::ipc::protocol::WireId(11)),
             profile: Some(crate::ipc::protocol::WireId(22)),
-            source_promoter: None,
+            source_discovery: None,
         }
     }
 
@@ -306,7 +306,7 @@ mod tests {
             disabled: Some(source),
             sub: None,
             profile: None,
-            source_promoter: None,
+            source_discovery: None,
         }
     }
 

@@ -16,7 +16,7 @@
 // pattern in another crate).
 #![warn(unsafe_code)]
 
-use specter_core::{ClassSet, FsEvent, ProbeOwner, ProbeRequest, ResourceId, ResourceKind};
+use specter_core::{ClassSet, FsEvent, ProbeRequest, ProfileId, ResourceId, ResourceKind};
 use std::io;
 use std::os::fd::AsFd;
 use std::path::Path;
@@ -352,7 +352,7 @@ pub trait Prober: Send + Sync {
     /// Best-effort cancel of any *queued* probe for `owner`. In-flight probes are not interrupted;
     /// the engine drops their responses via stale-correlation discipline. After `cancel`, a fresh
     /// `submit` for the same owner runs normally — cancellation is per-correlation, not per-owner.
-    fn cancel(&self, owner: ProbeOwner);
+    fn cancel(&self, owner: ProfileId);
 }
 
 /// Sink for probe responses produced by a [`Prober`] implementation.

@@ -343,9 +343,9 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// 1. A name absent from the engine's `by_name` index is refused with
     ///    [`WireErrorCode::UnknownSub`].
-    /// 2. The resolved Sub's `source_promoter.is_some()` (a dynamic, promoter-spawned Sub) is
-    ///    refused with [`WireErrorCode::DynamicSubNoOp`] — a runtime override against a synthesised
-    ///    name has no TOML anchor and would evaporate at the next reload's prune pass.
+    /// 2. A discovery-minted Sub (`is_dynamic()`) is refused with
+    ///    [`WireErrorCode::DynamicSubNoOp`] — the discovery Profile's next reconcile would simply
+    ///    re-mint it; disabling the *template* is the lever (its cascade reaps the minted set).
     /// 3. A name already in `disabled_runtime` is refused with [`WireErrorCode::NotDisabled`] — the
     ///    verb's precondition (sub is runtime-enabled) is violated.
     ///
@@ -380,13 +380,13 @@ impl<W: FsWatcher> EngineDriver<W> {
             .subs()
             .get(sid)
             .expect("by_name resolves to live SubId — registry lockstep invariant");
-        if sub.source_promoter.is_some() {
+        if sub.is_dynamic() {
             self.respond(
                 token,
                 &ResponsePayload::Err {
                     code: WireErrorCode::DynamicSubNoOp,
-                    error: "cannot disable a promoter-spawned dynamic sub \
-                            (synthesised names cannot persist as runtime overrides)"
+                    error: "cannot disable a discovery-minted sub (the next \
+                            reconcile would re-mint it; disable the template instead)"
                         .into(),
                 },
             );
@@ -469,9 +469,9 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// 1. A name absent from the engine's `by_name` index is refused with
     ///    [`WireErrorCode::UnknownSub`].
-    /// 2. A promoter-spawned dynamic Sub (`source_promoter.is_some()`) is refused with
-    ///    [`WireErrorCode::DynamicSubNoOp`] — the synthesised name is unstable across reloads, the
-    ///    same reason `disable` refuses it.
+    /// 2. A discovery-minted Sub (`is_dynamic()`) is refused with
+    ///    [`WireErrorCode::DynamicSubNoOp`] — minted Subs vanish and re-mint with the match set,
+    ///    the same reason `disable` refuses them.
     ///
     /// On the apply path the operator's `duration_ms` is rebuilt into a [`Duration`] **and
     /// clamped** to [`MAX_ABSORB_WINDOW`] before the engine step — the lone overflow guard for the
@@ -502,13 +502,14 @@ impl<W: FsWatcher> EngineDriver<W> {
             .subs()
             .get(sid)
             .expect("by_name resolves to live SubId — registry lockstep invariant");
-        if sub.source_promoter.is_some() {
+        if sub.is_dynamic() {
             self.respond(
                 token,
                 &ResponsePayload::Err {
                     code: WireErrorCode::DynamicSubNoOp,
-                    error: "cannot absorb on a promoter-spawned dynamic sub \
-                            (synthesised names are unstable across reloads)"
+                    error: "cannot absorb on a discovery-minted sub (minted Subs \
+                            vanish and re-mint with the match set; target an \
+                            operator-declared sub)"
                         .into(),
                 },
             );

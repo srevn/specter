@@ -55,8 +55,8 @@ use compact_str::CompactString;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use specter_core::{
     AbsorbMode, BurstHelper, BurstIntent, ClaimKind, DetachReason, Diagnostic, EffectScope,
-    FsEvent, OverflowScope, ProbeOwner, ProfileStateDiscriminant, PromoterClaimKind, ReapTrigger,
-    ResourceKind, SpliceFailureCause, StateLabel, WatchFailure,
+    FsEvent, OverflowScope, ProfileStateDiscriminant, ReapTrigger, ResourceKind,
+    SpliceFailureCause, StateLabel, WatchFailure,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -218,7 +218,7 @@ impl std::fmt::Display for WirePath {
 pub(crate) enum WireDiagnostic {
     StaleProbeResponse {
         at: WireTime,
-        owner: WireProbeOwner,
+        owner: WireId,
         correlation: u64,
     },
     StaleTimer {
@@ -239,10 +239,6 @@ pub(crate) enum WireDiagnostic {
         sub: WireId,
     },
     ConfigDiffUnknownSub {
-        at: WireTime,
-        name: CompactString,
-    },
-    ConfigDiffUnknownPromoter {
         at: WireTime,
         name: CompactString,
     },
@@ -304,13 +300,6 @@ pub(crate) enum WireDiagnostic {
         at: WireTime,
         profile: WireId,
         claim: WireClaimKind,
-        resource: WireId,
-        failure: WireWatchFailure,
-    },
-    PromoterClaimPurged {
-        at: WireTime,
-        promoter: WireId,
-        claim: WirePromoterClaimKind,
         resource: WireId,
         failure: WireWatchFailure,
     },
@@ -381,10 +370,6 @@ pub(crate) enum WireDiagnostic {
         at: WireTime,
         scope: WireOverflowScope,
     },
-    PromoterReseededForOverflow {
-        at: WireTime,
-        promoter: WireId,
-    },
     PerFileDriftDroppedOnRecovery {
         at: WireTime,
         profile: WireId,
@@ -397,7 +382,7 @@ pub(crate) enum WireDiagnostic {
         at: WireTime,
         sub: WireId,
         name: CompactString,
-        source_promoter: Option<WireId>,
+        source_discovery: Option<WireId>,
     },
     SubFired {
         at: WireTime,
@@ -428,59 +413,6 @@ pub(crate) enum WireDiagnostic {
         at: WireTime,
         sub: WireId,
     },
-    PromoterAttached {
-        at: WireTime,
-        promoter: WireId,
-        name: CompactString,
-    },
-    PromoterReaped {
-        at: WireTime,
-        promoter: WireId,
-    },
-    PromoterDescentVanished {
-        at: WireTime,
-        promoter: WireId,
-        prefix: WireId,
-    },
-    PromoterDescentFailed {
-        at: WireTime,
-        promoter: WireId,
-        prefix: WireId,
-        errno: i32,
-    },
-    PromotionKindObserved {
-        at: WireTime,
-        promoter: WireId,
-        path: WirePath,
-        kind: WireResourceKind,
-    },
-    PromoterFanoutThreshold {
-        at: WireTime,
-        promoter: WireId,
-        count: usize,
-    },
-    PromoterProxyStaleEvent {
-        at: WireTime,
-        promoter: WireId,
-        resource: WireId,
-    },
-    PromoterEnumerationVanished {
-        at: WireTime,
-        promoter: WireId,
-        proxy: WireId,
-    },
-    PromoterEnumerationFailed {
-        at: WireTime,
-        promoter: WireId,
-        proxy: WireId,
-        errno: i32,
-    },
-    DynamicSubReaped {
-        at: WireTime,
-        promoter: WireId,
-        sub: WireId,
-        path: WirePath,
-    },
     DiscoveryMinted {
         at: WireTime,
         source: WireId,
@@ -506,7 +438,7 @@ pub(crate) enum WireDiagnostic {
     },
     WalkerContractViolated {
         at: WireTime,
-        owner: WireProbeOwner,
+        owner: WireId,
     },
     /// Fan-out back-pressure marker — not derived from any `specter_core::Diagnostic`. Emitted by
     /// [`crate::driver::Hub::dispatch_to_subscribers`] when a wedged subscriber's queue overflowed
@@ -532,7 +464,7 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
         match d {
             Diagnostic::StaleProbeResponse { owner, correlation } => Self::StaleProbeResponse {
                 at: at.clone(),
-                owner: WireProbeOwner::from(*owner),
+                owner: WireId::from(*owner),
                 correlation: correlation.as_u64(),
             },
             Diagnostic::StaleTimer { id } => Self::StaleTimer {
@@ -555,10 +487,6 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 sub: WireId::from(*sub),
             },
             Diagnostic::ConfigDiffUnknownSub { name } => Self::ConfigDiffUnknownSub {
-                at: at.clone(),
-                name: name.clone(),
-            },
-            Diagnostic::ConfigDiffUnknownPromoter { name } => Self::ConfigDiffUnknownPromoter {
                 at: at.clone(),
                 name: name.clone(),
             },
@@ -643,18 +571,6 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 at: at.clone(),
                 profile: WireId::from(*profile),
                 claim: WireClaimKind::from(*claim),
-                resource: WireId::from(*resource),
-                failure: WireWatchFailure::from(*failure),
-            },
-            Diagnostic::PromoterClaimPurged {
-                promoter,
-                claim,
-                resource,
-                failure,
-            } => Self::PromoterClaimPurged {
-                at: at.clone(),
-                promoter: WireId::from(*promoter),
-                claim: WirePromoterClaimKind::from(*claim),
                 resource: WireId::from(*resource),
                 failure: WireWatchFailure::from(*failure),
             },
@@ -754,12 +670,6 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 at: at.clone(),
                 scope: WireOverflowScope::from(*scope),
             },
-            Diagnostic::PromoterReseededForOverflow { promoter } => {
-                Self::PromoterReseededForOverflow {
-                    at: at.clone(),
-                    promoter: WireId::from(*promoter),
-                }
-            }
             Diagnostic::PerFileDriftDroppedOnRecovery { profile } => {
                 Self::PerFileDriftDroppedOnRecovery {
                     at: at.clone(),
@@ -775,12 +685,12 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
             Diagnostic::SubAttached {
                 sub,
                 name,
-                source_promoter,
+                source_discovery,
             } => Self::SubAttached {
                 at: at.clone(),
                 sub: WireId::from(*sub),
                 name: name.clone(),
-                source_promoter: source_promoter.map(WireId::from),
+                source_discovery: source_discovery.map(WireId::from),
             },
             Diagnostic::SubFired {
                 sub,
@@ -819,83 +729,6 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 at: at.clone(),
                 sub: WireId::from(*sub),
             },
-            Diagnostic::PromoterAttached { promoter, name } => Self::PromoterAttached {
-                at: at.clone(),
-                promoter: WireId::from(*promoter),
-                name: name.clone(),
-            },
-            Diagnostic::PromoterReaped { promoter } => Self::PromoterReaped {
-                at: at.clone(),
-                promoter: WireId::from(*promoter),
-            },
-            Diagnostic::PromoterDescentVanished { promoter, prefix } => {
-                Self::PromoterDescentVanished {
-                    at: at.clone(),
-                    promoter: WireId::from(*promoter),
-                    prefix: WireId::from(*prefix),
-                }
-            }
-            Diagnostic::PromoterDescentFailed {
-                promoter,
-                prefix,
-                failure,
-            } => Self::PromoterDescentFailed {
-                at: at.clone(),
-                promoter: WireId::from(*promoter),
-                prefix: WireId::from(*prefix),
-                errno: failure.errno(),
-            },
-            Diagnostic::PromotionKindObserved {
-                promoter,
-                path,
-                kind,
-            } => Self::PromotionKindObserved {
-                at: at.clone(),
-                promoter: WireId::from(*promoter),
-                path: WirePath::from(path),
-                kind: WireResourceKind::from(*kind),
-            },
-            Diagnostic::PromoterFanoutThreshold { promoter, count } => {
-                Self::PromoterFanoutThreshold {
-                    at: at.clone(),
-                    promoter: WireId::from(*promoter),
-                    count: *count,
-                }
-            }
-            Diagnostic::PromoterProxyStaleEvent { promoter, resource } => {
-                Self::PromoterProxyStaleEvent {
-                    at: at.clone(),
-                    promoter: WireId::from(*promoter),
-                    resource: WireId::from(*resource),
-                }
-            }
-            Diagnostic::PromoterEnumerationVanished { promoter, proxy } => {
-                Self::PromoterEnumerationVanished {
-                    at: at.clone(),
-                    promoter: WireId::from(*promoter),
-                    proxy: WireId::from(*proxy),
-                }
-            }
-            Diagnostic::PromoterEnumerationFailed {
-                promoter,
-                proxy,
-                failure,
-            } => Self::PromoterEnumerationFailed {
-                at: at.clone(),
-                promoter: WireId::from(*promoter),
-                proxy: WireId::from(*proxy),
-                errno: failure.errno(),
-            },
-            Diagnostic::DynamicSubReaped {
-                promoter,
-                sub,
-                path,
-            } => Self::DynamicSubReaped {
-                at: at.clone(),
-                promoter: WireId::from(*promoter),
-                sub: WireId::from(*sub),
-                path: WirePath::from(path),
-            },
             Diagnostic::DiscoveryMinted { source, path, kind } => Self::DiscoveryMinted {
                 at: at.clone(),
                 source: WireId::from(*source),
@@ -927,7 +760,7 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
             },
             Diagnostic::WalkerContractViolated { owner } => Self::WalkerContractViolated {
                 at: at.clone(),
-                owner: WireProbeOwner::from(*owner),
+                owner: WireId::from(*owner),
             },
         }
     }
@@ -953,7 +786,6 @@ impl WireDiagnostic {
             Self::EffectCompleteForUnknownSub { .. } => "effect_complete_for_unknown_sub",
             Self::DetachUnknownSub { .. } => "detach_unknown_sub",
             Self::ConfigDiffUnknownSub { .. } => "config_diff_unknown_sub",
-            Self::ConfigDiffUnknownPromoter { .. } => "config_diff_unknown_promoter",
             Self::ConfigDiffRebindFallbackAttach { .. } => "config_diff_rebind_fallback_attach",
             Self::ProbeVanished { .. } => "probe_vanished",
             Self::ProbeFailed { .. } => "probe_failed",
@@ -966,7 +798,6 @@ impl WireDiagnostic {
             Self::ReapPendingCancelled { .. } => "reap_pending_cancelled",
             Self::ProfileReaped { .. } => "profile_reaped",
             Self::ProfileClaimPurged { .. } => "profile_claim_purged",
-            Self::PromoterClaimPurged { .. } => "promoter_claim_purged",
             Self::AttachPathInvalid { .. } => "attach_path_invalid",
             Self::AttachResourceStale { .. } => "attach_resource_stale",
             Self::AnchorKindMismatch { .. } => "anchor_kind_mismatch",
@@ -981,7 +812,6 @@ impl WireDiagnostic {
             Self::RebaseCeilingForced { .. } => "rebase_ceiling_forced",
             Self::RebaseCeilingUnreadable { .. } => "rebase_ceiling_unreadable",
             Self::SensorOverflow { .. } => "sensor_overflow",
-            Self::PromoterReseededForOverflow { .. } => "promoter_reseeded_for_overflow",
             Self::PerFileDriftDroppedOnRecovery { .. } => "per_file_drift_dropped_on_recovery",
             Self::PerFileFireSkippedOnFreshSeed { .. } => "per_file_fire_skipped_on_fresh_seed",
             Self::SubAttached { .. } => "sub_attached",
@@ -991,16 +821,6 @@ impl WireDiagnostic {
             Self::SubDetached { .. } => "sub_detached",
             Self::SubRebound { .. } => "sub_rebound",
             Self::RebindUnknownSub { .. } => "rebind_unknown_sub",
-            Self::PromoterAttached { .. } => "promoter_attached",
-            Self::PromoterReaped { .. } => "promoter_reaped",
-            Self::PromoterDescentVanished { .. } => "promoter_descent_vanished",
-            Self::PromoterDescentFailed { .. } => "promoter_descent_failed",
-            Self::PromotionKindObserved { .. } => "promotion_kind_observed",
-            Self::PromoterFanoutThreshold { .. } => "promoter_fanout_threshold",
-            Self::PromoterProxyStaleEvent { .. } => "promoter_proxy_stale_event",
-            Self::PromoterEnumerationVanished { .. } => "promoter_enumeration_vanished",
-            Self::PromoterEnumerationFailed { .. } => "promoter_enumeration_failed",
-            Self::DynamicSubReaped { .. } => "dynamic_sub_reaped",
             Self::DiscoveryMinted { .. } => "discovery_minted",
             Self::DiscoveryFanoutThreshold { .. } => "discovery_fanout_threshold",
             Self::DiscoverySubReaped { .. } => "discovery_sub_reaped",
@@ -1035,7 +855,6 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "effect_complete_for_unknown_sub",
     "detach_unknown_sub",
     "config_diff_unknown_sub",
-    "config_diff_unknown_promoter",
     "config_diff_rebind_fallback_attach",
     "probe_vanished",
     "probe_failed",
@@ -1048,7 +867,6 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "reap_pending_cancelled",
     "profile_reaped",
     "profile_claim_purged",
-    "promoter_claim_purged",
     "attach_path_invalid",
     "attach_resource_stale",
     "anchor_kind_mismatch",
@@ -1061,7 +879,6 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "rebase_ceiling_forced",
     "rebase_ceiling_unreadable",
     "sensor_overflow",
-    "promoter_reseeded_for_overflow",
     "per_file_drift_dropped_on_recovery",
     "per_file_fire_skipped_on_fresh_seed",
     "sub_attached",
@@ -1071,16 +888,6 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "sub_detached",
     "sub_rebound",
     "rebind_unknown_sub",
-    "promoter_attached",
-    "promoter_reaped",
-    "promoter_descent_vanished",
-    "promoter_descent_failed",
-    "promotion_kind_observed",
-    "promoter_fanout_threshold",
-    "promoter_proxy_stale_event",
-    "promoter_enumeration_vanished",
-    "promoter_enumeration_failed",
-    "dynamic_sub_reaped",
     "discovery_minted",
     "discovery_fanout_threshold",
     "discovery_sub_reaped",
@@ -1195,38 +1002,6 @@ impl std::fmt::Display for WireOverflowScope {
         match self {
             Self::Resource { resource } => write!(f, "resource/{}", resource.0),
             Self::Global => f.write_str("global"),
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum WireProbeOwner {
-    Profile { profile: WireId },
-    Promoter { promoter: WireId },
-}
-
-impl From<ProbeOwner> for WireProbeOwner {
-    fn from(o: ProbeOwner) -> Self {
-        match o {
-            ProbeOwner::Profile(p) => Self::Profile {
-                profile: WireId::from(p),
-            },
-            ProbeOwner::Promoter(p) => Self::Promoter {
-                promoter: WireId::from(p),
-            },
-        }
-    }
-}
-
-impl std::fmt::Display for WireProbeOwner {
-    /// Operator-visible label — `<kind>/<id>` so the owner tag and the inner id read as one token
-    /// in the renderer's `owner=` field. Mirrors [`WireTime`] / [`WirePath`]'s
-    /// `Display`-as-projection precedent so per-event diag rendering carries no allocation.
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Profile { profile } => write!(f, "profile/{}", profile.0),
-            Self::Promoter { promoter } => write!(f, "promoter/{}", promoter.0),
         }
     }
 }
@@ -1363,40 +1138,6 @@ impl std::fmt::Display for WireClaimKind {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum WirePromoterClaimKind {
-    DescentPrefix,
-    ActiveProxy,
-    PrefixParent,
-}
-
-impl From<PromoterClaimKind> for WirePromoterClaimKind {
-    fn from(c: PromoterClaimKind) -> Self {
-        match c {
-            PromoterClaimKind::DescentPrefix => Self::DescentPrefix,
-            PromoterClaimKind::ActiveProxy => Self::ActiveProxy,
-            PromoterClaimKind::PrefixParent => Self::PrefixParent,
-        }
-    }
-}
-
-impl WirePromoterClaimKind {
-    pub(crate) const fn as_str(self) -> &'static str {
-        match self {
-            Self::DescentPrefix => "descent_prefix",
-            Self::ActiveProxy => "active_proxy",
-            Self::PrefixParent => "prefix_parent",
-        }
-    }
-}
-
-impl std::fmt::Display for WirePromoterClaimKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(self.as_str())
-    }
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
-#[serde(rename_all = "snake_case")]
 pub(crate) enum WireSpliceFailureCause {
     TargetOutsideAnchorSubtree,
     SlotReapedMidGraft,
@@ -1435,7 +1176,6 @@ pub(crate) enum WireDetachReason {
     ConfigDiffRemoved,
     ConfigDiffIdentityChanged,
     IpcDisabled,
-    PromoterReaped,
     AnchorLost,
     DiscoverySourceDetached,
 }
@@ -1446,7 +1186,6 @@ impl From<DetachReason> for WireDetachReason {
             DetachReason::ConfigDiffRemoved => Self::ConfigDiffRemoved,
             DetachReason::ConfigDiffIdentityChanged => Self::ConfigDiffIdentityChanged,
             DetachReason::IpcDisabled => Self::IpcDisabled,
-            DetachReason::PromoterReaped => Self::PromoterReaped,
             DetachReason::AnchorLost => Self::AnchorLost,
             DetachReason::DiscoverySourceDetached => Self::DiscoverySourceDetached,
         }
@@ -1459,7 +1198,6 @@ impl WireDetachReason {
             Self::ConfigDiffRemoved => "config_diff_removed",
             Self::ConfigDiffIdentityChanged => "config_diff_identity_changed",
             Self::IpcDisabled => "ipc_disabled",
-            Self::PromoterReaped => "promoter_reaped",
             Self::AnchorLost => "anchor_lost",
             Self::DiscoverySourceDetached => "discovery_source_detached",
         }
@@ -1753,9 +1491,8 @@ mod tests {
     use super::{
         KNOWN_WIRE_VARIANTS, WireAbsorbMode, WireBurstHelper, WireBurstIntent, WireClaimKind,
         WireDetachReason, WireDiagnostic, WireEffectScope, WireFsEvent, WireOverflowScope,
-        WirePath, WireProbeOwner, WireProfileStateDiscriminant, WirePromoterClaimKind,
-        WireReapTrigger, WireReloadTrigger, WireResourceKind, WireSpliceFailureCause,
-        WireStateLabel, WireTime, WireWatchFailure,
+        WirePath, WireProfileStateDiscriminant, WireReapTrigger, WireReloadTrigger,
+        WireResourceKind, WireSpliceFailureCause, WireStateLabel, WireTime, WireWatchFailure,
     };
     use crate::ipc::protocol::WireId;
     use std::collections::BTreeSet;
@@ -1844,25 +1581,6 @@ mod tests {
         assert_eq!(back, wire);
     }
 
-    /// [`WireProbeOwner`]'s `Display` projects to `<kind>/<id>` — the operator-visible token the
-    /// `owner=` column on `StaleProbeResponse` lines carries. Extends [`WireTime`] / [`WirePath`]'s
-    /// `Display`-as-projection precedent across the compound enums; the renderer writes verbatim
-    /// through the formatter (no per-event allocation).
-    #[test]
-    fn wire_probe_owner_display_projects_kind_slash_id() {
-        assert_eq!(
-            WireProbeOwner::Profile { profile: WireId(7) }.to_string(),
-            "profile/7",
-        );
-        assert_eq!(
-            WireProbeOwner::Promoter {
-                promoter: WireId(42),
-            }
-            .to_string(),
-            "promoter/42",
-        );
-    }
-
     /// [`WireOverflowScope`]'s `Display` is asymmetric by design — the `Resource` arm carries an id
     /// (`resource/<n>`), the `Global` arm is the bare tag. Operators reading `scope=` on
     /// `SensorOverflow` lines distinguish daemon-wide overflow from a single-resource queue overrun
@@ -1916,7 +1634,7 @@ mod tests {
         vec![
             WireDiagnostic::StaleProbeResponse {
                 at: at(),
-                owner: WireProbeOwner::Profile { profile: WireId(1) },
+                owner: WireId(1),
                 correlation: 7,
             },
             WireDiagnostic::StaleTimer { at: at(), id: 9 },
@@ -1936,10 +1654,6 @@ mod tests {
             WireDiagnostic::ConfigDiffUnknownSub {
                 at: at(),
                 name: "foo".into(),
-            },
-            WireDiagnostic::ConfigDiffUnknownPromoter {
-                at: at(),
-                name: "bar".into(),
             },
             WireDiagnostic::ConfigDiffRebindFallbackAttach {
                 at: at(),
@@ -2001,13 +1715,6 @@ mod tests {
                 claim: WireClaimKind::Anchor,
                 resource: WireId(71),
                 failure: WireWatchFailure::Resource { errno: 28 },
-            },
-            WireDiagnostic::PromoterClaimPurged {
-                at: at(),
-                promoter: WireId(80),
-                claim: WirePromoterClaimKind::ActiveProxy,
-                resource: WireId(81),
-                failure: WireWatchFailure::Invariant { errno: 22 },
             },
             WireDiagnostic::AttachPathInvalid {
                 at: at(),
@@ -2073,10 +1780,6 @@ mod tests {
                 at: at(),
                 scope: WireOverflowScope::Global,
             },
-            WireDiagnostic::PromoterReseededForOverflow {
-                at: at(),
-                promoter: WireId(130),
-            },
             WireDiagnostic::PerFileDriftDroppedOnRecovery {
                 at: at(),
                 profile: WireId(140),
@@ -2089,7 +1792,7 @@ mod tests {
                 at: at(),
                 sub: WireId(150),
                 name: "watch".into(),
-                source_promoter: None,
+                source_discovery: None,
             },
             WireDiagnostic::SubFired {
                 at: at(),
@@ -2120,59 +1823,6 @@ mod tests {
                 at: at(),
                 sub: WireId(156),
             },
-            WireDiagnostic::PromoterAttached {
-                at: at(),
-                promoter: WireId(160),
-                name: "p".into(),
-            },
-            WireDiagnostic::PromoterReaped {
-                at: at(),
-                promoter: WireId(161),
-            },
-            WireDiagnostic::PromoterDescentVanished {
-                at: at(),
-                promoter: WireId(162),
-                prefix: WireId(163),
-            },
-            WireDiagnostic::PromoterDescentFailed {
-                at: at(),
-                promoter: WireId(164),
-                prefix: WireId(165),
-                errno: 2,
-            },
-            WireDiagnostic::PromotionKindObserved {
-                at: at(),
-                promoter: WireId(166),
-                path: WirePath::from(Path::new("/tmp/p/x")),
-                kind: WireResourceKind::Dir,
-            },
-            WireDiagnostic::PromoterFanoutThreshold {
-                at: at(),
-                promoter: WireId(167),
-                count: 256,
-            },
-            WireDiagnostic::PromoterProxyStaleEvent {
-                at: at(),
-                promoter: WireId(168),
-                resource: WireId(169),
-            },
-            WireDiagnostic::PromoterEnumerationVanished {
-                at: at(),
-                promoter: WireId(170),
-                proxy: WireId(171),
-            },
-            WireDiagnostic::PromoterEnumerationFailed {
-                at: at(),
-                promoter: WireId(172),
-                proxy: WireId(173),
-                errno: 13,
-            },
-            WireDiagnostic::DynamicSubReaped {
-                at: at(),
-                promoter: WireId(174),
-                sub: WireId(175),
-                path: WirePath::from(Path::new("/tmp/p/dyn")),
-            },
             WireDiagnostic::DiscoveryMinted {
                 at: at(),
                 source: WireId(190),
@@ -2198,9 +1848,7 @@ mod tests {
             },
             WireDiagnostic::WalkerContractViolated {
                 at: at(),
-                owner: WireProbeOwner::Promoter {
-                    promoter: WireId(181),
-                },
+                owner: WireId(181),
             },
             WireDiagnostic::Missed { at: at(), count: 5 },
         ]
@@ -2323,18 +1971,6 @@ mod tests {
     }
 
     #[test]
-    fn wire_promoter_claim_kind_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WirePromoterClaimKind::DescentPrefix,
-                WirePromoterClaimKind::ActiveProxy,
-                WirePromoterClaimKind::PrefixParent,
-            ],
-            WirePromoterClaimKind::as_str,
-        );
-    }
-
-    #[test]
     fn wire_splice_failure_cause_round_trips_every_variant() {
         assert_snake_round_trip(
             &[
@@ -2353,7 +1989,8 @@ mod tests {
                 WireDetachReason::ConfigDiffRemoved,
                 WireDetachReason::ConfigDiffIdentityChanged,
                 WireDetachReason::IpcDisabled,
-                WireDetachReason::PromoterReaped,
+                WireDetachReason::AnchorLost,
+                WireDetachReason::DiscoverySourceDetached,
             ],
             WireDetachReason::as_str,
         );

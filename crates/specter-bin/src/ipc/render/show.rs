@@ -131,12 +131,12 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
             absorb_mode_str(w.mode),
         );
     }
-    if let Some(pid) = d.source_promoter {
+    if let Some(src) = d.source_discovery {
         let _ = writeln!(
             out,
-            "{}promoter {}",
+            "{}discovery {}",
             label_cell(sty, "source", LABEL_WIDTH),
-            pid.0,
+            src.0,
         );
     }
     let _ = writeln!(out, "{}{}", label_cell(sty, "sub_id", LABEL_WIDTH), d.sub.0);
@@ -231,7 +231,7 @@ mod tests {
             absorb,
             absorb_count,
             settle_ms: 500,
-            source_promoter: None,
+            source_discovery: None,
             scope: WireEffectScope::SubtreeRoot,
             program,
         }

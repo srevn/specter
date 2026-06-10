@@ -4,7 +4,7 @@
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
     ActiveBurst, Diagnostic, EffectScope, EntryKind, FsEvent, Input, ProbeFailure, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig,
+    ProbeOutcome, ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig,
     SubAttachAnchor, SubAttachRequest,
 };
 use specter_engine::Engine;
@@ -60,7 +60,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
     // Inject probe response showing `log` appears.
     let log_advance = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: var_corr,
             outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("log", EntryKind::Dir, 1)])),
         }),
@@ -72,7 +72,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
     // Inject probe response showing `myapp` appears under /var/log.
     let myapp_materialize = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: log_corr,
             outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("myapp", EntryKind::Dir, 2)])),
         }),
@@ -142,7 +142,7 @@ fn pending_path_failed_probe_retains_state() {
 
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: corr,
             outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
         }),
@@ -194,7 +194,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     // No-progress response — descent stays pending.
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: corr,
             outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("other", EntryKind::File, 99)])),
         }),
@@ -212,7 +212,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     let probes = out
         .probe_ops()
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid))
         .count();
     assert_eq!(probes, 1, "FsEvent at prefix triggers fresh descent probe");
     let _ = e.cancel_all_in_flight_probes();
@@ -290,7 +290,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     let recovery_probe = out
         .probe_ops()
         .iter()
-        .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)));
+        .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid));
     assert!(
         recovery_probe,
         "recovery emits descent probe at watch_root_parent",
@@ -332,7 +332,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     );
     assert!(is_pending, "Profile is in Pending state");
     assert_eq!(
-        e.pending_probe_for(ProbeOwner::Profile(pid)),
+        e.pending_probe_for(pid),
         Some(initial_corr),
         "descent state carries the outstanding probe correlation",
     );
@@ -349,7 +349,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     let cancel_present = detach_out
         .probe_ops()
         .iter()
-        .any(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid));
+        .any(|op| matches!(op, ProbeOp::Cancel { owner: profile} if *profile == pid));
     assert!(
         cancel_present,
         "ProbeOp::Cancel emitted for in-flight descent probe; got {:?}",
@@ -492,7 +492,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let a_corr = first_probe_correlation(&attach_a_out).expect("descent probe at attach");
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_a),
+            owner: pid_a,
             correlation: a_corr,
             outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("bar", EntryKind::Dir, 1)])),
         }),
@@ -596,7 +596,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let a_probes = out
         .probe_ops()
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_a)))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid_a))
         .count();
     assert_eq!(a_probes, 1, "A's descent advance emits one probe");
     assert!(
@@ -611,7 +611,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let b_probes = out
         .probe_ops()
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_b)))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid_b))
         .count();
     assert_eq!(b_probes, 1, "B's recovery emits one descent probe");
     assert!(
@@ -626,7 +626,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let c_probes = out
         .probe_ops()
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_c)))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid_c))
         .count();
     assert_eq!(c_probes, 0, "C is unrelated to /root; no probe");
     assert!(matches!(

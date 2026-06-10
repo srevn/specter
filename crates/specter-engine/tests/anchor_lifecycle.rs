@@ -12,8 +12,8 @@
 use specter_core::testkit::{anchor_ok, dir_snap, empty_program, file_leaf};
 use specter_core::{
     AnchorClaim, ClassSet, EffectScope, EntryKind, FsEvent, Input, ProbeFailure, ProbeOp,
-    ProbeOutcome, ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProfileState, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
+    ProbeOutcome, ProbeRequest, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
+    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -130,7 +130,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_p),
+            owner: pid_p,
             correlation: p_corr,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -192,9 +192,7 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         .probe_ops()
         .iter()
         .find_map(|op| match op {
-            ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_p) => {
-                Some(request)
-            }
+            ProbeOp::Probe { request } if request.owner() == pid_p => Some(request),
             _ => None,
         })
         .expect("P emits a recovery Seed probe");
@@ -255,7 +253,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
     let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_p),
+            owner: pid_p,
             correlation: p_corr,
             outcome: ProbeOutcome::Vanished,
         }),
@@ -300,7 +298,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         .probe_ops()
         .iter()
         .chain(settle_out.probe_ops().iter())
-        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_p)))
+        .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid_p))
         .count();
     assert!(
         p_probe_count <= 1,
@@ -361,7 +359,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid_p),
+            owner: pid_p,
             correlation: p_corr,
             outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 5 }),
         }),
@@ -406,9 +404,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         .probe_ops()
         .iter()
         .find_map(|op| match op {
-            ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid_p) => {
-                Some(request)
-            }
+            ProbeOp::Probe { request } if request.owner() == pid_p => Some(request),
             _ => None,
         })
         .expect("P emits a recovery Seed probe");

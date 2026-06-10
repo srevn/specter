@@ -234,14 +234,14 @@ impl Tree {
     /// `WatchRootParent` (preserves the existing role — never demote a real role to its scaffold
     /// origin) or if the slot is stale.
     ///
-    /// Captures the common attach/promoter pattern: > "a slot that came from `ensure_path` as a
-    /// scaffold has now > acquired a real purpose (anchor of a User Profile, parent of > one, or
-    /// proxy of a Promoter) — flip its tag for diagnostic > clarity."
+    /// Captures the common attach pattern: a slot that came from `ensure_path` as a scaffold has
+    /// now acquired a real purpose (anchor of a User Profile, or parent of one) — flip its tag for
+    /// diagnostic clarity.
     ///
     /// Role is metadata: retention runs through the structural claimants on
-    /// [`Resource::has_anchors`] (`children`, `profiles`, `proxy_promoters`, `contributions`), so
-    /// the tag mutation is observer-only. The helper exists to keep the four-line "get + role-match
-    /// + role-write" idiom from drifting across call sites.
+    /// [`Resource::has_anchors`] (`children`, `profiles`, `contributions`), so the tag mutation is
+    /// observer-only. The helper exists to keep the four-line "get + role-match + role-write"
+    /// idiom from drifting across call sites.
     pub fn promote_scaffold(&mut self, id: ResourceId, new_role: ResourceRole) {
         if let Some(r) = self.nodes.get_mut(id)
             && matches!(r.role, ResourceRole::DescentScaffold)
@@ -379,9 +379,9 @@ impl Tree {
     /// caller correct by construction: misuse degrades to "one extra closing op" — the Sensor's
     /// idempotence absorbs the duplicate — rather than to a panic or a silent kernel-watch leak.
     ///
-    /// **What survives.** Children, profiles, the `proxy_promoters` back-ref, `role`, `parent`, and
-    /// `segment` all stay untouched. Of those, children, profiles, and `proxy_promoters` (alongside
-    /// the contributions map, which `vacate` itself just cleared) drive [`Resource::has_anchors`] —
+    /// **What survives.** Children, profiles, `role`, `parent`, and `segment` all stay untouched.
+    /// Of those, children and profiles (alongside the contributions map, which `vacate` itself
+    /// just cleared) drive [`Resource::has_anchors`] —
     /// i.e., they decide whether a follow-on [`Tree::try_reap`] keeps the slot alive. Role is
     /// metadata: it records *what* the slot is (User anchor / watch-root parent / descent scaffold)
     /// for diagnostic clarity, but does not anchor the slot. Vacated-but-anchored slots are
@@ -409,16 +409,16 @@ impl Tree {
     /// regardless of caller.
     ///
     /// **Why cascade.** Reaping a slot unlinks it from its parent's `children` map. If the parent
-    /// now has no anchors of its own — no remaining children, no profiles, no Promoter back-refs,
-    /// no contributions — it is also orphaned and should reap. Without the cascade, every release
+    /// now has no anchors of its own — no remaining children, no profiles, no contributions — it
+    /// is also orphaned and should reap. Without the cascade, every release
     /// helper that targets a leaf slot would silently leave its now-orphaned ancestor chain behind,
     /// since `try_reap` is a local op. The cascade is structurally bounded by the tree depth from
     /// `id` to its root (filesystem path depth, single-digit in practice) and gated at every step
     /// by `has_anchors`, so it never tears down a slot still claimed by some live owner.
     ///
     /// **Cascade stop conditions.** The walk halts as soon as it encounters a parent that still has
-    /// anchors (the normal case — a sibling child, a co-resident Profile / Promoter, or another
-    /// contribution keeps it alive) or reaches a root (parent = `None`).
+    /// anchors (the normal case — a sibling child, a co-resident Profile, or another contribution
+    /// keeps it alive) or reaches a root (parent = `None`).
     pub fn try_reap(&mut self, id: ResourceId, out: &mut StepOutput) -> bool {
         let Some(r) = self.nodes.get(id) else {
             return false;

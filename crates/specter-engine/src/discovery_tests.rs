@@ -22,9 +22,9 @@ fn terminus(segments: &[&str], kind: EntryKind) -> ChainTerminus {
     }
 }
 
-/// td = 1: every root entry is a terminus, whatever its kind — Dir, File, and Symlink all mint (the
-/// Promoter-parity rule: `EntryKind → ResourceKind` folds non-dirs to `File` downstream, but the
-/// collector reports the snapshot's own kind). Order is the `BTreeMap`'s lexicographic walk.
+/// td = 1: every root entry is a terminus, whatever its kind — Dir, File, and Symlink all mint
+/// (`EntryKind → ResourceKind` folds non-dirs to `File` downstream, but the collector reports the
+/// snapshot's own kind). Order is the `BTreeMap`'s lexicographic walk.
 #[test]
 fn termini_at_depth_one_collect_every_entry_kind_in_lexicographic_order() {
     let root = dir_snap(&[
@@ -106,7 +106,6 @@ fn template_on_non_chain_profile_is_unconstructable() {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: Some(mint_template()),
                 source_discovery: None,
             },
@@ -139,7 +138,6 @@ fn plain_sub_on_chain_profile_is_unconstructable() {
                 scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: None,
                 source_discovery: None,
             },

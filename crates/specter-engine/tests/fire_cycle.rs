@@ -20,9 +20,9 @@ use specter_core::{
     ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DedupKey, Diagnostic, DirMeta,
     DirSnapshot, EffectCompletion, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity,
     Input, LeafEntry, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation,
-    ProbeOp, ProbeOwner, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, Termination,
-    TimerKind, TreeSnapshot,
+    ProbeOp, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, Termination, TimerKind,
+    TreeSnapshot,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -176,7 +176,7 @@ fn drive_to_awaiting(
         if let Some(c) = probe_corr {
             let out = e.step(
                 Input::ProbeResponse(ProbeResponse {
-                    owner: ProbeOwner::Profile(pid),
+                    owner: pid,
                     correlation: c,
                     outcome: proven(std::sync::Arc::clone(snap)),
                 }),
@@ -417,7 +417,7 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
     let t_restart = rebasing_at + Duration::from_millis(5);
     let restart_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: rebase_corr,
             outcome: proven(snap),
         }),
@@ -539,7 +539,7 @@ fn fire_cycle_gate_deadline_force_transitions_to_rebasing() {
     let rebase_emitted = combined
         .probe_ops()
         .iter()
-        .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid)));
+        .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid));
     assert!(
         rebase_emitted,
         "rebase probe emitted on gate-deadline force-transition"
@@ -616,7 +616,7 @@ fn fire_cycle_gate_deadline_on_zombie_burst_reaps_profile() {
     assert!(
         combined.probe_ops().iter().all(|op| !matches!(
             op,
-            ProbeOp::Probe { request } if request.owner() == ProbeOwner::Profile(pid),
+            ProbeOp::Probe { request } if request.owner() == pid,
         )),
         "no rebase probe emitted — the wasted round-trip on a dying Profile is elided",
     );
@@ -793,7 +793,7 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
     let cancels = lost_out
         .probe_ops()
         .iter()
-        .filter(|op| matches!(op, ProbeOp::Cancel { owner: ProbeOwner::Profile(profile)} if *profile == pid))
+        .filter(|op| matches!(op, ProbeOp::Cancel { owner: profile} if *profile == pid))
         .count();
     assert_eq!(cancels, 1, "Rebasing probe cancelled on anchor loss");
     assert!(matches!(
@@ -828,11 +828,11 @@ fn fire_cycle_fresh_seed_skips_awaiting() {
     // (no fired Subs, no drift) and finishes to Idle. A fresh Seed never fires an Effect and never
     // lands in a post-fire Awaiting tail.
     let corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
+        .pending_probe_for(pid)
         .expect("cold-arm Seed Verifying probe in flight at burst construction");
     let resp_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: corr,
             outcome: proven(Arc::clone(&snap)),
         }),
@@ -1010,7 +1010,7 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
     let snap = dir_snap(&[]);
     let (_sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, &snap, now);
     let _ = drive_to_awaiting(&mut e, pid, r, &snap, seed_done + Duration::from_millis(10));
-    let pending_probe_before = e.pending_probe_for(ProbeOwner::Profile(pid));
+    let pending_probe_before = e.pending_probe_for(pid);
 
     // Advance well past max_settle (the BurstDeadline) but stop short of the gate_deadline (4 *
     // max_settle).
@@ -1043,7 +1043,7 @@ fn fire_cycle_burst_deadline_during_awaiting_dropped_silently() {
     };
     assert!(matches!(phase, PostFirePhase::Awaiting { .. }));
     assert_eq!(
-        e.pending_probe_for(ProbeOwner::Profile(pid)),
+        e.pending_probe_for(pid),
         pending_probe_before,
         "no probe minted"
     );
@@ -1294,7 +1294,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     let post_effect = sized_file_snap("foo.rs", EntryKind::File, 42, 1);
     e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: rebase_corr,
             outcome: proven(post_effect.clone()),
         }),
@@ -1455,11 +1455,11 @@ fn scp_into_structure_only_does_not_fire_during_growing_file() {
         at += SETTLE * 2;
         drain_due(&mut e, at);
         let corr = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
+            .pending_probe_for(pid)
             .expect("Verifying probe in flight after settle expiry");
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
+                owner: pid,
                 correlation: corr,
                 outcome: proven(Arc::clone(sample)),
             }),
@@ -1475,11 +1475,11 @@ fn scp_into_structure_only_does_not_fire_during_growing_file() {
     at += SETTLE * 2;
     drain_due(&mut e, at);
     let corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
+        .pending_probe_for(pid)
         .expect("Verifying probe in flight for the stabilised sample");
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: corr,
             outcome: proven(Arc::clone(&s2)),
         }),

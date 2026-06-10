@@ -13,9 +13,10 @@ use std::path::Path;
 /// response is a fresh allocation (mostly `WireTime` strings; `WirePath` lossy projections for the
 /// two filesystem paths).
 ///
-/// **`sub_total` semantics** — every Sub currently in the engine registry, *including* dynamic Subs
-/// minted by Promoters. An operator wanting "only static, only attached" derives it from `list`. The
-/// minimal `status` shape avoids carrying multiple counts that would skew interpretation at a glance.
+/// **`sub_total` semantics** — every Sub currently in the engine registry, *including*
+/// discovery-minted Subs. An operator wanting "only static, only attached" derives it from
+/// `list`. The minimal `status` shape avoids carrying multiple counts that would skew
+/// interpretation at a glance.
 pub(crate) fn status(
     engine: &Engine,
     ds: &DriverState,
@@ -29,14 +30,17 @@ pub(crate) fn status(
         reload_count: ds.reload_count,
         last_reload: ds.last_reload.map(WireLastReload::from),
         sub_total: engine.subs().len(),
-        // Inline filter+count over `config.watches` rather than `Config::disabled_names()`. The
-        // latter allocates two `Vec<&str>` (watches AND promoters) just to read `.len()` off the
-        // first one — the promoter side is unused here, and even the watch side wastes a heap
-        // allocation for what is structurally a counter.
+        // Inline filter+count over `config.watches` rather than `Config::disabled_names()` —
+        // the latter allocates a `Vec<&str>` just to read `.len()`, a heap allocation for what is
+        // structurally a counter.
         sub_disabled_toml: config.watches.iter().filter(|s| !s.enabled).count(),
         sub_disabled_runtime: disabled_runtime.len(),
         profile_active: engine.profiles().active_count(),
-        promoter_active: engine.promoters().len(),
+        discovery_active: engine
+            .subs()
+            .iter()
+            .filter(|(_, s)| s.template.is_some())
+            .count(),
         config_path: WirePath::from(config_path),
         socket_path: WirePath::from(&ds.socket_path),
     }
@@ -83,7 +87,7 @@ mod tests {
         assert_eq!(r.sub_disabled_toml, 0);
         assert_eq!(r.sub_disabled_runtime, 0);
         assert_eq!(r.profile_active, 0);
-        assert_eq!(r.promoter_active, 0);
+        assert_eq!(r.discovery_active, 0);
         assert_eq!(
             r.config_path,
             WirePath::from(Path::new("/etc/specter.toml"))

@@ -12,8 +12,6 @@ mod discovery;
 mod engine;
 mod path;
 mod probe;
-mod promoter;
-mod promoter_claims;
 mod reconcile;
 mod refcounts;
 mod timer;

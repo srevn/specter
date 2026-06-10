@@ -6,7 +6,7 @@ use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
     BurstFinish, DedupKey, Diagnostic, EffectCompletion, EffectOutcome, EffectScope, FsEvent,
     Input, ProbeOp, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest,
-    SubRegistryDiff, WatchOp, WatchRegistryDiff,
+    SubRegistryDiff, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -55,13 +55,7 @@ fn config_diff_add_sub_to_existing_profile() {
         NO_EVENTS,
         false,
     ));
-    let out = e.step(
-        Input::ConfigDiff(WatchRegistryDiff {
-            subs: diff,
-            ..Default::default()
-        }),
-        now,
-    );
+    let out = e.step(Input::ConfigDiff(diff), now);
 
     assert_eq!(e.subs().at(pid).len(), 2);
     let new_watches = out
@@ -109,13 +103,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     let post_seed = seed_done + SETTLE;
     let mut diff = SubRegistryDiff::default();
     diff.removed.push(CompactString::from("A"));
-    let out = e.step(
-        Input::ConfigDiff(WatchRegistryDiff {
-            subs: diff,
-            ..Default::default()
-        }),
-        post_seed,
-    );
+    let out = e.step(Input::ConfigDiff(diff), post_seed);
 
     assert!(e.profiles().get(pid).is_none(), "Profile reaped");
     assert!(out.diagnostics.iter().any(|d| matches!(
@@ -173,13 +161,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
     // Mid-burst ConfigDiff: remove A (by operator watch name).
     let mut diff = SubRegistryDiff::default();
     diff.removed.push(CompactString::from("A"));
-    let _ = e.step(
-        Input::ConfigDiff(WatchRegistryDiff {
-            subs: diff,
-            ..Default::default()
-        }),
-        t1,
-    );
+    let _ = e.step(Input::ConfigDiff(diff), t1);
     assert!(
         matches!(
             e.profiles().get(pid).unwrap().state().burst_finish(),
@@ -260,13 +242,7 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
         NO_EVENTS,
         false,
     ));
-    let out = e.step(
-        Input::ConfigDiff(WatchRegistryDiff {
-            subs: diff,
-            ..Default::default()
-        }),
-        t1,
-    );
+    let out = e.step(Input::ConfigDiff(diff), t1);
 
     // Rebind preserves the SubId — `A` still resolves to `sid_a`.
     let sid_b = e.subs().find_by_name("A").expect("A still live");
@@ -354,13 +330,7 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
     let watch_demand_before = e.tree().get(r).unwrap().watch_demand();
 
     let post_seed = now + SETTLE + SETTLE + SETTLE; // safely past the seed window
-    let out = e.step(
-        Input::ConfigDiff(WatchRegistryDiff {
-            subs: diff,
-            ..Default::default()
-        }),
-        post_seed,
-    );
+    let out = e.step(Input::ConfigDiff(diff), post_seed);
 
     let sub_after = e.subs().get(sid).expect("Sub preserved across rebind");
     assert_eq!(
@@ -446,13 +416,7 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
         false,
     ));
     let post_seed = now + SETTLE + SETTLE + SETTLE;
-    let out = e.step(
-        Input::ConfigDiff(WatchRegistryDiff {
-            subs: diff,
-            ..Default::default()
-        }),
-        post_seed,
-    );
+    let out = e.step(Input::ConfigDiff(diff), post_seed);
 
     assert!(
         out.diagnostics
@@ -511,13 +475,7 @@ fn effect_complete_after_detach_drops_silently() {
     let post_seed = seed_done + SETTLE;
     let mut diff = SubRegistryDiff::default();
     diff.removed.push(CompactString::from("A"));
-    e.step(
-        Input::ConfigDiff(WatchRegistryDiff {
-            subs: diff,
-            ..Default::default()
-        }),
-        post_seed,
-    );
+    e.step(Input::ConfigDiff(diff), post_seed);
 
     // Inject EffectComplete for the now-removed Sub.
     let out = e.step(
@@ -599,13 +557,7 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
         NO_EVENTS,
         false,
     ));
-    let _out = e.step(
-        Input::ConfigDiff(WatchRegistryDiff {
-            subs: diff,
-            ..Default::default()
-        }),
-        post_seed,
-    );
+    let _out = e.step(Input::ConfigDiff(diff), post_seed);
 
     // Old Sub gone; new Sub at the same name resolves to a fresh id on a fresh Profile (different
     // `config_hash`).

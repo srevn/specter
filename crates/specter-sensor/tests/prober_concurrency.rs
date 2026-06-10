@@ -6,7 +6,7 @@
 
 use crossbeam::channel::{Sender, unbounded};
 use slotmap::SlotMap;
-use specter_core::{Input, ProbeCorrelation, ProbeOwner, ProbeRequest, ProfileId};
+use specter_core::{Input, ProbeCorrelation, ProbeRequest, ProfileId};
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::num::NonZeroUsize;
 use std::path::PathBuf;
@@ -39,7 +39,7 @@ fn sink(tx: Sender<Input>) -> Arc<dyn ProberResponseSender> {
 
 fn anchor_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
-        owner: ProbeOwner::Profile(profile),
+        owner: profile,
         correlation: ProbeCorrelation::from(correlation),
         target_path: Arc::from(target_path),
     }

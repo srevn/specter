@@ -4,9 +4,9 @@
 //! new drop paths land. Each variant is light-weight (a few small fields) and carries enough
 //! context to log meaningfully.
 
-use crate::ids::{ProbeCorrelation, ProfileId, PromoterId, ResourceId, SubId, TimerId};
+use crate::ids::{ProbeCorrelation, ProfileId, ResourceId, SubId, TimerId};
 use crate::input::{FsEvent, OverflowScope};
-use crate::op::{ProbeFailure, ProbeOwner, WatchFailure};
+use crate::op::{ProbeFailure, WatchFailure};
 use crate::profile::{AbsorbMode, BurstIntent, ProfileStateDiscriminant};
 use crate::resource::ResourceKind;
 use compact_str::CompactString;
@@ -117,45 +117,21 @@ pub enum SpliceFailureCause {
 ///   `has_fired` continuity is what the in-place arm preserves.
 /// - [`Self::IpcDisabled`]: an operator runtime-disabled the Sub via the bin's IPC `disable` verb;
 ///   the bin sends [`crate::Input::DetachSub`] carrying this reason verbatim.
-/// - [`Self::PromoterReaped`]: a dynamic Sub's source Promoter reaped (operator removed the
-///   `[[promoter]]` block, or the Profile lost its anchor under an all-dynamic Sub set so the
-///   anchor-terminal teardown unwound the whole Profile). Pairs with
-///   [`Diagnostic::DynamicSubReaped`] (Promoter-keyed narration); `SubDetached` is the per-Sub
-///   lifecycle signal the latter complements.
 /// - [`Self::AnchorLost`]: a discovery-minted Sub's anchor disappeared and the all-dynamic
 ///   anchor-terminal teardown unwound its Profile — the honest vocabulary for "the watched path is
 ///   gone", with no source-entity reap implied (the discovery template stays live and re-mints on
 ///   reappearance). Pairs with [`Diagnostic::DiscoverySubReaped`] (source-keyed, path-carrying
 ///   narration).
 /// - [`Self::DiscoverySourceDetached`]: the discovery Sub that minted this Sub was detached, so the
-///   cascade reaped the minted set — the discovery analogue of a Promoter-removal cascade, named
-///   for what actually happened to *this* Sub's source rather than overloading the anchor story.
+///   cascade reaped the minted set — named for what actually happened to *this* Sub's source
+///   rather than overloading the anchor story.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DetachReason {
     ConfigDiffRemoved,
     ConfigDiffIdentityChanged,
     IpcDisabled,
-    PromoterReaped,
     AnchorLost,
     DiscoverySourceDetached,
-}
-
-/// Subject of a [`Diagnostic::PromoterClaimPurged`] emission.
-///
-/// Promoter claims are a disjoint set from Profile claims; the dedicated enum lets operators
-/// distinguish the source without parsing the embedded id type. Each claim type has a dedicated
-/// bookkeeping field on [`crate::promoter::Promoter`]:
-/// - [`Self::DescentPrefix`] ⇔ `Promoter.state == PrefixPending(_)` (the literal-prefix descent
-///   watch).
-/// - [`Self::ActiveProxy`] ⇔ `Promoter.state == Active { proxies }` and
-///   `proxies.contains_key(&resource)` (one of the per-pattern proxy watches).
-/// - [`Self::PrefixParent`] ⇔ `Promoter.prefix_parent == Some(resource)` (the preserved
-///   terminus-parent recovery edge — the Promoter twin of [`ClaimKind::WatchRootParent`]).
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PromoterClaimKind {
-    DescentPrefix,
-    ActiveProxy,
-    PrefixParent,
 }
 
 /// Engine-emitted diagnostic. Equality is structural so tests can pin the exact variant + fields
@@ -164,10 +140,10 @@ pub enum PromoterClaimKind {
 pub enum Diagnostic {
     /// `ProbeResponse` whose `(owner, correlation)` doesn't match the owner's in-flight `ProbeSlot`
     /// correlation. Catches stale-id (post-detach), post-cancel arrivals, and out-of-order
-    /// responses across all owner kinds. The `owner` field carries the [`ProbeOwner`] so operators
-    /// can demux which entity (Profile in v1) saw the stale response.
+    /// responses. The `owner` field carries the [`ProfileId`] so operators can see which Profile
+    /// saw the stale response.
     StaleProbeResponse {
-        owner: ProbeOwner,
+        owner: ProfileId,
         correlation: ProbeCorrelation,
     },
     /// `TimerExpired(id)` whose `TimerId` is not referenced by any Profile's burst. `pop_expired`
@@ -202,10 +178,6 @@ pub enum Diagnostic {
     /// the registry. Benign and informational: there is nothing to detach. The resolution shim
     /// emits this rather than attempting a detach.
     ConfigDiffUnknownSub { name: CompactString },
-    /// Promoter-side twin of [`Self::ConfigDiffUnknownSub`]: `Input::ConfigDiff`'s Promoter
-    /// `removed` list named a Promoter the engine has no record of. Benign and informational: there
-    /// is nothing to reap.
-    ConfigDiffUnknownPromoter { name: CompactString },
     /// `Input::ConfigDiff`'s Sub `modified_params` bucket named a watch the engine has no record of
     /// — typically a name whose prior attach failed ([`Self::AttachPathInvalid`]) so it never
     /// entered the registry. The dispatcher cannot rebind a Sub that does not exist, so it degrades
@@ -313,29 +285,6 @@ pub enum Diagnostic {
     ProfileClaimPurged {
         profile: ProfileId,
         claim: ClaimKind,
-        resource: ResourceId,
-        failure: WatchFailure,
-    },
-    /// A Promoter's claim on `resource` was purged because the kernel rejected the watch on it
-    /// (`Input::WatchOpRejected` arrived, clamping `watch_demand := 0`). One emission per affected
-    /// (Promoter, claim_kind) pair — a single rejection at a resource claimed by both a Profile
-    /// (via anchor / watch-root-parent / descent-prefix) AND one or more Promoters (via
-    /// descent-prefix or proxy) emits one [`Self::ProfileClaimPurged`] per Profile claim and one
-    /// [`Self::PromoterClaimPurged`] per Promoter claim.
-    ///
-    /// - [`PromoterClaimKind::DescentPrefix`]: the literal-prefix descent is abandoned. The engine
-    ///   cancels any in-flight descent probe and transitions the Promoter to `Active{empty}`. The
-    ///   Promoter is stranded — there is no v1 recovery channel for the literal prefix; operator
-    ///   restart is required.
-    /// - [`PromoterClaimKind::ActiveProxy`]: the proxy is unregistered and any in-flight
-    ///   enumeration probe targeting it is cancelled. The proxy will not re-register until a fresh
-    ///   enumeration of its parent re-discovers the entry.
-    /// - [`PromoterClaimKind::PrefixParent`]: the Promoter loses its terminus-parent recovery edge
-    ///   (the twin of [`ClaimKind::WatchRootParent`]). Proxies stay watched (different `resource`);
-    ///   terminus recreation cannot auto-recover — operator restart is required.
-    PromoterClaimPurged {
-        promoter: PromoterId,
-        claim: PromoterClaimKind,
         resource: ResourceId,
         failure: WatchFailure,
     },
@@ -501,18 +450,6 @@ pub enum Diagnostic {
     /// signal, so an operator seeing it should tune the load condition (`max_queued_events`
     /// saturation, a slow actuator blocking the watcher's drain).
     SensorOverflow { scope: OverflowScope },
-    /// `Input::SensorOverflow` arrived from the Sensor; the engine reseeded `promoter` (alongside
-    /// any in-scope Profiles surfaced by [`Self::SensorOverflow`]'s peer reseed loop). Per-Promoter
-    /// dispatch is state-keyed:
-    /// - `PrefixPending(_)` ⇒ a fresh descent probe is emitted at `current_prefix`.
-    /// - `Active { proxies }` ⇒ every proxy is enqueued into `pending_enumerations`; the dispatcher
-    ///   drains one immediately into a probe, with the rest queued behind the single-slot.
-    ///
-    /// One emission per Promoter the reseed actually acted on: a `PrefixPending` Promoter whose
-    /// descent probe is already in flight reseeds nothing (the in-flight response reflects the
-    /// post-overflow state) and emits no diagnostic. The bursts the reseed schedules carry no
-    /// per-Promoter annotation that they were triggered by overflow rather than a normal `FsEvent`.
-    PromoterReseededForOverflow { promoter: PromoterId },
     /// A `PerStableFile` Sub's loss-window reactions were dropped: a recovery reseed absorbed the
     /// change into the rebased baseline and the per-file path keeps no survival witness (a v1
     /// limitation). Emitted once per recovery with real drift and ≥1 `PerStableFile` Sub.
@@ -526,8 +463,8 @@ pub enum Diagnostic {
     /// intent; per-file reactions begin from the post-command baseline the fire establishes.
     PerFileFireSkippedOnFreshSeed { profile: ProfileId },
     /// A Sub has been registered with the engine and assigned `sub`. Emitted by `attach_sub_inner`
-    /// on every successful insert — static (operator-declared) attaches and dynamic
-    /// Promoter-spawned attaches alike.
+    /// on every successful insert — static (operator-declared) attaches and discovery-minted
+    /// dynamic attaches alike.
     ///
     /// Pure operator narration: the bin logs it (INFO for static, DEBUG for dynamic). Hot-reload
     /// identity resolution does *not* route through this stream — name → `SubId` is the engine's
@@ -536,11 +473,11 @@ pub enum Diagnostic {
     ///
     /// `name` carries the Sub's user-facing name verbatim — for static Subs the operator's
     /// `[[watch]].name`; for dynamic Subs the engine's synthesized
-    /// `<promoter_name>@<resolved_path>` shape. `source_promoter` distinguishes the two.
+    /// `<template_name>@<matched_path>` shape. `source_discovery` distinguishes the two.
     SubAttached {
         sub: SubId,
         name: CompactString,
-        source_promoter: Option<PromoterId>,
+        source_discovery: Option<SubId>,
     },
     /// A Sub emitted [`crate::Effect`]s on this `emit_effects` pass. `count` is `1` for a
     /// `SubtreeRoot` emission, and the per-leaf emission count for a `PerStableFile` Sub — the
@@ -585,8 +522,8 @@ pub enum Diagnostic {
     /// Distinct from siblings:
     /// - [`Self::DetachUnknownSub`] — a *failed* detach (stale id); no Sub was removed, no
     ///   `SubDetached`.
-    /// - [`Self::DynamicSubReaped`] — Promoter-keyed narration for the same dynamic-Sub teardown
-    ///   that this variant captures per-Sub. The two pair: `DynamicSubReaped` carries the path,
+    /// - [`Self::DiscoverySubReaped`] — source-keyed narration for the same dynamic-Sub teardown
+    ///   that this variant captures per-Sub. The two pair: `DiscoverySubReaped` carries the path,
     ///   `SubDetached` carries the per-Sub `(sub, profile, reason)` triple.
     /// - [`Self::SubRebound`] — in-place `modified_params` rebind; `has_fired` and the per-Sub
     ///   history survive, no `SubDetached`. The `modified_identity` arm IS a detach + attach and
@@ -597,8 +534,8 @@ pub enum Diagnostic {
         reason: DetachReason,
     },
     /// A Sub's per-Sub fields (`program`, `scope`, `settle`, `log_output`) were rebound in place
-    /// via `rebind_sub_inner` — the `modified_params` arm of [`crate::WatchRegistryDiff`]'s Sub
-    /// side. Symmetric with [`Self::SubAttached`]; pure operator narration.
+    /// via `rebind_sub_inner` — the `modified_params` arm of [`crate::SubRegistryDiff`].
+    /// Symmetric with [`Self::SubAttached`]; pure operator narration.
     ///
     /// **`has_fired` is preserved across rebind.** The B1 dedup floor reads it as "this Sub has
     /// already announced the current stable tree state"; a program swap changes *what runs*, not
@@ -615,84 +552,9 @@ pub enum Diagnostic {
     /// a benign no-op. Distinct from [`Self::DetachUnknownSub`] (a stale-id detach attempt) and
     /// from [`Self::EffectCompleteForUnknownSub`] (a stray completion arrival).
     RebindUnknownSub { sub: SubId },
-    /// A Promoter has been registered with the engine and assigned `promoter`. Emitted by
-    /// `attach_promoter_inner`. Pure operator narration (the bin logs it at INFO); `name` carries
-    /// the operator-facing Promoter name verbatim. Hot-reload resolution uses the engine's own
-    /// `by_name` index, not this stream.
-    PromoterAttached {
-        promoter: PromoterId,
-        name: CompactString,
-    },
-    /// A Promoter has been removed from the engine. Pairs with [`Self::PromoterAttached`]; pure
-    /// operator narration (the bin logs it at INFO).
-    PromoterReaped { promoter: PromoterId },
-    /// Promoter literal-prefix descent probe returned `Vanished` for `prefix`. The engine rewinds
-    /// descent to the next-existing ancestor of `prefix`. Repeated occurrences during scaffold
-    /// tear-down are normal.
-    PromoterDescentVanished {
-        promoter: PromoterId,
-        prefix: ResourceId,
-    },
-    /// Promoter literal-prefix descent probe returned [`crate::op::ProbeOutcome::Failed`] for
-    /// `prefix`. The engine retains the `PrefixPending` state and awaits the next event at `prefix`
-    /// before retrying. `failure` carries the typed routing target; the operator-visible errno
-    /// reads off `failure.errno()`.
-    PromoterDescentFailed {
-        promoter: PromoterId,
-        prefix: ResourceId,
-        failure: ProbeFailure,
-    },
-    /// Promoter enumeration matched `path` and the engine minted a dynamic Sub for it; `kind` is
-    /// the snapshot's kind for the matched entry. Operator narration — the bin logs it as
-    /// "promotion observed".
-    PromotionKindObserved {
-        promoter: PromoterId,
-        path: Arc<Path>,
-        kind: ResourceKind,
-    },
-    /// The Promoter's live dynamic-Sub count (derived from `SubRegistry`) crossed a threshold for
-    /// the first time. Operator signal that the pattern is matching more targets than typical —
-    /// likely a too-broad pattern (e.g. `/*` without further constraint). One-shot per Promoter
-    /// lifetime; the latch on `Promoter.warned_at_threshold` suppresses repeats.
-    PromoterFanoutThreshold { promoter: PromoterId, count: usize },
-    /// `FsEvent` arrived for a Resource that previously held a `proxy_promoters` back-ref to
-    /// `promoter`, but the Promoter has either reaped the proxy or fully reaped during the same
-    /// step. Engine drops the event; operators can ignore. Pairs with [`Self::EventNoConsumer`] —
-    /// the proxy back-ref was the supposed consumer; the back-ref is now stale.
-    PromoterProxyStaleEvent {
-        promoter: PromoterId,
-        resource: ResourceId,
-    },
-    /// Promoter enumeration probe at `proxy` returned `Vanished` — the proxy directory is gone from
-    /// disk. The engine cascade-cleans the proxy and any sub-proxies rooted under it via
-    /// `unregister_proxy_subtree`; dynamic Subs anchored at or below `proxy` reap via their own
-    /// anchor-terminal events. Distinct from [`Self::PromoterDescentVanished`] — that variant fires
-    /// during the literal-prefix descent (`PrefixPending` state); this one during the proxy-fanout
-    /// enumeration (`Active` state).
-    PromoterEnumerationVanished {
-        promoter: PromoterId,
-        proxy: ResourceId,
-    },
-    /// Promoter enumeration probe at `proxy` returned [`crate::op::ProbeOutcome::Failed`]. The
-    /// engine retains proxy state; the next event at `proxy` will re-trigger enumeration. Typical
-    /// errnos are transient (`EACCES`, `EIO`); a permanent failure leaves the proxy stalled until
-    /// the underlying condition clears or the operator restarts. `failure` carries the typed
-    /// routing target; the operator-visible errno reads off `failure.errno()`.
-    PromoterEnumerationFailed {
-        promoter: PromoterId,
-        proxy: ResourceId,
-        failure: ProbeFailure,
-    },
-    /// A dynamic Sub minted by `promoter` at `path` was reaped because its anchor disappeared.
-    /// Operator narration; if the path re-materialises a fresh enumeration re-promotes it.
-    DynamicSubReaped {
-        promoter: PromoterId,
-        sub: SubId,
-        path: Arc<Path>,
-    },
     /// A discovery template's reconcile pass matched `path` and minted a dynamic Sub for it; `kind`
     /// is the snapshot's kind for the matched terminus. `source` is the discovery Sub the mint ran
-    /// for. Operator narration — the discovery sibling of [`Self::PromotionKindObserved`].
+    /// for. Operator narration — the bin logs it as a mint observed.
     DiscoveryMinted {
         source: SubId,
         path: Arc<Path>,
@@ -701,13 +563,12 @@ pub enum Diagnostic {
     /// A discovery template's live minted-Sub count (derived from `SubRegistry`) crossed the
     /// warning threshold for the first time — the pattern is matching more targets than typical
     /// (likely too broad, e.g. `/*` without further constraint). One-shot per template lifetime;
-    /// the latch on `Sub.fanout_warned` suppresses repeats. The discovery sibling of
-    /// [`Self::PromoterFanoutThreshold`].
+    /// the latch on `Sub.fanout_warned` suppresses repeats.
     DiscoveryFanoutThreshold { source: SubId, count: usize },
     /// A dynamic Sub minted by the discovery template `source` at `path` was reaped because its
     /// anchor disappeared. Operator narration; if the path re-materialises the next reconcile
-    /// re-mints it (under a fresh [`SubId`]). The discovery sibling of [`Self::DynamicSubReaped`];
-    /// pairs with the per-Sub [`Self::SubDetached`] carrying [`DetachReason::AnchorLost`].
+    /// re-mints it (under a fresh [`SubId`]). Pairs with the per-Sub [`Self::SubDetached`]
+    /// carrying [`DetachReason::AnchorLost`].
     DiscoverySubReaped {
         source: SubId,
         sub: SubId,
@@ -732,12 +593,11 @@ pub enum Diagnostic {
         observed: ProfileStateDiscriminant,
     },
     /// A probe response's payload shape contradicts the route the engine requested: a `Verifying` /
-    /// `Rebasing` (proof) probe received the structural `DirEnumerated`, or a `Descent` /
-    /// enumeration probe received an `AnchorOk` / `SubtreeProven` proof. The engine recovers
-    /// route-appropriately — a burst finishes to `Idle` preserving its anchor/baseline (a walker
-    /// defect is not an anchor-identity change), a descent abandons its prefix, an enumeration
-    /// drops the offending proxy — and is self-healing (a later `FsEvent` re-drives the burst / a
-    /// fresh descent / a fresh `[[watch]]` glob match).
+    /// `Rebasing` (proof) probe received the structural `DirEnumerated`, or a `Descent` probe
+    /// received an `AnchorOk` / `SubtreeProven` proof. The engine recovers route-appropriately — a
+    /// burst finishes to `Idle` preserving its anchor/baseline (a walker defect is not an
+    /// anchor-identity change), a descent abandons its prefix — and is self-healing (a later
+    /// `FsEvent` re-drives the burst / a fresh descent).
     ///
     /// Distinct from siblings on the same response path:
     /// - [`Self::StaleProbeResponse`] — a *correlation* drift; here the correlation matched (the
@@ -750,5 +610,5 @@ pub enum Diagnostic {
     /// Structurally unreachable in v1 — the emission choke kinds each probe off the owner's state
     /// and the pool dispatches 1:1, so a correct walker never returns a shape the route cannot
     /// accept. An emission signals a walker-side routing regression.
-    WalkerContractViolated { owner: ProbeOwner },
+    WalkerContractViolated { owner: ProfileId },
 }

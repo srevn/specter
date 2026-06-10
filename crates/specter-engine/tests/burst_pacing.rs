@@ -11,8 +11,8 @@ use compact_str::CompactString;
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
     ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope, FsEvent, FsIdentity, Input,
-    ProbeOutcome, ProbeOwner, ProbeResponse, ProfileIdentity, ProofAuthority, ResourceKind,
-    ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
+    ProbeOutcome, ProbeResponse, ProfileIdentity, ProofAuthority, ResourceKind, ResourceRole,
+    ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{MAX_SETTLE, SETTLE, first_probe_correlation, seed_to_idle};
@@ -40,7 +40,6 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
             log_output: false,
-            source_promoter: None,
             template: None,
             source_discovery: None,
         },
@@ -103,7 +102,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     let resp_t = probe_emit + Duration::from_millis(1);
     let stable_out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: probe_correlation,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: snap,
@@ -167,7 +166,6 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
             scope: EffectScope::SubtreeRoot,
             settle: SETTLE,
             log_output: false,
-            source_promoter: None,
             template: None,
             source_discovery: None,
         },
@@ -236,7 +234,7 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
         ));
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
+                owner: pid,
                 correlation: probe_correlation,
                 outcome: ProbeOutcome::SubtreeProven {
                     snapshot: degraded_snap,

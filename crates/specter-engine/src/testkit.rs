@@ -14,10 +14,9 @@ use specter_core::testkit::{enumerated, proven};
 use specter_core::{
     ActiveBurst, ClassSet, DedupKey, DirSnapshot, EffectCompletion, EffectOutcome, EffectScope,
     FS_ROOT_SEGMENT, FsEvent, Input, MintTemplate, PatternSpec, PostFireBurst, PostFirePhase,
-    PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
-    ProfileId, ProfileIdentity, ProfileState, PromoterAttachRequest, PromoterId, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
-    SubParams, TimerId, WatchFailure,
+    PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId,
+    ProfileIdentity, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
+    SubAttachAnchor, SubAttachRequest, SubId, SubParams, TimerId, WatchFailure,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -114,7 +113,7 @@ pub fn post_fire_settle_id(e: &Engine, pid: ProfileId) -> TimerId {
 pub fn reconfirm_probed(out: &StepOutput, pid: ProfileId) -> bool {
     out.probe_ops().iter().any(|op| {
         matches!(op, ProbeOp::Probe { request }
-            if request.owner() == ProbeOwner::Profile(pid))
+            if request.owner() == pid)
     })
 }
 
@@ -281,11 +280,11 @@ pub fn drive_standard_n2_until_stable(
         at += SETTLE * 2;
         drain_due(e, at);
         let corr = e
-            .pending_probe_for(ProbeOwner::Profile(pid))
+            .pending_probe_for(pid)
             .expect("Verifying probe in flight after settle expiry");
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
-                owner: ProbeOwner::Profile(pid),
+                owner: pid,
                 correlation: corr,
                 outcome: proven(Arc::clone(snap)),
             }),
@@ -322,7 +321,7 @@ pub fn assert_seed_verifying(
         other => panic!("expected {pid:?} Active(PreFire(Verifying)), got {other:?}"),
     }
     let correlation = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
+        .pending_probe_for(pid)
         .expect("cold-arm Seed Verifying probe in flight at burst construction");
     (correlation, at)
 }
@@ -347,12 +346,12 @@ pub fn seed_to_idle_with(
     start: Instant,
 ) -> Instant {
     let correlation = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
+        .pending_probe_for(pid)
         .expect("cold-arm Seed Verifying probe in flight at burst construction");
     let at = start + SETTLE;
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation,
             outcome: make_outcome(),
         }),
@@ -415,12 +414,12 @@ pub fn verify_with(
     start: Instant,
 ) -> Verify {
     let corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
+        .pending_probe_for(pid)
         .expect("Verifying probe in flight at verify_with entry");
     let at = start + SETTLE;
     let out = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: corr,
             outcome: make_outcome(),
         }),
@@ -461,11 +460,11 @@ pub fn rebase_post_fire_to_idle(
     at: Instant,
 ) -> RebasePostFire {
     let corr = e
-        .pending_probe_for(ProbeOwner::Profile(pid))
+        .pending_probe_for(pid)
         .expect("EffectComplete drove Awaiting → Rebasing with the rebase probe in flight");
     let finish = e.step(
         Input::ProbeResponse(ProbeResponse {
-            owner: ProbeOwner::Profile(pid),
+            owner: pid,
             correlation: corr,
             outcome: proven(Arc::clone(snap)),
         }),
@@ -486,7 +485,7 @@ pub fn rebase_post_fire_to_idle(
 #[must_use]
 pub fn descent_advance(
     e: &mut Engine,
-    owner: ProbeOwner,
+    owner: ProfileId,
     snap: &Arc<DirSnapshot>,
     at: Instant,
 ) -> StepOutput {
@@ -511,7 +510,7 @@ pub fn descent_advance(
 /// decrement).
 ///
 /// **Carve-out callers** that need the rebase probe correlation (e.g. answering with a custom
-/// `Vanished` / `Failed` outcome) read it via `pending_probe_for(ProbeOwner::Profile(pid))` right
+/// `Vanished` / `Failed` outcome) read it via `pending_probe_for(pid)` right
 /// after this step — the probe is already in flight, no settle expiry between.
 #[must_use]
 pub fn complete_effect_to_rebasing(
@@ -528,25 +527,6 @@ pub fn complete_effect_to_rebasing(
         }),
         at,
     )
-}
-
-/// The fixture `PromoterAttachRequest`: `recursive`, `ClassSet::EMPTY`, `MAX_SETTLE`/`SETTLE`,
-/// `/bin/true`, `EffectScope::SubtreeRoot`.
-#[must_use]
-pub fn promoter_req(name: &str, pattern: &str) -> PromoterAttachRequest {
-    PromoterAttachRequest {
-        name: name.into(),
-        pattern_spec: PatternSpec::parse(pattern).expect("valid test pattern"),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::EMPTY,
-        },
-        settle: SETTLE,
-        program: specter_core::testkit::empty_program(),
-        scope: EffectScope::SubtreeRoot,
-        log_output: false,
-    }
 }
 
 /// Ensure a `User`-roled `Dir` root named `name`, returning its id.
@@ -581,51 +561,8 @@ pub const fn watch_op_rejected_input(resource: ResourceId) -> Input {
     }
 }
 
-/// Attach the fixture Promoter for `pattern`, returning the attach `StepOutput` too — for tests
-/// asserting on the attach step.
-#[must_use]
-pub fn attach_promoter_returning(
-    e: &mut Engine,
-    name: &str,
-    pattern: &str,
-    now: Instant,
-) -> (PromoterId, StepOutput) {
-    let out = e.step(Input::AttachPromoter(promoter_req(name, pattern)), now);
-    let qid =
-        specter_core::testkit::first_attached_promoter(&out).expect("attach_promoter succeeded");
-    (qid, out)
-}
-
-/// [`attach_promoter_returning`] discarding the attach `StepOutput`.
-#[must_use]
-pub fn attach_promoter(e: &mut Engine, name: &str, pattern: &str, now: Instant) -> PromoterId {
-    let (qid, _) = attach_promoter_returning(e, name, pattern, now);
-    qid
-}
-
-/// The live `(anchor → SubId)` set for Promoter `pid`, derived from `SubRegistry` truth (the single
-/// source post-`dynamic_subs` removal).
-#[must_use]
-pub fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubId> {
-    e.subs()
-        .iter()
-        .filter(|(_, s)| s.source_promoter == Some(pid))
-        .map(|(sid, s)| {
-            let anchor = e
-                .profiles()
-                .get(s.profile())
-                .expect("a live dynamic Sub's Profile is live")
-                .resource();
-            (anchor, sid)
-        })
-        .collect()
-}
-
-/// The fixture [`MintTemplate`] — minted identity byte-equal to [`promoter_req`]'s.
-///
-/// `recursive` `Subtree`, `ClassSet::EMPTY`, `MAX_SETTLE`; minted debounce `SETTLE`. The equality
-/// lets the differential test compare converged `(name, config_hash, settle, scope)` sets against
-/// the live Promoter without an identity-mismatch confound.
+/// The fixture [`MintTemplate`]: a `recursive` `Subtree` minted identity with `ClassSet::EMPTY`
+/// and `MAX_SETTLE`; minted debounce `SETTLE`.
 #[must_use]
 pub fn mint_template() -> Arc<MintTemplate> {
     Arc::new(MintTemplate {
@@ -640,12 +577,13 @@ pub fn mint_template() -> Arc<MintTemplate> {
 
 /// Attach a discovery template Sub for `pattern` at `anchor`, returning the attach `StepOutput` too.
 ///
-/// The discovery Sub's own identity mirrors the Stage 3 lowering constants in fixture form:
-/// `MatchChain(pattern)`, `ClassSet::STRUCTURE` (membership changes are the chain proof object's only
-/// witness classes, so the Profile folds `EventsReliable`), `MAX_SETTLE` / `SETTLE`, `/bin/true`.
-/// `scope` is explicit because it doubles as the minted Subs' reaction scope — the per-file
-/// recovery-warn pin needs `PerStableFile` here. `anchor` is explicit (pre-placed `Resource` or
-/// pending `Path`) because Stage 2 has no config lowering to render the literal prefix.
+/// The discovery Sub's own identity mirrors the config lowering's constant-identity shape in
+/// fixture form: `MatchChain(pattern)`, `ClassSet::STRUCTURE` (membership changes are the chain
+/// proof object's only witness classes, so the Profile folds `EventsReliable`), `MAX_SETTLE` /
+/// `SETTLE`, `/bin/true`. The fixture need not byte-match the lowering's settle constants — those
+/// are config policy, pinned in the config crate. `scope` is explicit because it doubles as the
+/// minted Subs' reaction scope — the per-file recovery-warn pin needs `PerStableFile` here.
+/// `anchor` is explicit (pre-placed `Resource` or pending `Path`).
 #[must_use]
 pub fn attach_discovery_returning(
     e: &mut Engine,
@@ -671,7 +609,6 @@ pub fn attach_discovery_returning(
                 scope,
                 settle: SETTLE,
                 log_output: false,
-                source_promoter: None,
                 template: Some(template),
                 source_discovery: None,
             },

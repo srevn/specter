@@ -10,7 +10,7 @@
 //! reloads             3 (last 2026-05-23T11:43:00Z via sighup)
 //! subs                12 attached · 1 disabled (toml) · 2 disabled (runtime)
 //! profiles            4 active
-//! promoters           1 attached
+//! discovery           1 template
 //! config              /etc/specter.toml
 //! socket              /run/user/1000/specter.sock
 //! ```
@@ -74,9 +74,9 @@ pub(crate) fn render(out: &mut String, resp: &StatusResponse, _wide: bool, sty: 
     );
     let _ = writeln!(
         out,
-        "{}{} attached",
-        label_cell(sty, "promoters", LABEL_WIDTH),
-        resp.promoter_active,
+        "{}{} templates",
+        label_cell(sty, "discovery", LABEL_WIDTH),
+        resp.discovery_active,
     );
     // `WirePath: Display` writes its inner UTF-8 / lossy-projected string verbatim — zero-alloc
     // into `out`, no intermediate.
@@ -140,7 +140,7 @@ mod tests {
             sub_disabled_toml: 0,
             sub_disabled_runtime: 0,
             profile_active: 0,
-            promoter_active: 0,
+            discovery_active: 0,
             config_path: WirePath::from(Path::new("/etc/specter.toml")),
             socket_path: WirePath::from(Path::new("/tmp/specter-test.sock")),
         }
@@ -159,7 +159,7 @@ mod tests {
             "reloads",
             "subs",
             "profiles",
-            "promoters",
+            "discovery",
             "config",
             "socket",
         ] {

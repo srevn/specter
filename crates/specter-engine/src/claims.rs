@@ -28,8 +28,7 @@ use crate::Engine;
 use crate::reconcile::apply_diff_to_tree;
 use crate::refcounts::{sub_watch, sub_watch_then_try_reap};
 use specter_core::{
-    AnchorClaim, ContribKey, DescentState, Diff, ProbeOwner, ProfileId, ProfileState, StepOutput,
-    TreeSnapshot,
+    AnchorClaim, ContribKey, DescentState, Diff, ProfileId, ProfileState, StepOutput, TreeSnapshot,
 };
 
 impl Engine {
@@ -63,7 +62,7 @@ impl Engine {
     /// Release the Profile's watch-root parent contribution if held. Idempotent; safe in any
     /// post-vacate state. Calls `try_reap` on the parent slot — with this Profile's
     /// [`ContribKey::ProfileParent`] just removed, the slot reaps unless some other claim still
-    /// holds it (a sibling child, another Profile parented here, a Promoter proxy / prefix). The
+    /// holds it (a sibling child, another Profile parented here). The
     /// reap is a no-op at the call moment when [`Engine::reap_profile`] runs this helper before the
     /// anchor's own `try_reap` — the anchor is still a child of the parent — but the cascading
     /// `try_reap` performed by [`specter_core::Tree::try_reap`] on the eventual anchor reap walks
@@ -99,10 +98,7 @@ impl Engine {
     /// otherwise stale-detect its own response. The discard *is* the enforcement site; no local
     /// witness is needed.
     pub(crate) fn release_descent_prefix_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
-        let Some(prefix) = self
-            .descent_state(ProbeOwner::Profile(pid))
-            .map(DescentState::current_prefix)
-        else {
+        let Some(prefix) = self.descent_state(pid).map(DescentState::current_prefix) else {
             return;
         };
 

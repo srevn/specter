@@ -14,8 +14,7 @@ use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, GlobPattern, Input,
     LeafEntry, NonEmptyChainSet, PatternSpec, ProbeCorrelation, ProbeFailure, ProbeOutcome,
-    ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProofAuthority, ProofObligation,
-    ScanConfig,
+    ProbeRequest, ProbeResponse, ProfileId, ProofAuthority, ProofObligation, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -34,9 +33,7 @@ fn fresh_expected() -> ExpectedMap {
 }
 
 fn seed(map: &ExpectedMap, p: ProfileId, c: u64) {
-    map.lock()
-        .unwrap()
-        .insert(ProbeOwner::Profile(p), ProbeCorrelation::from(c));
+    map.lock().unwrap().insert(p, ProbeCorrelation::from(c));
 }
 
 /// Test-side [`ProberResponseSender`] — wraps a single `Sender<Input>` clone and forwards each
@@ -63,7 +60,7 @@ fn fresh_profile_ids(n: usize) -> Vec<ProfileId> {
 
 fn req_anchor(profile: ProfileId, correlation: u64) -> ProbeRequest {
     ProbeRequest::AnchorFile {
-        owner: ProbeOwner::Profile(profile),
+        owner: profile,
         correlation: ProbeCorrelation::from(correlation),
         target_path: Arc::from(Path::new("/dev/null")),
     }
@@ -1896,7 +1893,7 @@ fn run_probe_dispatches_anchor_file_to_probe_anchor_file() {
     std::fs::write(&file_path, b"hi").unwrap();
 
     let leaf_req = ProbeRequest::AnchorFile {
-        owner: ProbeOwner::Profile(p),
+        owner: p,
         correlation: ProbeCorrelation::from(1),
         target_path: Arc::from(file_path.as_path()),
     };
@@ -1904,7 +1901,7 @@ fn run_probe_dispatches_anchor_file_to_probe_anchor_file() {
 
     // AnchorFile against a directory: kind mismatch ⇒ Vanished.
     let dir_req = ProbeRequest::AnchorFile {
-        owner: ProbeOwner::Profile(p),
+        owner: p,
         correlation: ProbeCorrelation::from(2),
         target_path: Arc::from(tmp.path()),
     };
@@ -1920,7 +1917,7 @@ fn run_probe_dispatches_descent_to_probe_descent() {
     std::fs::write(tmp.path().join("beta"), b"x").unwrap();
 
     let req = ProbeRequest::Descent {
-        owner: ProbeOwner::Profile(p),
+        owner: p,
         correlation: ProbeCorrelation::from(1),
         target_path: Arc::from(tmp.path()),
     };
@@ -2028,7 +2025,7 @@ fn run_worker_runs_when_correlation_matches() {
         ProbeOutcome::Vanished
     });
     assert_eq!(responses.len(), 1);
-    assert_eq!(responses[0].owner, ProbeOwner::Profile(p));
+    assert_eq!(responses[0].owner, p);
     assert_eq!(responses[0].correlation, ProbeCorrelation::from(7));
     assert!(matches!(responses[0].outcome, ProbeOutcome::Vanished));
 }
@@ -2070,7 +2067,7 @@ fn run_worker_panic_does_not_kill_loop() {
     in_tx.send(req_anchor(pids[1], 2)).unwrap();
     drop(in_tx);
 
-    let panic_for = ProbeOwner::Profile(pids[0]);
+    let panic_for = pids[0];
     let responses = drain_worker_with(&in_rx, out_tx, &out_rx, &expected, move |req| {
         assert!(req.owner() != panic_for, "simulated panic on first request");
         ProbeOutcome::Vanished
@@ -2128,12 +2125,12 @@ fn run_worker_post_run_cleanup_preserves_resubmit() {
         inner_for_probe
             .lock()
             .unwrap()
-            .insert(ProbeOwner::Profile(p), ProbeCorrelation::from(2));
+            .insert(p, ProbeCorrelation::from(2));
         ProbeOutcome::Vanished
     });
     assert_eq!(responses.len(), 1);
     assert_eq!(
-        inner.lock().unwrap().get(&ProbeOwner::Profile(p)).copied(),
+        inner.lock().unwrap().get(&p).copied(),
         Some(ProbeCorrelation::from(2))
     );
 }
@@ -2191,12 +2188,12 @@ fn lock_expected_recovers_from_poisoned_mutex() {
     let pid = fresh_profile_ids(1)[0];
     {
         let mut guard = lock_expected(&map);
-        guard.insert(ProbeOwner::Profile(pid), ProbeCorrelation::from(42));
+        guard.insert(pid, ProbeCorrelation::from(42));
     }
 
     // A second call observes the post-poison write — the map is structurally consistent across the
     // recovery boundary. Lift the value out so the guard drops at end-of-statement.
-    let recovered = lock_expected(&map).get(&ProbeOwner::Profile(pid)).copied();
+    let recovered = lock_expected(&map).get(&pid).copied();
     assert_eq!(recovered, Some(ProbeCorrelation::from(42)));
 }
 
@@ -2220,7 +2217,7 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
     let mut prober = WorkerProber::new(sink(out_tx), nz(1)).unwrap();
 
     let request = ProbeRequest::AnchorFile {
-        owner: ProbeOwner::Profile(pids[0]),
+        owner: pids[0],
         correlation: ProbeCorrelation::from(42),
         target_path: Arc::from(path.as_path()),
     };
@@ -2233,7 +2230,7 @@ fn worker_prober_submit_records_expectation_and_runs_probe() {
         Input::ProbeResponse(r) => r,
         other => panic!("unexpected: {other:?}"),
     };
-    assert_eq!(resp.owner, ProbeOwner::Profile(pids[0]));
+    assert_eq!(resp.owner, pids[0]);
     assert_eq!(resp.correlation, ProbeCorrelation::from(42));
     assert!(matches!(resp.outcome, ProbeOutcome::AnchorOk(_)));
 
@@ -2250,7 +2247,7 @@ fn worker_prober_cancel_removes_expectation() {
     let mut prober = WorkerProber::new(sink(out_tx), nz(1)).unwrap();
 
     // Cancel without submit is a no-op — verify no panic.
-    prober.cancel(ProbeOwner::Profile(pids[0]));
+    prober.cancel(pids[0]);
     assert_eq!(prober.expected_len(), 0);
 
     let _ = prober.shutdown();
@@ -2288,12 +2285,12 @@ fn worker_prober_resubmit_after_cancel_runs() {
     // Submit c1, cancel, submit c2. Expect: c1 either runs or skips (race), c2 runs deterministically
     // (its expectation is fresh and won't be cleared by anything before the worker pops it).
     let mk_req = |c: u64| ProbeRequest::AnchorFile {
-        owner: ProbeOwner::Profile(p),
+        owner: p,
         correlation: ProbeCorrelation::from(c),
         target_path: Arc::from(path.as_path()),
     };
     prober.submit(mk_req(1));
-    prober.cancel(ProbeOwner::Profile(p));
+    prober.cancel(p);
     prober.submit(mk_req(2));
 
     let mut got_c2 = false;
@@ -2340,7 +2337,7 @@ fn worker_prober_concurrent_submit_is_safe() {
                     *g
                 };
                 prober.submit(ProbeRequest::AnchorFile {
-                    owner: ProbeOwner::Profile(p),
+                    owner: p,
                     correlation: ProbeCorrelation::from(c),
                     target_path: Arc::from(path.as_path()),
                 });
@@ -2405,7 +2402,7 @@ fn deep_tree_walks_on_worker_without_stack_overflow() {
     let p = fresh_profile_ids(1)[0];
     let root: Arc<Path> = Arc::from(tmp.path());
     prober.submit(ProbeRequest::Subtree {
-        owner: ProbeOwner::Profile(p),
+        owner: p,
         correlation: ProbeCorrelation::from(1),
         target_path: Arc::clone(&root),
         anchor_path: root,

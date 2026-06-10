@@ -20,26 +20,18 @@
 //! field shape. Read access for the demand summary goes through [`Resource::contributions`],
 //! [`Resource::watch_demand`], [`Resource::events_union`].
 //!
-//! `proxy_promoters` is `pub(crate)` — a back-ref vector kept in lockstep with `Promoter.proxies`
-//! (the engine's promoter side). A raw push / retain could desynchronise the two halves of that
-//! join, so the sole mutators are the typed [`Resource::insert_proxy_promoter`] /
-//! [`Resource::remove_proxy_promoter`]; each returns the empty ↔ non-empty retention-edge `bool`
-//! (the same edge-reporting convention as the contributions mutators) and absorbs the dedup / no-op
-//! guard internally. Read access is via [`Resource::proxy_promoters`]; the vector is also one of
-//! the four structural claimants on [`Resource::has_anchors`].
-//!
 //! `profiles` is module-private — a back-ref vector kept in lockstep with `ProfileMap.by_resource`
 //! (the engine's Profile side). A raw push / retain could desynchronise the two halves of that
 //! join, so the sole mutators are the typed [`Resource::insert_profile_anchor`] /
 //! [`Resource::remove_profile_anchor`]; each returns the empty ↔ non-empty retention-edge `bool`
-//! (the same edge-reporting convention as the contributions / `proxy_promoters` mutators). Read
-//! access is via [`Resource::profiles`]; the vector is also one of the four structural claimants on
+//! (the same edge-reporting convention as the contributions mutators). Read access is via
+//! [`Resource::profiles`]; the vector is also one of the three structural claimants on
 //! [`Resource::has_anchors`].
 //!
 //! `role` is `pub`; the engine writes it directly. Role is metadata (no refcount edges), so a typed
 //! setter would buy nothing.
 
-use crate::ids::{ProfileId, PromoterId, ResourceId};
+use crate::ids::{ProfileId, ResourceId};
 use crate::sub::ClassSet;
 use compact_str::CompactString;
 use smallvec::SmallVec;
@@ -50,12 +42,9 @@ use std::sync::Arc;
 /// Identity of a single contributor to a Resource's contributions map.
 ///
 /// Each `(Resource, ContribKey)` pair holds at most one entry — the value is the contributor's
-/// `ClassSet` mask, which the per-Resource union OR-folds for the kqueue / inotify fflags. The seven
-/// variants partition the cross-layer "who claims me" graph by owner role: a Profile holds at most
-/// one claim of each kind per Resource (anchor / parent / descent / descendant); a Promoter holds at
-/// most one of each kind per Resource (prefix-descent / proxy / prefix-parent), with prefix-descent
-/// and proxy mutually exclusive (`PrefixPending` XOR `Active`) while prefix-parent coexists with
-/// proxies — the structural analogue of a Profile's `ProfileAnchor` ⊕ `ProfileParent`.
+/// `ClassSet` mask, which the per-Resource union OR-folds for the kqueue / inotify fflags. The
+/// variants partition the cross-layer "who claims me" graph by claim role: a Profile holds at most
+/// one claim of each kind per Resource (anchor / parent / descent / descendant).
 ///
 /// Each variant carries the owner id so the contribution can be removed by key without re-deriving
 /// from owner state — contribution attribution is **data**, not a derivation. The engine's refcount
@@ -78,20 +67,6 @@ pub enum ContribKey {
     /// `Profile.has_per_file_fds` for a covered Leaf). Mask is `Profile.events`. Per-resource fan-out
     /// is 1-to-N across the snapshot but each (Resource, Profile) pair contributes at most one entry.
     ProfileDescendant(ProfileId),
-    /// Promoter is in `PrefixPending` descent with `current_prefix == resource`. Mask is
-    /// `STRUCTURE`. Mutually exclusive with [`Self::PromoterProxy`] for the same Promoter.
-    PromoterPrefix(PromoterId),
-    /// Promoter is in `Active` state with a proxy entry at this Resource
-    /// (`proxies.contains_key(&resource)`). Mask is `STRUCTURE`. Mutually exclusive with
-    /// [`Self::PromoterPrefix`] for the same Promoter.
-    PromoterProxy(PromoterId),
-    /// Promoter is `Active` with `prefix_parent == Some(resource)`: the preserved terminus-parent
-    /// recovery edge. Mask is `STRUCTURE` (parent-edge watch is for terminus-reappearance detection
-    /// only). **Coexists** with [`Self::PromoterProxy`] for the same Promoter (the parent slot is
-    /// distinct from the proxy slots, and the edge is preserved across terminus loss when proxies
-    /// empty) — the structural analogue of [`Self::ProfileParent`] ⊕ [`Self::ProfileAnchor`], in
-    /// contrast to [`Self::PromoterPrefix`] which is mutually exclusive with proxies.
-    PromoterPrefixParent(PromoterId),
 }
 
 #[derive(Debug)]
@@ -127,13 +102,6 @@ pub struct Resource {
     /// covers the typical case: most Resources have at most one Profile anchored at them;
     /// cross-`ScanConfig` sharing on one slot is rare.
     profiles: SmallVec<[(u64, ProfileId); 1]>,
-    /// Promoter back-ref — the right side of the `Promoter.proxies` join, one entry per Promoter
-    /// proxying this slot. The engine's `register_proxy` inserts (via
-    /// [`Resource::insert_proxy_promoter`]) and `release_promoter_proxy_claim` removes (via
-    /// [`Resource::remove_proxy_promoter`]), keeping this vector and `Promoter.proxies` in lockstep.
-    /// `pub(crate)` so a raw push / retain can't break that lockstep. Inline cap 1 covers the typical
-    /// case: most Resources have zero proxies, and cross-Promoter sharing on one slot is rare.
-    pub(crate) proxy_promoters: SmallVec<[PromoterId; 1]>,
     /// Probed kind of this slot. `ResourceKind::Unknown` is the pre-classification placeholder —
     /// fresh slots created by `Tree::ensure_root` / `Tree::ensure_child`, `Tree::vacate`-reset
     /// slots, and descent scaffolds all start here. The engine writes the classified kind via
@@ -147,10 +115,9 @@ pub struct Resource {
     /// `specter-engine::refcounts`) — direct mutation outside those helpers (and
     /// [`crate::Tree::vacate`]) breaks the 0↔non-empty Watch / Unwatch invariant.
     ///
-    /// **Source of truth.** Coverage / Profile-state / Promoter-state are no longer walked to
-    /// recompute the union; the map is directly read. Each call site that bumps or releases a
-    /// contribution passes the explicit [`ContribKey`], so removal is O(log k) by key, not
-    /// O(registry).
+    /// **Source of truth.** Coverage and Profile state are never walked to recompute the union;
+    /// the map is directly read. Each call site that bumps or releases a contribution passes the
+    /// explicit [`ContribKey`], so removal is O(log k) by key, not O(registry).
     ///
     /// `pub(crate)` — the legitimate external mutators are the typed methods on `Resource`
     /// ([`Resource::insert_contribution`], [`Resource::remove_contribution`],
@@ -245,7 +212,6 @@ impl Resource {
             path,
             children: BTreeMap::new(),
             profiles: SmallVec::new(),
-            proxy_promoters: SmallVec::new(),
             kind: ResourceKind::Unknown,
             contributions: BTreeMap::new(),
             role,
@@ -254,14 +220,13 @@ impl Resource {
 
     /// Slot retention rule: `Tree::try_reap` removes the slot iff this returns `false`.
     ///
-    /// Retention is **structural** — a slot stays alive while *something* claims it. Four canonical
-    /// claimants:
+    /// Retention is **structural** — a slot stays alive while *something* claims it. Three
+    /// canonical claimants:
     ///
     /// - `children` — a descendant slot's `parent` edge points here.
     /// - `profiles` — one or more Profiles are anchored at this slot.
-    /// - `proxy_promoters` — one or more Promoter proxies are pinned here.
     /// - `contributions` — at least one [`ContribKey`] entry holds a kernel-watch demand here
-    ///   (Profile anchor / parent / descent / descendant, or Promoter prefix / proxy).
+    ///   (Profile anchor / parent / descent / descendant).
     ///
     /// [`ResourceRole`] is **metadata, not retention**. The role tag records *what* the slot is (User
     /// anchor / watch-root parent / descent scaffold) for diagnostic clarity; whether the slot
@@ -269,19 +234,16 @@ impl Resource {
     /// is "does any owner still hold this slot?", and the contributions map (in lockstep with owner
     /// state via [`crate::Tree::vacate`] and the engine's refcount helpers) answers it directly.
     ///
-    /// **Why all four fields, not just contributions.** The three back-ref vectors (`children`,
-    /// `profiles`, `proxy_promoters`) describe live ownership *without* implying a kernel-watch
-    /// demand: a Pending Profile's User-roled leaf carries `profiles` but no contribution at the
-    /// leaf (the leaf's only contribution arrives at materialization); a non-leaf descent scaffold
-    /// carries `children` but no contribution of its own (its descent contribution belongs to its
-    /// deepest-existing descendant). The union of all four is "anything reaches into this slot from
-    /// somewhere."
+    /// **Why all three fields, not just contributions.** The two back-ref vectors (`children`,
+    /// `profiles`) describe live ownership *without* implying a kernel-watch demand: a Pending
+    /// Profile's User-roled leaf carries `profiles` but no contribution at the leaf (the leaf's
+    /// only contribution arrives at materialization); a non-leaf descent scaffold carries
+    /// `children` but no contribution of its own (its descent contribution belongs to its
+    /// deepest-existing descendant). The union of all three is "anything reaches into this slot
+    /// from somewhere."
     #[must_use]
     pub fn has_anchors(&self) -> bool {
-        !self.children.is_empty()
-            || !self.profiles.is_empty()
-            || !self.proxy_promoters.is_empty()
-            || !self.contributions.is_empty()
+        !self.children.is_empty() || !self.profiles.is_empty() || !self.contributions.is_empty()
     }
 
     /// Number of distinct contributors holding watch-demand at this Resource. Derived from
@@ -341,55 +303,14 @@ impl Resource {
         &self.profiles
     }
 
-    /// Promoter back-references at this slot. Each entry corresponds to a live `Promoter.proxies`
-    /// entry keyed by this Resource. Read-only view; the lockstep with `Promoter.proxies` is held
-    /// through [`Resource::insert_proxy_promoter`] / [`Resource::remove_proxy_promoter`].
-    #[must_use]
-    pub fn proxy_promoters(&self) -> &[PromoterId] {
-        &self.proxy_promoters
-    }
-
-    /// Register `id` as a Promoter back-ref, keeping this slot's `proxy_promoters` in lockstep with
-    /// `Promoter.proxies`. Idempotent: an `id` already present (cross-Promoter sharing on one slot,
-    /// or a re-registration of the same Promoter) is left untouched and reports no edge — this
-    /// mutator owns the dedup the engine's `register_proxy` relies on.
-    ///
-    /// Returns `true` iff this call traversed the empty → non-empty retention edge (the slot just
-    /// gained its first proxy back-ref), so an edge-driven caller can react without the `SmallVec`
-    /// shape leaking. The current caller does not consume the edge; the signal is kept symmetric
-    /// with the contribution mutators rather than special-cased away.
-    pub fn insert_proxy_promoter(&mut self, id: PromoterId) -> bool {
-        if self.proxy_promoters.contains(&id) {
-            return false;
-        }
-        let was_empty = self.proxy_promoters.is_empty();
-        self.proxy_promoters.push(id);
-        was_empty
-    }
-
-    /// Drop `id`'s back-ref, leaving every co-resident Promoter's entry in place (filter, not
-    /// clear). Idempotent: an absent `id`, or an already-empty vector (reachable post
-    /// [`crate::Tree::vacate`] or on a double release), is a no-op that reports no edge.
-    ///
-    /// Returns `true` iff this call traversed the non-empty → empty retention edge (the slot just
-    /// lost its last proxy back-ref) — the symmetric inverse of [`Self::insert_proxy_promoter`]'s
-    /// empty → non-empty edge.
-    pub fn remove_proxy_promoter(&mut self, id: PromoterId) -> bool {
-        if self.proxy_promoters.is_empty() {
-            return false;
-        }
-        self.proxy_promoters.retain(|p| *p != id);
-        self.proxy_promoters.is_empty()
-    }
-
     /// Register a `(config_hash, pid)` Profile anchor at this slot, keeping `Resource.profiles` in
     /// lockstep with `ProfileMap.by_resource`. Idempotent: a `(config_hash, pid)` pair already
     /// present is left untouched and reports no edge. `ProfileMap::attach`'s upstream
-    /// `debug_assert!` already rules out the double-attach path in production; the dedup check here
-    /// mirrors [`Self::insert_proxy_promoter`]'s shape and is cheap on the inline-cap-1 `SmallVec`.
+    /// `debug_assert!` already rules out the double-attach path in production; the dedup check is
+    /// cheap on the inline-cap-1 `SmallVec`.
     ///
     /// Returns `true` iff this call traversed the empty → non-empty retention edge (the slot just
-    /// gained its first Profile anchor), matching the `proxy_promoters` mutator's edge-reporting
+    /// gained its first Profile anchor), matching the contribution mutators' edge-reporting
     /// convention.
     pub fn insert_profile_anchor(&mut self, config_hash: u64, pid: ProfileId) -> bool {
         if self
@@ -512,8 +433,8 @@ mod tests {
         std::sync::Arc::from(std::path::Path::new(""))
     }
 
-    /// Role is metadata; a fresh slot with no children, no profiles, no proxy back-refs, and no
-    /// contributions has no anchors regardless of its role tag.
+    /// Role is metadata; a fresh slot with no children, no profiles, and no contributions has no
+    /// anchors regardless of its role tag.
     #[test]
     fn fresh_resource_has_no_anchors_regardless_of_role() {
         for role in [
@@ -555,20 +476,6 @@ mod tests {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         r.insert_profile_anchor(42, crate::ids::ProfileId::default());
         assert!(r.has_anchors());
-    }
-
-    #[test]
-    fn anchored_when_proxy_promoters_present() {
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        r.insert_proxy_promoter(crate::ids::PromoterId::default());
-        assert!(r.has_anchors());
-        assert_eq!(r.proxy_promoters().len(), 1);
-    }
-
-    #[test]
-    fn fresh_resource_has_empty_proxy_promoters() {
-        let r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        assert!(r.proxy_promoters().is_empty());
     }
 
     #[test]
@@ -615,8 +522,8 @@ mod tests {
     }
 
     /// Fresh `Resource` carries an empty contributions map ⇒ `events_union()` returns `EMPTY` and
-    /// `watch_demand()` returns `0`. Refcount helpers insert into the map as covering Profiles /
-    /// Promoters attach.
+    /// `watch_demand()` returns `0`. Refcount helpers insert into the map as covering Profiles
+    /// attach.
     #[test]
     fn fresh_resource_events_union_is_empty() {
         let r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
@@ -696,65 +603,5 @@ mod tests {
         );
         assert_eq!(r.clear_contributions(), 2);
         assert!(r.contributions().is_empty());
-    }
-
-    /// `insert_proxy_promoter` reports the empty → non-empty retention edge exactly once. A second
-    /// *distinct* id is an intermediate (vector already non-empty: no edge); a *duplicate* id is an
-    /// idempotent no-op (no edge, no growth) — the dedup the engine's `register_proxy` relies on
-    /// lives in the mutator.
-    #[test]
-    fn insert_proxy_promoter_reports_edge_dedups_and_is_intermediate_for_second_id() {
-        use crate::ids::PromoterId;
-        let mut km: slotmap::SlotMap<PromoterId, ()> = slotmap::SlotMap::with_key();
-        let a = km.insert(());
-        let b = km.insert(());
-
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        assert!(r.insert_proxy_promoter(a), "empty → non-empty edge");
-        assert!(
-            !r.insert_proxy_promoter(a),
-            "duplicate id: idempotent no-op, no edge",
-        );
-        assert_eq!(r.proxy_promoters().len(), 1, "duplicate did not grow");
-        assert!(
-            !r.insert_proxy_promoter(b),
-            "second distinct id: vector already non-empty, intermediate",
-        );
-        assert_eq!(r.proxy_promoters().len(), 2);
-    }
-
-    /// `remove_proxy_promoter` reports the non-empty → empty retention edge exactly once and leaves
-    /// co-resident Promoters' entries in place (filter, not clear). Removing an absent id, or
-    /// hitting an already-empty vector, is an idempotent no-op (no edge, no panic).
-    #[test]
-    fn remove_proxy_promoter_reports_edge_retains_coresidents_and_is_idempotent() {
-        use crate::ids::PromoterId;
-        let mut km: slotmap::SlotMap<PromoterId, ()> = slotmap::SlotMap::with_key();
-        let a = km.insert(());
-        let b = km.insert(());
-
-        let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
-        assert!(
-            !r.remove_proxy_promoter(a),
-            "no-op on empty vector: no edge, no panic",
-        );
-
-        r.insert_proxy_promoter(a);
-        r.insert_proxy_promoter(b);
-        assert!(
-            !r.remove_proxy_promoter(a),
-            "co-resident `b` remains: non-empty → non-empty, no edge",
-        );
-        assert_eq!(
-            r.proxy_promoters(),
-            &[b],
-            "filter, not clear: co-resident entry survives",
-        );
-        assert!(
-            !r.remove_proxy_promoter(a),
-            "absent id, vector still non-empty: idempotent no-op",
-        );
-        assert!(r.remove_proxy_promoter(b), "1 → 0 edge: last back-ref gone");
-        assert!(r.proxy_promoters().is_empty());
     }
 }

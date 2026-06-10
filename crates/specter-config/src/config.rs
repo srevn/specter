@@ -254,7 +254,6 @@ impl SubSpec {
                 scope: self.scope,
                 settle: self.settle,
                 log_output: self.log_output,
-                source_promoter: None,
                 // The projection adds nothing: the template's knobs land in the MintTemplate
                 // verbatim, so the minted Profiles' identity hash equals one hand-built over the
                 // same user fields.
@@ -2231,9 +2230,9 @@ mod tests {
 
     // ---- @-in-name rejection ----
 
-    /// `@` is reserved for the synthesized `<promoter_name>@<resolved_path>` shape of dynamic Subs.
-    /// A static [[watch]] with `@` in its name would collide with that scheme on a Promoter sharing
-    /// the substring; reject at config-load.
+    /// `@` is reserved for the synthesized `<template_name>@<matched_path>` shape of minted Subs.
+    /// A static [[watch]] with `@` in its name would collide with that scheme on a discovery
+    /// template sharing the substring; reject at config-load.
     #[test]
     fn at_sign_in_static_name_rejected() {
         let toml = format!(

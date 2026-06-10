@@ -90,7 +90,7 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
         disabled: None,
         sub: Some(WireId::from(sid)),
         profile: Some(WireId::from(sub.profile())),
-        source_promoter: sub.source_promoter.map(WireId::from),
+        source_discovery: sub.source_discovery.map(WireId::from),
     }
 }
 
@@ -108,7 +108,7 @@ fn disabled_row(name: &str, source: DisabledSource) -> ListRow {
         disabled: Some(source),
         sub: None,
         profile: None,
-        source_promoter: None,
+        source_discovery: None,
     }
 }
 
@@ -284,7 +284,7 @@ mod tests {
     }
 
     /// Attached row carries every engine-derived field: state, sub id, profile id, fire counters
-    /// (`Some(0)` for a never-fired Sub), settle ms, and a null `source_promoter` for static Subs.
+    /// (`Some(0)` for a never-fired Sub), settle ms, and a null `source_discovery` for static Subs.
     #[test]
     fn list_attached_row_carries_every_engine_field() {
         let config = config_from_watches(&[("only", "/tmp/foo", true)]);
@@ -304,20 +304,21 @@ mod tests {
         assert_eq!(row.dedup_suppressed_count, Some(0));
         assert!(row.settle_ms.is_some(), "attached row carries settle_ms");
         assert!(
-            row.source_promoter.is_none(),
-            "static Sub has no source_promoter",
+            row.source_discovery.is_none(),
+            "static Sub has no source_discovery",
         );
         assert!(row.disabled.is_none(), "attached row's disabled is None");
     }
 
-    /// A dynamic Sub (`source_promoter: Some(_)`) projects with the discriminator populated.
-    /// Construct it by directly attaching a `SubAttachRequest` whose `source_promoter` is `Some(_)` —
-    /// the engine's `attach_sub` does not require a Promoter to exist for this projection-side test.
+    /// A dynamic Sub (`source_discovery: Some(_)`) projects with the discriminator populated.
+    /// Construct it by directly attaching a `SubAttachRequest` whose `source_discovery` is
+    /// `Some(_)` — the engine's `attach_sub` does not require the source template to exist for
+    /// this projection-side test.
     #[test]
-    fn list_dynamic_sub_carries_source_promoter() {
+    fn list_dynamic_sub_carries_source_discovery() {
         use specter_core::{ClassSet, ProfileIdentity};
         use specter_core::{
-            EffectScope, PromoterId, ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
+            EffectScope, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
         };
         use std::time::Duration;
 
@@ -330,14 +331,13 @@ mod tests {
                 events: ClassSet::DEFAULT_SUBTREE_ROOT,
             },
             SubParams {
-                name: CompactString::const_new("promoter@/tmp/dyn_anchor"),
+                name: CompactString::const_new("template@/tmp/dyn_anchor"),
                 program,
                 scope: EffectScope::SubtreeRoot,
                 settle: Duration::from_millis(100),
                 log_output: false,
-                source_promoter: Some(PromoterId::default()),
                 template: None,
-                source_discovery: None,
+                source_discovery: Some(SubId::default()),
             },
         );
         let mut engine = Engine::new();
@@ -353,8 +353,8 @@ mod tests {
         assert_eq!(resp.rows.len(), 1);
         let row = &resp.rows[0];
         assert!(
-            row.source_promoter.is_some(),
-            "dynamic Sub must carry source_promoter",
+            row.source_discovery.is_some(),
+            "dynamic Sub must carry source_discovery",
         );
     }
 

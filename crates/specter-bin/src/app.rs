@@ -370,8 +370,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     //     initial-attach violates that precondition — the diff's `added` bucket would attach Subs
     //     against an empty engine, rotate the loader to the post-TOCTOU config, then
     //     `run_initial_attach` would walk the rotated loader and double-attach those Subs, tripping
-    //     `SubRegistry::insert`'s `debug_assert!` (and `PromoterRegistry::insert`'s equivalent on a
-    //     TOML edit that adds a Promoter during the boot window).
+    //     `SubRegistry::insert`'s `debug_assert!`.
     //
     //     On `Break` (downstream `effects_tx` disconnect mid-attach), `run_initial_attach`
     //     internally drains in-flight probes via `begin_shutdown` before returning — the lifecycle
@@ -581,7 +580,7 @@ mod tests {
     use specter_actuator::EffectCompleteSender;
     use specter_core::{
         DedupKey, EffectCompletion, EffectOutcome, Input, ProbeCorrelation, ProbeOutcome,
-        ProbeOwner, ProbeResponse, ProfileId, SubId,
+        ProbeResponse, ProfileId, SubId,
     };
     use specter_sensor::ProberResponseSender;
     use std::time::Duration;
@@ -601,7 +600,7 @@ mod tests {
         // Construct a minimal ProbeResponse. `Vanished` is the narrowest outcome (no payload). The
         // owner/correlation are arbitrary — the wrapper threads the value through verbatim.
         let response = ProbeResponse {
-            owner: ProbeOwner::Profile(ProfileId::default()),
+            owner: ProfileId::default(),
             correlation: ProbeCorrelation::from(7),
             outcome: ProbeOutcome::Vanished,
         };

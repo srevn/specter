@@ -1173,7 +1173,7 @@ impl ActiveBurst {
 /// **Writers.**
 /// - [`ProfileState::mark_active_for_reap`] flips [`Self::ReturnToIdle`] → [`Self::Reap`]. Sole
 ///   callers: `detach_sub_inner` (last Sub detached mid-burst) and `on_anchor_terminal_all_dynamic`
-///   (all-dynamic Promoter teardown converged on a still-Active Profile).
+///   (all-dynamic anchor-terminal teardown converged on a still-Active Profile).
 /// - [`ProfileState::clear_active_reap`] flips [`Self::Reap`] → [`Self::ReturnToIdle`]. Sole
 ///   caller: `attach_sub_inner`'s zombie-revival arm — a fresh Sub joining a zombie Profile
 ///   resurrects it under the new Sub set.
@@ -1364,8 +1364,8 @@ impl ProfileState {
     /// land" so callers can `debug_assert!` against a future routing breach.
     ///
     /// **Sole writers.** `detach_sub_inner` (refcount→0 on Active) and
-    /// `on_anchor_terminal_all_dynamic` (all-dynamic Promoter teardown on Active). No other site
-    /// has a legitimate need to mark a burst for reap.
+    /// `on_anchor_terminal_all_dynamic` (all-dynamic anchor-terminal teardown on Active). No other
+    /// site has a legitimate need to mark a burst for reap.
     #[must_use]
     pub const fn mark_active_for_reap(&mut self) -> bool {
         if let Self::Active(_, finish) = self {
@@ -1512,9 +1512,6 @@ impl ProfileState {
 
     /// Borrow the descent payload if the state is currently [`Self::Pending`]. `None` for
     /// [`Self::Idle`] and [`Self::Active`] — the descent payload only lives in the `Pending` variant.
-    ///
-    /// Symmetric with [`crate::PromoterState::descent_state`]; the engine's owner-polymorphic
-    /// `descent_state` dispatcher routes to either projection through [`crate::ProbeOwner`].
     #[must_use]
     pub const fn descent_state(&self) -> Option<&DescentState> {
         match self {
@@ -1535,7 +1532,6 @@ impl ProfileState {
     /// total projection over the state space: the three probe-bearing carriers — a `Pending`
     /// descent, an `Active(PreFire(Verifying))`, an `Active(PostFire(Rebasing))` — answer from
     /// their armed slot; every other state (including a disarmed slot) yields `None`.
-    /// Owner-symmetric with [`crate::PromoterState::probe_correlation`].
     #[must_use]
     pub const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
         match self {
@@ -1557,7 +1553,7 @@ impl ProfileState {
     /// `Active(PreFire(Verifying))`, `Active(PostFire(Rebasing))`) disarm their slot; every other
     /// state (including an already-disarmed slot) is a `None` no-op. The disarm leaves the
     /// carrier's variant intact — only the slot empties — so a route computed before this call
-    /// stays valid after it. Owner-symmetric with [`crate::PromoterState::take_probe`].
+    /// stays valid after it.
     #[must_use]
     pub const fn take_probe(&mut self) -> Option<ProbeCorrelation> {
         match self {
@@ -1661,8 +1657,8 @@ pub struct DescentState {
 
 impl DescentState {
     /// Construct a fresh descent payload. Sole producer pattern used by `materialize_path_or_pending`
-    /// (Profile pending arm), the Promoter attach path's pending arm, and the recovery / rewind flows
-    /// in `engine::descent` that re-enter `Pending` after an anchor-terminal event.
+    /// (Profile pending arm) and the recovery / rewind flows in `engine::descent` that re-enter
+    /// `Pending` after an anchor-terminal event.
     ///
     /// Field-private; callers route through this constructor so the invariants on `current_prefix`
     /// (Watched, refcounted), `remaining_components` (non-empty by [`DescentRemaining`]'s own
@@ -1684,9 +1680,8 @@ impl DescentState {
         }
     }
 
-    /// The deepest currently-Watched ancestor on the descent path. Carries this Profile /
-    /// Promoter's `+1 STRUCTURE` [`crate::ContribKey::ProfileDescent`] /
-    /// [`crate::ContribKey::PromoterPrefix`] contribution.
+    /// The deepest currently-Watched ancestor on the descent path. Carries this Profile's
+    /// `+1 STRUCTURE` [`crate::ContribKey::ProfileDescent`] contribution.
     #[must_use]
     pub const fn current_prefix(&self) -> ResourceId {
         self.current_prefix
@@ -1728,9 +1723,8 @@ impl DescentState {
     }
 
     /// Identity of the descent's in-flight probe, or `None` if idle — the **read** edge of the
-    /// linear-probe protocol. [`crate::ProfileState::probe_correlation`] /
-    /// [`crate::PromoterState::probe_correlation`] delegate here for their descent carrier rather
-    /// than reaching the private slot.
+    /// linear-probe protocol. [`crate::ProfileState::probe_correlation`] delegates here for its
+    /// descent carrier rather than reaching the private slot.
     #[must_use]
     pub(crate) const fn probe_correlation(&self) -> Option<ProbeCorrelation> {
         self.probe.correlation()
@@ -1741,10 +1735,10 @@ impl DescentState {
     /// [`Self::arm_probe`].
     ///
     /// Crate-internal by design. The engine-facing "single consume per owner" law remains the `pub`
-    /// [`crate::ProfileState::take_probe`] / [`crate::PromoterState::take_probe`]; both delegate
-    /// their descent arm here, so the consume routes through the typed protocol instead of a raw
-    /// field and `probe` stays module-private. Routing-once is unaffected — the engine still sees
-    /// exactly one consume entry point per owner.
+    /// [`crate::ProfileState::take_probe`], which delegates its descent arm here, so the consume
+    /// routes through the typed protocol instead of a raw field and `probe` stays module-private.
+    /// Routing-once is unaffected — the engine still sees exactly one consume entry point per
+    /// owner.
     #[must_use]
     pub(crate) const fn disarm_probe(&mut self) -> Option<ProbeCorrelation> {
         self.probe.disarm()
@@ -2911,9 +2905,7 @@ impl Profile {
     /// over-approximation of that set: every true carrier satisfies it (soundness — the count-gate
     /// never under-counts), and it is *tight* in the dimension that matters — a healthy `Idle`
     /// Profile (anchor grafted, `current_is_some()`) is **excluded**, so a quiet watcher coexisting
-    /// with a storm does not pin the count above zero. The structural twin of
-    /// [`Promoter::is_nonsteady`](crate::Promoter::is_nonsteady) (`PrefixPending ∨ Active{proxies:
-    /// ∅}`).
+    /// with a storm does not pin the count above zero.
     ///
     /// This reads two inputs — `state` and anchor presence — moved by three write channels;
     /// [`ProfileMap`] owns the count and reconciles each:

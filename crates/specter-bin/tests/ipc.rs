@@ -52,7 +52,7 @@ impl Sandbox {
         let cfg = dir.join("specter.toml");
         let log = dir.join("specter.log");
         let socket = dir.join("specter.sock");
-        // Minimal valid config — no watches, no promoters. Tests that need watches write a richer
+        // Minimal valid config — no watches. Tests that need watches write a richer
         // TOML themselves.
         fs::write(&cfg, "").expect("write empty config");
         Self {
@@ -187,7 +187,7 @@ struct StatusResponseSnap {
     sub_disabled_toml: usize,
     sub_disabled_runtime: usize,
     profile_active: usize,
-    promoter_active: usize,
+    discovery_active: usize,
     config_path: PathBuf,
     socket_path: PathBuf,
 }
@@ -293,7 +293,7 @@ fn status_round_trip() {
             assert_eq!(s.sub_disabled_toml, 0);
             assert_eq!(s.sub_disabled_runtime, 0);
             assert_eq!(s.profile_active, 0);
-            assert_eq!(s.promoter_active, 0);
+            assert_eq!(s.discovery_active, 0);
             assert_eq!(s.reload_count, 0, "no reload triggered yet");
             assert!(
                 s.last_reload.is_none(),
@@ -1596,7 +1596,7 @@ fn disable_unknown_dynamic_shape_name_returns_unknown_sub() {
     let child = spawn_specter(&sb, std::iter::empty::<&str>());
     assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE));
 
-    let reply = one_shot(&sb.socket, r#"{"op":"disable","name":"promoter@/tmp/x"}"#)
+    let reply = one_shot(&sb.socket, r#"{"op":"disable","name":"template@/tmp/x"}"#)
         .expect("disable request");
     let resp: ResponseSnap = serde_json::from_str(reply.trim_end()).expect("parse response");
     match resp {

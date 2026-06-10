@@ -29,7 +29,7 @@
 use compact_str::CompactString;
 use serde::{Deserialize, Serialize};
 use slotmap::Key;
-use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
+use specter_core::{ProfileId, ResourceId, SubId};
 
 use super::framing::InfallibleSerialize;
 use super::wire::{
@@ -147,8 +147,9 @@ pub(crate) enum ResponsePayload {
 pub(crate) enum WireErrorCode {
     /// Sub name not in the engine registry, the operator-runtime disable set, or the TOML watches.
     UnknownSub,
-    /// Operator targeted a dynamic (promoter-spawned) Sub with an op the bin refuses to apply: the
-    /// synthesised name would silently evaporate on the next reload's promoter prune pass.
+    /// Operator targeted a dynamic (discovery-minted) Sub with an op the bin refuses to apply:
+    /// the discovery Profile's next reconcile would simply re-mint it. Disabling the *template*
+    /// is the lever — its detach cascade reaps the whole minted set.
     ///
     /// Consumed by the `disable` / `enable` IPC handlers in [`crate::driver`].
     DynamicSubNoOp,
@@ -269,12 +270,6 @@ impl From<ResourceId> for WireId {
     }
 }
 
-impl From<PromoterId> for WireId {
-    fn from(k: PromoterId) -> Self {
-        Self(k.data().as_ffi())
-    }
-}
-
 /// Why an operator-declared Sub is currently not in the engine registry. Surfaced on
 /// [`ListRow::disabled`] and [`ShowResponse::Disabled::source`] so operators distinguish "I
 /// disabled this via IPC and haven't re-enabled" from "the TOML has `enabled = false`".
@@ -312,7 +307,7 @@ impl std::fmt::Display for DisabledSource {
 }
 
 /// Daemon-wide status snapshot. Surfaced by `specter status` — uptime, reload bookkeeping, Sub /
-/// Profile / Promoter counts, and the canonical paths the daemon is currently bound to.
+/// Profile / discovery counts, and the canonical paths the daemon is currently bound to.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct StatusResponse {
     /// Seconds since daemon boot — `DriverState.start_instant.elapsed()`.
@@ -336,8 +331,8 @@ pub(crate) struct StatusResponse {
     pub(crate) sub_disabled_runtime: usize,
     /// `engine.profiles().active_count()` — Profiles not in `ProfileState::Idle`.
     pub(crate) profile_active: usize,
-    /// `engine.promoters().len()` — Promoters live in the registry.
-    pub(crate) promoter_active: usize,
+    /// Count of template-bearing Subs — the operator's "how many dynamic patterns are live" view.
+    pub(crate) discovery_active: usize,
     /// Currently-loaded config's source path. Every code path through `App::run` resolves one; a
     /// future stdin-TOML / ephemeral-config mode would widen this to `Option<WirePath>` honestly.
     pub(crate) config_path: WirePath,
@@ -387,8 +382,8 @@ pub(crate) struct ListResponse {
 /// apply" structural — JSON-schema generators distinguish "never fired" from "not attached".
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ListRow {
-    /// Operator-facing name. Static Subs: `[[watch]].name`. Dynamic Subs:
-    /// `<promoter_name>@<resolved_path>`.
+    /// Operator-facing name. Static Subs: `[[watch]].name`. Minted Subs:
+    /// `<template_name>@<matched_path>`.
     pub(crate) name: String,
     /// Eight-phase operator-display state. `None` for non-attached rows.
     pub(crate) state: Option<WireStateLabel>,
@@ -412,9 +407,9 @@ pub(crate) struct ListRow {
     pub(crate) sub: Option<WireId>,
     /// `ProfileId` projection of the Sub's hosting Profile. `None` for non-attached rows.
     pub(crate) profile: Option<WireId>,
-    /// `Sub.source_promoter` projection — `Some(_)` iff the Sub is promoter-minted, `None` for
-    /// static (operator-declared) Subs and for non-attached rows.
-    pub(crate) source_promoter: Option<WireId>,
+    /// `Sub.source_discovery` projection — `Some(_)` iff the Sub is discovery-minted, `None` for
+    /// operator-declared Subs (templates included) and for non-attached rows.
+    pub(crate) source_discovery: Option<WireId>,
 }
 
 /// `specter show <name>` response — internally tagged on `status` so the three operator outcomes
@@ -490,10 +485,10 @@ pub(crate) struct SubDetails {
     pub(crate) absorb_count: u64,
     /// `Sub.settle.as_millis()`.
     pub(crate) settle_ms: u64,
-    /// `Sub.source_promoter` projection — `Some(_)` iff the Sub was minted by a Promoter. Distinct
-    /// from a TOML-declared Sub with the same anchor: the promoter id locates which dynamic pattern
-    /// produced the entry.
-    pub(crate) source_promoter: Option<WireId>,
+    /// `Sub.source_discovery` projection — `Some(_)` iff the Sub was minted by a discovery
+    /// template. Distinct from a TOML-declared Sub with the same anchor: the source id locates
+    /// which template produced the entry.
+    pub(crate) source_discovery: Option<WireId>,
     /// `Sub.scope` projection.
     pub(crate) scope: WireEffectScope,
     /// One line per `ActionProgram` instruction. Rendering rules live with the projection helper
@@ -511,7 +506,7 @@ mod tests {
     use crate::ipc::wire::{WirePath, WireReloadTrigger, WireTime};
     use compact_str::CompactString;
     use slotmap::KeyData;
-    use specter_core::{ProfileId, PromoterId, ResourceId, SubId};
+    use specter_core::{ProfileId, ResourceId, SubId};
     use std::path::Path;
     use std::time::{Duration, UNIX_EPOCH};
 
@@ -537,10 +532,6 @@ mod tests {
         );
         assert_eq!(
             WireId::from(ResourceId::from(KeyData::from_ffi(raw))).0,
-            canonical
-        );
-        assert_eq!(
-            WireId::from(PromoterId::from(KeyData::from_ffi(raw))).0,
             canonical
         );
     }
@@ -909,7 +900,7 @@ mod tests {
             sub_disabled_toml: 0,
             sub_disabled_runtime: 0,
             profile_active: 0,
-            promoter_active: 0,
+            discovery_active: 0,
             config_path: WirePath::from(Path::new("/etc/specter.toml")),
             socket_path: WirePath::from(Path::new("/tmp/specter.sock")),
         }

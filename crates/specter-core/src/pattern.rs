@@ -29,6 +29,10 @@ use std::path::{Path, PathBuf};
 pub struct PatternSpec {
     source: CompactString,
     components: Vec<PatternComponent>,
+    /// Count of leading consecutive `Literal` components, root included. Always `>= 1` (the
+    /// synthetic root `/` is `Literal`) and strictly `<` the total component count: [`Self::parse`]
+    /// rejects pure-literal sources with [`PatternError::NotDynamic`], so every constructed
+    /// `PatternSpec` has at least one non-`Literal` component.
     literal_prefix_len: usize,
 }
 
@@ -120,20 +124,6 @@ impl PatternSpec {
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
-    }
-
-    #[must_use]
-    pub fn components(&self) -> &[PatternComponent] {
-        &self.components
-    }
-
-    /// Count of leading consecutive `Literal` components, root included. Always `>= 1` (the
-    /// synthetic root `/` is `Literal`) and strictly `<` the total component count: [`Self::parse`]
-    /// rejects pure-literal sources with [`PatternError::NotDynamic`], so every constructed
-    /// `PatternSpec` has at least one non-`Literal` component.
-    #[must_use]
-    pub const fn literal_prefix_len(&self) -> usize {
-        self.literal_prefix_len
     }
 
     /// The literal-prefix anchor path: `/` plus the leading consecutive `Literal` segments — where
@@ -300,46 +290,46 @@ mod tests {
     #[test]
     fn parse_mixed_pattern_decomposes_components() {
         let spec = PatternSpec::parse("/srv/staging/*/data/*/log").expect("valid pattern");
-        assert_eq!(spec.components().len(), 7);
+        assert_eq!(spec.components.len(), 7);
         assert!(matches!(
-            spec.components()[0],
+            spec.components[0],
             PatternComponent::Literal(ref s) if s == "/",
         ));
         assert!(matches!(
-            spec.components()[1],
+            spec.components[1],
             PatternComponent::Literal(ref s) if s == "srv",
         ));
         assert!(matches!(
-            spec.components()[2],
+            spec.components[2],
             PatternComponent::Literal(ref s) if s == "staging",
         ));
-        assert!(matches!(spec.components()[3], PatternComponent::Glob(_)));
+        assert!(matches!(spec.components[3], PatternComponent::Glob(_)));
         assert!(matches!(
-            spec.components()[4],
+            spec.components[4],
             PatternComponent::Literal(ref s) if s == "data",
         ));
-        assert!(matches!(spec.components()[5], PatternComponent::Glob(_)));
+        assert!(matches!(spec.components[5], PatternComponent::Glob(_)));
         assert!(matches!(
-            spec.components()[6],
+            spec.components[6],
             PatternComponent::Literal(ref s) if s == "log",
         ));
-        assert_eq!(spec.literal_prefix_len(), 3);
+        assert_eq!(spec.literal_prefix_len, 3);
     }
 
     #[test]
     fn parse_leading_glob_has_minimal_literal_prefix() {
         // `/srv/*/site` ⇒ literal_prefix_len = 2.
         let spec = PatternSpec::parse("/srv/*/site").expect("valid pattern");
-        assert_eq!(spec.literal_prefix_len(), 2);
+        assert_eq!(spec.literal_prefix_len, 2);
     }
 
     #[test]
     fn parse_brace_expansion_stays_one_glob_component() {
         // Brace expansion is one Glob component, not multiple. globset matches alternatives natively.
         let spec = PatternSpec::parse("/var/log/{app,system}/access.log").expect("valid pattern");
-        assert_eq!(spec.components().len(), 5);
-        assert_eq!(spec.literal_prefix_len(), 3);
-        assert!(matches!(spec.components()[3], PatternComponent::Glob(_)));
+        assert_eq!(spec.components.len(), 5);
+        assert_eq!(spec.literal_prefix_len, 3);
+        assert!(matches!(spec.components[3], PatternComponent::Glob(_)));
     }
 
     #[test]
@@ -417,13 +407,13 @@ mod tests {
     #[test]
     fn parse_accepts_root_glob_pattern() {
         let spec = PatternSpec::parse("/*").expect("valid pattern");
-        assert_eq!(spec.components().len(), 2);
-        assert_eq!(spec.literal_prefix_len(), 1);
+        assert_eq!(spec.components.len(), 2);
+        assert_eq!(spec.literal_prefix_len, 1);
         assert!(matches!(
-            spec.components()[0],
+            spec.components[0],
             PatternComponent::Literal(ref s) if s == "/",
         ));
-        assert!(matches!(spec.components()[1], PatternComponent::Glob(_)));
+        assert!(matches!(spec.components[1], PatternComponent::Glob(_)));
     }
 
     /// Consecutive globs build a deeper proxy chain. literal_prefix_len = 2; subsequent globs at
@@ -431,12 +421,12 @@ mod tests {
     #[test]
     fn parse_consecutive_globs_after_literal_prefix() {
         let spec = PatternSpec::parse("/data/*/*/log").expect("valid pattern");
-        assert_eq!(spec.components().len(), 5);
-        assert_eq!(spec.literal_prefix_len(), 2);
-        assert!(matches!(spec.components()[2], PatternComponent::Glob(_)));
-        assert!(matches!(spec.components()[3], PatternComponent::Glob(_)));
+        assert_eq!(spec.components.len(), 5);
+        assert_eq!(spec.literal_prefix_len, 2);
+        assert!(matches!(spec.components[2], PatternComponent::Glob(_)));
+        assert!(matches!(spec.components[3], PatternComponent::Glob(_)));
         assert!(matches!(
-            spec.components()[4],
+            spec.components[4],
             PatternComponent::Literal(ref s) if s == "log",
         ));
     }
