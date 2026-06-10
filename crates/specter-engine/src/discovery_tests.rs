@@ -1,6 +1,6 @@
-//! Unit pins for the discovery reconcile building blocks: the pure terminus collector, the
-//! template ⟺ `MatchChain` attach boundary, and the reconcile's non-Dir-anchor totality arm. The
-//! end-to-end reconcile lifecycle lives in `tests/discovery_lifecycle.rs`.
+//! Unit pins for the discovery reconcile building blocks: the pure terminus collector, the template
+//! ⟺ `MatchChain` attach boundary, and the reconcile's non-Dir-anchor totality arm. The end-to-end
+//! reconcile lifecycle lives in `tests/discovery_lifecycle.rs`.
 
 use super::{ChainTerminus, collect_chain_termini};
 use crate::Engine;
@@ -22,9 +22,9 @@ fn terminus(segments: &[&str], kind: EntryKind) -> ChainTerminus {
     }
 }
 
-/// td = 1: every root entry is a terminus, whatever its kind — Dir, File, and Symlink all mint
-/// (the Promoter-parity rule: `EntryKind → ResourceKind` folds non-dirs to `File` downstream, but
-/// the collector reports the snapshot's own kind). Order is the `BTreeMap`'s lexicographic walk.
+/// td = 1: every root entry is a terminus, whatever its kind — Dir, File, and Symlink all mint (the
+/// Promoter-parity rule: `EntryKind → ResourceKind` folds non-dirs to `File` downstream, but the
+/// collector reports the snapshot's own kind). Order is the `BTreeMap`'s lexicographic walk.
 #[test]
 fn termini_at_depth_one_collect_every_entry_kind_in_lexicographic_order() {
     let root = dir_snap(&[
@@ -42,9 +42,9 @@ fn termini_at_depth_one_collect_every_entry_kind_in_lexicographic_order() {
     );
 }
 
-/// td = 3: the collector descends `Covered` chain dirs only, and a terminus-level `Covered` dir
-/// (a shape the walker never emits — `descends_into` refuses at td) still collects as a Dir
-/// terminus rather than being descended past the chain bound.
+/// td = 3: the collector descends `Covered` chain dirs only, and a terminus-level `Covered` dir (a
+/// shape the walker never emits — `descends_into` refuses at td) still collects as a Dir terminus
+/// rather than being descended past the chain bound.
 #[test]
 fn termini_at_depth_three_walk_covered_chains_to_the_bound() {
     let root = dir_snap_nested(&[(
@@ -85,8 +85,8 @@ fn entries_above_the_terminus_that_cannot_recurse_are_skipped() {
     assert!(collect_chain_termini(&dir_snap(&[]), 1).is_empty());
 }
 
-/// The ⟺ attach boundary, template direction: a template on a non-chain Profile is
-/// unconstructable — its Profile would classify a firing consequence it can never use.
+/// The ⟺ attach boundary, template direction: a template on a non-chain Profile is unconstructable
+/// — its Profile would classify a firing consequence it can never use.
 #[test]
 #[should_panic(expected = "SubParams::template ⟺ ScanConfig::MatchChain")]
 fn template_on_non_chain_profile_is_unconstructable() {

@@ -1743,19 +1743,19 @@ impl Engine {
     /// discovery mint) versus the mixed/static case.
     ///
     /// **All-dynamic** ⇒ [`Self::on_anchor_terminal_all_dynamic`]: the Profile has no static
-    /// recovery channel; the source re-synthesises on path reappearance (a Promoter re-promotes,
-    /// a discovery template's next reconcile re-mints), so the Profile is reaped entirely (anchor,
+    /// recovery channel; the source re-synthesises on path reappearance (a Promoter re-promotes, a
+    /// discovery template's next reconcile re-mints), so the Profile is reaped entirely (anchor,
     /// descendants, descent prefix, watch-root parent — the full quartet) and each Sub's source is
     /// narrated per origin. I-Recovery-Split: the predicate is total over non-empty Subs.
     ///
     /// **Mixed or pure-static** ⇒ [`Self::finalize_anchor_lost`]: the existing recovery flow runs.
     /// The dynamic Subs (if any) stay attached — the static Sub keeps the Profile alive via
-    /// `Profile.watch_root_parent`'s recovery channel. On re-materialisation, the source-side
-    /// dedup gate (`promoter_already_promoted` / `discovery_already_minted`) finds the
-    /// still-attached dynamic Sub in `SubRegistry` and returns `true` (no fresh Sub for an
-    /// already-known anchor), so no engine work is needed for correctness — only the static Sub's
-    /// recovery flow drives the burst. A discovery *template* counts static here by construction:
-    /// `is_dynamic` reads synthesis origin, and templates are operator-declared.
+    /// `Profile.watch_root_parent`'s recovery channel. On re-materialisation, the source-side dedup
+    /// gate (`promoter_already_promoted` / `discovery_already_minted`) finds the still-attached
+    /// dynamic Sub in `SubRegistry` and returns `true` (no fresh Sub for an already-known anchor),
+    /// so no engine work is needed for correctness — only the static Sub's recovery flow drives the
+    /// burst. A discovery *template* counts static here by construction: `is_dynamic` reads
+    /// synthesis origin, and templates are operator-declared.
     ///
     /// The empty-Subs case is structurally unreachable: a Profile with no Subs reaped on the last
     /// detach. Routed defensively to `finalize_anchor_lost` for idempotence.
@@ -1822,17 +1822,16 @@ impl Engine {
         });
 
         // 3. Narrate each Sub's reap per synthesis origin; emit the per-Sub lifecycle signal; then
-        //    remove each dynamic Sub from SubRegistry. The source-keyed narration
-        //    (`DynamicSubReaped` for a Promoter promotion, `DiscoverySubReaped` for a discovery
-        //    mint) is path-carrying; [`Diagnostic::SubDetached`] is the per-Sub operator-facing
-        //    signal a `wait --kind detach` IPC client filters on. Both fire in the same loop while
-        //    the registry borrow is still live for the source lookup; the remove pass below tears
-        //    the entries down once the narration is done. SubRegistry's `by_profile` index drops
-        //    the entry on the last remove, so the post-loop registry has no back-references for
-        //    this Profile. The reasons differ deliberately: a Promoter reap historically narrates
-        //    `PromoterReaped`; a discovery mint's anchor loss is `AnchorLost` — the watched path is
-        //    gone, no source-entity reap implied (the template stays live and re-mints on
-        //    reappearance).
+        //    remove each dynamic Sub from SubRegistry. The source-keyed narration (`DynamicSubReaped`
+        //    for a Promoter promotion, `DiscoverySubReaped` for a discovery mint) is path-carrying;
+        //    [`Diagnostic::SubDetached`] is the per-Sub operator-facing signal a `wait --kind detach`
+        //    IPC client filters on. Both fire in the same loop while the registry borrow is still
+        //    live for the source lookup; the remove pass below tears the entries down once the
+        //    narration is done. SubRegistry's `by_profile` index drops the entry on the last remove,
+        //    so the post-loop registry has no back-references for this Profile. The reasons differ
+        //    deliberately: a Promoter reap historically narrates `PromoterReaped`; a discovery mint's
+        //    anchor loss is `AnchorLost` — the watched path is gone, no source-entity reap implied
+        //    (the template stays live and re-mints on reappearance).
         let sub_ids: SmallVec<[SubId; 2]> = self.subs.at(profile_id).iter().copied().collect();
         for sid in sub_ids.iter().copied() {
             let Some((source_promoter, source_discovery)) = self
@@ -2016,8 +2015,8 @@ impl Engine {
     /// orthogonal-to-[`specter_core::BurstIntent`] terminal-consequence switch the latch was
     /// designed to be.
     fn classify_consequence(&self, profile_id: ProfileId, intent: BurstIntent) -> Consequence {
-        // Shape layer: a discovery Profile's stable verdict reconciles the match set, whatever
-        // the intent. Returning before the intent match keeps the fold override unreachable —
+        // Shape layer: a discovery Profile's stable verdict reconciles the match set, whatever the
+        // intent. Returning before the intent match keeps the fold override unreachable —
         // absorb-inertness is structural, not asserted.
         if self
             .profiles
@@ -2080,8 +2079,8 @@ impl Engine {
     /// [`Consequence::Reconcile`] — share the silent-seal terminus
     /// ([`Engine::seal_baseline_silently`]): no Effect to defer, so none consults the Draining
     /// gate. `AbsorbFold` and `Reconcile` each run a per-cause prologue first (the
-    /// [`Diagnostic::QuiescenceAbsorbed`] narration + count bump; the reconcile's mint pass),
-    /// since the seal may reap the Profile. The three firing consequences cross the single gate in
+    /// [`Diagnostic::QuiescenceAbsorbed`] narration + count bump; the reconcile's mint pass), since
+    /// the seal may reap the Profile. The three firing consequences cross the single gate in
     /// [`Engine::gated_fire`].
     fn fire_or_seal(
         &mut self,
@@ -3542,8 +3541,8 @@ enum Consequence {
     /// intent, before the intent fork and the fold override run: reconcile is idempotent via the
     /// registry dedup query, so first enumeration and re-reconcile are the same operation, and a
     /// forced ceiling reconciles from the forced graft identically (`forced` is ignored — fresh
-    /// data, same consequence). Non-firing: never Draining-gated, never absorb-folded (structural
-    /// — the early return precedes the override), exits through the silent seal after the mints.
+    /// data, same consequence). Non-firing: never Draining-gated, never absorb-folded (structural —
+    /// the early return precedes the override), exits through the silent seal after the mints.
     Reconcile,
 }
 
@@ -3552,11 +3551,10 @@ impl Consequence {
     /// [`Self::FreshSeedFire`] / [`Self::RecoveryFire`]); false for the silent-seal arms
     /// ([`Self::SilentPin`] / [`Self::AbsorbFold`]) and for [`Self::Reconcile`] (discovery mints
     /// attachments, not Effects — there is nothing for an `absorb` window to suppress). The
-    /// [`Engine::classify_consequence`] override consults this to decide whether a fold latch has
-    /// a fire to override: a non-firing `base` passes through untouched (so a Cold-Seed
-    /// `SilentPin` leaves the `absorb` window unconsumed for the first genuinely fireable burst).
-    /// Wildcard-free — a future firing variant is a compile error here, not a silently-unfoldable
-    /// fire.
+    /// [`Engine::classify_consequence`] override consults this to decide whether a fold latch has a
+    /// fire to override: a non-firing `base` passes through untouched (so a Cold-Seed `SilentPin`
+    /// leaves the `absorb` window unconsumed for the first genuinely fireable burst). Wildcard-free
+    /// — a future firing variant is a compile error here, not a silently-unfoldable fire.
     #[must_use]
     const fn is_firing(&self) -> bool {
         match self {

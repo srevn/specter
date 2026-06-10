@@ -623,9 +623,9 @@ pub fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubI
 
 /// The fixture [`MintTemplate`] — minted identity byte-equal to [`promoter_req`]'s.
 ///
-/// `recursive` `Subtree`, `ClassSet::EMPTY`, `MAX_SETTLE`; minted debounce `SETTLE`. The
-/// equality lets the differential test compare converged `(name, config_hash, settle, scope)`
-/// sets against the live Promoter without an identity-mismatch confound.
+/// `recursive` `Subtree`, `ClassSet::EMPTY`, `MAX_SETTLE`; minted debounce `SETTLE`. The equality
+/// lets the differential test compare converged `(name, config_hash, settle, scope)` sets against
+/// the live Promoter without an identity-mismatch confound.
 #[must_use]
 pub fn mint_template() -> Arc<MintTemplate> {
     Arc::new(MintTemplate {
@@ -641,12 +641,11 @@ pub fn mint_template() -> Arc<MintTemplate> {
 /// Attach a discovery template Sub for `pattern` at `anchor`, returning the attach `StepOutput` too.
 ///
 /// The discovery Sub's own identity mirrors the Stage 3 lowering constants in fixture form:
-/// `MatchChain(pattern)`, `ClassSet::STRUCTURE` (membership changes are the chain proof object's
-/// only witness classes, so the Profile folds `EventsReliable`), `MAX_SETTLE` / `SETTLE`,
-/// `/bin/true`. `scope` is explicit because it doubles as the minted Subs' reaction scope — the
-/// per-file recovery-warn pin needs `PerStableFile` here. `anchor` is explicit (pre-placed
-/// `Resource` or pending `Path`) because Stage 2 has no config lowering to render the literal
-/// prefix.
+/// `MatchChain(pattern)`, `ClassSet::STRUCTURE` (membership changes are the chain proof object's only
+/// witness classes, so the Profile folds `EventsReliable`), `MAX_SETTLE` / `SETTLE`, `/bin/true`.
+/// `scope` is explicit because it doubles as the minted Subs' reaction scope — the per-file
+/// recovery-warn pin needs `PerStableFile` here. `anchor` is explicit (pre-placed `Resource` or
+/// pending `Path`) because Stage 2 has no config lowering to render the literal prefix.
 #[must_use]
 pub fn attach_discovery_returning(
     e: &mut Engine,

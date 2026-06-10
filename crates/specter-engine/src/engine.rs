@@ -274,8 +274,8 @@ impl Engine {
         // A discovery template and the `MatchChain` shape are coupled iff: a template on a
         // non-chain Profile could never reconcile, and a plain Sub on a chain Profile could never
         // react (its Profile mints attachments, not Effects). One assert closes both directions —
-        // and transitively forbids a chain-shaped *template* (its mint would be a template-less
-        // Sub on a chain Profile and trip this same assert at mint time).
+        // and transitively forbids a chain-shaped *template* (its mint would be a template-less Sub
+        // on a chain Profile and trip this same assert at mint time).
         debug_assert_eq!(
             req.params.template.is_some(),
             req.identity.config.match_chain().is_some(),

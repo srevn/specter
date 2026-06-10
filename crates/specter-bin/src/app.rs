@@ -150,18 +150,22 @@ pub fn run(args: DaemonArgs) -> ExitCode {
             return ExitCode::from(1);
         }
     };
-    // Emit the same `disabled_*` summary as the config-loaded log so an operator booting Specter
-    // with a mostly-disabled config sees *which* entries are suppressed at startup, not just a
-    // watch count that omits them.
-    let (disabled_watches, disabled_promoters) = initial_config.disabled_names();
+    // Emit the same `disabled_watches` summary as the config-loaded log so an operator booting
+    // Specter with a mostly-disabled config sees *which* entries are suppressed at startup, not
+    // just a watch count that omits them. `discovery` is the template-bearing subset of `watches` —
+    // the operator's "how many patterns" view.
+    let disabled_watches = initial_config.disabled_names();
     tracing::info!(
         level = ?log_cfg.level,
         destination = ?log_cfg.destination,
         path = ?log_cfg.path.as_ref().map(|p| p.display().to_string()),
         watches = initial_config.watches.len(),
-        promoters = initial_config.promoters.len(),
+        discovery = initial_config
+            .watches
+            .iter()
+            .filter(|s| s.template.is_some())
+            .count(),
         ?disabled_watches,
-        ?disabled_promoters,
         config = %config.display(),
         "specter starting"
     );

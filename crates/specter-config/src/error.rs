@@ -74,10 +74,9 @@ pub enum IssueKind {
     InvalidEnum,
     EventsEmpty,
     DuplicateEventClass,
-    /// Reserved-character violation in the user-supplied `name` field. Currently emitted when
-    /// `name` contains `@`, which the engine reserves for the synthesized
-    /// `<promoter_name>@<resolved_path>` shape of dynamic Subs. Distinct from [`Self::EmptyName`]
-    /// (empty name) and [`Self::DuplicateName`].
+    /// Reserved-character violation in the user-supplied `name` field. Currently emitted when `name`
+    /// contains `@`, which the engine reserves for the minted `<template_name>@<matched_path>` shape
+    /// of dynamic Subs. Distinct from [`Self::EmptyName`] (empty name) and [`Self::DuplicateName`].
     InvalidName,
     /// `path` of a dynamic `[[watch]]` failed `PatternSpec::parse` — any of `**`, `.`/`..`, empty
     /// segment, non-absolute, Windows prefix, or a malformed glob segment. Detail carries the

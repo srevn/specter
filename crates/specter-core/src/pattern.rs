@@ -17,7 +17,7 @@
 use crate::scan_config::{ConfigError, GlobPattern};
 use compact_str::CompactString;
 use std::fmt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Decomposed glob path pattern. `components.len() >= 2` post-parse — a synthetic `Literal("/")` at
 /// index 0 plus at least one segment.
@@ -134,6 +134,25 @@ impl PatternSpec {
     #[must_use]
     pub const fn literal_prefix_len(&self) -> usize {
         self.literal_prefix_len
+    }
+
+    /// The literal-prefix anchor path: `/` plus the leading consecutive `Literal` segments — where
+    /// a discovery Sub for this pattern attaches. Total by the parse invariant
+    /// (`components[0..literal_prefix_len]` are all `Literal`, root included), so the fold is
+    /// always absolute; a `Glob` inside the prefix is an invariant breach (`debug_assert!`),
+    /// skipped rather than rendered in release.
+    #[must_use]
+    pub fn literal_prefix_path(&self) -> PathBuf {
+        let mut p = PathBuf::new();
+        for comp in &self.components[..self.literal_prefix_len] {
+            match comp {
+                PatternComponent::Literal(s) => p.push(s.as_str()),
+                PatternComponent::Glob(_) => {
+                    debug_assert!(false, "glob in literal prefix violates parse invariant");
+                }
+            }
+        }
+        p
     }
 
     /// Chain levels below the literal-prefix anchor — the anchor-relative depth at which a match
@@ -441,6 +460,20 @@ mod tests {
             PatternSpec::parse("/var/log/myapp"),
             Err(PatternError::NotDynamic),
         );
+    }
+
+    /// `literal_prefix_path` renders the leading `Literal` run as an absolute anchor path: the
+    /// synthetic root plus each literal segment for a nested prefix, and bare `/` for the `lpl = 1`
+    /// root pattern (the no-parent-edge anchor case).
+    #[test]
+    fn literal_prefix_path_renders_anchor_for_each_prefix_shape() {
+        let nested = PatternSpec::parse("/srv/staging/*/data/*/log").expect("valid pattern");
+        assert_eq!(
+            nested.literal_prefix_path(),
+            std::path::PathBuf::from("/srv/staging"),
+        );
+        let root = PatternSpec::parse("/*").expect("valid pattern");
+        assert_eq!(root.literal_prefix_path(), std::path::PathBuf::from("/"));
     }
 
     /// `terminus_depth` is the chain length below the literal-prefix anchor — pinned across the

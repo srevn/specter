@@ -22,7 +22,7 @@ pub use cli::{
     AbsorbArgs, Cli, ClientArgs, ColorWhen, Command, DaemonArgs, ListArgs, NameTargetArgs,
     OutputFormat, ShowArgs, StatusArgs, TailArgs, WaitArgs, WaitKind,
 };
-pub use config::{Config, LogConfig, LogDestination, LogLevel, PromoterSpec, SubSpec};
+pub use config::{Config, LogConfig, LogDestination, LogLevel, SubSpec, TemplateSpec};
 pub use diff::diff;
 pub use error::{ConfigError, IssueKind, ValidationIssue};
 pub use file_meta::FileMeta;

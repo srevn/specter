@@ -113,12 +113,12 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// (`forward`'s outbound `effects_tx` disconnect) propagates back to the caller. On `Break` the
     /// cancel-first probe drain via [`super::EngineDriver::begin_shutdown`] runs internally,
     /// symmetric with [`super::EngineDriver::run_initial_attach`] — every engine-mutating entry
-    /// point that may arm probes (the diff's `added` Subs / Promoters enter Seed-Verifying with an
-    /// armed `ProbeSlot`) is responsible for the cleanup of those probes on its own `Break`. A
-    /// caller that drops the driver after observing `Break` cannot trip `ProbeSlot::drop`'s
-    /// linear-edge tripwire. The tick-layer outer drain that also calls `begin_shutdown` on `Break`
-    /// propagation is redundant for this path but idempotent (the cancel-first drain iterates over
-    /// an already-empty in-flight-probe set).
+    /// point that may arm probes (the diff's `added` Subs enter Seed-Verifying with an armed
+    /// `ProbeSlot`) is responsible for the cleanup of those probes on its own `Break`. A caller
+    /// that drops the driver after observing `Break` cannot trip `ProbeSlot::drop`'s linear-edge
+    /// tripwire. The tick-layer outer drain that also calls `begin_shutdown` on `Break` propagation
+    /// is redundant for this path but idempotent (the cancel-first drain iterates over an
+    /// already-empty in-flight-probe set).
     ///
     /// The loader rotation runs even on the `Break` path: the engine has the diff applied, so the
     /// loader matches the engine on the way out, and the driver is about to shut down anyway —
@@ -170,23 +170,23 @@ impl<W: FsWatcher> EngineDriver<W> {
             // side reports `modified_identity` and `modified_params` separately so triage can see
             // at a glance whether a reload tore down Profiles (identity) or only rebound per-Sub
             // fields (params).
-            let added_n = diff.subs.added.len();
-            let removed_n = diff.subs.removed.len();
-            let modified_identity_n = diff.subs.modified_identity.len();
-            let modified_params_n = diff.subs.modified_params.len();
-            let promoter_added_n = diff.promoters.added.len();
-            let promoter_removed_n = diff.promoters.removed.len();
-            let promoter_modified_n = diff.promoters.modified.len();
+            let added_n = diff.added.len();
+            let removed_n = diff.removed.len();
+            let modified_identity_n = diff.modified_identity.len();
+            let modified_params_n = diff.modified_params.len();
 
-            let out = self.engine.step(Input::ConfigDiff(diff), now);
+            let out = self.engine.step(
+                Input::ConfigDiff(specter_core::WatchRegistryDiff {
+                    subs: diff,
+                    ..Default::default()
+                }),
+                now,
+            );
             tracing::info!(
                 added = added_n,
                 removed = removed_n,
                 modified_identity = modified_identity_n,
                 modified_params = modified_params_n,
-                promoters_added = promoter_added_n,
-                promoters_removed = promoter_removed_n,
-                promoters_modified = promoter_modified_n,
                 "config reload applied",
             );
             self.forward(out)
@@ -345,25 +345,19 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// The unfiltered diff is the raw `specter_config::diff` output; the filter is the negative side
     /// of the `disabled_runtime ↔ engine` invariant — an attach / re-attach / re-bind / detach for a
     /// runtime-disabled Sub would re-introduce or churn the engine on a Sub the operator has
-    /// suppressed. The four Sub buckets (`added`, `removed`, `modified_identity`, `modified_params`)
-    /// are name-disjoint by construction, so retaining by name on each is exhaustive. Promoters are
-    /// not in scope for the runtime-disable override and pass through unchanged.
-    pub(super) fn compute_watch_diff(
-        &self,
-        new_config: &Config,
-    ) -> specter_core::WatchRegistryDiff {
+    /// suppressed. The four buckets (`added`, `removed`, `modified_identity`, `modified_params`) are
+    /// name-disjoint by construction, so retaining by name on each is exhaustive. Discovery templates
+    /// are ordinary operator-named Subs here, so the runtime-disable override covers them uniformly.
+    pub(super) fn compute_watch_diff(&self, new_config: &Config) -> specter_core::SubRegistryDiff {
         let mut diff = specter_config::diff(self.loader.current_config(), new_config);
         let disabled = &self.disabled_runtime;
-        diff.subs
-            .added
+        diff.added
             .retain(|r| !disabled.contains(r.params.name.as_str()));
-        diff.subs
-            .modified_identity
+        diff.modified_identity
             .retain(|r| !disabled.contains(r.params.name.as_str()));
-        diff.subs
-            .modified_params
+        diff.modified_params
             .retain(|r| !disabled.contains(r.params.name.as_str()));
-        diff.subs.removed.retain(|n| !disabled.contains(n.as_str()));
+        diff.removed.retain(|n| !disabled.contains(n.as_str()));
         diff
     }
 

@@ -1,59 +1,44 @@
-use crate::config::{Config, PromoterSpec, SubSpec};
+use crate::config::{Config, SubSpec};
 use compact_str::CompactString;
-use specter_core::{
-    PromoterAttachRequest, PromoterRegistryDiff, SubAttachRequest, SubRegistryDiff,
-    WatchRegistryDiff,
-};
+use specter_core::{SubAttachRequest, SubRegistryDiff};
 use std::collections::BTreeMap;
 
-/// Compute the full hot-reload diff between two validated [`Config`]s.
+/// Compute the hot-reload diff between two validated [`Config`]s.
 ///
-/// A pure function of `(old, new)` — no id maps. The returned [`WatchRegistryDiff`] is
-/// **name-keyed**: `removed` carries operator names; `added` / `modified` carry pre-id requests
+/// A pure function of `(old, new)` — no id maps. The returned [`SubRegistryDiff`] is
+/// **name-keyed**: `removed` carries operator names; `added` / `modified_*` carry pre-id requests
 /// whose name lives inside the request. The engine resolves name → id at apply time through its own
 /// authoritative `by_name` index — identity resolution is a registry-owner operation, not the
-/// loader's.
-///
-/// **Static ↔ dynamic migration via path edit.** A `[[watch]]` whose path edits across the
-/// `is_dynamic` boundary (e.g., `/foo` → `/foo/*`) moves between [`Config::watches`] and
-/// [`Config::promoters`] between reloads. The diff produces `subs.removed + promoters.added` (or
-/// the reverse): a wholesale teardown then attach. The path semantics meaningfully changed; merging
-/// across the boundary would hide that.
-///
-/// Determinism: each side's `removed` is name-ordered structurally — it is built from a
-/// `BTreeMap`'s `keys()` iterator (ascending by API contract), so the order is established at
-/// construction and a debug-mode `is_sorted` check pins the invariant without paying for a runtime
-/// sort. `modified` is name-sorted load-bearing — built from source-order `active_*`, sorted at the
-/// end via `sort_unstable_by` (names are unique by validation, so stability is unobservable).
-/// `added` preserves new-source order.
-#[must_use]
-pub fn diff(old: &Config, new: &Config) -> WatchRegistryDiff {
-    WatchRegistryDiff {
-        subs: diff_subs(old, new),
-        promoters: diff_promoters(old, new),
-    }
-}
-
-/// Static-Sub half of the watch-registry diff. Extracted so the two halves are independently
-/// testable; the public entry point composes both.
+/// loader's. Dynamic `[[watch]]` blocks ride the same buckets: a discovery spec is a
+/// template-bearing [`SubSpec`] in the one [`Config::watches`] list.
 ///
 /// Filters both sides through [`Config::active_watches`] before the name-keyed comparison: a
 /// disabled entry on either side is structurally equivalent to "absent." Flipping `enabled = true →
-/// false` therefore surfaces as `subs.removed`; the reverse as `subs.added`. Edits to fields on a
-/// disabled entry are invisible to the diff (the entry isn't in either filtered set) — they apply
-/// on the next `false → true` transition via the fresh attach.
+/// false` therefore surfaces as `removed`; the reverse as `added`. Edits to fields on a disabled
+/// entry are invisible to the diff (the entry isn't in either filtered set) — they apply on the
+/// next `false → true` transition via the fresh attach.
 ///
 /// Modified entries are partitioned by [`SubSpec::requires_new_profile`]:
 ///
-/// - **`modified_identity`** — path / scan / max_settle / events differ; the Sub must move to a
-///   different Profile partition. The engine validates the new anchor's parse, then runs
-///   `detach_old → attach_new`.
+/// - **`modified_identity`** — path / scan / max_settle / events differ, **or either spec is
+///   template-bearing**: any field change on a discovery spec is a wholesale replace (minted Subs
+///   hold `Arc`s of the template Sub's program — an in-place rebind would strand them), and a path
+///   edit across the `is_dynamic` boundary flips template presence, landing here too. The engine
+///   validates the new anchor's parse, then runs `detach_old → attach_new`.
 /// - **`modified_params`** — only per-Sub fields differ (`program`, `scope`, `settle`,
-///   `log_output`). The engine rebinds the live Sub in place; no Profile churn, no kernel-watch
-///   flap, no baseline loss.
+///   `log_output`) on a template-free pair. The engine rebinds the live Sub in place; no Profile
+///   churn, no kernel-watch flap, no baseline loss.
 ///
 /// The partition is exhaustive and disjoint: every modified entry lands in exactly one bucket.
-fn diff_subs(old: &Config, new: &Config) -> SubRegistryDiff {
+///
+/// Determinism: `removed` is name-ordered structurally — it is built from a `BTreeMap`'s `keys()`
+/// iterator (ascending by API contract), so the order is established at construction and a
+/// debug-mode `is_sorted` check pins the invariant without paying for a runtime sort. `modified_*`
+/// is name-sorted load-bearing — built from source-order `active_watches`, sorted at the end via
+/// `sort_unstable_by` (names are unique by validation, so stability is unobservable). `added`
+/// preserves new-source order.
+#[must_use]
+pub fn diff(old: &Config, new: &Config) -> SubRegistryDiff {
     let old_by_name: BTreeMap<&CompactString, &SubSpec> =
         old.active_watches().map(|s| (&s.name, s)).collect();
     let new_by_name: BTreeMap<&CompactString, &SubSpec> =
@@ -101,55 +86,12 @@ fn diff_subs(old: &Config, new: &Config) -> SubRegistryDiff {
     }
 }
 
-/// Promoter half of the watch-registry diff. Mirrors [`diff_subs`] against
-/// [`Config::active_promoters`]. Same `enabled`-as-absent semantics: a disabled Promoter on either
-/// side is filtered before comparison; flipping the flag surfaces as `promoters.added` /
-/// `promoters.removed`.
-fn diff_promoters(old: &Config, new: &Config) -> PromoterRegistryDiff {
-    let old_by_name: BTreeMap<&CompactString, &PromoterSpec> =
-        old.active_promoters().map(|p| (&p.name, p)).collect();
-    let new_by_name: BTreeMap<&CompactString, &PromoterSpec> =
-        new.active_promoters().map(|p| (&p.name, p)).collect();
-
-    let mut added: Vec<PromoterAttachRequest> = Vec::new();
-    let mut modified: Vec<PromoterAttachRequest> = Vec::new();
-    let mut removed: Vec<CompactString> = Vec::new();
-
-    for spec in new.active_promoters() {
-        match old_by_name.get(&spec.name) {
-            None => added.push(spec.to_attach_request()),
-            Some(old_spec) if **old_spec != *spec => modified.push(spec.to_attach_request()),
-            Some(_) => {}
-        }
-    }
-
-    for name in old_by_name.keys() {
-        if !new_by_name.contains_key(name) {
-            removed.push((*name).clone());
-        }
-    }
-
-    // Sort rationale mirrors `diff_subs`: `removed` is BTreeMap-keyed and so already name-ordered
-    // (debug-only assertion pins the invariant); `modified` is load-bearing on `active_promoters()`
-    // source order and uses `sort_unstable_by` since names are unique.
-    debug_assert!(
-        removed.is_sorted(),
-        "removed must inherit BTreeMap key order",
-    );
-    modified.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-
-    PromoterRegistryDiff {
-        added,
-        removed,
-        modified,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::diff;
     use crate::config::Config;
     use compact_str::CompactString;
+    use specter_core::ScanConfig;
 
     const ROOT: &str = "/";
 
@@ -197,13 +139,10 @@ mod tests {
         let a = cfg(&[]);
         let b = cfg(&[]);
         let d = diff(&a, &b);
-        assert!(d.subs.added.is_empty());
-        assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
-        assert!(d.promoters.added.is_empty());
-        assert!(d.promoters.removed.is_empty());
-        assert!(d.promoters.modified.is_empty());
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
     #[test]
@@ -214,12 +153,12 @@ mod tests {
         let new = cfg(&refs);
 
         let d = diff(&old, &new);
-        assert_eq!(d.subs.added.len(), 2);
-        assert_eq!(d.subs.added[0].params.name, "a");
-        assert_eq!(d.subs.added[1].params.name, "b");
-        assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
+        assert_eq!(d.added.len(), 2);
+        assert_eq!(d.added[0].params.name, "a");
+        assert_eq!(d.added[1].params.name, "b");
+        assert!(d.removed.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
     #[test]
@@ -230,10 +169,10 @@ mod tests {
         let new = cfg(&[]);
 
         let d = diff(&old, &new);
-        assert!(d.subs.added.is_empty());
-        assert_eq!(d.subs.removed, vec![CompactString::from("a")]);
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
+        assert!(d.added.is_empty());
+        assert_eq!(d.removed, vec![CompactString::from("a")]);
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
     #[test]
@@ -243,10 +182,10 @@ mod tests {
         let a = cfg(&refs);
         let b = cfg(&refs);
         let d = diff(&a, &b);
-        assert!(d.subs.added.is_empty());
-        assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
     /// Command change ⇒ per-Sub field only ⇒ `modified_params`. The identity bucket stays empty:
@@ -259,11 +198,11 @@ mod tests {
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
         let d = diff(&old, &new);
-        assert!(d.subs.added.is_empty());
-        assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert_eq!(d.subs.modified_params.len(), 1);
-        assert_eq!(d.subs.modified_params[0].params.name, "a");
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert_eq!(d.modified_params.len(), 1);
+        assert_eq!(d.modified_params[0].params.name, "a");
     }
 
     #[test]
@@ -275,15 +214,15 @@ mod tests {
 
         let d = diff(&old, &new);
 
-        assert_eq!(d.subs.added.len(), 1);
-        assert_eq!(d.subs.added[0].params.name, "d");
+        assert_eq!(d.added.len(), 1);
+        assert_eq!(d.added[0].params.name, "d");
 
-        assert_eq!(d.subs.removed, vec![CompactString::from("b")]);
+        assert_eq!(d.removed, vec![CompactString::from("b")]);
 
         // `block("a", "echo") → block("a", "fmt")` is a program-only change ⇒ `modified_params`.
-        assert!(d.subs.modified_identity.is_empty());
-        assert_eq!(d.subs.modified_params.len(), 1);
-        assert_eq!(d.subs.modified_params[0].params.name, "a");
+        assert!(d.modified_identity.is_empty());
+        assert_eq!(d.modified_params.len(), 1);
+        assert_eq!(d.modified_params[0].params.name, "a");
     }
 
     #[test]
@@ -294,10 +233,10 @@ mod tests {
         let new = cfg(&order_b.iter().map(String::as_str).collect::<Vec<_>>());
 
         let d = diff(&old, &new);
-        assert!(d.subs.added.is_empty());
-        assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
     #[test]
@@ -308,11 +247,11 @@ mod tests {
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
         let d = diff(&old, &new);
-        assert_eq!(d.subs.added.len(), 1);
-        assert_eq!(d.subs.added[0].params.name, "z");
-        assert_eq!(d.subs.removed, vec![CompactString::from("a")]);
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
+        assert_eq!(d.added.len(), 1);
+        assert_eq!(d.added[0].params.name, "z");
+        assert_eq!(d.removed, vec![CompactString::from("a")]);
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
     /// `settle` is a per-Sub field, not a Profile-identity field ⇒ `modified_params`. Pinning the
@@ -327,10 +266,10 @@ mod tests {
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
         let d = diff(&old, &new);
-        assert!(d.subs.added.is_empty());
-        assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert_eq!(d.subs.modified_params.len(), 1);
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert_eq!(d.modified_params.len(), 1);
     }
 
     #[test]
@@ -340,7 +279,7 @@ mod tests {
         let new = cfg(&[]);
         let d = diff(&old, &new);
         assert_eq!(
-            d.subs.removed,
+            d.removed,
             vec![
                 CompactString::from("a"),
                 CompactString::from("b"),
@@ -357,7 +296,6 @@ mod tests {
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let d = diff(&old, &new);
         let order: Vec<&str> = d
-            .subs
             .modified_params
             .iter()
             .map(|r| r.params.name.as_str())
@@ -379,13 +317,13 @@ mod tests {
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
         let d = diff(&old, &new);
-        assert!(d.subs.added.is_empty());
-        assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified_params.is_empty());
-        assert_eq!(d.subs.modified_identity.len(), 1);
-        assert_eq!(d.subs.modified_identity[0].params.name, "a");
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_params.is_empty());
+        assert_eq!(d.modified_identity.len(), 1);
+        assert_eq!(d.modified_identity[0].params.name, "a");
         assert_eq!(
-            d.subs.modified_identity[0].identity.events,
+            d.modified_identity[0].identity.events,
             specter_core::ClassSet::CONTENT
         );
     }
@@ -403,14 +341,14 @@ mod tests {
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let d = diff(&old, &new);
         assert!(
-            d.subs.modified_identity.is_empty(),
+            d.modified_identity.is_empty(),
             "identity bucket: {:?}",
-            d.subs.modified_identity,
+            d.modified_identity,
         );
         assert!(
-            d.subs.modified_params.is_empty(),
+            d.modified_params.is_empty(),
             "params bucket: {:?}",
-            d.subs.modified_params,
+            d.modified_params,
         );
     }
 
@@ -430,14 +368,14 @@ mod tests {
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let d = diff(&old, &new);
         assert!(
-            d.subs.modified_identity.is_empty(),
+            d.modified_identity.is_empty(),
             "identity bucket: {:?}",
-            d.subs.modified_identity,
+            d.modified_identity,
         );
         assert!(
-            d.subs.modified_params.is_empty(),
+            d.modified_params.is_empty(),
             "params bucket: {:?}",
-            d.subs.modified_params,
+            d.modified_params,
         );
     }
 
@@ -457,17 +395,17 @@ mod tests {
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
         let d = diff(&old, &new);
-        assert!(d.subs.modified_params.is_empty());
-        assert_eq!(d.subs.modified_identity.len(), 1);
-        assert_eq!(d.subs.modified_identity[0].params.name, "a");
+        assert!(d.modified_params.is_empty());
+        assert_eq!(d.modified_identity.len(), 1);
+        assert_eq!(d.modified_identity[0].params.name, "a");
     }
 
-    // ---- Promoter (dynamic) side ----
+    // ---- Discovery (dynamic) side ----
 
-    /// Adding a fresh dynamic [[watch]] populates `promoters.added` in source order. Nothing on the
-    /// old side, so no removed / modified entries.
+    /// Adding a fresh dynamic [[watch]] populates `added` in source order with template-bearing
+    /// requests. Nothing on the old side, so no removed / modified entries.
     #[test]
-    fn promoter_added_populates_added_in_source_order() {
+    fn discovery_added_populates_added_in_source_order() {
         let old = cfg(&[]);
         let new_blocks = [
             dyn_block("logs", "/var/log/*", "echo"),
@@ -477,135 +415,105 @@ mod tests {
         let new = cfg(&refs);
 
         let d = diff(&old, &new);
-        assert!(d.subs.added.is_empty());
-        assert_eq!(d.promoters.added.len(), 2);
-        assert_eq!(d.promoters.added[0].name, "logs");
-        assert_eq!(d.promoters.added[1].name, "sites");
-        assert!(d.promoters.removed.is_empty());
-        assert!(d.promoters.modified.is_empty());
+        assert_eq!(d.added.len(), 2);
+        assert_eq!(d.added[0].params.name, "logs");
+        assert_eq!(d.added[1].params.name, "sites");
+        assert!(d.added.iter().all(|r| r.params.template.is_some()));
+        assert!(d.removed.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
-    /// Removing a dynamic [[watch]] populates `promoters.removed` with the operator Promoter name.
+    /// Removing a dynamic [[watch]] populates `removed` with the operator name — the engine's
+    /// detach cascade reaps the minted set from the template Sub.
     #[test]
-    fn promoter_removed_populates_removed_with_promoter_name() {
+    fn discovery_removed_populates_removed_with_name() {
         let old_blocks = [dyn_block("logs", "/var/log/*", "echo")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&[]);
 
         let d = diff(&old, &new);
-        assert_eq!(d.promoters.removed, vec![CompactString::from("logs")]);
-        assert!(d.promoters.added.is_empty());
-        assert!(d.promoters.modified.is_empty());
+        assert_eq!(d.removed, vec![CompactString::from("logs")]);
+        assert!(d.added.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
-    /// Modifying any field on a dynamic [[watch]] surfaces the entry on `promoters.modified`.
-    /// Wholesale replace at the engine layer.
+    /// A **program-only** change on a template-bearing pair classifies `modified_identity` — the same
+    /// edit on a static spec lands in `modified_params` (see
+    /// [`different_command_lands_in_modified_params`]). Minted Subs hold `Arc`s of the template Sub's
+    /// program; an in-place rebind would strand them, so any discovery edit is a wholesale replace.
     #[test]
-    fn promoter_command_change_yields_modified() {
+    fn discovery_command_change_lands_in_modified_identity() {
         let old_blocks = [dyn_block("logs", "/var/log/*", "echo")];
         let new_blocks = [dyn_block("logs", "/var/log/*", "fmt")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
         let d = diff(&old, &new);
-        assert!(d.promoters.added.is_empty());
-        assert!(d.promoters.removed.is_empty());
-        assert_eq!(d.promoters.modified.len(), 1);
-        assert_eq!(d.promoters.modified[0].name, "logs");
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_params.is_empty());
+        assert_eq!(d.modified_identity.len(), 1);
+        assert_eq!(d.modified_identity[0].params.name, "logs");
     }
 
-    /// Pattern source change is a structural modification (different `pattern_spec.source`); diff
-    /// surfaces it as `modified`. The engine wholesale-replaces, which drains and re-mints dynamic
-    /// Subs against the new pattern.
+    /// Pattern source change re-anchors the discovery Profile; diff surfaces it as
+    /// `modified_identity` carrying the fresh `MatchChain` scan. The engine wholesale-replaces,
+    /// which reaps the old minted set and re-mints against the new pattern.
     #[test]
-    fn promoter_pattern_change_yields_modified() {
+    fn discovery_pattern_change_lands_in_modified_identity() {
         let old_blocks = [dyn_block("logs", "/var/log/*.log", "echo")];
         let new_blocks = [dyn_block("logs", "/var/log/*.json", "echo")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
         let d = diff(&old, &new);
-        assert_eq!(d.promoters.modified.len(), 1);
-        assert_eq!(
-            d.promoters.modified[0].pattern_spec.source(),
-            "/var/log/*.json",
-        );
+        assert_eq!(d.modified_identity.len(), 1);
+        let ScanConfig::MatchChain(spec) = &d.modified_identity[0].identity.config else {
+            panic!("discovery request carries MatchChain");
+        };
+        assert_eq!(spec.source(), "/var/log/*.json");
     }
 
-    /// Settle change on a dynamic watch surfaces as modified.
+    /// A user-`settle`-only change on a dynamic watch classifies `modified_identity` — the user's
+    /// `settle` lives on the *template* (the minted Subs' debounce), so a params-class rebind can
+    /// never carry it. Wholesale before the unification, identity now; never an in-place rebind.
     #[test]
-    fn promoter_settle_change_marks_modified() {
+    fn discovery_settle_change_lands_in_modified_identity() {
         let old_blocks = [dyn_block_full("logs", "/var/log/*", "echo", "200ms")];
         let new_blocks = [dyn_block_full("logs", "/var/log/*", "echo", "500ms")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
         let d = diff(&old, &new);
-        assert_eq!(d.promoters.modified.len(), 1);
+        assert!(d.modified_params.is_empty());
+        assert_eq!(d.modified_identity.len(), 1);
     }
 
-    /// Identical promoter configs yield no diff.
+    /// Identical dynamic blocks yield no diff — `PatternSpec` equality routes through `source` and
+    /// `TemplateSpec` is structural, so re-parsing the same TOML is diff-invisible.
     #[test]
-    fn promoter_identical_configs_yield_empty_diff() {
+    fn discovery_identical_configs_yield_empty_diff() {
         let blocks = [dyn_block("logs", "/var/log/*", "echo")];
         let refs: Vec<&str> = blocks.iter().map(String::as_str).collect();
         let a = cfg(&refs);
         let b = cfg(&refs);
         let d = diff(&a, &b);
-        assert!(d.promoters.added.is_empty());
-        assert!(d.promoters.removed.is_empty());
-        assert!(d.promoters.modified.is_empty());
-    }
-
-    /// `promoters.removed` sorts by name (mirrors `subs.removed`).
-    #[test]
-    fn promoter_removed_sorted_by_name() {
-        let old_blocks = [
-            dyn_block("c", "/c/*", "echo"),
-            dyn_block("a", "/a/*", "echo"),
-            dyn_block("b", "/b/*", "echo"),
-        ];
-        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let new = cfg(&[]);
-        let d = diff(&old, &new);
-        assert_eq!(
-            d.promoters.removed,
-            vec![
-                CompactString::from("a"),
-                CompactString::from("b"),
-                CompactString::from("c"),
-            ]
-        );
-    }
-
-    /// `promoters.modified` sorts by name (mirrors the Sub-side `modified_*` buckets, both
-    /// individually sorted in `diff_subs`).
-    #[test]
-    fn promoter_modified_sorted_by_name() {
-        let old_blocks = [
-            dyn_block("b", "/b/*", "echo"),
-            dyn_block("a", "/a/*", "echo"),
-        ];
-        let new_blocks = [dyn_block("b", "/b/*", "fmt"), dyn_block("a", "/a/*", "fmt")];
-        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
-        let d = diff(&old, &new);
-        let order: Vec<&str> = d
-            .promoters
-            .modified
-            .iter()
-            .map(|r| r.name.as_str())
-            .collect();
-        assert_eq!(order, vec!["a", "b"]);
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
     // ---- Cross-kind: static ↔ dynamic migration via path edit ----
 
-    /// Static → dynamic via path edit: name `foo` was static; new config has `foo` as dynamic. Same
-    /// name, but the path crossed the `is_dynamic` boundary so the entry moves between
-    /// `Config.watches` and `Config.promoters`. Diff produces `subs.removed + promoters.added`.
+    /// Static → dynamic via path edit: same name, but the path crossed the `is_dynamic` boundary,
+    /// so template presence differs across the pair and the head guard classifies
+    /// `modified_identity` — a wholesale teardown then attach. The path semantics meaningfully
+    /// changed; an in-place rebind would hide that.
     #[test]
-    fn static_to_dynamic_migration_yields_subs_removed_plus_promoters_added() {
+    fn static_to_dynamic_migration_lands_in_modified_identity() {
         let old_blocks = [block("foo", "echo")]; // path = "/" (static)
         let new_blocks = [dyn_block("foo", "/foo/*", "echo")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
@@ -613,20 +521,18 @@ mod tests {
 
         let d = diff(&old, &new);
 
-        assert_eq!(d.subs.removed, vec![CompactString::from("foo")]);
-        assert!(d.subs.added.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
-        assert_eq!(d.promoters.added.len(), 1);
-        assert_eq!(d.promoters.added[0].name, "foo");
-        assert!(d.promoters.removed.is_empty());
-        assert!(d.promoters.modified.is_empty());
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_params.is_empty());
+        assert_eq!(d.modified_identity.len(), 1);
+        assert_eq!(d.modified_identity[0].params.name, "foo");
+        assert!(d.modified_identity[0].params.template.is_some());
     }
 
-    /// Reverse direction: dynamic → static via path edit. The dynamic `foo` from old becomes a
-    /// static `foo` in new. Diff produces `promoters.removed + subs.added`.
+    /// Reverse direction: dynamic → static via path edit. Same head guard (template presence on the
+    /// *old* side), same `modified_identity` bucket; the request is now template-free.
     #[test]
-    fn dynamic_to_static_migration_yields_promoters_removed_plus_subs_added() {
+    fn dynamic_to_static_migration_lands_in_modified_identity() {
         let old_blocks = [dyn_block("foo", "/foo/*", "echo")];
         let new_blocks = [block("foo", "echo")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
@@ -634,20 +540,18 @@ mod tests {
 
         let d = diff(&old, &new);
 
-        assert_eq!(d.promoters.removed, vec![CompactString::from("foo")]);
-        assert!(d.promoters.added.is_empty());
-        assert!(d.promoters.modified.is_empty());
-        assert_eq!(d.subs.added.len(), 1);
-        assert_eq!(d.subs.added[0].params.name, "foo");
-        assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_params.is_empty());
+        assert_eq!(d.modified_identity.len(), 1);
+        assert_eq!(d.modified_identity[0].params.name, "foo");
+        assert!(d.modified_identity[0].params.template.is_none());
     }
 
-    /// Mixed reload: one Sub modify, one Promoter add, one of each removed. Each half stands on its
-    /// own; the diff composes them without interaction.
+    /// Mixed reload: one static modify, one discovery add, one of each removed. Static and
+    /// discovery entries ride the same buckets without interaction.
     #[test]
-    fn mixed_sub_and_promoter_changes_compose_independently() {
+    fn mixed_static_and_discovery_changes_compose_independently() {
         let old_blocks = [
             block("static_keep", "echo"),
             block("static_drop", "echo"),
@@ -664,17 +568,14 @@ mod tests {
 
         let d = diff(&old, &new);
 
-        assert_eq!(d.subs.removed, vec![CompactString::from("static_drop")]);
-        assert!(d.subs.added.is_empty());
-        // `static_keep`: echo → fmt is a program-only change ⇒ params bucket.
-        assert!(d.subs.modified_identity.is_empty());
-        assert_eq!(d.subs.modified_params.len(), 1);
-        assert_eq!(d.subs.modified_params[0].params.name, "static_keep");
-
-        assert_eq!(d.promoters.removed, vec![CompactString::from("dyn_drop")]);
-        assert_eq!(d.promoters.added.len(), 1);
-        assert_eq!(d.promoters.added[0].name, "dyn_new");
-        assert!(d.promoters.modified.is_empty());
+        let removed: Vec<&str> = d.removed.iter().map(CompactString::as_str).collect();
+        assert_eq!(removed, vec!["dyn_drop", "static_drop"]);
+        assert_eq!(d.added.len(), 1);
+        assert_eq!(d.added[0].params.name, "dyn_new");
+        // `static_keep`: echo → fmt is a program-only change on a static spec ⇒ params bucket.
+        assert!(d.modified_identity.is_empty());
+        assert_eq!(d.modified_params.len(), 1);
+        assert_eq!(d.modified_params[0].params.name, "static_keep");
     }
 
     // ---- Enabled-toggle transitions ----
@@ -701,10 +602,10 @@ mod tests {
         let old = cfg(&[block_with_enabled("a", "echo", true).as_str()]);
         let new = cfg(&[block_with_enabled("a", "echo", false).as_str()]);
         let d = diff(&old, &new);
-        assert_eq!(d.subs.removed, vec![CompactString::from("a")]);
-        assert!(d.subs.added.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
+        assert_eq!(d.removed, vec![CompactString::from("a")]);
+        assert!(d.added.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
     /// Reverse: `false → true` re-introduces the entry, surfacing as `subs.added`.
@@ -713,11 +614,11 @@ mod tests {
         let old = cfg(&[block_with_enabled("a", "echo", false).as_str()]);
         let new = cfg(&[block_with_enabled("a", "echo", true).as_str()]);
         let d = diff(&old, &new);
-        assert_eq!(d.subs.added.len(), 1);
-        assert_eq!(d.subs.added[0].params.name, "a");
-        assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
+        assert_eq!(d.added.len(), 1);
+        assert_eq!(d.added[0].params.name, "a");
+        assert!(d.removed.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
     /// Edits to other fields while the entry is disabled produce no diff: both sides are filtered
@@ -728,21 +629,29 @@ mod tests {
         let old = cfg(&[block_with_enabled("a", "echo", false).as_str()]);
         let new = cfg(&[block_with_enabled("a", "fmt", false).as_str()]);
         let d = diff(&old, &new);
-        assert!(d.subs.added.is_empty());
-        assert!(d.subs.removed.is_empty());
-        assert!(d.subs.modified_identity.is_empty());
-        assert!(d.subs.modified_params.is_empty());
+        assert!(d.added.is_empty());
+        assert!(d.removed.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
     }
 
-    /// Promoter-side enabled flip mirrors the static side. One transition is enough — the code path
-    /// is structurally identical (`active_promoters` filter ahead of the same name-keyed matching).
+    /// Dynamic-block enabled flip mirrors the static side — discovery specs ride the same
+    /// `active_watches` filter, so the flip surfaces as removed/added, never modified. The removed
+    /// name reaches the engine as a plain detach whose cascade reaps the minted set.
     #[test]
-    fn promoter_enabled_true_to_false_yields_promoters_removed() {
-        let old = cfg(&[dyn_block_with_enabled("logs", "/var/log/*", "echo", true).as_str()]);
-        let new = cfg(&[dyn_block_with_enabled("logs", "/var/log/*", "echo", false).as_str()]);
-        let d = diff(&old, &new);
-        assert_eq!(d.promoters.removed, vec![CompactString::from("logs")]);
-        assert!(d.promoters.added.is_empty());
-        assert!(d.promoters.modified.is_empty());
+    fn discovery_enabled_flip_yields_removed_then_added() {
+        let on = dyn_block_with_enabled("logs", "/var/log/*", "echo", true);
+        let off = dyn_block_with_enabled("logs", "/var/log/*", "echo", false);
+        let d = diff(&cfg(&[on.as_str()]), &cfg(&[off.as_str()]));
+        assert_eq!(d.removed, vec![CompactString::from("logs")]);
+        assert!(d.added.is_empty());
+        assert!(d.modified_identity.is_empty());
+        assert!(d.modified_params.is_empty());
+
+        let d = diff(&cfg(&[off.as_str()]), &cfg(&[on.as_str()]));
+        assert_eq!(d.added.len(), 1);
+        assert_eq!(d.added[0].params.name, "logs");
+        assert!(d.added[0].params.template.is_some());
+        assert!(d.removed.is_empty());
     }
 }

@@ -22,9 +22,9 @@
 //!   ([`ipc::project`]) — all registered against the same Poll selector as the Reactor via a
 //!   [`mio::Registry::try_clone()`] handle.
 //!
-//! `run_initial_attach` walks `loader.current_config` in source order, attaching each Sub / Promoter
-//! and forwarding the resulting output immediately so the watcher / prober see work as it lands.
-//! `run` wraps [`EngineDriver::tick`] until shutdown. All file I/O is on this thread — no Mutex.
+//! `run_initial_attach` walks `loader.current_config` in source order, attaching each Sub and
+//! forwarding the resulting output immediately so the watcher / prober see work as it lands. `run`
+//! wraps [`EngineDriver::tick`] until shutdown. All file I/O is on this thread — no Mutex.
 
 mod forward;
 mod ipc;
@@ -258,11 +258,10 @@ impl<W: FsWatcher> EngineDriver<W> {
         }
     }
 
-    /// Attach every active Sub and Promoter from `loader.current_config` in source order. Disabled
-    /// entries are filtered out via
-    /// [`Config::active_watches`](specter_config::Config::active_watches) /
-    /// [`Config::active_promoters`](specter_config::Config::active_promoters) — they remain in the
-    /// raw `Vec`s for introspection but never reach the engine, mirroring the "disabled = absent"
+    /// Attach every active Sub from `loader.current_config` in source order — static watches and
+    /// discovery templates ride the same list. Disabled entries are filtered out via
+    /// [`Config::active_watches`](specter_config::Config::active_watches) — they remain in the raw
+    /// `Vec` for introspection but never reach the engine, mirroring the "disabled = absent"
     /// discipline the diff layer applies to hot-reload.
     ///
     /// Each [`StepOutput`](specter_core::StepOutput) is forwarded as we go so the watcher / prober
@@ -272,9 +271,9 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// `Input::ConfigDiff` — because reload diffs are typically small. Revisit if those diffs grow
     /// large enough to stall the watcher behind a single `forward`.
     ///
-    /// No bin-side reconciliation: the engine owns `name → id` resolution through its registries'
-    /// `by_name` indices. The `SubAttached` / `PromoterAttached` diagnostics are pure operator
-    /// narration, logged via `forward`.
+    /// No bin-side reconciliation: the engine owns `name → id` resolution through its registry's
+    /// `by_name` index. The `SubAttached` diagnostics are pure operator narration, logged via
+    /// `forward`.
     ///
     /// Returns [`ControlFlow::Break`] if any `forward` observed a downstream channel disconnect
     /// (actuator-thread death surfaces as `effects_tx` returning `Err(Disconnected)`). On `Break`
@@ -285,7 +284,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// stays a thin branch on the `ControlFlow` return.
     pub(crate) fn run_initial_attach(&mut self) -> ControlFlow<()> {
         let now = Instant::now();
-        // Snapshot the active spec lists: `self.engine.step` needs `&mut self`, so the `&self`
+        // Snapshot the active spec list: `self.engine.step` needs `&mut self`, so the `&self`
         // borrow on `loader.current_config` cannot be held across the loop.
         let watch_specs: Vec<_> = self
             .loader
@@ -293,23 +292,9 @@ impl<W: FsWatcher> EngineDriver<W> {
             .active_watches()
             .cloned()
             .collect();
-        let promoter_specs: Vec<_> = self
-            .loader
-            .current_config()
-            .active_promoters()
-            .cloned()
-            .collect();
         for spec in watch_specs {
             let req = spec.to_attach_request();
             let out = self.engine.step(Input::AttachSub(req), now);
-            if self.forward(out).is_break() {
-                let _ = self.begin_shutdown();
-                return ControlFlow::Break(());
-            }
-        }
-        for spec in promoter_specs {
-            let req = spec.to_attach_request();
-            let out = self.engine.step(Input::AttachPromoter(req), now);
             if self.forward(out).is_break() {
                 let _ = self.begin_shutdown();
                 return ControlFlow::Break(());

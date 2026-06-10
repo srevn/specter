@@ -223,8 +223,8 @@ pub(crate) fn covering_profiles(
 /// command (its consequence is a reconcile) and is N=1-short, so holding an ancestor in Draining
 /// for it would defer real work for nothing. Both consumers — the `gated_fire` gate and the
 /// `finish_burst_to_idle` Draining-exit sweep — re-evaluate this same query, so they inherit the
-/// filter together. The exclusion is *not* transitive: [`chain_reaches`] stays shape-agnostic, so
-/// a mid-burst **minted** Standard descendant still holds the outer ancestor, resolving its chain
+/// filter together. The exclusion is *not* transitive: [`chain_reaches`] stays shape-agnostic, so a
+/// mid-burst **minted** Standard descendant still holds the outer ancestor, resolving its chain
 /// *through* the discovery Profile.
 pub(crate) fn has_active_standard_descendant(
     tree: &Tree,

@@ -703,10 +703,10 @@ fn run_initial_attach_attaches_static_only_config() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// A config with a dynamic `[[watch]]` routes through `attach_promoter` and registers the Promoter
-/// in the engine's registry.
+/// A config with a dynamic `[[watch]]` lowers to a discovery Sub — a template-bearing Sub in the
+/// one registry; the Promoter path is never taken.
 #[test]
-fn run_initial_attach_registers_promoter_for_dynamic_watch() {
+fn run_initial_attach_registers_discovery_sub_for_dynamic_watch() {
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg_path = tmp.path().join("specter.toml");
     let config = config_with_one_promoter(tmp.path());
@@ -714,20 +714,21 @@ fn run_initial_attach_registers_promoter_for_dynamic_watch() {
 
     let _ = rig.driver.run_initial_attach();
 
-    assert!(rig.driver.engine.subs().is_empty());
-    let pid = rig
+    let sid = rig
         .driver
         .engine
-        .promoters()
+        .subs()
         .find_by_name("logs")
-        .expect("Promoter 'logs' registered");
-    assert!(rig.driver.engine.promoters().get(pid).is_some());
+        .expect("discovery Sub 'logs' registered");
+    let sub = rig.driver.engine.subs().get(sid).expect("live Sub");
+    assert!(sub.template.is_some(), "dynamic watch lowers to a template");
+    assert!(rig.driver.engine.promoters().is_empty());
 
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Mixed static + dynamic config: the initial-attach loop walks both spec lists and populates both
-/// maps in one run.
+/// Mixed static + dynamic config: the initial-attach loop walks the one spec list and registers
+/// both kinds as Subs in one run.
 #[test]
 fn run_initial_attach_handles_mixed_static_and_dynamic() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -757,13 +758,13 @@ settle    = "50ms"
     let _ = rig.driver.run_initial_attach();
 
     assert!(rig.driver.engine.subs().find_by_name("build").is_some());
-    assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
+    assert!(rig.driver.engine.subs().find_by_name("logs").is_some());
 
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Disabled entries on either side are skipped at initial attach — neither the engine's Sub
-/// registry nor its Promoter registry sees the disabled rows.
+/// Disabled entries of either kind are skipped at initial attach — the engine's registry never sees
+/// the disabled rows.
 #[test]
 fn run_initial_attach_skips_disabled_entries() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -807,13 +808,11 @@ enabled   = false
     let _ = rig.driver.run_initial_attach();
 
     let subs = rig.driver.engine.subs();
-    let promoters = rig.driver.engine.promoters();
     assert!(subs.find_by_name("build").is_some());
     assert!(subs.find_by_name("build_off").is_none());
-    assert!(promoters.find_by_name("logs").is_some());
-    assert!(promoters.find_by_name("logs_off").is_none());
-    assert_eq!(subs.len(), 1);
-    assert_eq!(promoters.len(), 1);
+    assert!(subs.find_by_name("logs").is_some());
+    assert!(subs.find_by_name("logs_off").is_none());
+    assert_eq!(subs.len(), 2);
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -976,9 +975,9 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Reload that adds a dynamic [[watch]] registers a Promoter.
+/// Reload that adds a dynamic [[watch]] attaches a discovery Sub.
 #[test]
-fn reload_added_promoter_registers_in_engine() {
+fn reload_added_dynamic_watch_attaches_discovery_sub() {
     let tmp = tempfile::TempDir::new().unwrap();
     let initial_text = String::new();
     let new_text = format!(
@@ -996,21 +995,28 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(initial, cfg_path.clone());
     let _ = rig.driver.run_initial_attach();
-    assert!(rig.driver.engine.promoters().is_empty());
+    assert!(rig.driver.engine.subs().is_empty());
 
     std::fs::write(&cfg_path, &new_text).unwrap();
     let _ = rig
         .driver
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
+    let sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("logs")
+        .expect("discovery Sub 'logs' attached on reload");
+    let sub = rig.driver.engine.subs().get(sid).expect("live Sub");
+    assert!(sub.template.is_some());
 
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Reload that removes a dynamic [[watch]] reaps the Promoter.
+/// Reload that removes a dynamic [[watch]] detaches the discovery Sub.
 #[test]
-fn reload_removed_promoter_detaches_in_engine() {
+fn reload_removed_dynamic_watch_detaches_discovery_sub() {
     let tmp = tempfile::TempDir::new().unwrap();
     let initial_text = format!(
         r#"
@@ -1028,21 +1034,23 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(initial, cfg_path.clone());
     let _ = rig.driver.run_initial_attach();
-    assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
+    assert!(rig.driver.engine.subs().find_by_name("logs").is_some());
 
     std::fs::write(&cfg_path, &new_text).unwrap();
     let _ = rig
         .driver
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    assert!(rig.driver.engine.promoters().find_by_name("logs").is_none());
+    assert!(rig.driver.engine.subs().find_by_name("logs").is_none());
 
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Reload modifying a dynamic [[watch]] mints a fresh PromoterId under the same name.
+/// Reload modifying a dynamic [[watch]] — even a program-only edit — classifies `modified_identity`
+/// (the template head guard), so the engine wholesale-replaces: a fresh `SubId` under the same
+/// name, never an in-place rebind.
 #[test]
-fn reload_modified_promoter_replaces_id_in_engine() {
+fn reload_modified_dynamic_watch_replaces_sub_id() {
     let tmp = tempfile::TempDir::new().unwrap();
     let initial_text = format!(
         r#"
@@ -1068,33 +1076,34 @@ actions   = [{{ exec = ["echo"] }}]
 
     let mut rig = rig_for(initial, cfg_path.clone());
     let _ = rig.driver.run_initial_attach();
-    let old_pid = rig
+    let old_sid = rig
         .driver
         .engine
-        .promoters()
+        .subs()
         .find_by_name("logs")
-        .expect("Promoter 'logs' registered pre-reload");
+        .expect("discovery Sub 'logs' registered pre-reload");
 
     std::fs::write(&cfg_path, &new_text).unwrap();
     let _ = rig
         .driver
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    let new_pid = rig
+    let new_sid = rig
         .driver
         .engine
-        .promoters()
+        .subs()
         .find_by_name("logs")
-        .expect("Promoter 'logs' still registered post-reload");
-    assert_ne!(new_pid, old_pid);
+        .expect("discovery Sub 'logs' still registered post-reload");
+    assert_ne!(new_sid, old_sid);
 
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Static→dynamic migration via path edit. Diff emits `subs.removed + promoters.added`; engine
-/// registries swap.
+/// Static→dynamic migration via path edit. Template presence differs across the pair, so the diff
+/// classifies `modified_identity`; the engine swaps the static Sub for a discovery Sub under the
+/// same name.
 #[test]
-fn reload_static_to_dynamic_migration_swaps_engine_registries() {
+fn reload_static_to_dynamic_migration_swaps_sub_kind() {
     let tmp = tempfile::TempDir::new().unwrap();
     let initial_text = format!(
         r#"
@@ -1120,23 +1129,50 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(initial, cfg_path.clone());
     let _ = rig.driver.run_initial_attach();
-    assert!(rig.driver.engine.subs().find_by_name("foo").is_some());
-    assert!(rig.driver.engine.promoters().is_empty());
+    let static_sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("foo")
+        .expect("static Sub 'foo' attached");
+    assert!(
+        rig.driver
+            .engine
+            .subs()
+            .get(static_sid)
+            .expect("live Sub")
+            .template
+            .is_none()
+    );
 
     std::fs::write(&cfg_path, &new_text).unwrap();
     let _ = rig
         .driver
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    assert!(rig.driver.engine.subs().find_by_name("foo").is_none());
-    assert!(rig.driver.engine.promoters().find_by_name("foo").is_some());
+    let dyn_sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("foo")
+        .expect("discovery Sub 'foo' attached post-migration");
+    assert_ne!(dyn_sid, static_sid, "wholesale replace, not a rebind");
+    assert!(
+        rig.driver
+            .engine
+            .subs()
+            .get(dyn_sid)
+            .expect("live Sub")
+            .template
+            .is_some()
+    );
 
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Dynamic→static migration via path edit.
+/// Dynamic→static migration via path edit — the reverse swap under the same name.
 #[test]
-fn reload_dynamic_to_static_migration_swaps_engine_registries() {
+fn reload_dynamic_to_static_migration_swaps_sub_kind() {
     let tmp = tempfile::TempDir::new().unwrap();
     let initial_text = format!(
         r#"
@@ -1162,16 +1198,43 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(initial, cfg_path.clone());
     let _ = rig.driver.run_initial_attach();
-    assert!(rig.driver.engine.subs().is_empty());
-    assert!(rig.driver.engine.promoters().find_by_name("foo").is_some());
+    let dyn_sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("foo")
+        .expect("discovery Sub 'foo' attached");
+    assert!(
+        rig.driver
+            .engine
+            .subs()
+            .get(dyn_sid)
+            .expect("live Sub")
+            .template
+            .is_some()
+    );
 
     std::fs::write(&cfg_path, &new_text).unwrap();
     let _ = rig
         .driver
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    assert!(rig.driver.engine.promoters().find_by_name("foo").is_none());
-    assert!(rig.driver.engine.subs().find_by_name("foo").is_some());
+    let static_sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("foo")
+        .expect("static Sub 'foo' attached post-migration");
+    assert_ne!(static_sid, dyn_sid, "wholesale replace, not a rebind");
+    assert!(
+        rig.driver
+            .engine
+            .subs()
+            .get(static_sid)
+            .expect("live Sub")
+            .template
+            .is_none()
+    );
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -1721,19 +1784,19 @@ fn dispatch_reload_does_not_bump_counters_on_parse_fail() {
 
 /// [`EngineDriver::run_initial_attach`] runs against the loader's initial config *before* any
 /// [`EngineDriver::dispatch_reload`] (`Startup`) call. Initial-attach observes an empty engine and
-/// attaches each Sub / Promoter directly. A subsequent `dispatch_reload(Startup)` then sees an
-/// engine in sync with the loader — the diff's `added` bucket attaches new entries cleanly, neither
-/// colliding in [`specter_core::SubRegistry::insert`]'s `by_name` index nor in
-/// [`specter_core::PromoterRegistry::insert`]'s when the TOCTOU drift added a dynamic `[[watch]]`.
+/// attaches each Sub directly. A subsequent `dispatch_reload(Startup)` then sees an engine in sync
+/// with the loader — the diff's `added` bucket attaches new entries cleanly, never colliding in
+/// [`specter_core::SubRegistry::insert`]'s `by_name` index.
 ///
-/// Reversing the order would attach the diff's `added` Subs / Promoters against an empty engine,
-/// rotate the loader to the post-TOCTOU config, and then `run_initial_attach` would walk the
-/// rotated loader and double-attach those entries — tripping both registries' `debug_assert!` on
-/// the duplicate `by_name` insert.
+/// Reversing the order would attach the diff's `added` Subs against an empty engine, rotate the
+/// loader to the post-TOCTOU config, and then `run_initial_attach` would walk the rotated loader
+/// and double-attach those entries — tripping the registry's `debug_assert!` on the duplicate
+/// `by_name` insert.
 ///
-/// The test exercises both registry sites in one pass: the initial config holds one static Sub; the
-/// on-disk drift adds another static Sub AND a dynamic `[[watch]]` (a Promoter). The `last_reload_via
-/// = Startup` assertion is the secondary behavioural pin on the `Startup` attribution.
+/// The test exercises both watch kinds in one pass: the initial config holds one static Sub; the
+/// on-disk drift adds another static Sub AND a dynamic `[[watch]]` (a discovery Sub). The
+/// `last_reload_via = Startup` assertion is the secondary behavioural pin on the `Startup`
+/// attribution.
 #[test]
 fn startup_drift_after_initial_attach_does_not_double_attach() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -1752,8 +1815,8 @@ actions   = [{{ exec = ["true"] }}]
     let boot_config = Config::from_str(&boot_text).expect("boot config parses");
 
     // On-disk config — TOCTOU drift adds a static Sub `bar` AND a dynamic `[[watch]]` `logs`
-    // (lowered to a Promoter). Both kinds exercise their respective registry `debug_assert!` site
-    // under a buggy boot order.
+    // (lowered to a discovery Sub). Both kinds exercise the registry `debug_assert!` site under a
+    // buggy boot order.
     let drift_text = format!(
         r#"
 [[watch]]
@@ -1776,33 +1839,40 @@ actions   = [{{ exec = ["true"] }}]
 
     let mut rig = rig_for(boot_config, cfg_path);
 
-    // Step 1 — initial-attach against the loader's boot config. Engine ends with just `foo`
-    // attached; Promoter registry empty.
+    // Step 1 — initial-attach against the loader's boot config. Engine ends with just `foo` attached.
     let _ = rig.driver.run_initial_attach();
     assert!(rig.driver.engine.subs().find_by_name("foo").is_some());
     assert!(rig.driver.engine.subs().find_by_name("bar").is_none());
     assert_eq!(rig.driver.engine.subs().len(), 1);
-    assert!(rig.driver.engine.promoters().is_empty());
 
     // Step 2 — startup-TOCTOU dispatch_reload sees the drifted file, computes `diff(boot, drift)` =
-    // `{added: [bar], promoters_added: [logs]}`, and applies. With the engine in sync with the
-    // loader's pre-rotation boot state, the `added` buckets dispatch cleanly.
+    // `{added: [bar, logs]}`, and applies. With the engine in sync with the loader's pre-rotation
+    // boot state, the `added` bucket dispatches cleanly.
     let _ = rig
         .driver
         .dispatch_reload(ReloadTrigger::Startup, Instant::now());
 
     assert!(rig.driver.engine.subs().find_by_name("foo").is_some());
     assert!(rig.driver.engine.subs().find_by_name("bar").is_some());
+    let logs_sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("logs")
+        .expect("discovery Sub 'logs' attached exactly once");
+    assert!(
+        rig.driver
+            .engine
+            .subs()
+            .get(logs_sid)
+            .expect("live Sub")
+            .template
+            .is_some()
+    );
     assert_eq!(
         rig.driver.engine.subs().len(),
-        2,
-        "foo + bar each attached exactly once",
-    );
-    assert!(rig.driver.engine.promoters().find_by_name("logs").is_some());
-    assert_eq!(
-        rig.driver.engine.promoters().len(),
-        1,
-        "logs Promoter registered exactly once",
+        3,
+        "foo + bar + logs each attached exactly once",
     );
 
     // The trigger surfaces as `Startup` on the next `status` query — operators distinguish
@@ -2059,10 +2129,10 @@ max_settle = "500ms"
     let mut rig = rig_for(old, cfg_path);
 
     let unfiltered = specter_config::diff(rig.driver.loader.current_config(), &new);
-    assert_eq!(unfiltered.subs.added.len(), 1);
-    assert_eq!(unfiltered.subs.removed.len(), 1);
-    assert_eq!(unfiltered.subs.modified_identity.len(), 1);
-    assert_eq!(unfiltered.subs.modified_params.len(), 1);
+    assert_eq!(unfiltered.added.len(), 1);
+    assert_eq!(unfiltered.removed.len(), 1);
+    assert_eq!(unfiltered.modified_identity.len(), 1);
+    assert_eq!(unfiltered.modified_params.len(), 1);
 
     for name in [
         "to_be_added",
@@ -2076,10 +2146,10 @@ max_settle = "500ms"
     }
 
     let filtered = rig.driver.compute_watch_diff(&new);
-    assert!(filtered.subs.added.is_empty());
-    assert!(filtered.subs.removed.is_empty());
-    assert!(filtered.subs.modified_identity.is_empty());
-    assert!(filtered.subs.modified_params.is_empty());
+    assert!(filtered.added.is_empty());
+    assert!(filtered.removed.is_empty());
+    assert!(filtered.modified_identity.is_empty());
+    assert!(filtered.modified_params.is_empty());
 }
 
 #[test]
@@ -2100,8 +2170,8 @@ actions   = [{{ exec = ["true"] }}]
 
     let rig = rig_for(initial, cfg_path);
     let diff = rig.driver.compute_watch_diff(&new);
-    assert_eq!(diff.subs.added.len(), 1);
-    assert_eq!(diff.subs.added[0].params.name, "added");
+    assert_eq!(diff.added.len(), 1);
+    assert_eq!(diff.added[0].params.name, "added");
 }
 
 #[test]

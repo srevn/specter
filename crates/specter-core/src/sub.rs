@@ -768,8 +768,8 @@ impl SubRegistry {
     /// test behind the per-file recovery-drop signal.
     ///
     /// **Template-bearing Subs are excluded.** A discovery Sub stores the user's scope as the
-    /// minted Subs' reaction spec (the double-duty params reading), but its own reaction is
-    /// minting — it never fires a per-file Effect, so a per-file template scope must not trip the
+    /// minted Subs' reaction spec (the double-duty params reading), but its own reaction is minting
+    /// — it never fires a per-file Effect, so a per-file template scope must not trip the
     /// recovery-drop diagnostic on the discovery Profile. The minted Subs answer for themselves on
     /// their own Profiles, where their stored scope *is* their reaction.
     ///
@@ -1641,8 +1641,8 @@ mod tests {
     }
 
     /// A per-file *template* scope is minted-reaction payload, not this Profile's reaction — it
-    /// must not trip the per-file recovery-drop predicate. A plain per-file Sub on the same
-    /// Profile still does.
+    /// must not trip the per-file recovery-drop predicate. A plain per-file Sub on the same Profile
+    /// still does.
     #[test]
     fn has_per_stable_file_sub_excludes_template_bearing_subs() {
         let mut reg = SubRegistry::new();

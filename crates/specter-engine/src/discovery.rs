@@ -2,11 +2,11 @@
 //!
 //! A discovery Profile's scan shape is [`specter_core::ScanConfig::MatchChain`] and its Subs are
 //! discovery templates ([`specter_core::MintTemplate`]-bearing — the attach boundary asserts the
-//! coupling in both directions). A stable verdict on such a Profile *reconciles the match set*:
-//! for every chain terminus in the post-graft snapshot × every template on the Profile, mint a
-//! dynamic Sub unless one already exists. The burst then exits through the ordinary silent seal
-//! (`seal_baseline_silently`) — discovery fires attachments, never Effects, so nothing here
-//! touches burst state or crosses the Draining gate.
+//! coupling in both directions). A stable verdict on such a Profile *reconciles the match set*: for
+//! every chain terminus in the post-graft snapshot × every template on the Profile, mint a dynamic
+//! Sub unless one already exists. The burst then exits through the ordinary silent seal
+//! (`seal_baseline_silently`) — discovery fires attachments, never Effects, so nothing here touches
+//! burst state or crosses the Draining gate.
 //!
 //! Reconcile is **add-only and idempotent**: a full walk of `current` gated by the registry-derived
 //! dedup query, so cold-Seed first enumeration, Standard re-reconcile, post-recovery re-mint, and
@@ -115,8 +115,8 @@ impl Engine {
     /// [`Consequence::Reconcile`](crate::transitions) body. Mints a dynamic Sub per (chain terminus
     /// × template) that the dedup query doesn't already know; never removes anything.
     ///
-    /// Registry/tree/attach work only — no burst-state writer: the caller (`fire_or_seal`) runs
-    /// the silent seal *after* this returns, so the burst exits through the existing category-(a)
+    /// Registry/tree/attach work only — no burst-state writer: the caller (`fire_or_seal`) runs the
+    /// silent seal *after* this returns, so the burst exits through the existing category-(a)
     /// terminus. The template set is derived from the live registry at entry, which makes the
     /// zombie case self-correcting: a template detached mid-burst (its cascade already reaped the
     /// minted set) is simply absent here, so the in-flight burst's reconcile mints nothing and the
@@ -190,8 +190,8 @@ impl Engine {
             // Slot dance, `try_promote`'s semantics verbatim: `ensure_child` is get-or-create, so
             // the walk is idempotent over the chain-dir slots the post-graft reconciler already
             // created (role `User`) and creates only the terminus slots (Uncovered dirs / leaves
-            // get no reconciler contribution). Stamping the observed kind lets `Profile.kind`
-            // cache at attach instead of waiting for the minted Profile's first Seed probe.
+            // get no reconciler contribution). Stamping the observed kind lets `Profile.kind` cache
+            // at attach instead of waiting for the minted Profile's first Seed probe.
             let mut slot = anchor;
             for seg in &terminus.segments {
                 slot = self

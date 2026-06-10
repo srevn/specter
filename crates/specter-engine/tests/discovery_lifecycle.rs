@@ -4,8 +4,8 @@
 //! template) → Standard re-reconcile → vanish/recovery/overflow/cascade with synthetic
 //! [`ProbeResponse`] injections, the same pattern `promoter_lifecycle.rs` uses. The inline tests
 //! (`src/discovery_tests.rs`) pin the pure collector and the attach-boundary asserts; this file
-//! pins the composed behaviour: consequence routing, dedup convergence, lifecycle diagnostics,
-//! the Draining-gate shape filter, and the converged-state equivalence with the live Promoter.
+//! pins the composed behaviour: consequence routing, dedup convergence, lifecycle diagnostics, the
+//! Draining-gate shape filter, and the converged-state equivalence with the live Promoter.
 //!
 //! Assertions are **converged-state**, never step traces, wherever the Promoter is the reference:
 //! probe cadences legitimately differ between the two machines (per-level enumeration vs one
@@ -219,9 +219,9 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
     );
 }
 
-/// A storm of chain events inside one settle window coalesces into one Batching window, one
-/// probe, one reconcile that mints everything — the unification's storm-cost claim (the Promoter
-/// ran one enumeration per event).
+/// A storm of chain events inside one settle window coalesces into one Batching window, one probe,
+/// one reconcile that mints everything — the unification's storm-cost claim (the Promoter ran one
+/// enumeration per event).
 #[test]
 fn storm_coalesces_to_one_probe_and_one_reconcile() {
     let mut e = Engine::new();
@@ -270,9 +270,9 @@ fn storm_coalesces_to_one_probe_and_one_reconcile() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Terminus-internal churn drives a benign, terminus-scoped no-op reconcile — and across the
-/// whole scenario the discovery Profile never leaves `Idle | Active(PreFire)`: no Draining, no
-/// PostFire, structurally.
+/// Terminus-internal churn drives a benign, terminus-scoped no-op reconcile — and across the whole
+/// scenario the discovery Profile never leaves `Idle | Active(PreFire)`: no Draining, no PostFire,
+/// structurally.
 #[test]
 fn terminus_churn_is_a_noop_reconcile_and_never_leaves_pre_fire() {
     let mut e = Engine::new();
@@ -319,8 +319,8 @@ fn terminus_churn_is_a_noop_reconcile_and_never_leaves_pre_fire() {
 }
 
 /// A vanished terminus reaps its minted Sub through the minted Profile's own anchor-terminal path
-/// (`DiscoverySubReaped` + `SubDetached(AnchorLost)`); the next reconcile mints nothing; the
-/// path's reappearance re-mints under a fresh `SubId`.
+/// (`DiscoverySubReaped` + `SubDetached(AnchorLost)`); the next reconcile mints nothing; the path's
+/// reappearance re-mints under a fresh `SubId`.
 #[test]
 fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
     let mut e = Engine::new();
@@ -456,8 +456,8 @@ fn detach_discovery_template_cascades_to_minted_subs() {
     assert_eq!(e.subs().iter().count(), 0, "registry fully unwound");
 }
 
-/// Two templates on the same pattern share one discovery Profile and one walk; the reconcile
-/// mints per (terminus × template), and identical minted identities share minted Profiles.
+/// Two templates on the same pattern share one discovery Profile and one walk; the reconcile mints
+/// per (terminus × template), and identical minted identities share minted Profiles.
 #[test]
 fn second_template_shares_profile_and_walk_mints_per_template() {
     let mut e = Engine::new();
@@ -500,8 +500,8 @@ fn second_template_shares_profile_and_walk_mints_per_template() {
 }
 
 /// Prefix `rm -rf` recovery: minted Subs reap bottom-up via their own anchors, the discovery
-/// Profile recovers through `watch_root_parent` descent, and the recovery Seed's consequence is
-/// a re-minting Reconcile — with **no** `PerFileDriftDroppedOnRecovery` even though the template
+/// Profile recovers through `watch_root_parent` descent, and the recovery Seed's consequence is a
+/// re-minting Reconcile — with **no** `PerFileDriftDroppedOnRecovery` even though the template
 /// stores a per-file scope (the template's reaction is minting, not a per-file Effect).
 #[test]
 fn prefix_rm_rf_recovery_remints_without_per_file_warning() {
@@ -660,8 +660,8 @@ fn overflow_reseed_recovers_missed_mints() {
 }
 
 /// An armed operator `absorb` window is inert for discovery: the reconcile proceeds (mints land)
-/// and no `QuiescenceAbsorbed` is narrated — the early classify return precedes the fold
-/// override, so the latch is never consumed.
+/// and no `QuiescenceAbsorbed` is narrated — the early classify return precedes the fold override,
+/// so the latch is never consumed.
 #[test]
 fn absorb_window_is_inert_for_discovery() {
     let mut e = Engine::new();
@@ -710,8 +710,8 @@ fn absorb_window_is_inert_for_discovery() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `max_settle` ceiling expiry under churn forces the probe and the forced verdict still
-/// reconciles and seals — promotion latency stays bounded.
+/// `max_settle` ceiling expiry under churn forces the probe and the forced verdict still reconciles
+/// and seals — promotion latency stays bounded.
 #[test]
 fn forced_ceiling_reconciles_and_seals() {
     let mut e = Engine::new();
@@ -753,9 +753,9 @@ fn forced_ceiling_reconciles_and_seals() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Draining-gate filter, exclusion direction: a mid-burst **discovery** descendant does not hold
-/// a covering user Profile in Draining — the gate protects against descendant *command* activity
-/// and discovery fires none.
+/// Draining-gate filter, exclusion direction: a mid-burst **discovery** descendant does not hold a
+/// covering user Profile in Draining — the gate protects against descendant *command* activity and
+/// discovery fires none.
 #[test]
 fn mid_burst_discovery_descendant_does_not_drain_covering_profile() {
     let mut e = Engine::new();
@@ -785,8 +785,8 @@ fn mid_burst_discovery_descendant_does_not_drain_covering_profile() {
     let _ = respond(&mut e, disc_pid, &chain, seed_done);
     settle_minted_seeds(&mut e, tpl_sid, seed_done);
 
-    // One event at the discovery anchor opens both bursts (outer covers it recursively); the
-    // minted Profile (deeper) stays Idle. Answer the outer verify first, while discovery is still
+    // One event at the discovery anchor opens both bursts (outer covers it recursively); the minted
+    // Profile (deeper) stays Idle. Answer the outer verify first, while discovery is still
     // mid-burst Verifying.
     let t1 = seed_done + Duration::from_millis(10);
     let _ = e.step(
@@ -993,8 +993,8 @@ fn fanout_threshold_warns_exactly_once() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// The converged dynamic-Sub set as `(name, config_hash, settle, scope)` — the
-/// machine-independent projection both engines of the differential test are compared on.
+/// The converged dynamic-Sub set as `(name, config_hash, settle, scope)` — the machine-independent
+/// projection both engines of the differential test are compared on.
 fn converged(
     e: &Engine,
     dynamic: impl Fn(&Sub) -> bool,
@@ -1135,9 +1135,8 @@ fn discovery_converges_to_the_promoter_registry_shape() {
     let _ = b.cancel_all_in_flight_probes();
 }
 
-/// Two identically-driven engines produce identical mint narration and identical minted-Sub /
-/// anchor id sequences — reconcile order is deterministic (lexicographic termini × SubId-sorted
-/// templates).
+/// Two identically-driven engines produce identical mint narration and identical minted-Sub / anchor
+/// id sequences — reconcile order is deterministic (lexicographic termini × SubId-sorted templates).
 #[test]
 fn identically_driven_engines_mint_identically() {
     let drive = || {
@@ -1178,8 +1177,8 @@ fn identically_driven_engines_mint_identically() {
     assert_eq!((a1, a2), (b1, b2), "identical minted ids and anchors");
 }
 
-/// A dynamic pattern whose literal prefix doesn't exist yet attaches `Pending`, walks the
-/// ordinary descent, and the materialisation Seed's consequence is the first reconcile.
+/// A dynamic pattern whose literal prefix doesn't exist yet attaches `Pending`, walks the ordinary
+/// descent, and the materialisation Seed's consequence is the first reconcile.
 #[test]
 fn pending_prefix_descends_then_first_reconcile_mints() {
     let mut e = Engine::new();
