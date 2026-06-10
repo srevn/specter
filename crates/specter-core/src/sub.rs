@@ -792,7 +792,10 @@ impl SubRegistry {
 
 #[cfg(test)]
 mod tests {
-    use super::{ActionProgram, EffectScope, Sub, SubParams, SubRegistry, SubRegistryDiff};
+    use super::{
+        ActionProgram, ClassSet, EffectScope, MintTemplate, ProfileIdentity, ScanConfig, Sub,
+        SubParams, SubRegistry, SubRegistryDiff,
+    };
     use crate::ids::{ProfileId, PromoterId, SubId};
     use crate::program::{
         ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder, SpawnBody,
@@ -1496,6 +1499,178 @@ mod tests {
             },
         );
         assert!(res.is_none(), "stale SubId yields None");
+    }
+
+    /// A template-bearing `SubParams` fixture. The minted identity is an arbitrary `Subtree` scan:
+    /// the template ⟺ `MatchChain` coupling is the engine attach boundary's invariant, not the
+    /// registry's — these pins exercise registry mechanics only.
+    fn template_params(name: &str) -> SubParams {
+        SubParams {
+            name: name.into(),
+            program: anchor_only_program(),
+            scope: EffectScope::SubtreeRoot,
+            settle: SETTLE,
+            log_output: false,
+            source_promoter: None,
+            template: Some(Arc::new(MintTemplate {
+                identity: ProfileIdentity {
+                    config: ScanConfig::builder().build(),
+                    max_settle: SETTLE * 4,
+                    events: ClassSet::EMPTY,
+                },
+                settle: SETTLE,
+            })),
+            source_discovery: None,
+        }
+    }
+
+    /// The fan-out latch crossing edge: strict-greater (`count == threshold` does not cross), the
+    /// first crossing returns the count and latches, later crossings are silent — one warning per
+    /// template lifetime, structural in the check-and-latch.
+    #[test]
+    fn latch_fanout_warning_crosses_strict_greater_exactly_once() {
+        let mut reg = SubRegistry::new();
+        let sid = reg.insert(Sub::from_request(
+            ProfileId::default(),
+            template_params("disc"),
+        ));
+        assert_eq!(
+            reg.latch_fanout_warning(sid, 3, 3),
+            None,
+            "count == threshold does not cross (strict greater)",
+        );
+        assert!(
+            !reg.get(sid)
+                .unwrap()
+                .template
+                .as_ref()
+                .unwrap()
+                .fanout_warned,
+            "a non-crossing probe leaves the latch open",
+        );
+        assert_eq!(
+            reg.latch_fanout_warning(sid, 3, 4),
+            Some(4),
+            "first crossing returns the count and latches",
+        );
+        assert_eq!(
+            reg.latch_fanout_warning(sid, 3, 5),
+            None,
+            "latched: later crossings are silent",
+        );
+    }
+
+    /// A non-template Sub and a stale id both yield a silent `None` — the latch lives on the
+    /// template carrier, so the miss mirrors `mark_fired`'s died-with-the-entry contract.
+    #[test]
+    fn latch_fanout_warning_none_for_non_template_and_stale_id() {
+        let mut reg = SubRegistry::new();
+        let plain = reg.insert(Sub::from_request(
+            ProfileId::default(),
+            SubParams {
+                name: "build".into(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+                template: None,
+                source_discovery: None,
+            },
+        ));
+        assert_eq!(
+            reg.latch_fanout_warning(plain, 0, 10),
+            None,
+            "non-template Sub: the latch has no home",
+        );
+        reg.remove(plain).expect("removed");
+        assert_eq!(
+            reg.latch_fanout_warning(plain, 0, 10),
+            None,
+            "stale id: silent miss",
+        );
+    }
+
+    /// Rebind tripwire: `source_discovery` is a synthesis-origin identity field — crossing the
+    /// static↔dynamic boundary in place would silently re-attribute the Sub's cascade membership.
+    #[test]
+    #[should_panic(expected = "source_discovery")]
+    fn rebind_panics_on_source_discovery_change() {
+        let mut reg = SubRegistry::new();
+        let sid = reg.insert(Sub::from_request(
+            ProfileId::default(),
+            SubParams {
+                name: "build".into(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+                template: None,
+                source_discovery: None,
+            },
+        ));
+        let _ = reg.rebind(
+            sid,
+            SubParams {
+                name: "build".into(),
+                program: anchor_only_program(),
+                scope: EffectScope::SubtreeRoot,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+                template: None,
+                source_discovery: Some(SubId::default()),
+            },
+        );
+    }
+
+    /// Rebind tripwire: a template-bearing Sub never rebinds in place — minted Subs hold `Arc`s of
+    /// the template's program, so an in-place swap would strand them on stale reaction state. The
+    /// config diff classifies any template-spec change as `modified_identity` (reap + reattach);
+    /// this assert is the core-side floor under that rule.
+    #[test]
+    #[should_panic(expected = "template")]
+    fn rebind_panics_on_template_bearing_sub() {
+        let mut reg = SubRegistry::new();
+        let sid = reg.insert(Sub::from_request(
+            ProfileId::default(),
+            template_params("disc"),
+        ));
+        let _ = reg.rebind(sid, template_params("disc"));
+    }
+
+    /// A per-file *template* scope is minted-reaction payload, not this Profile's reaction — it
+    /// must not trip the per-file recovery-drop predicate. A plain per-file Sub on the same
+    /// Profile still does.
+    #[test]
+    fn has_per_stable_file_sub_excludes_template_bearing_subs() {
+        let mut reg = SubRegistry::new();
+        let pid = ProfileId::default();
+        let mut tp = template_params("disc");
+        tp.scope = EffectScope::PerStableFile;
+        reg.insert(Sub::from_request(pid, tp));
+        assert!(
+            !reg.has_per_stable_file_sub(pid),
+            "a discovery Sub's reaction is minting, never a per-file Effect",
+        );
+        reg.insert(Sub::from_request(
+            pid,
+            SubParams {
+                name: "fmt".into(),
+                program: anchor_only_program(),
+                scope: EffectScope::PerStableFile,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+                template: None,
+                source_discovery: None,
+            },
+        ));
+        assert!(
+            reg.has_per_stable_file_sub(pid),
+            "a plain per-file Sub still trips the predicate",
+        );
     }
 }
 

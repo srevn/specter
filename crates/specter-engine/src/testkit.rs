@@ -13,11 +13,11 @@ use crate::Engine;
 use specter_core::testkit::{enumerated, proven};
 use specter_core::{
     ActiveBurst, ClassSet, DedupKey, DirSnapshot, EffectCompletion, EffectOutcome, EffectScope,
-    FS_ROOT_SEGMENT, FsEvent, Input, PatternSpec, PostFireBurst, PostFirePhase, PreFireBurst,
-    PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse, ProfileId,
-    ProfileIdentity, ProfileState, PromoterAttachRequest, PromoterId, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, TimerId,
-    WatchFailure,
+    FS_ROOT_SEGMENT, FsEvent, Input, MintTemplate, PatternSpec, PostFireBurst, PostFirePhase,
+    PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeOwner, ProbeResponse,
+    ProfileId, ProfileIdentity, ProfileState, PromoterAttachRequest, PromoterId, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
+    SubParams, TimerId, WatchFailure,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -617,6 +617,110 @@ pub fn dynamic_subs_of(e: &Engine, pid: PromoterId) -> BTreeMap<ResourceId, SubI
                 .expect("a live dynamic Sub's Profile is live")
                 .resource();
             (anchor, sid)
+        })
+        .collect()
+}
+
+/// The fixture [`MintTemplate`] — minted identity byte-equal to [`promoter_req`]'s.
+///
+/// `recursive` `Subtree`, `ClassSet::EMPTY`, `MAX_SETTLE`; minted debounce `SETTLE`. The
+/// equality lets the differential test compare converged `(name, config_hash, settle, scope)`
+/// sets against the live Promoter without an identity-mismatch confound.
+#[must_use]
+pub fn mint_template() -> Arc<MintTemplate> {
+    Arc::new(MintTemplate {
+        identity: ProfileIdentity {
+            config: ScanConfig::builder().recursive(true).build(),
+            max_settle: MAX_SETTLE,
+            events: ClassSet::EMPTY,
+        },
+        settle: SETTLE,
+    })
+}
+
+/// Attach a discovery template Sub for `pattern` at `anchor`, returning the attach `StepOutput` too.
+///
+/// The discovery Sub's own identity mirrors the Stage 3 lowering constants in fixture form:
+/// `MatchChain(pattern)`, `ClassSet::STRUCTURE` (membership changes are the chain proof object's
+/// only witness classes, so the Profile folds `EventsReliable`), `MAX_SETTLE` / `SETTLE`,
+/// `/bin/true`. `scope` is explicit because it doubles as the minted Subs' reaction scope — the
+/// per-file recovery-warn pin needs `PerStableFile` here. `anchor` is explicit (pre-placed
+/// `Resource` or pending `Path`) because Stage 2 has no config lowering to render the literal
+/// prefix.
+#[must_use]
+pub fn attach_discovery_returning(
+    e: &mut Engine,
+    name: &str,
+    anchor: SubAttachAnchor,
+    pattern: &str,
+    template: Arc<MintTemplate>,
+    scope: EffectScope,
+    now: Instant,
+) -> (SubId, ProfileId, StepOutput) {
+    let spec = Arc::new(PatternSpec::parse(pattern).expect("valid test pattern"));
+    let out = e.step(
+        Input::AttachSub(SubAttachRequest::from_parts(
+            anchor,
+            ProfileIdentity {
+                config: ScanConfig::MatchChain(spec),
+                max_settle: MAX_SETTLE,
+                events: ClassSet::STRUCTURE,
+            },
+            SubParams {
+                name: name.into(),
+                program: specter_core::testkit::empty_program(),
+                scope,
+                settle: SETTLE,
+                log_output: false,
+                source_promoter: None,
+                template: Some(template),
+                source_discovery: None,
+            },
+        )),
+        now,
+    );
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_discovery succeeded");
+    let pid = pid_of(e, sid);
+    (sid, pid, out)
+}
+
+/// [`attach_discovery_returning`] with the fixture `SubtreeRoot` scope, discarding the attach
+/// `StepOutput` — the common case.
+#[must_use]
+pub fn attach_discovery(
+    e: &mut Engine,
+    name: &str,
+    anchor: SubAttachAnchor,
+    pattern: &str,
+    template: Arc<MintTemplate>,
+    now: Instant,
+) -> (SubId, ProfileId) {
+    let (sid, pid, _) = attach_discovery_returning(
+        e,
+        name,
+        anchor,
+        pattern,
+        template,
+        EffectScope::SubtreeRoot,
+        now,
+    );
+    (sid, pid)
+}
+
+/// The live `(anchor → SubId)` set minted by discovery template `sid`, derived from `SubRegistry`
+/// truth — the discovery sibling of [`dynamic_subs_of`].
+#[must_use]
+pub fn discovery_subs_of(e: &Engine, sid: SubId) -> BTreeMap<ResourceId, SubId> {
+    e.subs()
+        .iter()
+        .filter(|(_, s)| s.source_discovery == Some(sid))
+        .map(|(mid, s)| {
+            let anchor = e
+                .profiles()
+                .get(s.profile())
+                .expect("a live minted Sub's Profile is live")
+                .resource();
+            (anchor, mid)
         })
         .collect()
 }

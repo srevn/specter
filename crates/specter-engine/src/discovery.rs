@@ -300,3 +300,7 @@ impl Engine {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "discovery_tests.rs"]
+mod discovery_tests;
