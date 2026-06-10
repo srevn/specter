@@ -1454,7 +1454,7 @@ mod tests {
     use super::{Config, LogConfig, LogDestination, LogLevel, SubAttachAnchor, SubSpec};
     use crate::error::{ConfigError, IssueKind};
     use specter_core::program::SpawnBody;
-    use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder};
+    use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder, ScanConfig};
     use std::path::Path;
     use std::time::Duration;
 
@@ -1610,11 +1610,21 @@ mod tests {
         assert_eq!(w.scope, EffectScope::SubtreeRoot);
         assert_eq!(w.settle, Duration::from_millis(200));
         assert_eq!(w.max_settle, Duration::from_hours(1));
-        assert!(w.scan.recursive);
-        assert!(!w.scan.hidden);
-        assert!(w.scan.exclude.is_empty());
-        assert!(w.scan.pattern.is_none());
-        assert_eq!(w.scan.max_depth, None);
+        let ScanConfig::Subtree {
+            recursive,
+            hidden,
+            exclude,
+            pattern,
+            max_depth,
+        } = &w.scan
+        else {
+            panic!("static watch lowers to Subtree, got {:?}", w.scan);
+        };
+        assert!(*recursive);
+        assert!(!*hidden);
+        assert!(exclude.is_empty());
+        assert!(pattern.is_none());
+        assert_eq!(*max_depth, None);
         let SpawnBody::Exec(exec) = w.program.ops()[0].body() else {
             panic!("expected SpawnBody::Exec");
         };
@@ -1945,16 +1955,26 @@ mod tests {
     fn brace_expansion_pattern_compiles() {
         let toml = minimal_toml("pattern = \"**/*.{c,h,rs}\"\n");
         let cfg = Config::from_str(&toml).unwrap();
-        assert!(cfg.watches[0].scan.pattern.is_some());
+        let ScanConfig::Subtree { pattern, .. } = &cfg.watches[0].scan else {
+            panic!(
+                "static watch lowers to Subtree, got {:?}",
+                cfg.watches[0].scan
+            );
+        };
+        assert!(pattern.is_some());
     }
 
     #[test]
     fn excludes_sorted_by_source_after_validate() {
         let toml = minimal_toml("exclude = [\"z/**\", \"a/**\", \"m/**\"]\n");
         let cfg = Config::from_str(&toml).unwrap();
-        let sources: Vec<&str> = cfg.watches[0]
-            .scan
-            .exclude
+        let ScanConfig::Subtree { exclude, .. } = &cfg.watches[0].scan else {
+            panic!(
+                "static watch lowers to Subtree, got {:?}",
+                cfg.watches[0].scan
+            );
+        };
+        let sources: Vec<&str> = exclude
             .iter()
             .map(specter_core::GlobPattern::source)
             .collect();
@@ -2188,7 +2208,10 @@ mod tests {
         assert_eq!(w.scope, EffectScope::SubtreeRoot);
         assert_eq!(w.settle, Duration::from_millis(200));
         assert_eq!(w.max_settle, Duration::from_hours(1));
-        assert!(w.scan.recursive);
+        let ScanConfig::Subtree { recursive, .. } = &w.scan else {
+            panic!("static watch lowers to Subtree, got {:?}", w.scan);
+        };
+        assert!(*recursive);
     }
 
     #[test]
@@ -2396,7 +2419,10 @@ mod tests {
         assert_eq!(p.scope, EffectScope::SubtreeRoot);
         assert_eq!(p.settle, Duration::from_millis(200));
         assert_eq!(p.max_settle, Duration::from_hours(1));
-        assert!(p.scan.recursive);
+        let ScanConfig::Subtree { recursive, .. } = &p.scan else {
+            panic!("dynamic watch lowers to Subtree, got {:?}", p.scan);
+        };
+        assert!(*recursive);
         assert_eq!(p.events, ClassSet::DEFAULT_SUBTREE_ROOT);
         assert!(!p.log_output);
     }
@@ -2421,9 +2447,21 @@ mod tests {
         assert_eq!(req.identity.max_settle, Duration::from_millis(1200));
         assert_eq!(req.identity.events, ClassSet::CONTENT);
         assert!(req.log_output);
-        assert!(!req.identity.config.recursive);
-        assert!(req.identity.config.hidden);
-        assert!(req.identity.config.pattern.is_some());
+        let ScanConfig::Subtree {
+            recursive,
+            hidden,
+            pattern,
+            ..
+        } = &req.identity.config
+        else {
+            panic!(
+                "dynamic watch lowers to Subtree, got {:?}",
+                req.identity.config
+            );
+        };
+        assert!(!*recursive);
+        assert!(*hidden);
+        assert!(pattern.is_some());
     }
 
     /// Dynamic watches accept `pattern` (per-Sub include filter) and `exclude` (per-Sub exclude
@@ -2436,8 +2474,14 @@ mod tests {
                     exclude = [\"*.gz\"]\n";
         let cfg = Config::from_str(toml).unwrap();
         let p = &cfg.promoters[0];
-        assert!(p.scan.pattern.is_some());
-        assert_eq!(p.scan.exclude.len(), 1);
+        let ScanConfig::Subtree {
+            pattern, exclude, ..
+        } = &p.scan
+        else {
+            panic!("dynamic watch lowers to Subtree, got {:?}", p.scan);
+        };
+        assert!(pattern.is_some());
+        assert_eq!(exclude.len(), 1);
     }
 
     /// Multiple errors in one dynamic watch accumulate — pattern parse failure does NOT

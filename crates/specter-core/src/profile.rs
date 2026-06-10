@@ -2099,9 +2099,11 @@ struct ProfileConfig {
 
 impl ProfileConfig {
     /// Derive all three caches from a frozen [`ProfileIdentity`]. The canonical hash route is
-    /// [`ProfileIdentity::config_hash`]; `exclude_strings` projects `config.exclude` in the
-    /// builder-canonical order (already sorted by source, so no re-sort); `has_per_file_fds` is true
-    /// iff the event mask carries CONTENT or METADATA (covered Leaves then need their own FDs).
+    /// [`ProfileIdentity::config_hash`]; `exclude_strings` projects
+    /// [`ScanConfig::exclude_globs`](crate::ScanConfig::exclude_globs) in the builder-canonical
+    /// order (already sorted by source, so no re-sort; the empty slice for shapes that carry no
+    /// excludes); `has_per_file_fds` is true iff the event mask carries CONTENT or METADATA
+    /// (covered Leaves then need their own FDs).
     fn new(identity: ProfileIdentity) -> Self {
         let config_hash = identity.config_hash();
         let has_per_file_fds = identity
@@ -2109,7 +2111,7 @@ impl ProfileConfig {
             .intersects(ClassSet::CONTENT | ClassSet::METADATA);
         let exclude_strings: Arc<[CompactString]> = identity
             .config
-            .exclude
+            .exclude_globs()
             .iter()
             .map(|g| CompactString::from(g.source()))
             .collect();

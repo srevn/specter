@@ -2973,9 +2973,9 @@ fn sensor_overflow_armed_verifying_reap_emits_cancel_only() {
 
 #[test]
 fn sensor_overflow_pending_profile_with_in_flight_probe_not_duplicated() {
-    // Pending(_) Profile with the descent probe still in flight: the overflow re-probe skips
-    // inside `on_descent_event` (I5 — the in-flight probe's response already reflects the
-    // post-overflow tree), preserving the armed slot and emitting no second probe.
+    // Pending(_) Profile with the descent probe still in flight: the overflow re-probe skips inside
+    // `on_descent_event` (I5 — the in-flight probe's response already reflects the post-overflow
+    // tree), preserving the armed slot and emitting no second probe.
     let mut e = Engine::new();
     let req = SubAttachRequest::for_anchor(
         "guard".into(),
@@ -3036,10 +3036,10 @@ fn sensor_overflow_pending_profile_with_in_flight_probe_not_duplicated() {
 
 #[test]
 fn sensor_overflow_pending_profile_reprobes() {
-    // Pending(_) Profile with a DISARMED descent slot (a prior probe found the next segment
-    // absent / failed, so the descent is waiting on an IN_CREATE): overflow re-probes the current
-    // prefix. Without the re-probe, an IN_CREATE lost to the unreliable window wedges the descent
-    // forever — the stall this pins against.
+    // Pending(_) Profile with a DISARMED descent slot (a prior probe found the next segment absent
+    // / failed, so the descent is waiting on an IN_CREATE): overflow re-probes the current prefix.
+    // Without the re-probe, an IN_CREATE lost to the unreliable window wedges the descent forever —
+    // the stall this pins against.
     let mut e = Engine::new();
     let a = e
         .tree
@@ -3066,9 +3066,8 @@ fn sensor_overflow_pending_profile_reprobes() {
         .pending_probe_for(ProbeOwner::Profile(pid))
         .expect("fixture: descent probe in flight at /a");
 
-    // Failed response: descent retains state (current_prefix = /a) but the slot disarms — the
-    // exact "awaiting an event the kernel may have dropped" shape the overflow re-probe exists
-    // for.
+    // Failed response: descent retains state (current_prefix = /a) but the slot disarms — the exact
+    // "awaiting an event the kernel may have dropped" shape the overflow re-probe exists for.
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: ProbeOwner::Profile(pid),

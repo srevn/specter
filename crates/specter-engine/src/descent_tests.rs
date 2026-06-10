@@ -41,8 +41,8 @@ fn empty_program() -> Arc<ActionProgram> {
     ])])
 }
 
-/// Build an `Arc<DirSnapshot>` carrying the supplied single-component children. Descent probes ship
-/// `recursive=false`, so every descent test response is a single-level `DirSnapshot`; this helper
+/// Build an `Arc<DirSnapshot>` carrying the supplied single-component children. Descent probes walk
+/// a single level, so every descent test response is a single-level `DirSnapshot`; this helper
 /// matches that shape exactly. Recursive uses are out of scope for the descent test surface
 /// (recursive walks live in burst tests). The typed `ProbeOutcome::DirEnumerated` variant takes
 /// `Arc<DirSnapshot>` directly — no `TreeSnapshot::Dir` wrap is needed at the wire boundary.
@@ -586,9 +586,9 @@ fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
 }
 
 /// Descent probes ride a dedicated `ProbeRequest::Descent` variant — the engine ships only `(profile,
-/// correlation, target_path)`, leaving the scan-config override (recursive=false, hidden=true, no
-/// pattern/exclude) entirely to the walker. Since the engine carries no scan-config on the wire, the
-/// override correctness lives in the sensor's walker tests; this engine test pins the variant choice.
+/// correlation, target_path)`, leaving the admit-all single-level scan shape (`ScanConfig::Descent`)
+/// entirely to the walker. Since the engine carries no scan-config on the wire, the shape's
+/// correctness lives in the sensor's walker tests; this engine test pins the variant choice.
 #[test]
 fn descent_probe_uses_descent_variant() {
     let mut e = Engine::new();

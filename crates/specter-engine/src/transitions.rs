@@ -1524,8 +1524,8 @@ impl Engine {
                     // No baseline to drift-test — re-probe the descent prefix instead, so an
                     // IN_CREATE lost to the unreliable window can't wedge the descent (a disarmed
                     // slot would otherwise wait forever for an event the kernel already dropped).
-                    // Skips internally when a probe is already in flight (its response reflects
-                    // the post-overflow tree). No per-Profile diagnostic — consistent with the
+                    // Skips internally when a probe is already in flight (its response reflects the
+                    // post-overflow tree). No per-Profile diagnostic — consistent with the
                     // Idle/Active arms; the step's SensorOverflow diagnostic covers it.
                     self.on_descent_event(ProbeOwner::Profile(pid), now, out);
                 }
@@ -1541,10 +1541,9 @@ impl Engine {
         };
 
         for qid in promoters_to_reseed {
-            // Project the relevant state into a local enum so the borrow on
-            // `self.promoters.get(qid)` ends before the `&mut self` calls below
-            // (on_descent_event, dispatch_next_enumeration). Stale id ⇒ skip without emitting the
-            // reseed diagnostic — the Promoter is gone.
+            // Project the relevant state into a local enum so the borrow on `self.promoters.get(qid)`
+            // ends before the `&mut self` calls below (on_descent_event, dispatch_next_enumeration).
+            // Stale id ⇒ skip without emitting the reseed diagnostic — the Promoter is gone.
             let action = match self.promoters.get(qid) {
                 None => continue,
                 Some(q) => match q.state() {
@@ -1556,9 +1555,9 @@ impl Engine {
             };
 
             let reseeded = match action {
-                // The in-flight gate lives inside on_descent_event (single source): a probe
-                // already in flight skips the re-arm — its response reflects the post-overflow
-                // state — and the `false` return suppresses the diagnostic below.
+                // The in-flight gate lives inside on_descent_event (single source): a probe already
+                // in flight skips the re-arm — its response reflects the post-overflow state — and
+                // the `false` return suppresses the diagnostic below.
                 PromoterReseedAction::Descent => {
                     self.on_descent_event(ProbeOwner::Promoter(qid), now, out)
                 }
@@ -1575,8 +1574,8 @@ impl Engine {
                 }
             };
 
-            // Gated on the action having done anything: a skipped descent re-arm reseeded
-            // nothing, so narrating it would misreport the overflow handling.
+            // Gated on the action having done anything: a skipped descent re-arm reseeded nothing,
+            // so narrating it would misreport the overflow handling.
             if reseeded {
                 out.diagnostics
                     .push(Diagnostic::PromoterReseededForOverflow { promoter: qid });
@@ -3617,15 +3616,14 @@ enum CompletionRoute {
 
 /// Per-Promoter dispatch projection used by [`Engine::on_sensor_overflow`]. Computed under a short
 /// `&self.promoters` borrow, then dispatched under `&mut self` — splitting the borrow lifetimes is
-/// the only way to thread the post-state-read calls (`on_descent_event`,
-/// `dispatch_next_enumeration`) through Rust's borrow rules without re-querying the registry per
-/// access.
+/// the only way to thread the post-state-read calls (`on_descent_event`, `dispatch_next_enumeration`)
+/// through Rust's borrow rules without re-querying the registry per access.
 ///
 /// Variants:
 /// - `Descent`: `PrefixPending` Promoter; route through `Engine::on_descent_event`, whose gates
-///   (probe in flight, still descending) decide whether a fresh probe actually goes out. The
-///   prefix target is not carried — `emit_owner_probe` reads `current_prefix` back off the descent
-///   slot, so a stale snapshot cannot diverge from state.
+///   (probe in flight, still descending) decide whether a fresh probe actually goes out. The prefix
+///   target is not carried — `emit_owner_probe` reads `current_prefix` back off the descent slot,
+///   so a stale snapshot cannot diverge from state.
 /// - `Enumerate(proxies)`: `Active` Promoter; enqueue every proxy and drain the first into a probe
 ///   via `dispatch_next_enumeration`.
 enum PromoterReseedAction {

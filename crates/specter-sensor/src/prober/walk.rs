@@ -21,9 +21,9 @@
 //!   `baseline_subtree` or `obligation`.
 //!
 //! [`specter_core::ProbeRequest::AnchorFile`] runs a single `lstat` (no controls — a leaf has no
-//! descendants to skip). [`specter_core::ProbeRequest::Descent`] hardcodes a minimal override
-//! config (`recursive=false`, `hidden=true`, no exclude/pattern, no `max_depth`) — the Profile's
-//! user-facing filters would mask the very segment descent is searching for.
+//! descendants to skip). [`specter_core::ProbeRequest::Descent`] walks under the
+//! [`ScanConfig::Descent`] shape (admit every dirent, one level) — the Profile's user-facing
+//! filters would mask the very segment descent is searching for.
 //!
 //! Symlinks are never traversed (`symlink_metadata` ≡ `lstat`); they appear as `EntryKind::Symlink`
 //! leaves when encountered as direct children. v1 has no `follow_symlinks` opt-in. Cross-filesystem
@@ -31,15 +31,15 @@
 //! emitted as `DirChild::Uncovered(fs_id)` (uncovered-by-mount).
 //!
 //! Per-dirent scope filtering is delegated to [`ScanConfig::accepts_structural`] (pre-`lstat`) plus
-//! the pattern arm inline (post-`lstat`, when `is_dir` is known). `covers` (engine) calls the full
-//! [`ScanConfig::accepts`]; both consume the same predicate body **and** measure `rel` from the
-//! same basis — the Profile anchor, shipped on `ProbeRequest::Subtree`'s `anchor_path` and
-//! re-derived per dirent via `strip_prefix`. Matching the predicate body alone is not enough: scope
-//! inputs must share an origin too, or an anchor-relative glob desyncs from an LCA-relative `rel`.
-//! The shared basis keeps walker and engine in lockstep across every scope axis;
-//! [`WalkContext::note_filter_drop`] is the runtime witness of that lockstep — an obligation-chain
-//! leaf the walker nonetheless filters degrades the frame to `Undischarged` rather than silently
-//! dropping it.
+//! [`ScanConfig::accepts_kinded`] (post-`lstat`, when `is_dir` is known). `covers` (engine) calls
+//! the full [`ScanConfig::accepts`] — the composition of the same two halves; both consumers run
+//! the same predicate body **and** measure `rel` from the same basis — the Profile anchor, shipped
+//! on `ProbeRequest::Subtree`'s `anchor_path` and re-derived per dirent via `strip_prefix`.
+//! Matching the predicate body alone is not enough: scope inputs must share an origin too, or an
+//! anchor-relative glob desyncs from an LCA-relative `rel`. The shared basis keeps walker and
+//! engine in lockstep across every scope axis; [`WalkContext::note_filter_drop`] is the runtime
+//! witness of that lockstep — an obligation-chain leaf the walker nonetheless filters degrades the
+//! frame to `Undischarged` rather than silently dropping it.
 
 use crate::ProbeFailureExt;
 use compact_str::CompactString;
@@ -153,26 +153,24 @@ fn certify(obligation: &ProofObligation, l: &ProofLedger) -> ProofAuthority {
 
 impl WalkContext<'_> {
     /// True iff a child directory at `depth_after_descent` on `child_dev` is in-scope for recursive
-    /// descent. Folds three statically-knowable gates:
-    /// - `self.config.recursive`
-    /// - `depth_after_descent < max_depth.unwrap_or(u32::MAX)`
-    /// - `child_dev == self.root_dev` (cross-filesystem refusal)
+    /// descent. Two gates, two owners:
+    /// - [`ScanConfig::descends_into`] — the scan shape's recursion-edge policy (for `Subtree`:
+    ///   `recursive` and under `max_depth`; for `Descent`: never).
+    /// - `child_dev == self.root_dev` (cross-filesystem refusal) — walker-owned: the engine's
+    ///   `Tree` slots don't carry `device`, so the device axis cannot live on the predicate.
     ///
     /// Negation drives `DirChild::Uncovered(fs_id)` emission in [`build_dir_child`]. This is the
     /// only source of `Uncovered` emissions in the walker; transient I/O (raced unlink, EACCES,
     /// ENOTDIR mid-walk) surfaces as `Covered(empty_or_partial_arc)` instead, via
     /// [`enumerate_dir`]'s benign-empty contract.
     ///
-    /// Cross-filesystem refusal is walker-specific (the engine's `Tree` slots don't carry `device`,
-    /// so `ScanConfig::accepts` cannot fold it). The `recursive` and `max_depth` gates here exactly
-    /// mirror what `ScanConfig::accepts` enforces per dirent — kept inline because this decision is
-    /// *whether to descend into the subtree* (a recursion-edge concern) rather than *whether to
-    /// include the dirent in the snapshot*; the two are deliberately separate.
+    /// The recursion-edge decision is deliberately separate from `ScanConfig::accepts` (*whether to
+    /// include the dirent in the snapshot*): the per-dirent predicate runs depth-bounded gates too,
+    /// but this decision is *whether to descend into the subtree* and is consulted exactly once per
+    /// directory dirent.
     #[must_use]
     fn should_recurse(&self, depth_after_descent: u32, child_dev: u64) -> bool {
-        self.config.recursive
-            && depth_after_descent < self.config.max_depth.unwrap_or(u32::MAX)
-            && child_dev == self.root_dev
+        self.config.descends_into(depth_after_descent) && child_dev == self.root_dev
     }
 
     /// Returns `Some(Arc::clone(baseline))` when the directory at `path` with freshly-`lstat`ed
@@ -235,12 +233,12 @@ impl WalkContext<'_> {
     /// regression.
     ///
     /// [`enumerate_dir`] calls this at each scope-predicate `continue` (the `accepts_structural`
-    /// gate and the `pattern` arm) — the drops that mean *out of scope*, distinct from an I/O fault
-    /// (which degrades the frame directly) and from an observed-absent delete (absent from
-    /// `read_dir`, so it never reaches a filter arm). The walker measures scope from the anchor on
-    /// the wire, the same basis the engine's `covers` uses, so every obligation-chain leaf the
-    /// engine tracks is in scope for the walker too: a filter dropping an on-chain dirent is a
-    /// scope regression, never a legitimate exclusion.
+    /// gate and the `accepts_kinded` gate) — the drops that mean *out of scope*, distinct from an
+    /// I/O fault (which degrades the frame directly) and from an observed-absent delete (absent
+    /// from `read_dir`, so it never reaches a filter arm). The walker measures scope from the
+    /// anchor on the wire, the same basis the engine's `covers` uses, so every obligation-chain
+    /// leaf the engine tracks is in scope for the walker too: a filter dropping an on-chain dirent
+    /// is a scope regression, never a legitimate exclusion.
     ///
     /// On regression it is loud in dev (`debug_assert`) and degrades in release — returns
     /// [`Completeness::Incomplete`] so [`snapshot_dir`] records this frame (an ancestor of
@@ -389,36 +387,30 @@ pub(super) fn probe_subtree(
 /// inferable from the name, not from re-deriving the obligation chain.
 const DESCENT_CAPTURED_WITH: u64 = 0;
 
-/// Descent prefix probe. Single-level enumeration of `target_path` with a hardcoded override config:
-/// `recursive=false`, `hidden=true`, no `exclude`, no `pattern`, no `max_depth`. The override config
-/// is what drives the unified [`ScanConfig::accepts_structural`] predicate to admit *every* dirent —
+/// Descent prefix probe. Single-level enumeration of `target_path` under the
+/// [`ScanConfig::Descent`] scan shape, whose predicate arms admit *every* dirent at one level —
 /// descent is searching for the next path segment, so the engine's user-facing filters (which would
-/// mask the very segment we're looking for) deliberately collapse to no-ops here. Descent dispatch
-/// reads `arc.entries.get(name)` directly and (for Profile descent) discards the snapshot.
+/// mask the very segment we're looking for) are no-ops by construction of the shape. Descent
+/// dispatch reads `arc.entries.get(name)` directly and (for Profile descent) discards the snapshot.
 ///
 /// Returns [`ProbeOutcome::DirEnumerated`] — a structural query is not a quiescence observation, so
 /// it carries **no** [`ProofAuthority`]. It still threads the shared recursion core, so its
 /// `ProofLedger` is written-then-discarded: a descent `read_dir` fault can populate `degraded`, but
 /// the *type* (no `authority` field) is the guarantee, not an empty ledger. `WholeSubtree` is inert
-/// here — `recursive=false` stops at one level and `baseline=None` makes mtime-skip unreachable, so
+/// here — the `Descent` shape never descends and `baseline=None` makes mtime-skip unreachable, so
 /// it never refuses a skip that could matter.
 ///
 /// `captured_with` is stamped as [`DESCENT_CAPTURED_WITH`] — descent dispatch never reads the field
 /// (the snapshot is consumed by the engine and dropped before any consumer compares hashes), so the
 /// value is observationally irrelevant. Callers should not rely on a particular sentinel.
 pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
-    let cfg = ScanConfig::builder()
-        .recursive(false)
-        .hidden(true)
-        .max_depth(None)
-        .build();
     let mut sink = ProofLedger::default();
     // Descent roots and scopes at the same path: target == anchor, so every dirent's `rel` is its
-    // bare segment. The override config admits every dirent regardless, so the basis is inert here.
+    // bare segment. The `Descent` shape admits every dirent regardless, so the basis is inert here.
     match walk_root(
         target_path,
         target_path,
-        &cfg,
+        &ScanConfig::Descent,
         DESCENT_CAPTURED_WITH,
         None,
         &ProofObligation::WholeSubtree,
@@ -577,13 +569,10 @@ fn enumerate_dir(
         };
         let is_dir = cmeta.file_type().is_dir();
 
-        // Pattern arm of `accepts`, run post-`lstat` now that `is_dir` is known. Kept inline
-        // (rather than calling `accepts` again and re-evaluating the structural gates) — the
-        // pre-`lstat` gate above has already discharged the structural half.
-        if !is_dir
-            && let Some(pat) = &ctx.config.pattern
-            && !pat.matches_path(rel)
-        {
+        // Kinded half of `accepts`, run post-`lstat` now that `is_dir` is known — the pre-`lstat`
+        // gate above has already discharged the structural half, so re-running `accepts` here would
+        // re-evaluate it for nothing.
+        if !ctx.config.accepts_kinded(rel, is_dir) {
             completeness = ctx.note_filter_drop(&child_path, completeness);
             continue;
         }

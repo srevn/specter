@@ -993,7 +993,7 @@ impl Engine {
     ///    [`StepOutput::sort_for_emission`] pass) reads "do the work, then announce it."
     ///
     /// **Note on `discard_anchor_state` overlap.** This helper performs `release_descendant_claim`
-    /// + `release_anchor_claim` inline rather than via [`Engine::discard_anchor_state`]. The two
+    /// and `release_anchor_claim` inline rather than via [`Engine::discard_anchor_state`]. The two
     /// helpers differ in purpose:
     ///
     /// - `discard_anchor_state` exists for the "anchor lost, Profile lives" case — the seven

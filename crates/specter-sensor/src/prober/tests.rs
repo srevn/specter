@@ -400,6 +400,35 @@ fn probe_subtree_emits_symlink_entry_kind() {
     assert_eq!(l.kind(), EntryKind::Symlink);
 }
 
+/// A symlink is a non-directory to the kinded gate, so `pattern` applies to it exactly as to a
+/// regular file. Pins the `accepts_kinded` agreement the walker and `covers` share: `ResourceKind`
+/// folds symlinks to `File`, so the walker's `!is_dir` and the predicate's `kind != Dir` mean the
+/// same thing — a non-matching symlink drops, a matching one stays.
+#[test]
+fn probe_subtree_pattern_applies_to_symlinks() {
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("target.c");
+    std::fs::write(&target, b"x").unwrap();
+    std::os::unix::fs::symlink(&target, tmp.path().join("link.c")).unwrap();
+    std::os::unix::fs::symlink(&target, tmp.path().join("link.log")).unwrap();
+
+    let cfg = ScanConfig::builder()
+        .pattern(GlobPattern::compile("*.c").unwrap())
+        .build();
+    let result = psub(tmp.path(), &cfg);
+    let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
+        panic!("expected Ok(Dir)");
+    };
+    assert!(
+        !arc.entries().contains_key("link.log"),
+        "non-matching symlink is pattern-dropped like any file",
+    );
+    let ChildEntry::Leaf(l) = arc.entries().get("link.c").expect("matching symlink stays") else {
+        panic!("symlink emits as Leaf");
+    };
+    assert_eq!(l.kind(), EntryKind::Symlink);
+}
+
 #[test]
 fn probe_subtree_skips_unreadable_subdir_emits_remaining() {
     use std::os::unix::fs::PermissionsExt;
@@ -1689,9 +1718,9 @@ fn certify_absent_chain_leaf_is_authoritative_not_undischarged() {
 // ---------------------------------------------------------------- pool: run_probe dispatch
 //
 // `run_probe` is the variant-dispatch glue between `WorkerProber` and the three walker entry
-// points. The cases below pin that each variant reaches the right walker, and that `Descent`
-// honours its hardcoded override config (hidden=true, no exclude/pattern) regardless of any config
-// baked into the request — the variant carries no `ScanConfig`.
+// points. The cases below pin that each variant reaches the right walker, and that `Descent` walks
+// the admit-all single-level `ScanConfig::Descent` shape regardless of any config baked into the
+// request — the variant carries no `ScanConfig`.
 
 #[test]
 fn run_probe_dispatches_anchor_file_to_probe_anchor_file() {
@@ -1740,11 +1769,11 @@ fn run_probe_dispatches_descent_to_probe_descent() {
 }
 
 #[test]
-fn probe_descent_uses_hardcoded_override_config() {
+fn probe_descent_admits_every_dirent() {
     let tmp = TempDir::new().unwrap();
-    // `.hidden` would be filtered by the default `hidden=false`; `foo.tmp` would be filtered by an
-    // exclude/pattern. Descent's hardcoded override has hidden=true with no exclude/pattern, so
-    // every direct child must surface.
+    // `.hidden` would be filtered by a Subtree default (`hidden=false`); `foo.tmp` would be
+    // filtered by an exclude/pattern. The `Descent` scan shape admits every dirent — descent is
+    // searching for the next path segment — so every direct child must surface.
     std::fs::write(tmp.path().join(".hidden"), b"x").unwrap();
     std::fs::write(tmp.path().join("foo.tmp"), b"x").unwrap();
     std::fs::write(tmp.path().join("main.c"), b"x").unwrap();

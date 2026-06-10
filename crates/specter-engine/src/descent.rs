@@ -351,8 +351,8 @@ impl crate::Engine {
         let next_segment = descent.remaining_components().head().clone();
         let is_terminal = descent.remaining_components().is_terminal();
 
-        // Descent probes ship `recursive=false`, so the response is a single-level Dir snapshot —
-        // look up the next segment by name in the BTreeMap directly.
+        // Descent probes walk the single-level `ScanConfig::Descent` shape, so the response is a
+        // one-level Dir snapshot — look up the next segment by name in the BTreeMap directly.
         let entry_kind = match snapshot.entries().get(next_segment.as_str()) {
             Some(child) => child.kind(),
             None => {

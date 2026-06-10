@@ -91,14 +91,30 @@ impl PartialOrd for GlobPattern {
     }
 }
 
+/// The scan predicate — what the walker reads and what `covers` tests, as a sum over scan shapes.
+///
+/// Every consumer goes through the named predicates ([`Self::accepts`],
+/// [`Self::accepts_structural`], [`Self::accepts_kinded`], [`Self::descends_into`],
+/// [`Self::exclude_globs`]) or the hash; no consumer destructures the variants — shape dispatch
+/// lives entirely in this module, so a new shape is a compile error here and nowhere else.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ScanConfig {
-    pub recursive: bool,
-    pub hidden: bool,
-    /// Sorted by source string at builder time.
-    pub exclude: Vec<GlobPattern>,
-    pub pattern: Option<GlobPattern>,
-    pub max_depth: Option<u32>,
+pub enum ScanConfig {
+    /// The cumulative recursive predicate over one subtree: every filter narrows what a recursive
+    /// walk admits. The user-facing shape — [`ScanConfigBuilder`] builds it, config lowering and
+    /// Profile identity carry it.
+    Subtree {
+        recursive: bool,
+        hidden: bool,
+        /// Sorted by source string at builder time.
+        exclude: Vec<GlobPattern>,
+        pattern: Option<GlobPattern>,
+        max_depth: Option<u32>,
+    },
+    /// Admit-every-dirent, single level — the descent probe's preset. Descent searches for the next
+    /// path component of a not-yet-existing anchor, so the user-facing filters (which would mask
+    /// the very segment being searched for) deliberately collapse to no-ops. Prober-internal: never
+    /// wrapped in a `ProfileIdentity`, never on the wire, never partitions Profiles.
+    Descent,
 }
 
 impl ScanConfig {
@@ -110,94 +126,142 @@ impl ScanConfig {
     /// True iff an entry at cumulative relative path `rel` of `kind` at `depth` (anchor = 0, direct
     /// child = 1, …) is in scope.
     ///
-    /// The single source of the scope predicate. Two callers, one body:
+    /// The single source of the scope predicate, composed of its two halves
+    /// ([`Self::accepts_structural`] ∧ [`Self::accepts_kinded`]). Two callers:
     /// - `specter_engine::coverage` tests every prefix from anchor → target — `kind` is in hand,
     ///   single call.
     /// - The walker (`specter-sensor::prober`) tests each dirent — `kind` is only known after
-    ///   `lstat`, so it splits the predicate via [`Self::accepts_structural`] (pre-`lstat`) plus
-    ///   the pattern arm of this method (post-`lstat`); see that method's doc for the rationale.
+    ///   `lstat`, so it calls the halves directly: [`Self::accepts_structural`] pre-`lstat`,
+    ///   [`Self::accepts_kinded`] post-`lstat`; see the structural half's doc for the rationale.
     ///
     /// **Depth 0 bypasses every filter.** The anchor is part of the Profile's scope by
-    /// construction. For `depth > 0` the body folds `max_depth`, `recursive`, `hidden`
+    /// construction. For `depth > 0`, `Subtree` folds `max_depth`, `recursive`, `hidden`
     /// (last-segment basename test), `exclude` (full-`rel` test), and `pattern` (final-`File` only
-    /// — directories are always covered; we descend through them).
+    /// — directories are always covered; we descend through them); `Descent` admits one level.
     ///
-    /// **Fold-completeness ratchet.** Like `compute_config_hash`, this predicate destructures
-    /// `ScanConfig` exhaustively: a new field is a compile error here until it is folded in. The
-    /// two parallel ratchets keep the partition key and the filter semantics co-evolving across
-    /// every future axis.
+    /// `ResourceKind::Unknown` is collapsed by upstream callers (`Resource::kind_or_file`,
+    /// `From<EntryKind>`) before reaching this method, so `kind != Dir` here means the same thing
+    /// as the walker's `!is_dir`.
     #[must_use]
     pub fn accepts(&self, rel: &Path, kind: ResourceKind, depth: u32) -> bool {
-        if !self.accepts_structural(rel, depth) {
-            return false;
-        }
-        // Pattern applies to files only; directories are always covered (the walker descends
-        // through them, and `covers` checks them as intermediate prefixes). `ResourceKind::Unknown`
-        // is collapsed by upstream callers (`Resource::kind_or_file`, `From<EntryKind>`) before
-        // reaching this method.
-        if matches!(kind, ResourceKind::File)
-            && let Some(pat) = &self.pattern
-            && !pat.matches_path(rel)
-        {
-            return false;
-        }
-        true
+        self.accepts_structural(rel, depth)
+            && self.accepts_kinded(rel, matches!(kind, ResourceKind::Dir))
     }
 
-    /// The kind-independent half of [`Self::accepts`]. Folds the four gates that don't need a
-    /// `ResourceKind`: `max_depth`, `recursive`, `hidden`, and `exclude`.
+    /// The kind-independent half of [`Self::accepts`]. For `Subtree`, folds the four gates that
+    /// don't need a `ResourceKind`: `max_depth`, `recursive`, `hidden`, and `exclude`. For
+    /// `Descent`, admits one level (the walk never descends, so only depths 0 and 1 are queried).
     ///
     /// Exists for the walker, which doesn't know `is_dir` until after the per-dirent `lstat`.
     /// Calling [`Self::accepts`] there with a guessed kind would either skip a covered Dir (guess
     /// `File` + `pattern.matches == false`) or admit a pattern-violating File (guess `Dir`).
     /// Splitting lets the walker reject hidden / excluded dirents pre-`lstat` — saving the syscall
-    /// on a `target/` tree in a Cargo project (thousands of excluded dirents) — and gate the
-    /// pattern arm post-`lstat` against the known kind. `covers` has `kind` in hand and calls
+    /// on a `target/` tree in a Cargo project (thousands of excluded dirents) — and gate the kinded
+    /// half post-`lstat` against the known kind. `covers` has `kind` in hand and calls
     /// [`Self::accepts`] directly.
     ///
-    /// Destructuring is exhaustive for the same fold-completeness reason as [`Self::accepts`]: a
-    /// new structural field forces a compile error here, not a silent bypass.
+    /// **Fold-completeness ratchet, predicate tier.** The `Subtree` arm destructures exhaustively:
+    /// a new field on the variant is a compile error here until the author decides which half it
+    /// folds into — structural (a clause below) or kind-dependent (an arm in
+    /// [`Self::accepts_kinded`], where `pattern` lives). A new *variant* is a non-exhaustive-match
+    /// compile error across every predicate and the hash at once.
     #[must_use]
     pub fn accepts_structural(&self, rel: &Path, depth: u32) -> bool {
-        // Exhaustive destructure — a new field is a compile error until it's folded into this body
-        // (or, if kind-dependent, into the `accepts` arm). `pattern` lives here only to discharge
-        // the destructure; the pattern gate runs in `accepts`, which means a new kind-dependent
-        // field would still need its own arm there. A new structural field gets a `&` clause below.
-        let Self {
-            recursive,
-            hidden,
-            exclude,
-            pattern: _,
-            max_depth,
-        } = self;
+        // Anchor depth bypasses every filter for every shape — the anchor is in scope by
+        // construction.
         if depth == 0 {
             return true;
         }
-        if let Some(max) = *max_depth
-            && depth > max
-        {
-            return false;
+        match self {
+            // `pattern` lives here only to discharge the destructure; its gate is the kinded half.
+            Self::Subtree {
+                recursive,
+                hidden,
+                exclude,
+                pattern: _,
+                max_depth,
+            } => {
+                if let Some(max) = *max_depth
+                    && depth > max
+                {
+                    return false;
+                }
+                if depth > 1 && !*recursive {
+                    return false;
+                }
+                if !*hidden
+                    && rel
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .is_some_and(|s| s.starts_with('.'))
+                {
+                    return false;
+                }
+                if exclude.iter().any(|g| g.matches_path(rel)) {
+                    return false;
+                }
+                true
+            }
+            Self::Descent => depth <= 1,
         }
-        if depth > 1 && !*recursive {
-            return false;
+    }
+
+    /// The kind-dependent half of [`Self::accepts`]: the residual gate that needs to know whether
+    /// the entry is a directory. For `Subtree`, the `pattern` arm — files must match the pattern
+    /// when one is set; directories are always covered (the walker descends through them, and
+    /// `covers` checks them as intermediate prefixes). `Descent` admits every kind.
+    ///
+    /// One home for both consumers: [`Self::accepts`] passes `kind == Dir`, and the walker calls
+    /// this directly post-`lstat` with the freshly-observed `is_dir` — the two agree because
+    /// `ResourceKind` folds every non-directory (symlinks included) to `File`, so `kind != Dir` ⟺
+    /// `!is_dir` for every kind `accepts` can receive.
+    #[must_use]
+    pub fn accepts_kinded(&self, rel: &Path, is_dir: bool) -> bool {
+        match self {
+            Self::Subtree { pattern, .. } => {
+                is_dir || pattern.as_ref().is_none_or(|pat| pat.matches_path(rel))
+            }
+            Self::Descent => true,
         }
-        if !*hidden
-            && rel
-                .file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|s| s.starts_with('.'))
-        {
-            return false;
+    }
+
+    /// True iff the walk's coverage extends below a directory sitting at `child_depth` (anchor = 0,
+    /// direct child = 1, …) — the recursion-edge decision, distinct from [`Self::accepts`]'s
+    /// per-entry inclusion decision. `Subtree` descends while `recursive` and under `max_depth`;
+    /// `Descent` never descends.
+    ///
+    /// The walker's `should_recurse` conjoins this with its cross-filesystem gate (the engine's
+    /// `Tree` slots don't carry `device`, so the device axis cannot live here); negation drives
+    /// `DirChild::Uncovered(fs_id)` emission.
+    #[must_use]
+    pub fn descends_into(&self, child_depth: u32) -> bool {
+        match self {
+            Self::Subtree {
+                recursive,
+                max_depth,
+                ..
+            } => *recursive && child_depth < max_depth.unwrap_or(u32::MAX),
+            Self::Descent => false,
         }
-        if exclude.iter().any(|g| g.matches_path(rel)) {
-            return false;
+    }
+
+    /// The exclude globs this scan shape filters with — `Subtree`'s `exclude` list; the empty slice
+    /// for shapes that carry none. Effect-env projection (`Profile::exclude_strings`) consumes this
+    /// so it never destructures the shape.
+    #[must_use]
+    pub fn exclude_globs(&self) -> &[GlobPattern] {
+        match self {
+            Self::Subtree { exclude, .. } => exclude,
+            Self::Descent => &[],
         }
-        true
     }
 }
 
-/// Builder for [`ScanConfig`]. Sorts `exclude` by source on `build()` so equal logical configs are
-/// byte-equal — `compute_config_hash` reads in already-sorted order.
+/// Builder for [`ScanConfig::Subtree`] — the user-facing shape; the other variants are presets
+/// constructed directly.
+///
+/// Sorts `exclude` by source on `build()` so equal logical configs are byte-equal —
+/// `compute_config_hash` reads in already-sorted order.
 #[derive(Debug, Default)]
 pub struct ScanConfigBuilder {
     recursive: bool,
@@ -247,7 +311,7 @@ impl ScanConfigBuilder {
     #[must_use]
     pub fn build(mut self) -> ScanConfig {
         self.exclude.sort();
-        ScanConfig {
+        ScanConfig::Subtree {
             recursive: self.recursive,
             hidden: self.hidden,
             exclude: self.exclude,
@@ -311,67 +375,78 @@ fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
 /// [`ProfileIdentity::config_hash`] is the sole public route; production threads a
 /// `ProfileIdentity` through that rather than calling this directly.
 ///
-/// Inputs are folded in fixed order through [`crate::hash::hasher`]: `recursive`, `hidden`,
-/// `len(exclude)` as `u32`, each `exclude.source`, pattern presence-byte plus optional source,
-/// `max_depth`, `max_settle.as_nanos()`, `events.bits()`.
+/// Inputs are folded in fixed order through [`crate::hash::hasher`]: a 1-byte scan-shape
+/// discriminant, the variant's own fields (for `Subtree`: `recursive`, `hidden`, `len(exclude)` as
+/// `u32`, each `exclude.source`, then `pattern` and `max_depth` each as a 1-byte presence flag plus
+/// optional payload), then the shape-independent identity axes — `max_settle.as_nanos()` and
+/// `events.bits()`.
 ///
-/// `events` is folded last so two Subs differing only on event-class mask fork separate Profiles
-/// ("Profile-union infection" defence).
+/// The discriminant byte is chosen explicitly in each arm (not `mem::discriminant`), so the digest
+/// is stable across variant reordering; it leads the fold so no two shapes' field encodings can
+/// collide byte-for-byte. `events` is folded last so two Subs differing only on event-class mask
+/// fork separate Profiles ("Profile-union infection" defence).
 #[must_use]
 pub(crate) fn compute_config_hash(
     scan: &ScanConfig,
     max_settle: Duration,
     events: ClassSet,
 ) -> u64 {
-    // Fold-completeness ratchet: this exhaustive destructure makes a new `ScanConfig` field a
-    // compile error (E0027) until it is folded into the digest below — promoting Profile-partition
-    // completeness from a hand-maintained test convention to a compiler invariant. Never add `..`:
-    // it silently re-opens the silent-Profile-merge hole.
-    let ScanConfig {
-        recursive,
-        hidden,
-        exclude,
-        pattern,
-        max_depth,
-    } = scan;
-
     let mut h = hasher();
 
-    h.put_u8(u8::from(*recursive));
-    h.put_u8(u8::from(*hidden));
-
-    // Canonical width: u32 for the count. Saturate on the absurd overflow case — the alternative is
-    // an explicit panic, which buys nothing for a config layer that cannot realistically reach 2^32
-    // globs.
-    let exclude_count = u32::try_from(exclude.len()).unwrap_or(u32::MAX);
-    h.put_u32(exclude_count);
-    for g in exclude {
-        h.put_str(g.source.as_str());
-    }
-
-    match pattern {
-        Some(g) => {
-            h.put_u8(1);
-            h.put_str(g.source.as_str());
-        }
-        None => {
+    match scan {
+        // Fold-completeness ratchet: this exhaustive destructure makes a new `Subtree` field a
+        // compile error (E0027) until it is folded into the digest below — promoting
+        // Profile-partition completeness from a hand-maintained test convention to a compiler
+        // invariant. Never add `..`: it silently re-opens the silent-Profile-merge hole. A new
+        // *variant* is a non-exhaustive-match compile error until it picks its own discriminant byte.
+        ScanConfig::Subtree {
+            recursive,
+            hidden,
+            exclude,
+            pattern,
+            max_depth,
+        } => {
             h.put_u8(0);
+            h.put_u8(u8::from(*recursive));
+            h.put_u8(u8::from(*hidden));
+
+            // Canonical width: u32 for the count. Saturate on the absurd overflow case — the
+            // alternative is an explicit panic, which buys nothing for a config layer that cannot
+            // realistically reach 2^32 globs.
+            let exclude_count = u32::try_from(exclude.len()).unwrap_or(u32::MAX);
+            h.put_u32(exclude_count);
+            for g in exclude {
+                h.put_str(g.source.as_str());
+            }
+
+            match pattern {
+                Some(g) => {
+                    h.put_u8(1);
+                    h.put_str(g.source.as_str());
+                }
+                None => {
+                    h.put_u8(0);
+                }
+            }
+
+            match max_depth {
+                Some(d) => {
+                    h.put_u8(1);
+                    h.put_u32(*d);
+                }
+                None => {
+                    h.put_u8(0);
+                }
+            }
+        }
+        // Never hashed in production — a `Descent` is prober-internal and anchors no Profile. The
+        // arm is total rather than `unreachable!` so a future caller hashing one gets a stable
+        // digest, not a panic.
+        ScanConfig::Descent => {
+            h.put_u8(1);
         }
     }
 
-    // `max_depth` is folded as a width-canonical `u64` discriminant (0 = None, 1 = Some) plus the
-    // `u32` payload. A `derive`d `Option::<u32>::hash` would fold the discriminant as an `isize` (→
-    // `usize`-width) integer; the explicit `u64` matches that byte stream on the 64-bit target
-    // while staying stable across `usize` widths. Deliberately *not* unified with `pattern`'s
-    // 1-byte presence flag above (a distinct explicit encoding); collapsing the two is a digest
-    // re-encoding, out of scope here.
-    match max_depth {
-        Some(d) => {
-            h.put_u64(1);
-            h.put_u32(*d);
-        }
-        None => h.put_u64(0),
-    }
     h.put_u128(max_settle.as_nanos());
     h.put_u8(events.bits());
 
@@ -455,18 +530,32 @@ mod tests {
             .exclude(glob("a"))
             .exclude(glob("m"))
             .build();
-        let sources: Vec<&str> = cfg.exclude.iter().map(GlobPattern::source).collect();
+        let sources: Vec<&str> = cfg
+            .exclude_globs()
+            .iter()
+            .map(GlobPattern::source)
+            .collect();
         assert_eq!(sources, vec!["a", "m", "z"]);
     }
 
     #[test]
     fn empty_builder_yields_default_shaped_config() {
         let cfg = ScanConfig::builder().build();
-        assert!(!cfg.recursive);
-        assert!(!cfg.hidden);
-        assert!(cfg.exclude.is_empty());
-        assert!(cfg.pattern.is_none());
-        assert!(cfg.max_depth.is_none());
+        let ScanConfig::Subtree {
+            recursive,
+            hidden,
+            exclude,
+            pattern,
+            max_depth,
+        } = &cfg
+        else {
+            panic!("builder builds Subtree, got {cfg:?}");
+        };
+        assert!(!recursive);
+        assert!(!hidden);
+        assert!(exclude.is_empty());
+        assert!(pattern.is_none());
+        assert!(max_depth.is_none());
     }
 
     #[test]
@@ -637,27 +726,52 @@ mod tests {
 
         assert_ne!(
             h0,
-            rehash(&base, |id| id.config.recursive = false),
+            rehash(&base, |id| {
+                let ScanConfig::Subtree { recursive, .. } = &mut id.config else {
+                    unreachable!("builder builds Subtree")
+                };
+                *recursive = false;
+            }),
             "recursive must discriminate"
         );
         assert_ne!(
             h0,
-            rehash(&base, |id| id.config.hidden = false),
+            rehash(&base, |id| {
+                let ScanConfig::Subtree { hidden, .. } = &mut id.config else {
+                    unreachable!("builder builds Subtree")
+                };
+                *hidden = false;
+            }),
             "hidden must discriminate"
         );
         assert_ne!(
             h0,
-            rehash(&base, |id| id.config.exclude.push(glob("c"))),
+            rehash(&base, |id| {
+                let ScanConfig::Subtree { exclude, .. } = &mut id.config else {
+                    unreachable!("builder builds Subtree")
+                };
+                exclude.push(glob("c"));
+            }),
             "exclude must discriminate"
         );
         assert_ne!(
             h0,
-            rehash(&base, |id| id.config.pattern = None),
+            rehash(&base, |id| {
+                let ScanConfig::Subtree { pattern, .. } = &mut id.config else {
+                    unreachable!("builder builds Subtree")
+                };
+                *pattern = None;
+            }),
             "pattern must discriminate"
         );
         assert_ne!(
             h0,
-            rehash(&base, |id| id.config.max_depth = Some(8)),
+            rehash(&base, |id| {
+                let ScanConfig::Subtree { max_depth, .. } = &mut id.config else {
+                    unreachable!("builder builds Subtree")
+                };
+                *max_depth = Some(8);
+            }),
             "max_depth must discriminate"
         );
         assert_ne!(
@@ -669,6 +783,18 @@ mod tests {
             h0,
             rehash(&base, |id| id.events = ClassSet::CONTENT),
             "events must discriminate"
+        );
+    }
+
+    /// The 1-byte scan-shape discriminant leads the fold: two shapes whose remaining byte streams
+    /// could coincide still digest apart. Pinned on the only variant pair that exists today; a new
+    /// shape extends this with its own pair.
+    #[test]
+    fn hash_distinguishes_scan_shape() {
+        let subtree = ScanConfig::builder().build();
+        assert_ne!(
+            compute_config_hash(&subtree, SETTLE, NO_EVENTS),
+            compute_config_hash(&ScanConfig::Descent, SETTLE, NO_EVENTS),
         );
     }
 
@@ -694,7 +820,7 @@ mod tests {
         assert_eq!(identity.config_hash(), GOLDEN_HASH);
     }
 
-    const GOLDEN_HASH: u64 = 0x35A4_7E13_BE87_7324;
+    const GOLDEN_HASH: u64 = 0x2BE2_4E94_4F1C_30EB;
 
     /// Fold-completeness ratchet for [`ScanConfig::accepts`]. Mirrors
     /// [`hash_discriminates_every_populated_field`]: a fully-populated `ScanConfig` plus a neutral
@@ -751,14 +877,24 @@ mod tests {
         let base_v = verdicts(&base, probes);
 
         let mut mut_recursive = populated();
-        mut_recursive.recursive = false;
+        {
+            let ScanConfig::Subtree { recursive, .. } = &mut mut_recursive else {
+                unreachable!("builder builds Subtree")
+            };
+            *recursive = false;
+        }
         assert!(
             shifted(&base_v, &mut_recursive, probes),
             "recursive must discriminate"
         );
 
         let mut mut_hidden = populated();
-        mut_hidden.hidden = false;
+        {
+            let ScanConfig::Subtree { hidden, .. } = &mut mut_hidden else {
+                unreachable!("builder builds Subtree")
+            };
+            *hidden = false;
+        }
         assert!(
             shifted(&base_v, &mut_hidden, probes),
             "hidden must discriminate"
@@ -787,7 +923,12 @@ mod tests {
         );
 
         let mut mut_max_depth = populated();
-        mut_max_depth.max_depth = Some(6);
+        {
+            let ScanConfig::Subtree { max_depth, .. } = &mut mut_max_depth else {
+                unreachable!("builder builds Subtree")
+            };
+            *max_depth = Some(6);
+        }
         assert!(
             shifted(&base_v, &mut_max_depth, probes),
             "max_depth must discriminate"
@@ -800,39 +941,5 @@ mod tests {
             base.accepts(Path::new(""), ResourceKind::Dir, 0),
             "depth 0 must accept regardless of filters"
         );
-    }
-
-    /// Pins the compiler-generated `Option<u32>` `derive(Hash)` discriminant encoding that
-    /// `compute_config_hash` reproduces explicitly through the seam for `max_depth`. The blanket
-    /// `Option::hash` folds the discriminant as an `isize` (→ `usize` width) before the inner
-    /// `u32`; the seam reproduces that as a width-canonical `u64` discriminant + `u32` payload,
-    /// byte-identical on the 64-bit target. If a future rustc changes the enum discriminant hash
-    /// shape this fires here, in isolation, rather than as a silent `GOLDEN_HASH` drift.
-    #[test]
-    fn max_depth_seam_encoding_matches_option_u32_hash() {
-        use crate::hash::hasher;
-        use siphasher::sip::SipHasher24 as RawSip64;
-        use std::hash::{Hash, Hasher};
-
-        for md in [None, Some(7u32), Some(0u32)] {
-            let mut reference = RawSip64::new();
-            md.hash(&mut reference);
-
-            let mut seam = hasher();
-            match md {
-                Some(d) => {
-                    seam.put_u64(1);
-                    seam.put_u32(d);
-                }
-                None => seam.put_u64(0),
-            }
-
-            assert_eq!(
-                seam.finish_u64(),
-                reference.finish(),
-                "seam max_depth encoding diverged from Option::<u32>::hash \
-                 for {md:?}; GOLDEN_HASH would shift",
-            );
-        }
     }
 }
