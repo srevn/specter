@@ -215,6 +215,51 @@ mod tests {
         assert_eq!(r.sub_disabled_toml, 1, "one TOML-disabled watch");
     }
 
+    /// `discovery_active` counts template-bearing Subs — the operator's "how many patterns" view.
+    /// Two dynamic blocks and one static watch attach; the count is exactly the template count
+    /// while `sub_total` carries all three.
+    #[test]
+    fn status_discovery_active_counts_templates() {
+        use specter_core::Input;
+        use std::time::Instant;
+
+        let toml = r#"
+    [[watch]]
+    name      = "logs_a"
+    path      = "/srv/a/*/log"
+    actions   = [{ exec = ["true"] }]
+
+    [[watch]]
+    name      = "logs_b"
+    path      = "/srv/b/*/log"
+    actions   = [{ exec = ["true"] }]
+
+    [[watch]]
+    name      = "plain"
+    path      = "/srv/plain"
+    actions   = [{ exec = ["true"] }]
+    "#;
+        let config = Config::from_str(toml).expect("mixed config parses");
+        let mut engine = Engine::new();
+        let now = Instant::now();
+        for spec in config.active_watches() {
+            let _ = engine.step(Input::AttachSub(spec.to_attach_request()), now);
+        }
+        // The attaches pend on absent prefixes with descent probes in flight; the projection only
+        // reads registry counts, so disarm before asserting.
+        let _ = engine.cancel_all_in_flight_probes();
+
+        let r = status(
+            &engine,
+            &fresh_state(),
+            &BTreeSet::new(),
+            &config,
+            &PathBuf::from("/etc/specter.toml"),
+        );
+        assert_eq!(r.discovery_active, 2, "one per template-bearing Sub");
+        assert_eq!(r.sub_total, 3, "templates count in the registry total too");
+    }
+
     #[test]
     fn status_socket_path_from_driver_state() {
         let engine = Engine::new();

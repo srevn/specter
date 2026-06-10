@@ -3078,7 +3078,7 @@ fn sensor_overflow_pending_profile_reprobes() {
         e.pending_probe_for(pid).is_none(),
         "fixture: slot disarmed after Failed response",
     );
-    assert!(e.descent_state(pid).is_some(), "fixture: still descending",);
+    assert!(e.descent_state(pid).is_some(), "fixture: still descending");
 
     let out = e.step(
         Input::SensorOverflow {

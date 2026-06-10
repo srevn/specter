@@ -469,4 +469,49 @@ mod tests {
             other => panic!("expected Unknown for dynamic Sub name, got {other:?}"),
         }
     }
+
+    /// A discovery **template** is operator-declared (`!is_dynamic()`), so `show` resolves it
+    /// `Active` like any static watch — only the minted set maps to `Unknown`. The fixture goes
+    /// through the real config lowering: a glob-bearing path lowers to a template-bearing Sub.
+    #[test]
+    fn show_discovery_template_returns_active() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pattern = format!("{}/{{a,b}}/access.log", tmp.path().display());
+        let config = config_from_watches(&[("disc", &pattern, true)]);
+        let guard = EngineGuard::wrap(engine_with(&config));
+        let sid = guard
+            .engine()
+            .subs()
+            .find_by_name("disc")
+            .expect("template attached");
+        assert!(
+            guard
+                .engine()
+                .subs()
+                .get(sid)
+                .expect("live sub")
+                .template
+                .is_some(),
+            "fixture lowered to a template (load-bearing precondition)",
+        );
+
+        let r = show(
+            guard.engine(),
+            &fresh_state(),
+            &BTreeSet::new(),
+            &config,
+            "disc",
+            Instant::now(),
+        );
+        match r {
+            ShowResponse::Active(d) => {
+                assert_eq!(d.name, "disc");
+                assert!(
+                    d.source_discovery.is_none(),
+                    "a template is operator-declared, not minted",
+                );
+            }
+            other => panic!("expected Active for a discovery template, got {other:?}"),
+        }
+    }
 }

@@ -2,18 +2,34 @@
 //! mid-burst handling; in-flight Effect race after detach.
 
 use compact_str::CompactString;
-use specter_core::testkit::{dir_snap, empty_program};
+use specter_core::testkit::{dir_snap, empty_program, proven};
 use specter_core::{
-    BurstFinish, DedupKey, Diagnostic, EffectCompletion, EffectOutcome, EffectScope, FsEvent,
-    Input, ProbeOp, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest,
+    BurstFinish, DedupKey, DetachReason, Diagnostic, DirSnapshot, EffectCompletion, EffectOutcome,
+    EffectScope, EntryKind, FsEvent, Input, ProbeOp, ProbeResponse, ProfileId, ProfileState,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest,
     SubRegistryDiff, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, seed_to_idle, verify,
+    DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, discovery_req, discovery_subs_of, drain_due,
+    mint_template, pid_of, pre_place_dir, seed_to_idle, verify,
 };
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
+
+/// Answer `pid`'s single in-flight probe with `proven(snap)` at `at`.
+fn respond(e: &mut Engine, pid: ProfileId, snap: &Arc<DirSnapshot>, at: Instant) -> StepOutput {
+    let corr = e.pending_probe_for(pid).expect("probe in flight");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: corr,
+            outcome: proven(Arc::clone(snap)),
+        }),
+        at,
+    )
+}
 
 #[test]
 fn config_diff_add_sub_to_existing_profile() {
@@ -566,4 +582,241 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
     assert_ne!(sid_b, sid_a, "fresh SubId minted on identity change");
     assert_eq!(e.subs().len(), 1, "exactly one Sub remains");
     let _ = e.cancel_all_in_flight_probes();
+}
+
+/// A `ConfigDiff` added bucket carrying a discovery template attaches it like any Sub: the cold
+/// Seed probe rides the diff step and the first reconcile mints per terminus — the reload route
+/// and the direct-attach route converge on one lifecycle.
+#[test]
+fn config_diff_add_dynamic_attaches_and_first_reconcile_mints() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+
+    let mut diff = SubRegistryDiff::default();
+    diff.added.push(discovery_req(
+        "disc",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_template(),
+        EffectScope::SubtreeRoot,
+    ));
+    let out = e.step(Input::ConfigDiff(diff), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("diff added the template");
+    let pid = pid_of(&e, sid);
+    assert!(
+        out.probe_ops().iter().any(|op| matches!(
+            op,
+            ProbeOp::Probe { request } if request.owner() == pid
+        )),
+        "cold Seed probe rides the ConfigDiff step",
+    );
+
+    let minted = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
+    assert!(
+        minted.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DiscoveryMinted { source, .. } if *source == sid
+        )),
+        "first reconcile mints; got {:?}",
+        minted.diagnostics,
+    );
+    assert_eq!(discovery_subs_of(&e, sid).len(), 1);
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// The added bucket with an absent literal prefix lands `Pending` with the descent probe in the
+/// same diff step — a reload-added pattern waits for its prefix exactly like a direct attach.
+#[test]
+fn config_diff_add_dynamic_with_missing_prefix_goes_pending() {
+    let mut e = Engine::new();
+    let now = Instant::now();
+
+    let mut diff = SubRegistryDiff::default();
+    diff.added.push(discovery_req(
+        "disc",
+        SubAttachAnchor::Path(PathBuf::from("/data/x")),
+        "/data/x/*",
+        mint_template(),
+        EffectScope::SubtreeRoot,
+    ));
+    let out = e.step(Input::ConfigDiff(diff), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("diff added the template");
+    let pid = pid_of(&e, sid);
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state(),
+            ProfileState::Pending(_)
+        ),
+        "absent literal prefix ⇒ Pending descent",
+    );
+    assert!(
+        out.probe_ops().iter().any(|op| matches!(
+            op,
+            ProbeOp::Probe { request } if request.owner() == pid
+        )),
+        "descent probe rides the ConfigDiff step",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// `modified_identity` on a template-bearing pair — the diff layer's classification for *any*
+/// field change on a dynamic block: the old template detaches under `ConfigDiffIdentityChanged`,
+/// its minted set cascades under `DiscoverySourceDetached` (a mid-cold-Seed minted probe is
+/// cancelled cleanly), and the replacement attaches in the same step. Its first reconcile re-mints
+/// fresh `SubId`s — never an in-place rebind, which would strand minted `Arc`s of the old
+/// template's program.
+#[test]
+fn config_diff_modify_template_cascades_and_remints() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let attach = e.step(
+        Input::AttachSub(discovery_req(
+            "disc",
+            SubAttachAnchor::Resource(data),
+            "/data/*",
+            mint_template(),
+            EffectScope::SubtreeRoot,
+        )),
+        now,
+    );
+    let old_template =
+        specter_core::testkit::first_attached_sub(&attach).expect("template attached");
+    let old_profile = pid_of(&e, old_template);
+    let _ = respond(
+        &mut e,
+        old_profile,
+        &dir_snap(&[("x", EntryKind::Dir, 1)]),
+        now,
+    );
+    let old_minted = *discovery_subs_of(&e, old_template)
+        .values()
+        .next()
+        .expect("minted");
+
+    // The minted Profile's cold Seed probe is deliberately left in flight: the cascade owns its
+    // cancellation.
+    let t1 = now + SETTLE;
+    let mut diff = SubRegistryDiff::default();
+    diff.modified_identity.push(discovery_req(
+        "disc",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_template(),
+        EffectScope::SubtreeRoot,
+    ));
+    let out = e.step(Input::ConfigDiff(diff), t1);
+
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::SubDetached { sub, reason: DetachReason::ConfigDiffIdentityChanged, .. }
+                if *sub == old_template
+        )),
+        "old template detaches under the identity-change reason; got {:?}",
+        out.diagnostics,
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::SubDetached { sub, reason: DetachReason::DiscoverySourceDetached, .. }
+                if *sub == old_minted
+        )),
+        "minted set cascades with the old template",
+    );
+    assert!(e.subs().get(old_minted).is_none(), "old minted Sub removed");
+    let new_template =
+        specter_core::testkit::first_attached_sub(&out).expect("replacement attached");
+    assert_ne!(
+        new_template, old_template,
+        "wholesale replace mints a fresh template"
+    );
+
+    let new_profile = pid_of(&e, new_template);
+    let _ = respond(
+        &mut e,
+        new_profile,
+        &dir_snap(&[("x", EntryKind::Dir, 1)]),
+        t1,
+    );
+    let new_minted = *discovery_subs_of(&e, new_template)
+        .values()
+        .next()
+        .expect("re-minted");
+    assert_ne!(
+        new_minted, old_minted,
+        "the re-mint is a fresh Sub, not a revival"
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// A removed dynamic name reaps the template under `ConfigDiffRemoved` and cascades its minted
+/// set — one reload line removes the whole discovery family, Profiles included.
+#[test]
+fn config_diff_remove_dynamic_cascades() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let attach = e.step(
+        Input::AttachSub(discovery_req(
+            "disc",
+            SubAttachAnchor::Resource(data),
+            "/data/*",
+            mint_template(),
+            EffectScope::SubtreeRoot,
+        )),
+        now,
+    );
+    let sid = specter_core::testkit::first_attached_sub(&attach).expect("template attached");
+    let pid = pid_of(&e, sid);
+    let _ = respond(
+        &mut e,
+        pid,
+        &dir_snap(&[("x", EntryKind::Dir, 1), ("y", EntryKind::Dir, 2)]),
+        now,
+    );
+    let minted = discovery_subs_of(&e, sid);
+    assert_eq!(minted.len(), 2, "fixture minted per terminus");
+    // Drive the minted cold Seeds to Idle so the cascade reaps synchronously — the mid-burst
+    // cascade (reap deferred to burst end) is pinned by the modify gate above.
+    for &mid in minted.values() {
+        let mp = pid_of(&e, mid);
+        let _ = respond(&mut e, mp, &dir_snap(&[]), now);
+    }
+
+    let t1 = now + SETTLE;
+    let mut diff = SubRegistryDiff::default();
+    diff.removed.push(CompactString::from("disc"));
+    let out = e.step(Input::ConfigDiff(diff), t1);
+
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::SubDetached { sub, reason: DetachReason::ConfigDiffRemoved, .. }
+                if *sub == sid
+        )),
+        "template detaches under the reload reason; got {:?}",
+        out.diagnostics,
+    );
+    for &mid in minted.values() {
+        assert!(
+            out.diagnostics.iter().any(|d| matches!(
+                d,
+                Diagnostic::SubDetached { sub, reason: DetachReason::DiscoverySourceDetached, .. }
+                    if *sub == mid
+            )),
+            "minted Sub {mid:?} cascades under DiscoverySourceDetached",
+        );
+    }
+    assert_eq!(e.subs().iter().count(), 0, "registry fully unwound");
+    assert!(e.profiles().get(pid).is_none(), "discovery Profile reaped");
+    for &mid in minted.values() {
+        assert!(e.subs().get(mid).is_none(), "minted Sub removed");
+    }
+    assert_eq!(
+        e.profiles().iter().count(),
+        0,
+        "every minted Profile reaped with the family",
+    );
 }

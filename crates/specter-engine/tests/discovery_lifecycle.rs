@@ -14,14 +14,14 @@ use specter_core::testkit::{
 };
 use specter_core::{
     ActiveBurst, ClassSet, DetachReason, Diagnostic, DirSnapshot, EffectScope, EntryKind, FsEvent,
-    Input, OverflowScope, ProbeOp, ProbeResponse, ProfileId, ProfileState, ResourceId,
-    ResourceKind, ScanConfig, StepOutput, SubAttachAnchor, SubId,
+    Input, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState,
+    ResourceId, ResourceKind, ScanConfig, StepOutput, SubAttachAnchor, SubId, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
     DEFAULT_EVENTS, MAX_SETTLE, SETTLE, attach, attach_discovery, attach_discovery_returning,
-    descent_advance, discovery_subs_of, drain_due, is_draining, mint_template, pid_of,
-    pre_place_dir, seed_to_idle,
+    descent_advance, discovery_subs_of, drain_due, is_draining, last_probe_path, mint_template,
+    pid_of, pre_place_dir, seed_to_idle,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -1071,5 +1071,419 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
             .name,
         "disc@/data/x/m",
     );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// A `/*` root pattern anchors the discovery Profile at the FS root itself: no `watch_root_parent`
+/// edge exists (there is no parent to watch), the attach opens the cold Seed directly (the root is
+/// always materialised), and a minted terminus joins paths cleanly at `/` — `disc@/x`, never
+/// `disc@//x`.
+#[test]
+fn root_pattern_installs_no_parent_edge() {
+    let mut e = Engine::new();
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Path("/".into()),
+        "/*",
+        mint_template(),
+        now,
+    );
+    let p = e.profiles().get(pid).expect("discovery Profile live");
+    assert!(
+        p.watch_root_parent().is_none(),
+        "root anchor has no parent edge",
+    );
+    assert!(
+        matches!(p.state(), ProfileState::Active(ActiveBurst::PreFire(_), _)),
+        "root always exists — cold Seed, never Pending",
+    );
+
+    let out = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
+    assert_eq!(
+        minted_paths(&out),
+        vec![(sid, "/x".to_string())],
+        "terminus path joins at the root without a doubled separator",
+    );
+    assert_eq!(
+        e.subs()
+            .get(*discovery_subs_of(&e, sid).values().next().unwrap())
+            .unwrap()
+            .name,
+        "disc@/x",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// Detaching one of two same-pattern templates cascades only its own minted set: the sibling
+/// template, its minted Sub, the shared discovery Profile, and the shared minted Profile all
+/// survive, and the next reconcile is still a dedup no-op for the survivor.
+#[test]
+fn second_template_detach_leaves_siblings_minted_set_intact() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let (sid1, pid) = attach_discovery(
+        &mut e,
+        "disc1",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_template(),
+        now,
+    );
+    let (sid2, _) = attach_discovery(
+        &mut e,
+        "disc2",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_template(),
+        now,
+    );
+    let snap = dir_snap(&[("x", EntryKind::Dir, 1)]);
+    let _ = respond(&mut e, pid, &snap, now);
+    settle_minted_seeds(&mut e, sid1, now);
+    settle_minted_seeds(&mut e, sid2, now);
+    let mid1 = *discovery_subs_of(&e, sid1).values().next().expect("minted");
+    let mid2 = *discovery_subs_of(&e, sid2).values().next().expect("minted");
+    let minted_pid = pid_of(&e, mid1);
+    assert_eq!(
+        minted_pid,
+        pid_of(&e, mid2),
+        "identical minted identity shares one minted Profile",
+    );
+
+    let out = e.step(Input::DetachSub(sid1), now + Duration::from_millis(10));
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::SubDetached { sub, reason: DetachReason::DiscoverySourceDetached, .. }
+                if *sub == mid1
+        )),
+        "detached template's mint cascades; got {:?}",
+        out.diagnostics,
+    );
+    assert!(e.subs().get(mid1).is_none());
+    assert!(e.subs().get(sid2).is_some(), "sibling template survives");
+    assert!(
+        e.subs().get(mid2).is_some(),
+        "sibling's minted Sub survives"
+    );
+    assert!(
+        e.profiles().get(pid).is_some(),
+        "shared discovery Profile survives on the sibling template",
+    );
+    assert!(
+        e.profiles().get(minted_pid).is_some(),
+        "shared minted Profile survives on the sibling's mint",
+    );
+
+    let (out2, _) = burst_and_respond(&mut e, pid, data, &snap, now + Duration::from_millis(20));
+    assert!(
+        minted_paths(&out2).is_empty(),
+        "survivor reconcile is a dedup no-op — no re-mint for the detached template either",
+    );
+    assert_eq!(discovery_subs_of(&e, sid2).len(), 1);
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// The minted Sub's cold-Seed burst deadline derives from reconcile-time `now` — the instant the
+/// mint happened — not from the discovery template's attach instant. The timer-heap boundary is
+/// the witness: nothing referenced is due one tick before `reconcile_now + max_settle`, and the
+/// minted Profile's `BurstDeadline` is due exactly at it.
+#[test]
+fn minted_seed_burst_deadline_derives_from_reconcile_now() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_template(),
+        now,
+    );
+
+    // Answer the cold probe a full second after attach: a deadline threaded from any earlier
+    // instant (the attach, the event) would fall due before the boundary probed below.
+    let t_mint = now + Duration::from_secs(1);
+    let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), t_mint);
+    let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
+    let minted_pid = pid_of(&e, mid);
+
+    // The attach-derived instant: a deadline threaded from the template's attach `now` would fall
+    // due exactly here, a full second early.
+    assert!(
+        e.pop_expired(now + MAX_SETTLE).is_none(),
+        "nothing due at attach-now + max_settle — the deadline is not attach-derived",
+    );
+    let entry = e
+        .pop_expired(t_mint + MAX_SETTLE)
+        .expect("minted Seed deadline due exactly at reconcile-now + max_settle");
+    assert_eq!(entry.profile, minted_pid);
+    assert_eq!(entry.kind, TimerKind::BurstDeadline);
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// A `Vanished` descent response releases only the descender's prefix claim: a discovery Profile
+/// anchored at the shared prefix keeps its watch (no `Unwatch`, demand drops by exactly the
+/// descent's contribution) and its own lifecycle is untouched, while the descender rewinds to the
+/// FS root and re-probes.
+#[test]
+fn descent_vanish_preserves_co_resident_discovery_contribution() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let (_, disc_pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_template(),
+        now,
+    );
+    let _ = respond(&mut e, disc_pid, &dir_snap(&[]), now);
+    let demand_resident = e.tree().get(data).unwrap().watch_demand();
+
+    // A static Sub pends below the discovery anchor; its descent contributes to the shared prefix.
+    let (_, static_pid) = attach(
+        &mut e,
+        "deep",
+        SubAttachAnchor::Path("/data/missing/deep".into()),
+        ScanConfig::builder().recursive(true).build(),
+        ClassSet::EMPTY,
+        MAX_SETTLE,
+        now,
+    );
+    assert!(matches!(
+        e.profiles().get(static_pid).unwrap().state(),
+        ProfileState::Pending(_)
+    ));
+    assert_eq!(
+        e.tree().get(data).unwrap().watch_demand(),
+        demand_resident + 1,
+        "descent claim joins the discovery anchor's",
+    );
+
+    let corr = e.pending_probe_for(static_pid).expect("descent in flight");
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: static_pid,
+            correlation: corr,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        now + Duration::from_millis(10),
+    );
+
+    assert!(
+        !out.watch_ops
+            .iter()
+            .any(|op| matches!(op, WatchOp::Unwatch { resource } if *resource == data)),
+        "the co-resident's watch holds the shared prefix — no Unwatch",
+    );
+    assert_eq!(
+        e.tree().get(data).unwrap().watch_demand(),
+        demand_resident,
+        "only the descent's own contribution released",
+    );
+    assert!(
+        matches!(
+            e.profiles().get(disc_pid).unwrap().state(),
+            ProfileState::Idle
+        ),
+        "discovery Profile untouched by the sibling's rewind",
+    );
+    assert_eq!(
+        last_probe_path(&out),
+        Some("/".into()),
+        "descender rewound to the FS root and re-probed",
+    );
+    assert!(matches!(
+        e.profiles().get(static_pid).unwrap().state(),
+        ProfileState::Pending(_)
+    ));
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// `rm -rf` above the anchor: recovery descent rewinds one level per `Vanished` response, the
+/// chain terminating at the FS root (where a probe is always answerable), then re-advances
+/// component by component and the recovery Seed's reconcile re-mints — the probe-target ladder
+/// `/a/b → /a → / → /a → /a/b → /a/b/c` is the witness.
+#[test]
+fn recovery_cascade_rewinds_through_parent_to_fs_root() {
+    let mut e = Engine::new();
+    let c = pre_place_dir(&mut e, &["a", "b", "c"]);
+    let b = e.tree().parent(c).expect("chain parent");
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(c),
+        "/a/b/c/*",
+        mint_template(),
+        now,
+    );
+    let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
+    settle_minted_seeds(&mut e, sid, now);
+    let old_mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
+    let x = e.tree().lookup(Some(c), "x").expect("terminus slot");
+
+    // rm -rf /a, bottom-up: the minted anchor tears down all-dynamic, the discovery anchor goes
+    // terminal (template survives, Idle with no current).
+    let t1 = now + Duration::from_millis(10);
+    let _ = e.step(
+        Input::FsEvent {
+            resource: x,
+            event: FsEvent::Removed,
+        },
+        t1,
+    );
+    let _ = e.step(
+        Input::FsEvent {
+            resource: c,
+            event: FsEvent::Removed,
+        },
+        t1,
+    );
+    assert!(e.subs().get(old_mid).is_none(), "minted Sub reaped");
+
+    // Recovery enters descent at the watch_root_parent; /a/b and /a are gone too, so each probe
+    // answers Vanished and the descent rewinds one level, re-arming at the parent.
+    let entry = e.step(
+        Input::FsEvent {
+            resource: b,
+            event: FsEvent::StructureChanged,
+        },
+        t1,
+    );
+    assert_eq!(last_probe_path(&entry), Some("/a/b".into()));
+    let vanish = |e: &mut Engine, at| {
+        let corr = e.pending_probe_for(pid).expect("descent probe in flight");
+        e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: pid,
+                correlation: corr,
+                outcome: ProbeOutcome::Vanished,
+            }),
+            at,
+        )
+    };
+    let r1 = vanish(&mut e, t1);
+    assert_eq!(last_probe_path(&r1), Some("/a".into()), "first rewind");
+    let r2 = vanish(&mut e, t1);
+    assert_eq!(
+        last_probe_path(&r2),
+        Some("/".into()),
+        "second rewind terminates at the FS root",
+    );
+
+    // Forward again: the tree reappears one component per response, the anchor materialises, and
+    // the recovery Seed reconciles into a fresh mint.
+    let a1 = descent_advance(&mut e, pid, &dir_snap(&[("a", EntryKind::Dir, 2)]), t1);
+    assert_eq!(last_probe_path(&a1), Some("/a".into()));
+    let a2 = descent_advance(&mut e, pid, &dir_snap(&[("b", EntryKind::Dir, 3)]), t1);
+    assert_eq!(last_probe_path(&a2), Some("/a/b".into()));
+    let a3 = descent_advance(&mut e, pid, &dir_snap(&[("c", EntryKind::Dir, 4)]), t1);
+    assert_eq!(
+        last_probe_path(&a3),
+        Some("/a/b/c".into()),
+        "anchor materialised — recovery Seed probes the subtree",
+    );
+    let recovered = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 5)]), t1);
+    assert_eq!(minted_paths(&recovered).len(), 1, "recovery re-mints");
+    let new_mid = *discovery_subs_of(&e, sid).values().next().expect("re-mint");
+    assert_ne!(new_mid, old_mid, "fresh SubId after the loss window");
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// Three loss → recovery → re-mint cycles leave every shared refcount where one cycle leaves it:
+/// the parent edge's demand, the anchor's demand, and the minted set size are invariant across
+/// cycles — repeated recovery neither leaks nor double-releases parent-edge contributions.
+#[test]
+fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let root = e.tree().parent(data).expect("FS root");
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_template(),
+        now,
+    );
+    let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
+    settle_minted_seeds(&mut e, sid, now);
+    let root_demand = e.tree().get(root).unwrap().watch_demand();
+    let anchor_demand = e.tree().get(data).unwrap().watch_demand();
+
+    let mut at = now;
+    for cycle in 0..3u64 {
+        at += Duration::from_millis(10);
+        let anchor = e
+            .tree()
+            .lookup(Some(root), "data")
+            .expect("anchor slot live this cycle");
+        let x = e.tree().lookup(Some(anchor), "x").expect("terminus slot");
+        let _ = e.step(
+            Input::FsEvent {
+                resource: x,
+                event: FsEvent::Removed,
+            },
+            at,
+        );
+        let _ = e.step(
+            Input::FsEvent {
+                resource: anchor,
+                event: FsEvent::Removed,
+            },
+            at,
+        );
+        let _ = e.step(
+            Input::FsEvent {
+                resource: root,
+                event: FsEvent::StructureChanged,
+            },
+            at,
+        );
+        let _ = descent_advance(
+            &mut e,
+            pid,
+            &dir_snap(&[("data", EntryKind::Dir, 10 + cycle)]),
+            at,
+        );
+        let recovered = respond(
+            &mut e,
+            pid,
+            &dir_snap(&[("x", EntryKind::Dir, 20 + cycle)]),
+            at,
+        );
+        assert_eq!(
+            minted_paths(&recovered).len(),
+            1,
+            "cycle {cycle}: recovery re-mints",
+        );
+        settle_minted_seeds(&mut e, sid, at);
+
+        assert_eq!(
+            e.tree().get(root).unwrap().watch_demand(),
+            root_demand,
+            "cycle {cycle}: parent-edge demand invariant",
+        );
+        let anchor = e.tree().lookup(Some(root), "data").expect("anchor live");
+        assert_eq!(
+            e.tree().get(anchor).unwrap().watch_demand(),
+            anchor_demand,
+            "cycle {cycle}: anchor demand invariant",
+        );
+        assert_eq!(discovery_subs_of(&e, sid).len(), 1, "cycle {cycle}");
+        assert_eq!(
+            e.profiles().get(pid).unwrap().watch_root_parent(),
+            Some(root),
+            "cycle {cycle}: parent edge points at the FS root",
+        );
+    }
     let _ = e.cancel_all_in_flight_probes();
 }

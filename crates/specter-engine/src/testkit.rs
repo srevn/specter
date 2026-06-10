@@ -575,7 +575,8 @@ pub fn mint_template() -> Arc<MintTemplate> {
     })
 }
 
-/// Attach a discovery template Sub for `pattern` at `anchor`, returning the attach `StepOutput` too.
+/// The discovery-template `SubAttachRequest` the fixtures use — [`attach_discovery_returning`]
+/// steps it directly; config-diff scenarios place it in `SubRegistryDiff` buckets.
 ///
 /// The discovery Sub's own identity mirrors the config lowering's constant-identity shape in
 /// fixture form: `MatchChain(pattern)`, `ClassSet::STRUCTURE` (membership changes are the chain
@@ -584,6 +585,36 @@ pub fn mint_template() -> Arc<MintTemplate> {
 /// are config policy, pinned in the config crate. `scope` is explicit because it doubles as the
 /// minted Subs' reaction scope — the per-file recovery-warn pin needs `PerStableFile` here.
 /// `anchor` is explicit (pre-placed `Resource` or pending `Path`).
+#[must_use]
+pub fn discovery_req(
+    name: &str,
+    anchor: SubAttachAnchor,
+    pattern: &str,
+    template: Arc<MintTemplate>,
+    scope: EffectScope,
+) -> SubAttachRequest {
+    let spec = Arc::new(PatternSpec::parse(pattern).expect("valid test pattern"));
+    SubAttachRequest::from_parts(
+        anchor,
+        ProfileIdentity {
+            config: ScanConfig::MatchChain(spec),
+            max_settle: MAX_SETTLE,
+            events: ClassSet::STRUCTURE,
+        },
+        SubParams {
+            name: name.into(),
+            program: specter_core::testkit::empty_program(),
+            scope,
+            settle: SETTLE,
+            log_output: false,
+            template: Some(template),
+            source_discovery: None,
+        },
+    )
+}
+
+/// Attach a discovery template Sub for `pattern` at `anchor`, returning the attach `StepOutput` too.
+/// The request shape is [`discovery_req`]'s.
 #[must_use]
 pub fn attach_discovery_returning(
     e: &mut Engine,
@@ -594,25 +625,8 @@ pub fn attach_discovery_returning(
     scope: EffectScope,
     now: Instant,
 ) -> (SubId, ProfileId, StepOutput) {
-    let spec = Arc::new(PatternSpec::parse(pattern).expect("valid test pattern"));
     let out = e.step(
-        Input::AttachSub(SubAttachRequest::from_parts(
-            anchor,
-            ProfileIdentity {
-                config: ScanConfig::MatchChain(spec),
-                max_settle: MAX_SETTLE,
-                events: ClassSet::STRUCTURE,
-            },
-            SubParams {
-                name: name.into(),
-                program: specter_core::testkit::empty_program(),
-                scope,
-                settle: SETTLE,
-                log_output: false,
-                template: Some(template),
-                source_discovery: None,
-            },
-        )),
+        Input::AttachSub(discovery_req(name, anchor, pattern, template, scope)),
         now,
     );
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_discovery succeeded");
@@ -644,7 +658,7 @@ pub fn attach_discovery(
 }
 
 /// The live `(anchor → SubId)` set minted by discovery template `sid`, derived from `SubRegistry`
-/// truth — the discovery sibling of [`dynamic_subs_of`].
+/// truth — registry scan, no cached index, so it converges with whatever the engine actually holds.
 #[must_use]
 pub fn discovery_subs_of(e: &Engine, sid: SubId) -> BTreeMap<ResourceId, SubId> {
     e.subs()

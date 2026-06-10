@@ -198,8 +198,9 @@ settle    = "50ms"
     Config::from_str(&toml).expect("test config parses")
 }
 
-/// Dynamic single-watch config. Brace expansion makes `is_dynamic` auto-detect; the literal prefix
-/// is the supplied tempdir so the validator's path-canonicalisation pass succeeds.
+/// Dynamic single-watch config. Brace expansion makes `is_dynamic` auto-detect; the lowering
+/// anchors at the literal prefix verbatim (dynamic paths are parse-only, never canonicalised), so
+/// the tempdir is just a unique absolute prefix.
 fn config_with_one_discovery(path: &std::path::Path) -> Config {
     let toml = format!(
         r#"
@@ -3020,6 +3021,73 @@ fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
             .subs()
             .find_by_name(dynamic_name)
             .is_some()
+    );
+
+    let _ = rig.driver.begin_shutdown();
+}
+
+/// A discovery **template** is an operator-declared Sub and carries the full disable/enable
+/// surface — only the minted set is the refusal class. Disable detaches it (cascading any minted
+/// Subs engine-side) and records the override; enable clears the override and re-attaches a
+/// template-bearing Sub through the same lowering the initial attach used.
+#[test]
+fn ipc_disable_and_enable_discovery_template_round_trip() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let cfg_path = tmp.path().join("specter.toml");
+    let config = config_with_one_discovery(tmp.path());
+    let mut rig = rig_for(config, cfg_path);
+    let _ = rig.driver.run_initial_attach();
+    let sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("logs")
+        .expect("template attached");
+    let sub = rig.driver.engine.subs().get(sid).expect("live sub");
+    assert!(sub.template.is_some(), "fixture lowered to a template");
+    assert!(!sub.is_dynamic(), "a template is operator-declared");
+
+    let mut client_a = ipc_connect(&rig);
+    let reply = ipc_round_trip(
+        &mut rig,
+        &mut client_a,
+        &WireRequest::Disable {
+            name: CompactString::const_new("logs"),
+        },
+    );
+    assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
+    assert!(rig.driver.engine.subs().find_by_name("logs").is_none());
+    assert!(
+        rig.driver
+            .disabled_runtime
+            .contains(&CompactString::const_new("logs")),
+    );
+
+    let mut client_b = ipc_connect(&rig);
+    let reply = ipc_round_trip(
+        &mut rig,
+        &mut client_b,
+        &WireRequest::Enable {
+            name: CompactString::const_new("logs"),
+        },
+    );
+    assert!(matches!(reply, ResponsePayload::Ok), "got {reply:?}");
+    assert!(rig.driver.disabled_runtime.is_empty());
+    let sid = rig
+        .driver
+        .engine
+        .subs()
+        .find_by_name("logs")
+        .expect("template re-attached");
+    assert!(
+        rig.driver
+            .engine
+            .subs()
+            .get(sid)
+            .expect("live sub")
+            .template
+            .is_some(),
+        "re-attach went through the discovery lowering",
     );
 
     let _ = rig.driver.begin_shutdown();
