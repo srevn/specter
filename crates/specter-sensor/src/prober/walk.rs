@@ -153,11 +153,11 @@ fn certify(obligation: &ProofObligation, l: &ProofLedger) -> ProofAuthority {
 
 impl WalkContext<'_> {
     /// True iff a child directory at `depth_after_descent` on `child_dev` is in-scope for recursive
-    /// descent. Two gates, two owners:
-    /// - [`ScanConfig::descends_into`] — the scan shape's recursion-edge policy (for `Subtree`:
-    ///   `recursive` and under `max_depth`; for `Descent`: never).
-    /// - `child_dev == self.root_dev` (cross-filesystem refusal) — walker-owned: the engine's
-    ///   `Tree` slots don't carry `device`, so the device axis cannot live on the predicate.
+    /// descent — a pure delegation to [`ScanConfig::descends_into`], the single home of the
+    /// recursion-edge policy. The walker contributes the one observation core cannot make
+    /// (`child_dev == self.root_dev`; the engine's `Tree` slots don't carry `device`); whether the
+    /// observation *matters* is the shape's decision (`Subtree` is device-gated, `MatchChain` is
+    /// device-blind, `Descent` never descends).
     ///
     /// Negation drives `DirChild::Uncovered(fs_id)` emission in [`build_dir_child`]. This is the
     /// only source of `Uncovered` emissions in the walker; transient I/O (raced unlink, EACCES,
@@ -170,7 +170,8 @@ impl WalkContext<'_> {
     /// directory dirent.
     #[must_use]
     fn should_recurse(&self, depth_after_descent: u32, child_dev: u64) -> bool {
-        self.config.descends_into(depth_after_descent) && child_dev == self.root_dev
+        self.config
+            .descends_into(depth_after_descent, child_dev == self.root_dev)
     }
 
     /// Returns `Some(Arc::clone(baseline))` when the directory at `path` with freshly-`lstat`ed
@@ -533,11 +534,14 @@ fn enumerate_dir(
         // `try_from` saturates the PATH_MAX-bounded count (only a future iterative walker could
         // approach u32::MAX).
         let entry_depth = u32::try_from(rel.components().count()).unwrap_or(u32::MAX);
-        // Pre-`lstat` scope gate: hidden / exclude / recursive / max_depth (the last two are no-ops
-        // at this site — the walker only reaches dirents at depths `should_recurse` has already
-        // cleared — but the same predicate runs for `covers` where they bite). Skipping here saves
-        // the per-dirent `lstat` syscall on excluded subtrees (a `target/` tree in a Cargo project
-        // is thousands of dirents).
+        // Pre-`lstat` scope gate — the kind-independent half of the shape's predicate (Subtree:
+        // hidden / exclude; MatchChain: the positional segment match). Skipping here saves the
+        // per-dirent `lstat` syscall on out-of-scope subtrees (a `target/` tree in a Cargo
+        // project is thousands of dirents). Agreement invariant with the recursion edge: the
+        // structural depth bound admits every depth `descends_into` reaches (`descends_into(d−1)
+        // ⇒ dirents enumerate at depth d ⇒ the bound admits d`), so a drop here is always a
+        // genuine scope filter, never a depth-bound desync — `note_filter_drop` is the runtime
+        // tripwire for exactly that regression.
         if !ctx.config.accepts_structural(rel, entry_depth) {
             completeness = ctx.note_filter_drop(&child_path, completeness);
             continue;
@@ -571,8 +575,9 @@ fn enumerate_dir(
 
         // Kinded half of `accepts`, run post-`lstat` now that `is_dir` is known — the pre-`lstat`
         // gate above has already discharged the structural half, so re-running `accepts` here would
-        // re-evaluate it for nothing.
-        if !ctx.config.accepts_kinded(rel, is_dir) {
+        // re-evaluate it for nothing. Same `entry_depth` both halves read — one derivation from
+        // `rel`, so the positional gates cannot desync.
+        if !ctx.config.accepts_kinded(rel, is_dir, entry_depth) {
             completeness = ctx.note_filter_drop(&child_path, completeness);
             continue;
         }
@@ -652,4 +657,57 @@ fn build_leaf_child(
 ) -> ChildEntry {
     let baseline_leaf = baseline.and_then(|b| b.lookup_leaf(name));
     ChildEntry::Leaf(LeafEntry::from_metadata_or_inherit(cmeta, baseline_leaf))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::WalkContext;
+    use specter_core::{PatternSpec, ProofObligation, ScanConfig};
+    use std::path::Path;
+    use std::sync::Arc;
+
+    /// Real mounts are untestable in unit CI, so the cross-device pin is the predicate
+    /// composition: `should_recurse` translates the walker's device observation into
+    /// `descends_into`'s `same_device` and the shape applies its policy. A device-mismatched
+    /// child must still descend under `MatchChain` (bounded chain walk; levels may cross mounts)
+    /// while the same mismatch refuses under `Subtree` — and the same-device control proves the
+    /// `child_dev == root_dev` translation isn't polarity-inverted. Lives inline because
+    /// `WalkContext` is module-private by design.
+    #[test]
+    fn should_recurse_device_gate_is_shape_policy() {
+        let obligation = ProofObligation::WholeSubtree;
+        let chain_cfg = ScanConfig::MatchChain(Arc::new(
+            PatternSpec::parse("/srv/*/data/*/log").expect("test pattern parses"),
+        ));
+        let chain = WalkContext {
+            anchor_path: Path::new("/srv"),
+            config: &chain_cfg,
+            obligation: &obligation,
+            forced: false,
+            captured_with: 0,
+            root_dev: 1,
+        };
+        assert!(
+            chain.should_recurse(1, 2),
+            "MatchChain is device-blind above the terminus",
+        );
+        assert!(
+            !chain.should_recurse(4, 2),
+            "the terminus depth never descends",
+        );
+
+        let subtree_cfg = ScanConfig::builder().recursive(true).build();
+        let subtree = WalkContext {
+            config: &subtree_cfg,
+            ..chain
+        };
+        assert!(
+            !subtree.should_recurse(1, 2),
+            "an unbounded recursive walk refuses a cross-device child",
+        );
+        assert!(
+            subtree.should_recurse(1, 1),
+            "same-device control: the device translation is not inverted",
+        );
+    }
 }

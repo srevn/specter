@@ -2691,8 +2691,9 @@ impl Profile {
         self.cfg.identity.events
     }
 
-    /// The frozen [`ScanConfig`] half of the Profile identity. Borrow for the `pattern` /
-    /// `max_depth` / `recursive` / `exclude` coverage reads and the probe-request config clone.
+    /// The frozen [`ScanConfig`] half of the Profile identity. Borrow for the named scope
+    /// predicates (`accepts*` / `descends_into` coverage reads, the witness-class requirement)
+    /// and the probe-request config clone — consumers never destructure the shape.
     #[must_use]
     pub const fn config(&self) -> &ScanConfig {
         &self.cfg.identity.config
@@ -2731,19 +2732,24 @@ impl Profile {
     }
 
     /// True iff settle-window silence is a sufficient quiescence witness for this Profile — the
-    /// mask covers [`ClassSet::IN_PLACE_WRITES`]. The criterion (which classes count, why, and the
-    /// kernel-event-vocabulary assumption) lives at that constant; this method is the Profile-level
-    /// projection via [`Self::events`] / [`ClassSet::witnesses_quiescence`].
+    /// events mask covers the classes its scan shape requires
+    /// ([`ScanConfig::quiescence_witness_classes`]). The criterion is shape-owned: the shape
+    /// determines the proof object (subtree content hash vs match set), the proof object
+    /// determines which change classes could cross a settle window invisibly, and the per-class
+    /// rationale (with the kernel-event-vocabulary assumption) lives at the [`ClassSet`]
+    /// constants. This method is the composition of the two frozen identity halves and holds no
+    /// shape knowledge itself.
     ///
     /// `false` signals that fire-bearing bursts require the hash-equality witness across two
     /// consecutive Authoritative samples — the Layer-C safety net for events-incomplete masks.
-    /// Invariant for the Profile's lifetime (folds into `config_hash` via [`Self::events`]).
+    /// Invariant for the Profile's lifetime (both inputs fold into `config_hash`).
     ///
     /// See also `Engine::owes_proof_from` — the orthogonal predicate selecting *which* bursts owe a
     /// proof. The two compose at the witness-selection join inside `Engine::certify_probe_response`.
     #[must_use]
     pub const fn events_witness_quiescence(&self) -> bool {
-        self.events().witnesses_quiescence()
+        self.events()
+            .contains(self.config().quiescence_witness_classes())
     }
 
     /// The substitution-side projection of `ScanConfig.exclude` (source strings, builder-canonical
@@ -3335,6 +3341,7 @@ mod tests {
     use crate::fs_id::FsIdentity;
     use crate::ids::{ProfileId, ResourceId};
     use crate::output::StepOutput;
+    use crate::pattern::PatternSpec;
     use crate::probe::ProbeSlot;
     use crate::resource::{ResourceKind, ResourceRole};
     use crate::scan_config::GlobPattern;
@@ -3438,8 +3445,8 @@ mod tests {
         assert_eq!(p.events(), ClassSet::EMPTY);
     }
 
-    /// `has_per_file_fds` is true when CONTENT is in the mask (closes E2E #3 by default for
-    /// `subtree-root`).
+    /// `has_per_file_fds` is true when CONTENT is in the mask (the `subtree-root` default), so
+    /// in-place edits surface as events through per-file FDs instead of waiting for a probe.
     #[test]
     fn new_profile_has_per_file_fds_when_content_in_events() {
         let mut tree = Tree::new();
@@ -3469,11 +3476,13 @@ mod tests {
         assert!(!p.has_per_file_fds());
     }
 
-    /// [`Profile::events_witness_quiescence`] is true iff the Profile's `events_union` covers
+    /// For the `Subtree` shape, [`Profile::events_witness_quiescence`] is true iff the mask covers
     /// [`ClassSet::IN_PLACE_WRITES`]. Masks lacking the in-place-writes vocabulary cannot witness an
     /// in-place write over a settle window, so settle-window silence does not prove quiescence on
     /// those masks. The predicate is the (per-Profile) gate on whether the verdict floor's
     /// settle-natural fire path is sound; events-incomplete Profiles need the hash-equality channel.
+    /// (The shape dispatch — a `MatchChain` Profile under the identical masks — is pinned by
+    /// [`events_witness_quiescence_dispatches_on_scan_shape`].)
     #[test]
     fn events_witness_quiescence_tracks_in_place_writes_mask() {
         let mut tree = Tree::new();
@@ -3531,6 +3540,35 @@ mod tests {
         assert!(
             !structure_and_metadata.events_witness_quiescence(),
             "the predicate is the IN_PLACE_WRITES mask: without it, no settle-natural fire",
+        );
+    }
+
+    /// The witness criterion is shape-owned: a `MatchChain` Profile's proof object is the match
+    /// set, whose changes are all STRUCTURE point events — so the STRUCTURE-only mask that fails
+    /// the `Subtree` witness (the sibling test above) suffices here, folding discovery bursts via
+    /// `EventsReliable` (N=1) instead of the two-sample hash channel. A chain mask *without*
+    /// STRUCTURE falls back to the hash channel — conservative composition, no panic shape, no
+    /// attach-time validation needed at this layer.
+    #[test]
+    fn events_witness_quiescence_dispatches_on_scan_shape() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let chain = || {
+            ScanConfig::MatchChain(Arc::new(
+                PatternSpec::parse("/srv/*/log").expect("test pattern parses"),
+            ))
+        };
+
+        let chain_structure = mk_profile(r, chain(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE, None);
+        assert!(
+            chain_structure.events_witness_quiescence(),
+            "STRUCTURE covers MEMBERSHIP_CHANGES — settle-silence witnesses the match set",
+        );
+
+        let chain_content = mk_profile(r, chain(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
+        assert!(
+            !chain_content.events_witness_quiescence(),
+            "a chain mask missing STRUCTURE cannot witness membership — hash-channel fallback",
         );
     }
 

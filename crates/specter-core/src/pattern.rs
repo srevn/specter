@@ -17,6 +17,7 @@
 use crate::scan_config::{ConfigError, GlobPattern};
 use compact_str::CompactString;
 use std::fmt;
+use std::path::Path;
 
 /// Decomposed glob path pattern. `components.len() >= 2` post-parse — a synthetic `Literal("/")` at
 /// index 0 plus at least one segment.
@@ -133,6 +134,36 @@ impl PatternSpec {
     #[must_use]
     pub const fn literal_prefix_len(&self) -> usize {
         self.literal_prefix_len
+    }
+
+    /// Chain levels below the literal-prefix anchor — the anchor-relative depth at which a match
+    /// terminates. Always `>= 1`: [`Self::parse`] rejects pure-literal sources, so at least one
+    /// component sits past the literal prefix.
+    #[must_use]
+    pub fn terminus_depth(&self) -> u32 {
+        u32::try_from(self.components.len() - self.literal_prefix_len).unwrap_or(u32::MAX)
+    }
+
+    /// True iff `segment` matches the positional component at anchor-relative `depth`
+    /// (`1 ..= terminus_depth`). Total: out-of-range depths return `false` — `0` included, since
+    /// the anchor *is* the literal prefix, not a chain position.
+    ///
+    /// `Literal` compares byte-equality against the bare segment. A literal component never
+    /// carries a glob discriminator (the parser routes those to `Glob`), but glob-special
+    /// non-discriminator bytes such as `\` stay literal here — never escape-interpreted. `Glob`
+    /// runs the compiled matcher against the bare segment, so brace alternation, `?`, and
+    /// character classes apply per-position.
+    #[must_use]
+    pub fn matches_at(&self, depth: u32, segment: &str) -> bool {
+        if depth == 0 || depth > self.terminus_depth() {
+            return false;
+        }
+        // In range ⇒ the index lands in `literal_prefix_len ..= components.len() − 1`
+        // (`depth <= terminus_depth = len − lpl`), so the direct index cannot panic.
+        match &self.components[self.literal_prefix_len + depth as usize - 1] {
+            PatternComponent::Literal(lit) => lit.as_str() == segment,
+            PatternComponent::Glob(g) => g.matches_path(Path::new(segment)),
+        }
     }
 
     /// Validator dispatch gate: returns `true` iff `source` contains any of the four glob
@@ -410,6 +441,71 @@ mod tests {
             PatternSpec::parse("/var/log/myapp"),
             Err(PatternError::NotDynamic),
         );
+    }
+
+    /// `terminus_depth` is the chain length below the literal-prefix anchor — pinned across the
+    /// three prefix shapes (mixed literal/glob, root-anchored `/*`, consecutive globs) so the
+    /// `len − lpl` arithmetic can't silently drift against the parser's decomposition.
+    #[test]
+    fn terminus_depth_measures_chain_below_literal_prefix() {
+        let mixed = PatternSpec::parse("/srv/staging/*/data/*/log").expect("valid pattern");
+        assert_eq!(mixed.terminus_depth(), 4);
+        let root = PatternSpec::parse("/*").expect("valid pattern");
+        assert_eq!(root.terminus_depth(), 1);
+        let consecutive = PatternSpec::parse("/data/*/*/log").expect("valid pattern");
+        assert_eq!(consecutive.terminus_depth(), 3);
+    }
+
+    /// The `Literal` arm of `matches_at` is byte-equality, not glob matching. `\` is glob-special
+    /// but not a parse discriminator, so `a\b` stays a `Literal` component; a glob-interpreting
+    /// arm would escape it to match `ab`. Case and prefix mismatches pin plain equality.
+    #[test]
+    fn matches_at_literal_is_byte_equality_not_glob() {
+        let spec = PatternSpec::parse(r"/srv/*/a\b").expect("valid pattern");
+        // Depth 2 is the literal `a\b` component.
+        assert!(spec.matches_at(2, r"a\b"));
+        assert!(
+            !spec.matches_at(2, "ab"),
+            r"`\` must stay a literal byte, never a glob escape",
+        );
+        let plain = PatternSpec::parse("/srv/*/data").expect("valid pattern");
+        assert!(plain.matches_at(2, "data"));
+        assert!(!plain.matches_at(2, "Data"));
+        assert!(!plain.matches_at(2, "dat"));
+        assert!(!plain.matches_at(2, "database"));
+    }
+
+    /// The `Glob` arm runs the compiled matcher against the bare segment — one pin per
+    /// discriminator (`*`, `?`, `[a-z]`, `{a,b}`; the brace alternation stays one component).
+    #[test]
+    fn matches_at_glob_matches_per_discriminator() {
+        let star = PatternSpec::parse("/srv/app*").expect("valid pattern");
+        assert!(star.matches_at(1, "app1"));
+        assert!(!star.matches_at(1, "web1"));
+
+        let question = PatternSpec::parse("/srv/app?").expect("valid pattern");
+        assert!(question.matches_at(1, "app1"));
+        assert!(!question.matches_at(1, "app12"));
+
+        let class = PatternSpec::parse("/srv/vol[a-z]").expect("valid pattern");
+        assert!(class.matches_at(1, "vola"));
+        assert!(!class.matches_at(1, "vol1"));
+
+        let brace = PatternSpec::parse("/srv/{app,web}").expect("valid pattern");
+        assert!(brace.matches_at(1, "app"));
+        assert!(brace.matches_at(1, "web"));
+        assert!(!brace.matches_at(1, "db"));
+    }
+
+    /// `matches_at` is total over depth: `0` (the anchor — not a chain position) and anything
+    /// beyond the terminus return `false` rather than panicking on index arithmetic.
+    #[test]
+    fn matches_at_out_of_range_depths_are_false() {
+        let spec = PatternSpec::parse("/srv/*/log").expect("valid pattern");
+        assert_eq!(spec.terminus_depth(), 2);
+        assert!(!spec.matches_at(0, "srv"));
+        assert!(!spec.matches_at(3, "log"));
+        assert!(!spec.matches_at(u32::MAX, "log"));
     }
 
     /// `Display` produces human-readable, operator-friendly messages. The config validator routes

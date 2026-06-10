@@ -221,8 +221,8 @@ impl ClassSet {
     pub const CONTENT: Self = Self(1 << 1);
     pub const METADATA: Self = Self(1 << 2);
 
-    /// Default for [`EffectScope::SubtreeRoot`] — STRUCTURE | CONTENT. Closes E2E #3 (in-place
-    /// edits surface as events through the per-file FDs implied by CONTENT).
+    /// Default for [`EffectScope::SubtreeRoot`] — STRUCTURE | CONTENT. CONTENT implies per-file
+    /// FDs, so in-place edits surface as events instead of going unseen until the next probe.
     pub const DEFAULT_SUBTREE_ROOT: Self = Self(0b011);
 
     /// Default for [`EffectScope::PerStableFile`] — CONTENT | METADATA. The user opted into
@@ -246,6 +246,21 @@ impl ClassSet {
     /// cover [`Self::IN_PLACE_WRITES`] (e.g. `STRUCTURE` only), forcing the hash-channel safety net.
     pub const IN_PLACE_WRITES: Self = Self::CONTENT;
 
+    /// Classes whose subscription suffices to witness *membership* quiescence over a settle window
+    /// — the criterion for scan shapes whose proof object is a match set
+    /// (`ScanConfig::MatchChain`) rather than a subtree content hash. Membership changes (entries
+    /// appearing / vanishing / renaming at chain positions) are all STRUCTURE point events; no
+    /// in-place-write analog can span the window invisibly, so a STRUCTURE-covering mask folds the
+    /// verdict via `EventsReliable` — N=1, no hash-channel ride.
+    ///
+    /// **HAZARD — the membership witness does not cover leaf content.** A matched *file* terminus
+    /// still folds `{mtime, size, leaf_hash}` into the pruned snapshot hash, so an unwatched
+    /// in-place append moves the hash without an event. Under this witness the hash is never
+    /// consulted for the verdict and match-set reconciliation depends only on names and kinds, so
+    /// that drift is cosmetic baseline noise — but never add an "equal hash ⇒ skip reconcile"
+    /// shortcut on this witness without first making terminus leaves fold identity-only.
+    pub const MEMBERSHIP_CHANGES: Self = Self::STRUCTURE;
+
     /// True iff every bit in `other` is set in `self` AND `other` is non-empty.
     ///
     /// The `other.0 != 0` clause sidesteps the `bitflags`-crate footgun where `contains(EMPTY) ==
@@ -262,18 +277,6 @@ impl ClassSet {
     #[must_use]
     pub const fn intersects(self, other: Self) -> bool {
         (self.0 & other.0) != 0
-    }
-
-    /// True iff this mask subscribes to every change class that can affect `leaf_hash` invisibly
-    /// over a settle window — the criterion the verdict floor reads (via
-    /// [`crate::Profile::events_witness_quiescence`]) to choose between
-    /// [`crate::QuiescenceWitness::EventsReliable`] and the Layer-C hash channel.
-    ///
-    /// Defined as `self.contains(Self::IN_PLACE_WRITES)`. Class additions to the witness vocabulary
-    /// are a one-line decision at [`Self::IN_PLACE_WRITES`]'s docstring.
-    #[must_use]
-    pub const fn witnesses_quiescence(self) -> bool {
-        self.contains(Self::IN_PLACE_WRITES)
     }
 
     /// Canonical bit representation — folded into `config_hash`.
@@ -1463,7 +1466,8 @@ mod class_set_tests {
         assert_eq!(
             ClassSet::DEFAULT_SUBTREE_ROOT,
             ClassSet::STRUCTURE | ClassSet::CONTENT,
-            "subtree-root default must include STRUCTURE+CONTENT (E2E #3 closure)"
+            "subtree-root default must include STRUCTURE+CONTENT \
+             (CONTENT drives the per-file FDs that surface in-place edits)"
         );
         assert_eq!(
             ClassSet::DEFAULT_PER_FILE,

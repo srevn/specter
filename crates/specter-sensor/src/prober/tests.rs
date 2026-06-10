@@ -13,8 +13,9 @@ use crossbeam::channel::{Receiver, Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, GlobPattern, Input,
-    LeafEntry, NonEmptyChainSet, ProbeCorrelation, ProbeFailure, ProbeOutcome, ProbeOwner,
-    ProbeRequest, ProbeResponse, ProfileId, ProofAuthority, ProofObligation, ScanConfig,
+    LeafEntry, NonEmptyChainSet, PatternSpec, ProbeCorrelation, ProbeFailure, ProbeOutcome,
+    ProbeOwner, ProbeRequest, ProbeResponse, ProfileId, ProofAuthority, ProofObligation,
+    ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -1712,6 +1713,170 @@ fn certify_absent_chain_leaf_is_authoritative_not_undischarged() {
         authority,
         ProofAuthority::Authoritative,
         "an absent (deleted) chain leaf is observed-absent, not a hole; got {authority:?}",
+    );
+}
+
+// ---------------------------------------------------------------- walk: MatchChain positional
+// pruned walk
+//
+// The positional shape probes membership, not content: chain dirs recurse (`Covered`), the
+// terminus stays unexplored (`Uncovered` dirs / plain `Leaf` files), and everything off the chain
+// is filter-dropped. The pattern's literal prefix need not equal the test anchor path: the walker
+// only consumes anchor-relative depths (`matches_at` / `terminus_depth`); anchor == literal
+// prefix is the engine's attach-time contract, not a walker input.
+
+fn chain_cfg(pattern: &str) -> ScanConfig {
+    ScanConfig::MatchChain(Arc::new(
+        PatternSpec::parse(pattern).expect("test pattern parses"),
+    ))
+}
+
+#[test]
+fn match_chain_walk_prunes_to_chain_and_terminus() {
+    // `app*/log` below the anchor (terminus depth 2). One fixture exercises every drop and
+    // terminus class: a dir terminus (app1/log) with content below it, a file terminus
+    // (app2/log), a depth-2 non-match (app1/note), a mid-chain file matching the glob (app3),
+    // and a depth-1 non-match (junk).
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("app1/log/deep")).unwrap();
+    std::fs::write(tmp.path().join("app1/log/deep/x"), b"x").unwrap();
+    std::fs::write(tmp.path().join("app1/note"), b"x").unwrap();
+    std::fs::create_dir(tmp.path().join("app2")).unwrap();
+    std::fs::write(tmp.path().join("app2/log"), b"x").unwrap();
+    std::fs::write(tmp.path().join("app3"), b"x").unwrap();
+    std::fs::create_dir(tmp.path().join("junk")).unwrap();
+
+    let cfg = chain_cfg("/srv/app*/log");
+    let outcome = psub(tmp.path(), &cfg);
+    let segs = segments(&outcome);
+    assert_eq!(
+        segs,
+        vec!["app1", "app1/log", "app2", "app2/log"],
+        "chain dirs and termini only — non-matching siblings, mid-chain files, and \
+         below-terminus content are all out of the pruned snapshot",
+    );
+
+    let ProbeOutcome::SubtreeProven { snapshot, .. } = outcome else {
+        panic!("expected SubtreeProven, got {outcome:?}");
+    };
+    let app1 = snapshot
+        .lookup_covered_dir("app1")
+        .expect("chain dir is Covered");
+    assert!(
+        matches!(
+            app1.entries().get("log"),
+            Some(ChildEntry::Dir(DirChild::Uncovered(_))),
+        ),
+        "a dir terminus is Uncovered — membership observed, content never read",
+    );
+    let app2 = snapshot
+        .lookup_covered_dir("app2")
+        .expect("chain dir is Covered");
+    assert!(
+        matches!(app2.entries().get("log"), Some(ChildEntry::Leaf(_))),
+        "a file terminus is an ordinary Leaf",
+    );
+}
+
+#[test]
+fn match_chain_off_chain_filter_drops_stay_authoritative() {
+    // Positional filter drops are scope, not blindness: with a `Chains` obligation through one
+    // chain (app1/log), dropping the non-matching sibling `junk` is off-chain and must not
+    // degrade the proof. Doubles as the pin that a dir terminus *on* the obligation chain
+    // discharges by observation at its parent's level — `Uncovered` is not a hole.
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("app1/log")).unwrap();
+    std::fs::create_dir(tmp.path().join("junk")).unwrap();
+    let cfg = chain_cfg("/srv/app*/log");
+    let mut chain = BTreeSet::new();
+    chain.insert(Arc::from(tmp.path().join("app1/log")));
+    let outcome = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &chains_from(chain),
+        false,
+    );
+    let ProbeOutcome::SubtreeProven { authority, .. } = outcome else {
+        panic!("expected SubtreeProven, got {outcome:?}");
+    };
+    assert_eq!(
+        authority,
+        ProofAuthority::Authoritative,
+        "an off-chain filter drop never flags; got {authority:?}",
+    );
+}
+
+#[test]
+fn match_chain_mtime_skip_compounds_on_chain_dirs() {
+    // The chain walk inherits per-level mtime-skip. An obligation chain naming an absent dirent
+    // directly under the anchor forces the root frame to enumerate (deterministically — no
+    // mtime-granularity dependence, and an absent leaf is observed-absent so nothing degrades)
+    // while the unchanged chain dir below stays skippable: its frame must come back
+    // `Arc`-ptr-identical to the baseline's.
+    let tmp = TempDir::new().unwrap();
+    std::fs::create_dir_all(tmp.path().join("app1/log")).unwrap();
+    let cfg = chain_cfg("/srv/app*/log");
+    let first = psub(tmp.path(), &cfg);
+    let ProbeOutcome::SubtreeProven {
+        snapshot: baseline, ..
+    } = first
+    else {
+        panic!("first probe failed");
+    };
+    let prior_app1 = Arc::clone(
+        baseline
+            .lookup_covered_dir("app1")
+            .expect("chain dir present"),
+    );
+
+    let mut chain = BTreeSet::new();
+    chain.insert(Arc::from(tmp.path().join("absent")));
+    let second = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&baseline),
+        &chains_from(chain),
+        false,
+    );
+    let ProbeOutcome::SubtreeProven { snapshot: top, .. } = second else {
+        panic!("re-probe failed");
+    };
+    assert!(
+        !Arc::ptr_eq(&baseline, &top),
+        "the obligation runs through the root frame — it must re-enumerate",
+    );
+    let new_app1 = Arc::clone(top.lookup_covered_dir("app1").expect("chain dir present"));
+    assert!(
+        Arc::ptr_eq(&prior_app1, &new_app1),
+        "the unchanged off-obligation chain dir re-uses its baseline frame",
+    );
+}
+
+#[test]
+fn match_chain_depth_stays_anchor_relative_when_rooted_below_anchor() {
+    // `/srv/*/data/*/log` (terminus depth 4), anchor = <tmp>, recursion root = <tmp>/app1/data —
+    // a dirty-LCA two levels down. The terminus leaf box1/log sits at anchor-relative depth 4; a
+    // walk-root-relative measurement would test it at depth 2 against the `data` literal and
+    // drop it. Its presence pins that positional indexing keeps the anchor basis under
+    // dirty-LCA-scoped Standard probes.
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("app1/data");
+    std::fs::create_dir_all(target.join("box1")).unwrap();
+    std::fs::write(target.join("box1/log"), b"x").unwrap();
+    std::fs::write(target.join("box1/current"), b"x").unwrap();
+    let cfg = chain_cfg("/srv/*/data/*/log");
+    let outcome = probe_subtree(&target, tmp.path(), &cfg, 0, None, &no_obligation(), false);
+    let segs = segments(&outcome);
+    assert_eq!(
+        segs,
+        vec!["box1", "box1/log"],
+        "box1 tests position 3 (`*`) and log position 4 (`log`) — anchor-relative; \
+         the depth-4 non-match `current` is dropped",
     );
 }
 

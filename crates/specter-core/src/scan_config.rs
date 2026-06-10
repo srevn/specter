@@ -12,12 +12,14 @@
 //! types is `compute_config_hash`, which reads `source` directly via `core::hash::hasher`.
 
 use crate::hash::hasher;
+use crate::pattern::PatternSpec;
 use crate::resource::ResourceKind;
 use crate::sub::ClassSet;
 use compact_str::CompactString;
 use globset::{Glob, GlobMatcher};
 use std::cmp::Ordering;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::Duration;
 
 /// A glob pattern: the canonical `source` text and its compiled matcher.
@@ -95,8 +97,9 @@ impl PartialOrd for GlobPattern {
 ///
 /// Every consumer goes through the named predicates ([`Self::accepts`],
 /// [`Self::accepts_structural`], [`Self::accepts_kinded`], [`Self::descends_into`],
-/// [`Self::exclude_globs`]) or the hash; no consumer destructures the variants — shape dispatch
-/// lives entirely in this module, so a new shape is a compile error here and nowhere else.
+/// [`Self::exclude_globs`], [`Self::quiescence_witness_classes`]) or the hash; no consumer
+/// destructures the variants — shape dispatch lives entirely in this module, so a new shape is a
+/// compile error here and nowhere else.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScanConfig {
     /// The cumulative recursive predicate over one subtree: every filter narrows what a recursive
@@ -110,6 +113,16 @@ pub enum ScanConfig {
         pattern: Option<GlobPattern>,
         max_depth: Option<u32>,
     },
+    /// Positional per-segment chain over a parsed absolute pattern, anchored at the pattern's
+    /// literal prefix. A dirent at anchor-relative depth `d` tests pattern component
+    /// `literal_prefix_len + d − 1` ([`PatternSpec::matches_at`]); coverage ends at the terminus
+    /// depth ([`PatternSpec::terminus_depth`]), where matched directories stay unexplored
+    /// (`DirChild::Uncovered`) and matched files are ordinary leaves — the pruned walk observes
+    /// chain membership, not subtree content.
+    ///
+    /// `Arc`: `ProbeRequest::Subtree` clones the config per probe emission; sharing the parsed
+    /// spec makes that clone a refcount bump instead of recompiling per-segment matchers.
+    MatchChain(Arc<PatternSpec>),
     /// Admit-every-dirent, single level — the descent probe's preset. Descent searches for the next
     /// path component of a not-yet-existing anchor, so the user-facing filters (which would mask
     /// the very segment being searched for) deliberately collapse to no-ops. Prober-internal: never
@@ -137,7 +150,9 @@ impl ScanConfig {
     /// **Depth 0 bypasses every filter.** The anchor is part of the Profile's scope by
     /// construction. For `depth > 0`, `Subtree` folds `max_depth`, `recursive`, `hidden`
     /// (last-segment basename test), `exclude` (full-`rel` test), and `pattern` (final-`File` only
-    /// — directories are always covered; we descend through them); `Descent` admits one level.
+    /// — directories are always covered; we descend through them); `MatchChain` tests the last
+    /// segment against its positional component and applies the chain kind rule (mid-chain must
+    /// be Dir; the terminus admits any kind); `Descent` admits one level.
     ///
     /// `ResourceKind::Unknown` is collapsed by upstream callers (`Resource::kind_or_file`,
     /// `From<EntryKind>`) before reaching this method, so `kind != Dir` here means the same thing
@@ -145,17 +160,20 @@ impl ScanConfig {
     #[must_use]
     pub fn accepts(&self, rel: &Path, kind: ResourceKind, depth: u32) -> bool {
         self.accepts_structural(rel, depth)
-            && self.accepts_kinded(rel, matches!(kind, ResourceKind::Dir))
+            && self.accepts_kinded(rel, matches!(kind, ResourceKind::Dir), depth)
     }
 
     /// The kind-independent half of [`Self::accepts`]. For `Subtree`, folds the four gates that
     /// don't need a `ResourceKind`: `max_depth`, `recursive`, `hidden`, and `exclude`. For
-    /// `Descent`, admits one level (the walk never descends, so only depths 0 and 1 are queried).
+    /// `MatchChain`, the positional segment test — the last segment of `rel` against the pattern
+    /// component at `depth` (the depth bound is [`PatternSpec::matches_at`]'s own totality:
+    /// out-of-range depths are `false`). For `Descent`, admits one level (the walk never descends,
+    /// so only depths 0 and 1 are queried).
     ///
     /// Exists for the walker, which doesn't know `is_dir` until after the per-dirent `lstat`.
     /// Calling [`Self::accepts`] there with a guessed kind would either skip a covered Dir (guess
     /// `File` + `pattern.matches == false`) or admit a pattern-violating File (guess `Dir`).
-    /// Splitting lets the walker reject hidden / excluded dirents pre-`lstat` — saving the syscall
+    /// Splitting lets the walker reject out-of-scope dirents pre-`lstat` — saving the syscall
     /// on a `target/` tree in a Cargo project (thousands of excluded dirents) — and gate the kinded
     /// half post-`lstat` against the known kind. `covers` has `kind` in hand and calls
     /// [`Self::accepts`] directly.
@@ -202,6 +220,14 @@ impl ScanConfig {
                 }
                 true
             }
+            // The positional test is the whole arm: `matches_at` already folds the depth bound
+            // (beyond-terminus ⇒ false). Non-UTF-8 names are conservatively out of scope — the
+            // walker drops them before any predicate and Tree names are UTF-8 by construction, so
+            // the `None` arm is totality, not a live path.
+            Self::MatchChain(spec) => rel
+                .file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(|seg| spec.matches_at(depth, seg)),
             Self::Descent => depth <= 1,
         }
     }
@@ -209,38 +235,59 @@ impl ScanConfig {
     /// The kind-dependent half of [`Self::accepts`]: the residual gate that needs to know whether
     /// the entry is a directory. For `Subtree`, the `pattern` arm — files must match the pattern
     /// when one is set; directories are always covered (the walker descends through them, and
-    /// `covers` checks them as intermediate prefixes). `Descent` admits every kind.
+    /// `covers` checks them as intermediate prefixes). For `MatchChain`, the positional kind rule —
+    /// an intermediate chain position names a directory the walk descends through, so a mid-chain
+    /// non-dir is out of scope; the terminus admits any kind (a match terminates there regardless).
+    /// `Descent` admits every kind.
     ///
     /// One home for both consumers: [`Self::accepts`] passes `kind == Dir`, and the walker calls
     /// this directly post-`lstat` with the freshly-observed `is_dir` — the two agree because
     /// `ResourceKind` folds every non-directory (symlinks included) to `File`, so `kind != Dir` ⟺
-    /// `!is_dir` for every kind `accepts` can receive.
+    /// `!is_dir` for every kind `accepts` can receive. `depth` shares the caller's one derivation
+    /// (the walker's `rel`-derived `entry_depth`; `covers`' chain position) — never recomputed
+    /// here, symmetric with [`Self::accepts_structural`].
     #[must_use]
-    pub fn accepts_kinded(&self, rel: &Path, is_dir: bool) -> bool {
+    pub fn accepts_kinded(&self, rel: &Path, is_dir: bool, depth: u32) -> bool {
+        // Anchor depth bypasses the kinded gate too — same "in scope by construction" contract as
+        // the structural half, now expressible since the depth is in hand.
+        if depth == 0 {
+            return true;
+        }
         match self {
             Self::Subtree { pattern, .. } => {
                 is_dir || pattern.as_ref().is_none_or(|pat| pat.matches_path(rel))
             }
+            Self::MatchChain(spec) => is_dir || depth >= spec.terminus_depth(),
             Self::Descent => true,
         }
     }
 
     /// True iff the walk's coverage extends below a directory sitting at `child_depth` (anchor = 0,
     /// direct child = 1, …) — the recursion-edge decision, distinct from [`Self::accepts`]'s
-    /// per-entry inclusion decision. `Subtree` descends while `recursive` and under `max_depth`;
-    /// `Descent` never descends.
+    /// per-entry inclusion decision.
     ///
-    /// The walker's `should_recurse` conjoins this with its cross-filesystem gate (the engine's
-    /// `Tree` slots don't carry `device`, so the device axis cannot live here); negation drives
-    /// `DirChild::Uncovered(fs_id)` emission.
+    /// The walker supplies `same_device` — its per-dirent observation that the child's device
+    /// equals the recursion root's. The observation cannot originate here (the engine's `Tree`
+    /// slots don't carry `device`), but whether it *matters* is the shape's policy:
+    ///
+    /// - `Subtree` descends while `recursive`, under `max_depth`, and on the same device — an
+    ///   unbounded recursive walk must not wander into mounts.
+    /// - `MatchChain` descends strictly above the terminus depth, device-blind: the walk is
+    ///   bounded by the chain length (no runaway-cost concern), and chain positions may
+    ///   legitimately sit on distinct mounts (one matched volume per level).
+    /// - `Descent` never descends.
+    ///
+    /// Negation drives `DirChild::Uncovered(fs_id)` emission in the walker — uncovered-by-mount,
+    /// beyond-`max_depth`, and the chain terminus all fall out of the same edge.
     #[must_use]
-    pub fn descends_into(&self, child_depth: u32) -> bool {
+    pub fn descends_into(&self, child_depth: u32, same_device: bool) -> bool {
         match self {
             Self::Subtree {
                 recursive,
                 max_depth,
                 ..
-            } => *recursive && child_depth < max_depth.unwrap_or(u32::MAX),
+            } => *recursive && child_depth < max_depth.unwrap_or(u32::MAX) && same_device,
+            Self::MatchChain(spec) => child_depth < spec.terminus_depth(),
             Self::Descent => false,
         }
     }
@@ -252,7 +299,34 @@ impl ScanConfig {
     pub fn exclude_globs(&self) -> &[GlobPattern] {
         match self {
             Self::Subtree { exclude, .. } => exclude,
-            Self::Descent => &[],
+            Self::MatchChain(_) | Self::Descent => &[],
+        }
+    }
+
+    /// The event classes a Profile's mask must cover for settle-window silence to witness this
+    /// shape's quiescence — the shape half of the witness criterion the verdict floor reads
+    /// through `Profile::events_witness_quiescence`.
+    ///
+    /// The scan shape determines the proof object, and the proof object determines which change
+    /// classes could cross a settle window invisibly:
+    /// - `Subtree` proves a content hash ⇒ [`ClassSet::IN_PLACE_WRITES`]: in-place writes are the
+    ///   one change kind that moves `leaf_hash` without a point event. `Descent` takes the same
+    ///   conservative arm — total by the same convention as its hash arm (a descent is
+    ///   prober-internal and never wrapped in a `ProfileIdentity`, so the arm is never consulted
+    ///   in production).
+    /// - `MatchChain` proves a match set ⇒ [`ClassSet::MEMBERSHIP_CHANGES`]: membership changes
+    ///   are STRUCTURE point events; no in-place-write analog exists for set membership (the
+    ///   leaf-content residual is documented at that constant).
+    ///
+    /// The returned set is always non-empty. [`ClassSet::contains`] reports `false` for an empty
+    /// argument, so a hypothetical "silence always witnesses" shape must not encode itself as
+    /// `EMPTY` here — it would read as *never* witnessing. Such a shape needs an explicit fold at
+    /// the projection instead.
+    #[must_use]
+    pub const fn quiescence_witness_classes(&self) -> ClassSet {
+        match self {
+            Self::Subtree { .. } | Self::Descent => ClassSet::IN_PLACE_WRITES,
+            Self::MatchChain(_) => ClassSet::MEMBERSHIP_CHANGES,
         }
     }
 }
@@ -445,6 +519,13 @@ pub(crate) fn compute_config_hash(
         ScanConfig::Descent => {
             h.put_u8(1);
         }
+        // Parse purity makes `source` the complete encoding: equal source ⇒ byte-equal
+        // decomposition (`components` and `literal_prefix_len` are deterministic functions of
+        // it), so folding the source string folds the whole positional predicate.
+        ScanConfig::MatchChain(spec) => {
+            h.put_u8(2);
+            h.put_str(spec.source());
+        }
     }
 
     h.put_u128(max_settle.as_nanos());
@@ -485,14 +566,21 @@ impl ProfileIdentity {
 #[cfg(test)]
 mod tests {
     use super::{
-        ClassSet, ConfigError, GlobPattern, ProfileIdentity, ResourceKind, ScanConfig,
+        ClassSet, ConfigError, GlobPattern, PatternSpec, ProfileIdentity, ResourceKind, ScanConfig,
         compute_config_hash,
     };
     use std::path::Path;
+    use std::sync::Arc;
     use std::time::Duration;
 
     fn glob(source: &str) -> GlobPattern {
         GlobPattern::compile(source).expect("test glob compiles")
+    }
+
+    fn chain(pattern: &str) -> ScanConfig {
+        ScanConfig::MatchChain(Arc::new(
+            PatternSpec::parse(pattern).expect("test pattern parses"),
+        ))
     }
 
     const SETTLE: Duration = Duration::from_secs(6);
@@ -787,14 +875,83 @@ mod tests {
     }
 
     /// The 1-byte scan-shape discriminant leads the fold: two shapes whose remaining byte streams
-    /// could coincide still digest apart. Pinned on the only variant pair that exists today; a new
-    /// shape extends this with its own pair.
+    /// could coincide still digest apart. Pairwise over every variant; a new shape extends this
+    /// with its own pairs.
     #[test]
     fn hash_distinguishes_scan_shape() {
-        let subtree = ScanConfig::builder().build();
+        let subtree_h = compute_config_hash(&ScanConfig::builder().build(), SETTLE, NO_EVENTS);
+        let descent_h = compute_config_hash(&ScanConfig::Descent, SETTLE, NO_EVENTS);
+        let chain_h = compute_config_hash(&chain("/srv/*/log"), SETTLE, NO_EVENTS);
+        assert_ne!(subtree_h, descent_h);
+        assert_ne!(subtree_h, chain_h);
+        assert_ne!(descent_h, chain_h);
+    }
+
+    /// Two positional sources digest apart — `source` is `MatchChain`'s complete encoding (parse
+    /// purity: equal source ⇒ byte-equal decomposition), so distinct patterns must fork distinct
+    /// Profiles.
+    #[test]
+    fn hash_distinguishes_match_chain_sources() {
         assert_ne!(
-            compute_config_hash(&subtree, SETTLE, NO_EVENTS),
-            compute_config_hash(&ScanConfig::Descent, SETTLE, NO_EVENTS),
+            compute_config_hash(&chain("/srv/*/log"), SETTLE, NO_EVENTS),
+            compute_config_hash(&chain("/srv/*/data"), SETTLE, NO_EVENTS),
+        );
+    }
+
+    /// Predicate grid for the positional shape over `/srv/*/data/*/log` (terminus depth 4): a
+    /// matching chain is admitted at every position, a non-matching segment rejects, scope ends
+    /// at the terminus, the kind rule drops mid-chain non-dirs while the terminus admits any
+    /// kind, and depth 0 bypasses both predicate halves.
+    #[test]
+    fn match_chain_accepts_positional_grid() {
+        let cfg = chain("/srv/*/data/*/log");
+
+        // The matching chain, Dir-kinded, at every depth.
+        assert!(cfg.accepts(Path::new("app1"), ResourceKind::Dir, 1));
+        assert!(cfg.accepts(Path::new("app1/data"), ResourceKind::Dir, 2));
+        assert!(cfg.accepts(Path::new("app1/data/box1"), ResourceKind::Dir, 3));
+        assert!(cfg.accepts(Path::new("app1/data/box1/log"), ResourceKind::Dir, 4));
+        // The terminus admits any kind — a match terminates there regardless.
+        assert!(cfg.accepts(Path::new("app1/data/box1/log"), ResourceKind::File, 4));
+
+        // A non-matching segment rejects at its position.
+        assert!(!cfg.accepts(Path::new("app1/etc"), ResourceKind::Dir, 2));
+        assert!(!cfg.accepts(Path::new("app1/data/box1/current"), ResourceKind::File, 4));
+
+        // Beyond the terminus is out of scope for every kind.
+        assert!(!cfg.accepts(Path::new("app1/data/box1/log/below"), ResourceKind::Dir, 5));
+        assert!(!cfg.accepts(Path::new("app1/data/box1/log/below"), ResourceKind::File, 5));
+
+        // Mid-chain non-dir: an intermediate position names a directory the chain descends
+        // through; a file there leads nowhere.
+        assert!(!cfg.accepts(Path::new("app1"), ResourceKind::File, 1));
+        assert!(!cfg.accepts(Path::new("app1/data"), ResourceKind::File, 2));
+
+        // Depth 0 bypasses both halves — the anchor is in scope by construction, even File-kinded
+        // (the kinded bypass; the structural bypass alone would still reject this).
+        assert!(cfg.accepts(Path::new(""), ResourceKind::Dir, 0));
+        assert!(cfg.accepts(Path::new(""), ResourceKind::File, 0));
+    }
+
+    /// The recursion edge is shape policy over the walker's device observation: `MatchChain` is
+    /// bounded by the terminus and device-blind (chain levels may legitimately sit on distinct
+    /// mounts; the walk cost is bounded by the chain length), while `Subtree` keeps the
+    /// cross-filesystem refusal — the widened signature must not invert that gate's polarity.
+    #[test]
+    fn descends_into_is_terminus_bounded_and_device_blind_for_match_chain() {
+        let cfg = chain("/srv/*/data/*/log");
+        assert!(cfg.descends_into(0, false));
+        assert!(cfg.descends_into(3, false));
+        assert!(
+            !cfg.descends_into(4, true),
+            "the terminus depth never descends",
+        );
+
+        let subtree = ScanConfig::builder().recursive(true).build();
+        assert!(subtree.descends_into(1, true));
+        assert!(
+            !subtree.descends_into(1, false),
+            "Subtree keeps the cross-device refusal under the widened signature",
         );
     }
 

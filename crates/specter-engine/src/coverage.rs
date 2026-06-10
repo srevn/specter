@@ -727,6 +727,123 @@ mod tests {
         );
     }
 
+    // ===== positional covers (MatchChain) =====
+    //
+    // `covers` reuses its chain walk unchanged — the positional shape only swaps the per-prefix
+    // predicate. These pin the covers-specific compositions (cumulative-`rel` depth feeding
+    // `matches_at`; the final prefix's `kind_or_file` collapse meeting the kinded chain rule);
+    // the predicate arms themselves are the `scan_config` grid's.
+
+    use specter_core::PatternSpec;
+    use std::sync::Arc;
+
+    /// Anchor a Profile whose scan shape is the positional chain parsed from `pattern`. The
+    /// anchor segment is the pattern's literal-prefix tail by convention; `covers` itself never
+    /// re-derives that correspondence (it measures depths from `profile.resource`).
+    fn anchor_chain(tree: &mut Tree, segment: &str, pattern: &str) -> (ResourceId, Profile) {
+        let r = tree.ensure_root(segment, ResourceRole::User);
+        mark(tree, r, ResourceKind::Dir);
+        let p = Profile::new(
+            r,
+            ProfileIdentity {
+                config: ScanConfig::MatchChain(Arc::new(
+                    PatternSpec::parse(pattern).expect("test pattern parses"),
+                )),
+                max_settle: MAX_SETTLE,
+                events: NO_EVENTS,
+            },
+            SETTLE,
+            None,
+        );
+        (r, p)
+    }
+
+    fn child(tree: &mut Tree, parent: ResourceId, segment: &str, kind: ResourceKind) -> ResourceId {
+        let r = tree
+            .ensure_child(parent, segment, ResourceRole::User)
+            .expect("test live parent");
+        mark(tree, r, kind);
+        r
+    }
+
+    #[test]
+    fn match_chain_covers_chain_prefixes_and_stops_below_terminus() {
+        // `/srv/*/data/*/log`, anchored at `srv` (terminus depth 4). Every matching chain prefix
+        // is covered; the slot below the terminus is not — discovery never covers below a
+        // terminus, so a minted Profile owns that subtree without overlap; and a non-matching
+        // sibling rejects at its position.
+        let mut tree = Tree::new();
+        let (root, profile) = anchor_chain(&mut tree, "srv", "/srv/*/data/*/log");
+        let app1 = child(&mut tree, root, "app1", ResourceKind::Dir);
+        let data = child(&mut tree, app1, "data", ResourceKind::Dir);
+        let box1 = child(&mut tree, data, "box1", ResourceKind::Dir);
+        let log = child(&mut tree, box1, "log", ResourceKind::Dir);
+        let below = child(&mut tree, log, "below", ResourceKind::Dir);
+        let etc = child(&mut tree, app1, "etc", ResourceKind::Dir);
+
+        let mut scratch = PathBuf::new();
+        assert!(covers(&profile, app1, &tree, &mut scratch));
+        assert!(covers(&profile, data, &tree, &mut scratch));
+        assert!(covers(&profile, box1, &tree, &mut scratch));
+        assert!(
+            covers(&profile, log, &tree, &mut scratch),
+            "a Dir terminus is covered",
+        );
+        assert!(
+            !covers(&profile, below, &tree, &mut scratch),
+            "discovery never covers below a terminus",
+        );
+        assert!(
+            !covers(&profile, etc, &tree, &mut scratch),
+            "a non-matching segment rejects at its chain position",
+        );
+    }
+
+    #[test]
+    fn match_chain_covers_file_terminus_via_glob() {
+        // `/srv/*/*.log` — a Glob terminus admitting File targets at depth 2; the terminus
+        // pattern still discriminates.
+        let mut tree = Tree::new();
+        let (root, profile) = anchor_chain(&mut tree, "srv", "/srv/*/*.log");
+        let app1 = child(&mut tree, root, "app1", ResourceKind::Dir);
+        let log = child(&mut tree, app1, "x.log", ResourceKind::File);
+        let txt = child(&mut tree, app1, "x.txt", ResourceKind::File);
+        let mut scratch = PathBuf::new();
+        assert!(covers(&profile, log, &tree, &mut scratch));
+        assert!(!covers(&profile, txt, &tree, &mut scratch));
+    }
+
+    #[test]
+    fn match_chain_rejects_mid_chain_non_dir_and_unclassified_slots() {
+        // Mid-chain positions name directories the chain descends through. A File target there is
+        // out of scope — and so is an *unclassified* slot: `covers` collapses Unknown to
+        // File-shape (`kind_or_file`), which composes with the kinded chain rule. The walker can
+        // never pin this case (it always knows the kind post-`lstat`); only `covers` sees
+        // unprobed slots.
+        let mut tree = Tree::new();
+        let (root, profile) = anchor_chain(&mut tree, "srv", "/srv/*/log");
+        let as_file = child(&mut tree, root, "app1", ResourceKind::File);
+        let unclassified = tree
+            .ensure_child(root, "app2", ResourceRole::User)
+            .expect("test live parent");
+        assert!(tree.get(unclassified).unwrap().kind().is_none());
+        let as_dir = child(&mut tree, root, "app3", ResourceKind::Dir);
+
+        let mut scratch = PathBuf::new();
+        assert!(
+            !covers(&profile, as_file, &tree, &mut scratch),
+            "a mid-chain File is out of scope",
+        );
+        assert!(
+            !covers(&profile, unclassified, &tree, &mut scratch),
+            "an unprobed slot collapses to File-shape and rejects mid-chain",
+        );
+        assert!(
+            covers(&profile, as_dir, &tree, &mut scratch),
+            "control: a classified Dir at the same position is covered",
+        );
+    }
+
     // ===== nearest_covering_ancestor =====
     //
     // Resolution tests for the `covers` derivation. Walks Resource ancestors of a child Profile's
