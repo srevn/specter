@@ -201,16 +201,21 @@ impl Engine {
             }
             self.tree.set_kind(slot, terminus.kind.into());
 
-            let mut abs = anchor_path.to_path_buf();
-            for seg in &terminus.segments {
-                abs.push(seg.as_str());
-            }
-            let abs: Arc<Path> = Arc::from(abs);
-
+            // The absolute path (name suffix + diag payload) materialises on the first dedup miss
+            // only: a steady-state pass where every template already minted allocates no paths —
+            // O(termini) allocations would otherwise recur on every no-op reconcile.
+            let mut abs: Option<Arc<Path>> = None;
             for t in &templates {
                 if self.discovery_already_minted(t.sid, slot, t.cfg_hash) {
                     continue;
                 }
+                let abs = abs.get_or_insert_with(|| {
+                    let mut p = anchor_path.to_path_buf();
+                    for seg in &terminus.segments {
+                        p.push(seg.as_str());
+                    }
+                    Arc::from(p)
+                });
                 // `format_compact!` writes straight into the `CompactString` that becomes
                 // `SubParams.name`; the `@` byte is reserved at config validation, so synthesised
                 // names never collide with operator names in the registry's `by_name` index.
@@ -239,7 +244,7 @@ impl Engine {
                 );
                 out.diagnostics.push(Diagnostic::DiscoveryMinted {
                     source: t.sid,
-                    path: Arc::clone(&abs),
+                    path: Arc::clone(abs),
                     kind: terminus.kind.into(),
                 });
             }
