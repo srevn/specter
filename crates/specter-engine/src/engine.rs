@@ -262,6 +262,18 @@ impl Engine {
             "attach_sub_inner: ReactionSpec::Mint ⟺ ScanConfig::MatchChain \
              (a template mints; a chain Profile reconciles — neither exists without the other)",
         );
+        // A chain shape's proof object is its match set; membership changes fold to STRUCTURE and
+        // have no in-place-write analog, so STRUCTURE is exactly the mask a discovery Profile
+        // subscribes (config lowering pins it). A wider mask would derive shape-blind state off
+        // classes the proof object cannot fold — `Profile::new` reads CONTENT/METADATA into
+        // `has_per_file_fds`, installing per-file FDs whose events the chain verdict ignores.
+        debug_assert!(
+            req.identity.config().match_chain().is_none()
+                || req.identity.events() == ClassSet::STRUCTURE,
+            "attach_sub_inner: ScanConfig::MatchChain ⟹ events == STRUCTURE \
+             (the match-set proof object folds membership only; got {:?})",
+            req.identity.events(),
+        );
 
         // Phase 1 — Identity resolution. The trichotomy below is the structural source of truth for
         // "what state is this Profile entering on this attach?". Two predicates are exhaustively

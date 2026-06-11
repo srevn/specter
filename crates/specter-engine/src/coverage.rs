@@ -10,11 +10,20 @@
 //! the chain queries and external consumers keep.
 //!
 //! [`nearest_covering_ancestor`] is the transitive derivation of [`covers`], and
-//! [`has_active_standard_descendant`] (via [`chain_reaches`]) is the pure query that replaced the old
-//! `dirty_descendants` refcount: it answers, fresh at each consult point, "is some Active-Standard
-//! strict-descendant Profile still covering this ancestor?" — the `Draining → Verifying` reconfirm
-//! condition. Evaluating it as a query rather than maintaining it as a counter is what makes it
-//! robust to mid-burst topology moves; the rationale lives on [`has_active_standard_descendant`].
+//! [`has_active_standard_descendant`] (via [`chain_reaches`]) is the pure query answering, fresh at
+//! each consult point, "is some Active-Standard strict-descendant Profile still covering this
+//! ancestor?" — the `Draining → Verifying` reconfirm condition. Evaluating it as a query rather
+//! than maintaining it as a counter is what makes it robust to mid-burst topology moves; the
+//! rationale lives on [`has_active_standard_descendant`].
+//!
+//! Two consults are hot, which is why every entry point threads a caller-owned `&mut PathBuf`
+//! scratch instead of allocating per call: per-event routing ([`covering_profiles`], once per
+//! delivered `FsEvent`) and the per-fire Draining gate (`gated_fire` consults
+//! [`has_active_standard_descendant`] on **every natural fire**, not only the rarer
+//! `finish_burst_to_idle` Draining sweep). Engine callers pass `Engine.coverage_scratch`; tests
+//! hold a local. The same economy drives the walk shape: the upward-walking queries collect the
+//! target's segment chain once and classify every candidate Profile against its suffix
+//! ([`classify_chain`]), rather than re-walking target → anchor per candidate.
 
 use smallvec::SmallVec;
 use specter_core::{
@@ -136,8 +145,8 @@ pub(crate) fn classify(
         return CoverageClass::Interior;
     }
 
-    // Walk target → ancestor chain to anchor; collect segments in reverse (target-to-root), then
-    // reverse to root-to-target order. Inline cap of 8 covers typical source-tree depths from a
+    // Walk target → ancestor chain to anchor, collecting segments in target-to-root order — the
+    // order [`classify_chain`] consumes. Inline cap of 8 covers typical source-tree depths from a
     // workspace anchor (`src/foo/bar/baz/qux/file.rs` is 6 deep); cap 4 spilled on every such path.
     //
     // Termination relies on the `Tree` acyclicity invariant: each `parent()` step strictly ascends,
@@ -161,17 +170,35 @@ pub(crate) fn classify(
             None => return CoverageClass::Outside,
         }
     }
-    rev.reverse();
+    classify_chain(profile.config(), &rev, target_kind, scratch)
+}
 
-    let total = rev.len();
-    let config = profile.config();
-    // One incremental build into the engine-owned `scratch` (capacity retained across calls;
+/// Fold the admission predicate over one anchor → target segment chain, then refine the admitted
+/// case by the recursion edge — the classification kernel shared by [`classify`],
+/// [`covering_profiles`], and [`nearest_covering_ancestor`]. The chain is **target-to-root order**
+/// (the natural order an upward Tree walk collects; the fold iterates it reversed), and **non-empty**
+/// — depth 0 is each caller's own anchor arm, [`CoverageClass::Interior`] unconditionally.
+///
+/// Intermediate prefixes test as [`ResourceKind::Dir`] (the Tree invariant: a non-Dir parent has no
+/// children); the final prefix — the deepest segment, `chain_rev[0]` — tests as `target_kind`.
+fn classify_chain(
+    config: &ScanConfig,
+    chain_rev: &[&str],
+    target_kind: ResourceKind,
+    scratch: &mut PathBuf,
+) -> CoverageClass {
+    debug_assert!(
+        !chain_rev.is_empty(),
+        "classify_chain: empty chain — depth 0 is the caller's anchor arm",
+    );
+    let total = chain_rev.len();
+    // One incremental build into the caller-owned `scratch` (capacity retained across calls;
     // `clear()` per call so the cross-call residue is never observable). `scratch.as_path()` after
     // `push` is the cumulative relative path the predicate consumes — the same shape the walker
     // passes (`child_path.strip_prefix(anchor_path)`). An early `return` mid-walk leaves `scratch`
     // dirty; the next entry's `clear()` is the reset.
     scratch.clear();
-    for (i, seg) in rev.iter().enumerate() {
+    for (i, seg) in chain_rev.iter().rev().enumerate() {
         scratch.push(seg);
         let depth = u32::try_from(i + 1).unwrap_or(u32::MAX);
         let kind = if i + 1 == total {
@@ -205,44 +232,62 @@ pub(crate) fn classify(
 /// "Nearest ancestor *Profile*, not Resource" is the easy mistake: a Resource ancestor with no
 /// Profile is skipped; the walk continues to the next Resource ancestor.
 ///
-/// **Pure, never cached.** The result is a total function of `(tree, profiles, child)` — no peer
-/// state, no stored edge. It is not cached into a per-Profile `parent_profile` edge: a refcount
-/// keyed on a recomputable derivation cannot be kept balanced across mid-burst topology moves. The
-/// derivation stands alone: [`chain_reaches`] climbs it hop-by-hop and
-/// [`has_active_standard_descendant`] evaluates the reconfirm predicate fresh from it. `pub(crate)`
-/// — engine-internal; no cross-crate consumer.
+/// **One upward pass.** The ascent collects the child-anchor-relative segment chain as it climbs,
+/// so every candidate at a height-`h` ancestor classifies against the already-collected
+/// `&segs[..h]` ([`classify_chain`]) instead of re-walking child → ancestor per candidate. The
+/// consult sits under the per-fire Draining gate ([`chain_reaches`] re-enters this per chain hop),
+/// where a per-candidate re-walk would be quadratic in depth on co-covered trees; `scratch` is
+/// caller-threaded for the same reason (see the module doc).
 ///
-/// Each `child → result` step is a strict Resource-ancestor move (`tree.ancestors` is strict, and
-/// the same-Resource co-anchor case is excluded), so iterating it ([`chain_reaches`]) terminates
-/// structurally — a cycle is unrepresentable, with no self-edge assertion needed.
+/// **Pure, never cached.** The result is a total function of `(tree, profiles, child)` — no peer
+/// state, no stored edge (`scratch` is workspace, not state: its contents never survive
+/// observably). It is not cached into a per-Profile `parent_profile` edge: a refcount keyed on a
+/// recomputable derivation cannot be kept balanced across mid-burst topology moves. The derivation
+/// stands alone: [`chain_reaches`] climbs it hop-by-hop and [`has_active_standard_descendant`]
+/// evaluates the reconfirm predicate fresh from it. `pub(crate)` — engine-internal; no cross-crate
+/// consumer.
+///
+/// Each `child → result` step is a strict Resource-ancestor move (the ascent starts at
+/// `child.resource`'s parent, and the same-Resource co-anchor case is excluded), so iterating it
+/// ([`chain_reaches`]) terminates structurally — a cycle is unrepresentable, with no self-edge
+/// assertion needed.
 #[must_use]
 pub(crate) fn nearest_covering_ancestor(
     tree: &Tree,
     profiles: &ProfileMap,
     child: ProfileId,
+    scratch: &mut PathBuf,
 ) -> Option<ProfileId> {
     let child_resource = profiles.get(child)?.resource();
-    // Cold path (a Draining-phase query, not the per-event hot path): own a local scratch reused
-    // across the ancestor loop's `covers` calls. The signature stays clean — threading `&mut
-    // PathBuf` through this pure derivation and its `chain_reaches` /
-    // `has_active_standard_descendant` callers would muddy their "total function of (tree,
-    // profiles, child)" contract for an allocation the cold path does not feel.
-    let mut scratch = PathBuf::new();
-    for ancestor in tree.ancestors(child_resource) {
+    // Live observation is the only kind authority on this path — the same `kind_or_file` collapse
+    // `covers` applies (see `classify`'s kind-authority contract).
+    let target_kind = tree
+        .get(child_resource)
+        .map_or(ResourceKind::File, Resource::kind_or_file);
+    let mut segs: SmallVec<[&str; 8]> = SmallVec::new();
+    let mut cur = child_resource;
+    loop {
+        let parent = tree.parent(cur)?;
+        // A live slot always carries its segment; `None` means `cur` went stale, which a `&Tree`
+        // walk cannot produce — and nothing above could classify across the gap anyway.
+        segs.push(tree.name(cur)?);
         let nearest = profiles
-            .at(ancestor)
+            .at(parent)
             .filter(|&pid| pid != child)
             .filter(|&pid| {
-                profiles
-                    .get(pid)
-                    .is_some_and(|p| covers(p, child_resource, tree, &mut scratch))
+                profiles.get(pid).is_some_and(|p| {
+                    !matches!(
+                        classify_chain(p.config(), &segs, target_kind, scratch),
+                        CoverageClass::Outside
+                    )
+                })
             })
             .min();
         if nearest.is_some() {
             return nearest;
         }
+        cur = parent;
     }
-    None
 }
 
 /// Walk `resource` and its strict ancestors looking for Profiles whose [`classify`] is not
@@ -274,6 +319,15 @@ pub(crate) fn covering_profiles(
         .get(resource)
         .map_or(ResourceKind::File, Resource::kind_or_file);
     let mut out: SmallVec<[(ProfileId, CoverageClass); 2]> = SmallVec::new();
+
+    // One upward pass: the ascent collects the segment chain once (target-to-root, the order
+    // `classify_chain` consumes), so the candidates at a height-`h` ancestor classify against
+    // `&segs[..h]` — their own anchor-relative suffix — instead of re-walking resource → anchor per
+    // Profile. This is the per-event routing entry, where the per-candidate re-walk would be
+    // quadratic in depth on co-covered trees. No dedup pass is needed: a Profile is anchored at
+    // exactly one Resource and the strict ascent visits each Resource once, so a ProfileId cannot
+    // repeat across the walk.
+    let mut segs: SmallVec<[&str; 8]> = SmallVec::new();
     let mut cur = Some(resource);
     while let Some(rid) = cur {
         for pid in profiles.at(rid) {
@@ -283,12 +337,26 @@ pub(crate) fn covering_profiles(
             if matches!(p.state(), ProfileState::Pending(_)) {
                 continue;
             }
-            let class = classify(p, resource, target_kind, tree, scratch);
-            if !matches!(class, CoverageClass::Outside) && !out.iter().any(|&(q, _)| q == pid) {
+            // Depth 0 — the event landed on this Profile's own anchor — is Interior by
+            // construction, mirroring `classify`'s `target == anchor` arm.
+            let class = if segs.is_empty() {
+                CoverageClass::Interior
+            } else {
+                classify_chain(p.config(), &segs, target_kind, scratch)
+            };
+            if !matches!(class, CoverageClass::Outside) {
                 out.push((pid, class));
             }
         }
         cur = tree.parent(rid);
+        if cur.is_some() {
+            match tree.name(rid) {
+                Some(name) => segs.push(name),
+                // A live slot always carries its segment; a miss means nothing above could
+                // classify across the gap — stop ascending.
+                None => break,
+            }
+        }
     }
     out
 }
@@ -323,6 +391,7 @@ pub(crate) fn has_active_standard_descendant(
     tree: &Tree,
     profiles: &ProfileMap,
     ancestor: ProfileId,
+    scratch: &mut PathBuf,
 ) -> bool {
     let Some(root) = profiles.get(ancestor).map(Profile::resource) else {
         return false;
@@ -333,7 +402,7 @@ pub(crate) fn has_active_standard_descendant(
         for d in profiles.at(node) {
             if profiles.get(d).is_some_and(|p| {
                 p.state().in_active_standard_burst() && p.config().match_chain().is_none()
-            }) && chain_reaches(tree, profiles, d, ancestor)
+            }) && chain_reaches(tree, profiles, d, ancestor, scratch)
             {
                 return true;
             }
@@ -357,9 +426,10 @@ fn chain_reaches(
     profiles: &ProfileMap,
     descendant: ProfileId,
     ancestor: ProfileId,
+    scratch: &mut PathBuf,
 ) -> bool {
     let mut cur = descendant;
-    while let Some(parent) = nearest_covering_ancestor(tree, profiles, cur) {
+    while let Some(parent) = nearest_covering_ancestor(tree, profiles, cur, scratch) {
         if parent == ancestor {
             return true;
         }
@@ -1103,7 +1173,7 @@ mod tests {
         let r = tree.ensure_root("root", ResourceRole::User);
         mark_dir(&mut tree, r);
         let pid = profiles.attach(&mut tree, profile_at(r, cfg_recursive()));
-        assert!(nearest_covering_ancestor(&tree, &profiles, pid).is_none());
+        assert!(nearest_covering_ancestor(&tree, &profiles, pid, &mut PathBuf::new()).is_none());
     }
 
     #[test]
@@ -1124,12 +1194,18 @@ mod tests {
         let p_a = profiles.attach(&mut tree, profile_at(a, cfg_recursive()));
         let p_b = profiles.attach(&mut tree, profile_at(b, cfg_recursive()));
 
-        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_b), Some(p_a));
         assert_eq!(
-            nearest_covering_ancestor(&tree, &profiles, p_a),
+            nearest_covering_ancestor(&tree, &profiles, p_b, &mut PathBuf::new()),
+            Some(p_a)
+        );
+        assert_eq!(
+            nearest_covering_ancestor(&tree, &profiles, p_a, &mut PathBuf::new()),
             Some(p_root)
         );
-        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_root), None);
+        assert_eq!(
+            nearest_covering_ancestor(&tree, &profiles, p_root, &mut PathBuf::new()),
+            None
+        );
     }
 
     #[test]
@@ -1153,7 +1229,10 @@ mod tests {
             profile_at(root, ScanConfig::builder().recursive(false).build()),
         );
         let p_b = profiles.attach(&mut tree, profile_at(b, cfg_recursive()));
-        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_b), None);
+        assert_eq!(
+            nearest_covering_ancestor(&tree, &profiles, p_b, &mut PathBuf::new()),
+            None
+        );
     }
 
     #[test]
@@ -1173,8 +1252,8 @@ mod tests {
         );
         // Both at root; root has no Profile ancestor; resolution walks ancestors of root.resource
         // (none — root is a Tree root).
-        assert!(nearest_covering_ancestor(&tree, &profiles, p_a).is_none());
-        assert!(nearest_covering_ancestor(&tree, &profiles, p_b).is_none());
+        assert!(nearest_covering_ancestor(&tree, &profiles, p_a, &mut PathBuf::new()).is_none());
+        assert!(nearest_covering_ancestor(&tree, &profiles, p_b, &mut PathBuf::new()).is_none());
     }
 
     #[test]
@@ -1203,7 +1282,7 @@ mod tests {
 
         let smaller = std::cmp::min(p_root_a, p_root_b);
         assert_eq!(
-            nearest_covering_ancestor(&tree, &profiles, p_leaf),
+            nearest_covering_ancestor(&tree, &profiles, p_leaf, &mut PathBuf::new()),
             Some(smaller),
         );
     }
@@ -1231,11 +1310,14 @@ mod tests {
         // `a` deliberately carries no Profile.
         let p_b = profiles.attach(&mut tree, profile_at(b, cfg_recursive()));
         assert_eq!(
-            nearest_covering_ancestor(&tree, &profiles, p_b),
+            nearest_covering_ancestor(&tree, &profiles, p_b, &mut PathBuf::new()),
             Some(p_root),
             "Profile-less Resource ancestor is skipped; walk continues",
         );
-        assert_eq!(nearest_covering_ancestor(&tree, &profiles, p_root), None);
+        assert_eq!(
+            nearest_covering_ancestor(&tree, &profiles, p_root, &mut PathBuf::new()),
+            None
+        );
     }
 
     // ===== has_active_standard_descendant =====
@@ -1328,7 +1410,7 @@ mod tests {
             "premise: `a` does not directly cover `deep` (depth 2 > max_depth 1)",
         );
         assert!(
-            has_active_standard_descendant(&tree, &profiles, p_a),
+            has_active_standard_descendant(&tree, &profiles, p_a, &mut PathBuf::new()),
             "true via the transitive chain deep → p_mid → p_a",
         );
         // Sanity: with the deep Profile Idle the predicate is false.
@@ -1355,7 +1437,8 @@ mod tests {
         assert!(!has_active_standard_descendant(
             &tree2,
             &profiles_idle,
-            p_a2
+            p_a2,
+            &mut PathBuf::new(),
         ));
     }
 
@@ -1386,7 +1469,7 @@ mod tests {
             BurstIntent::Standard,
         );
         assert!(
-            !has_active_standard_descendant(&tree, &profiles, p_a),
+            !has_active_standard_descendant(&tree, &profiles, p_a, &mut PathBuf::new()),
             "a co-anchor Active-Standard Profile is not a strict descendant",
         );
     }
@@ -1435,7 +1518,12 @@ mod tests {
             c3,
             ScanConfig::builder().recursive(true),
         );
-        assert!(has_active_standard_descendant(&tree, &profiles, p_root));
+        assert!(has_active_standard_descendant(
+            &tree,
+            &profiles,
+            p_root,
+            &mut PathBuf::new()
+        ));
     }
 
     #[test]
@@ -1465,7 +1553,7 @@ mod tests {
                 ScanConfig::builder().recursive(true),
                 intent,
             );
-            has_active_standard_descendant(&tree, &profiles, p_root)
+            has_active_standard_descendant(&tree, &profiles, p_root, &mut PathBuf::new())
         };
         assert!(!topo(BurstIntent::Seed), "Seed descendant never gates");
         assert!(
@@ -1515,12 +1603,12 @@ mod tests {
         // smaller id.
         let smaller = std::cmp::min(p_mid_1, p_mid_2);
         assert_eq!(
-            nearest_covering_ancestor(&tree, &profiles, p_deep),
+            nearest_covering_ancestor(&tree, &profiles, p_deep, &mut PathBuf::new()),
             Some(smaller),
             "deep's first chain hop is the deterministic min-id co-anchor",
         );
         assert!(
-            has_active_standard_descendant(&tree, &profiles, p_a),
+            has_active_standard_descendant(&tree, &profiles, p_a, &mut PathBuf::new()),
             "the chain still reaches `p_a` through the resolved `mid` Profile",
         );
     }

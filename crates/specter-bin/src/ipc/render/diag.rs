@@ -84,6 +84,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::QuiescenceCeilingForcedDespiteChange { at, .. }
         | WireDiagnostic::RebaseCeilingForced { at, .. }
         | WireDiagnostic::RebaseCeilingUnreadable { at, .. }
+        | WireDiagnostic::ChangeOutsideEventMask { at, .. }
         | WireDiagnostic::SensorOverflow { at, .. }
         | WireDiagnostic::PerFileDriftDroppedOnRecovery { at, .. }
         | WireDiagnostic::PerFileFireSkippedOnFreshSeed { at, .. }
@@ -163,6 +164,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::QuiescenceCeilingForcedDespiteChange { .. }
         | W::RebaseCeilingForced { .. }
         | W::RebaseCeilingUnreadable { .. }
+        | W::ChangeOutsideEventMask { .. }
         | W::SensorOverflow { .. }
         | W::PerFileDriftDroppedOnRecovery { .. }
         | W::RebindUnknownSub { .. }
@@ -413,6 +415,16 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "profile", profile.0);
             field(out, sty, "intent", intent);
             field(out, sty, "observed_change", observed_change);
+        }
+        WireDiagnostic::ChangeOutsideEventMask {
+            profile,
+            intent,
+            retries,
+            ..
+        } => {
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "intent", intent);
+            field(out, sty, "retries", retries);
         }
         WireDiagnostic::SensorOverflow { scope, .. } => {
             field(out, sty, "scope", scope);
@@ -798,6 +810,10 @@ mod tests {
             "rebase_ceiling_forced" => json!({
                 "diag": tag, "at": at, "profile": id,
                 "intent": "standard", "observed_change": false,
+            }),
+            "change_outside_event_mask" => json!({
+                "diag": tag, "at": at, "profile": id,
+                "intent": "standard", "retries": 3,
             }),
             "sensor_overflow" => json!({"diag": tag, "at": at, "scope": global_scope}),
             "sub_attached" => json!({

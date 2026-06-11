@@ -427,6 +427,20 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
              mtime-skipped/degraded); refused to rebase blind, prior baseline kept, burst \
              finished to Idle (self-recovers if transient)",
         ),
+        Diagnostic::ChangeOutsideEventMask {
+            profile,
+            intent,
+            retries,
+        } => tracing::warn!(
+            ?profile,
+            ?intent,
+            retries,
+            "forced ceiling reached after consecutive event-silent retry windows that each \
+             hashed differently: the proof object is moving via change classes outside the \
+             profile's subscribed `events` mask (e.g. in-place writes under events=STRUCTURE); \
+             committed the freshest observation anyway — widen `events` to the classes that \
+             actually move the tree",
+        ),
         Diagnostic::SensorOverflow { scope } => tracing::warn!(
             ?scope,
             "sensor reported overflow (kernel queue dropped events); reseeding in-scope Profiles",
@@ -598,6 +612,7 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::QuiescenceCeilingForcedDespiteChange { .. }
         | D::RebaseCeilingForced { .. }
         | D::RebaseCeilingUnreadable { .. }
+        | D::ChangeOutsideEventMask { .. }
         | D::SensorOverflow { .. }
         | D::PerFileDriftDroppedOnRecovery { .. }
         | D::PerFileFireSkippedOnFreshSeed { .. }

@@ -16,6 +16,7 @@
 //! rebase-loop consequence.
 
 use crate::Engine;
+use crate::coverage::CoverageClass;
 use crate::engine::is_timer_referenced;
 use crate::path::empty_path;
 use crate::probe::{DescentOutcome, ProfileProbeRoute, ProofOutcome, WalkerContractViolation};
@@ -35,6 +36,16 @@ use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
+
+/// Consecutive-Retry floor at which a forced-ceiling hash-channel disagreement upgrades from the
+/// generic despite-change diagnostic to [`Diagnostic::ChangeOutsideEventMask`]. Below the floor the
+/// disagreement keeps its generic story — one or two near-deadline disagreements are consistent
+/// with a slow writer the ceiling happened to catch mid-flight. At the floor, repeated settle
+/// windows that were each event-silent (any in-mask event zeroes the burst's `retry_streak`) yet
+/// each hashed differently witness motion the `events` mask structurally cannot see. Three is the
+/// smallest streak a single write straddling two adjacent samples cannot produce, and small enough
+/// to be reachable within a typical `settle : max_settle` ratio before the ceiling fires.
+pub(crate) const CHANGE_OUTSIDE_MASK_RETRY_FLOOR: u32 = 3;
 
 impl Engine {
     /// Dispatch a normalized [`FsEvent`] for `resource`.
@@ -179,7 +190,7 @@ impl Engine {
             // absorbs are equally stopped (a proof-irrelevant event must not extend a settle loop).
             if !is_anchor && !is_identity {
                 let dir_kinded = matches!(resource_kind, ResourceKind::Dir);
-                if matches!(class, crate::coverage::CoverageClass::Boundary)
+                if matches!(class, CoverageClass::Boundary)
                     || (dir_kinded && event_class == ClassSet::METADATA)
                 {
                     out.diagnostics.push(Diagnostic::EventOutsideProofObject {
@@ -1780,6 +1791,7 @@ impl Engine {
                 &self.tree,
                 &self.profiles,
                 profile_id,
+                &mut self.coverage_scratch,
             )
         {
             if fresh_seed {
@@ -1808,7 +1820,9 @@ impl Engine {
     ///   the Draining gate via the `forced` disjunct in [`Engine::gated_fire`]. On
     ///   `hash_channel_disagreed = true` (strong signal — the hash channel observed `prior !=
     ///   response` before the ceiling expired) the dispatch emits
-    ///   [`Diagnostic::QuiescenceCeilingForcedDespiteChange`]; the quiet `false` case stays silent
+    ///   [`Diagnostic::QuiescenceCeilingForcedDespiteChange`] — or, when the burst's
+    ///   `retry_streak` sits at-or-above [`CHANGE_OUTSIDE_MASK_RETRY_FLOOR`], its mask-blindspot
+    ///   upgrade [`Diagnostic::ChangeOutsideEventMask`]; the quiet `false` case stays silent
     ///   — a forced *fire* carries the bit on its [`specter_core::Effect`], and a forced silent
     ///   seal ([`Consequence::SilentPin`]) observed no change worth flagging.
     /// - [`QuiescenceVerdict::Retry`] — non-firing, non-terminal: the walker certified but the hash
@@ -1847,18 +1861,34 @@ impl Engine {
             QuiescenceVerdict::Stable(StableReason::Forced {
                 hash_channel_disagreed,
             }) => {
-                // Bounded-ceiling path. The strong-signal diagnostic emits only when the hash
-                // channel observed a concrete prior/response disagreement before the deadline
-                // expired; the quiet `false` case stays silent — a forced fire carries the bit on
-                // its `Effect`, a forced silent seal observed no change worth flagging. The
-                // fire-or-seal routing is identical either way; on the firing arms `forced = true`
-                // triggers the Draining-gate bypass in `gated_fire`.
+                // Bounded-ceiling path. A diagnostic emits only when the hash channel observed a
+                // concrete prior/response disagreement before the deadline expired; the quiet
+                // `false` case stays silent — a forced fire carries the bit on its `Effect`, a
+                // forced silent seal observed no change worth flagging. A disagreement at the tail
+                // of a persistent event-silent retry streak upgrades to the mask-blindspot hint:
+                // N quiet windows that each hashed differently witness motion outside the
+                // Profile's `events` mask, not a slow writer the deadline caught. The fire-or-seal
+                // routing is identical either way; on the firing arms `forced = true` triggers the
+                // Draining-gate bypass in `gated_fire`.
                 if hash_channel_disagreed {
-                    out.diagnostics
-                        .push(Diagnostic::QuiescenceCeilingForcedDespiteChange {
+                    let retries = self
+                        .profiles
+                        .get(profile_id)
+                        .and_then(Profile::pre_fire_burst)
+                        .map_or(0, |pre| pre.retry_streak);
+                    if retries >= CHANGE_OUTSIDE_MASK_RETRY_FLOOR {
+                        out.diagnostics.push(Diagnostic::ChangeOutsideEventMask {
                             profile: profile_id,
                             intent,
+                            retries,
                         });
+                    } else {
+                        out.diagnostics
+                            .push(Diagnostic::QuiescenceCeilingForcedDespiteChange {
+                                profile: profile_id,
+                                intent,
+                            });
+                    }
                 }
                 self.fire_or_seal(profile_id, snapshot, target, true, intent, now, out);
             }
@@ -2169,10 +2199,12 @@ impl Engine {
     ///     or the hash channel agreed). Restart from the fire-tail residual or finish to Idle.
     ///   - [`StableReason::Forced`] — the bounded `RebaseCeiling` fired but the walker still
     ///     certified. Pin the freshest observation (a deliberate, loud terminal — not a wedge) and
-    ///     emit one [`Diagnostic::RebaseCeilingForced`] carrying `observed_change =
-    ///     hash_channel_disagreed`: `true` is the strong signal (the hash channel observed `prior !=
-    ///     response` before the ceiling expired); `false` is the quiet ceiling (the channel agreed at
-    ///     the last sample, was on its first sample, or was inactive on an events-reliable Profile).
+    ///     emit one diagnostic: [`Diagnostic::RebaseCeilingForced`] carrying `observed_change =
+    ///     hash_channel_disagreed` (`true` is the strong signal — the hash channel observed `prior
+    ///     != response` before the ceiling expired; `false` is the quiet ceiling — the channel
+    ///     agreed at the last sample, was on its first sample, or was inactive on an
+    ///     events-reliable Profile), upgraded to [`Diagnostic::ChangeOutsideEventMask`] when the
+    ///     disagreement tails a `retry_streak` at-or-above [`CHANGE_OUTSIDE_MASK_RETRY_FLOOR`].
     /// - [`QuiescenceVerdict::Retry`] — non-firing, non-terminal: the walker certified but the hash
     ///   channel observed `prior != Some(response)` (events-incomplete fire-bearing burst), or the
     ///   walker refused on some chain (transient non-observation — `EACCES`, a chmod-000 chain).
@@ -2260,14 +2292,29 @@ impl Engine {
                     } => {
                         // Bounded terminal: the `RebaseCeiling` already fired but the walker
                         // certified anyway. Emit one diagnostic unconditionally — no `Effect`
-                        // records the forced fallback downstream (the principled asymmetry with the
-                        // pre-fire mirror) — carrying the disagreement bit as `observed_change`.
+                        // records the forced fallback downstream (the principled asymmetry with
+                        // the pre-fire mirror). A disagreement at the tail of a persistent
+                        // event-silent retry streak upgrades the generic carrying-the-bit form to
+                        // the mask-blindspot hint, exactly as on the pre-fire ceiling.
                         let intent = self.rebase_burst_intent(profile_id);
-                        out.diagnostics.push(Diagnostic::RebaseCeilingForced {
-                            profile: profile_id,
-                            intent,
-                            observed_change: hash_channel_disagreed,
-                        });
+                        let retries = self
+                            .profiles
+                            .get(profile_id)
+                            .and_then(Profile::post_fire_burst)
+                            .map_or(0, |post| post.retry_streak);
+                        if hash_channel_disagreed && retries >= CHANGE_OUTSIDE_MASK_RETRY_FLOOR {
+                            out.diagnostics.push(Diagnostic::ChangeOutsideEventMask {
+                                profile: profile_id,
+                                intent,
+                                retries,
+                            });
+                        } else {
+                            out.diagnostics.push(Diagnostic::RebaseCeilingForced {
+                                profile: profile_id,
+                                intent,
+                                observed_change: hash_channel_disagreed,
+                            });
+                        }
                         self.finish_burst_to_idle(profile_id, out);
                     }
                 }

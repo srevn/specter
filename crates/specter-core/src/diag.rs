@@ -438,6 +438,10 @@ pub enum Diagnostic {
     /// of whether an Effect fired. For events-reliable Profiles and cold-Seed bursts the channel is
     /// bypassed and this variant is unreachable by the verdict fold (`hash_channel_disagreed` is
     /// always `false`).
+    ///
+    /// When the disagreement is the tail of a *persistent* event-silent retry streak, the dispatch
+    /// upgrades to [`Self::ChangeOutsideEventMask`] instead — the streak witnesses a mask
+    /// blindspot, not a slow writer caught by the deadline.
     QuiescenceCeilingForcedDespiteChange {
         profile: ProfileId,
         intent: BurstIntent,
@@ -456,13 +460,14 @@ pub enum Diagnostic {
     ///   confirmation, not observed change); or the hash channel was inactive because the Profile's
     ///   `events_union` already witnesses quiescence ([`crate::Profile::events_witness_quiescence`]).
     ///
-    /// Always emitted on the post-fire forced arm — deliberately **loud** on both bits, because no
-    /// `Effect` carries `forced` downstream to record that the rebase was a ceiling fallback. This
-    /// is the principled asymmetry with the pre-fire counterpart
-    /// [`Self::QuiescenceCeilingForcedDespiteChange`], which emits *only* on disagreement and stays
-    /// silent on the quiet path (there `forced` already rides `Effect.forced`). `intent`
-    /// distinguishes a Standard post-fire rebase from a Seed-drift one, exactly as on
-    /// [`Self::ProbeVanished`] / [`Self::ProbeFailed`].
+    /// The post-fire forced arm is always **loud** — every forced rebase emits either this or its
+    /// [`Self::ChangeOutsideEventMask`] upgrade (a `true` bit at the tail of a persistent
+    /// event-silent retry streak), because no `Effect` carries `forced` downstream to record that
+    /// the rebase was a ceiling fallback. This is the principled asymmetry with the pre-fire
+    /// counterpart [`Self::QuiescenceCeilingForcedDespiteChange`], which emits *only* on
+    /// disagreement and stays silent on the quiet path (there `forced` already rides
+    /// `Effect.forced`). `intent` distinguishes a Standard post-fire rebase from a Seed-drift one,
+    /// exactly as on [`Self::ProbeVanished`] / [`Self::ProbeFailed`].
     RebaseCeilingForced {
         profile: ProfileId,
         intent: BurstIntent,
@@ -484,6 +489,29 @@ pub enum Diagnostic {
         profile: ProfileId,
         first_unread: Arc<Path>,
         intent: BurstIntent,
+    },
+    /// Both forced-ceiling terminals' mask-blindspot refinement: the hash channel observed
+    /// concrete disagreement (`prior != response`) at the final sample — as on
+    /// [`Self::QuiescenceCeilingForcedDespiteChange`] / [`Self::RebaseCeilingForced`] — at the
+    /// tail of `retries` consecutive Retry windows during which **not one mask-admitted event
+    /// arrived** (any in-mask event resets the burst's streak counter). Settle windows the events
+    /// stream swore were quiet kept hashing differently, so the proof object is moving via change
+    /// classes outside the Profile's subscribed `events` mask; the streak is the witness. The
+    /// canonical shape: `events = STRUCTURE` over files written in place (mmap writers, touch
+    /// storms) — mtime folds into `leaf_hash`, so every sample differs while STRUCTURE stays
+    /// silent. The remedy is config-side: widen `events` to the classes that actually move the
+    /// tree.
+    ///
+    /// Emitted **instead of** the generic ceiling diagnostic, at both terminals (the pre-fire
+    /// `BurstDeadline` and the post-fire `RebaseCeiling` — `intent` plus the engine's dispatch
+    /// site distinguish them in logs exactly as for the generic pair). Reachable only when the
+    /// hash channel was engaged — an events-incomplete mask is a precondition of both the
+    /// disagreement bit and the channel itself — so an events-reliable Profile can never receive a
+    /// false hint.
+    ChangeOutsideEventMask {
+        profile: ProfileId,
+        intent: BurstIntent,
+        retries: u32,
     },
     /// `Input::SensorOverflow` arrived — the kernel's event queue dropped record(s) over `scope`
     /// and the watcher surfaced the loss-of-trust signal. The engine reseeds every in-scope Profile

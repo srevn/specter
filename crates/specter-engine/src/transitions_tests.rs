@@ -5800,6 +5800,271 @@ fn post_fire_forced_ceiling_observed_change_tracks_carrier_disagreement() {
     }
 }
 
+/// The mask-blindspot upgrade at the pre-fire ceiling: a touch-storm under `events = STRUCTURE`.
+/// Every settle window is event-silent (no STRUCTURE event ever arrives, so `retry_streak` never
+/// resets) yet every sample hashes differently — in-place writes / mtime churn fold into
+/// `leaf_hash` while the subscribed class stays quiet. After
+/// `CHANGE_OUTSIDE_MASK_RETRY_FLOOR` consecutive Retry windows, the forced-ceiling disagreement
+/// emits `ChangeOutsideEventMask` (carrying the streak) **instead of** the generic
+/// `QuiescenceCeilingForcedDespiteChange`; the bounded fire itself is unchanged.
+#[test]
+fn pre_fire_forced_ceiling_after_event_silent_retry_streak_emits_mask_hint() {
+    let floor = crate::transitions::CHANGE_OUTSIDE_MASK_RETRY_FLOOR;
+    let mut e = Engine::new();
+    let r = e.tree.ensure_root("anchor", ResourceRole::User);
+    e.tree.set_kind(r, ResourceKind::Dir);
+    let now = Instant::now();
+    let (_sid, pid) = crate::testkit::attach_structure_only(&mut e, r, now);
+    let baseline = dir_tree_snap(vec![]);
+    let seed_done = crate::testkit::seed_to_idle(&mut e, pid, &baseline, now);
+
+    let burst_start = seed_done + Duration::from_millis(1);
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::StructureChanged,
+        },
+        burst_start,
+    );
+
+    // `floor` Retry rounds: each settle expiry drives a verify whose sample hashes differently
+    // from the carrier's prior (distinct sizes ⇒ distinct leaf/dir hashes), so every round folds
+    // Retry and `retry_drives_batching` bumps the streak — round 1 via `prior = None`, the rest
+    // via concrete disagreement. No FsEvent arrives anywhere in the loop: the streak never resets.
+    let mut at = burst_start;
+    for round in 0..floor {
+        at += SETTLE * 2;
+        crate::testkit::drain_due(&mut e, at);
+        let corr = e
+            .pending_probe_for(pid)
+            .expect("settle expiry drives a Verifying probe each round");
+        let sample = dir_tree_snap(vec![("draft", EntryKind::File, u64::from(round) + 1)]);
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: pid,
+                correlation: corr,
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: sample,
+                    authority: ProofAuthority::Authoritative,
+                },
+            }),
+            at,
+        );
+        assert!(
+            out.effects().is_empty(),
+            "round {round}: Retry must not fire",
+        );
+    }
+
+    // BurstDeadline mid-Batching: `forced = true` + a fresh Verifying probe.
+    let bd_id = match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.burst_deadline,
+        other => panic!("expected Active(PreFire) after the retry rounds; got {other:?}"),
+    };
+    let bd_out = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::BurstDeadline,
+            id: bd_id,
+        },
+        burst_start + MAX_SETTLE + Duration::from_millis(1),
+    );
+    let corr_forced = bd_out
+        .probe_ops()
+        .iter()
+        .find_map(|op| match op {
+            ProbeOp::Probe { request } => Some(request.correlation()),
+            ProbeOp::Cancel { .. } => None,
+        })
+        .expect("BurstDeadline drives a fresh forced Verifying probe");
+
+    // The forced sample still disagrees with the carrier (the storm never quiesced) — the terminal
+    // pairs `hash_channel_disagreed = true` with `retry_streak == floor`, selecting the hint.
+    let final_sample = dir_tree_snap(vec![("draft", EntryKind::File, u64::from(floor) + 1)]);
+    let s_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: corr_forced,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: final_sample,
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        burst_start + MAX_SETTLE + Duration::from_millis(2),
+    );
+
+    assert_eq!(
+        s_out.effects().len(),
+        1,
+        "the hint changes the diagnostic, never the bounded fire",
+    );
+    assert!(
+        s_out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ChangeOutsideEventMask { profile, intent, retries }
+                if *profile == pid && *intent == BurstIntent::Standard && *retries == floor,
+        )),
+        "streak at the floor upgrades the forced-ceiling disagreement to the mask hint; got {:?}",
+        s_out.diagnostics,
+    );
+    assert!(
+        s_out
+            .diagnostics
+            .iter()
+            .all(|d| !matches!(d, Diagnostic::QuiescenceCeilingForcedDespiteChange { .. })),
+        "the hint replaces the generic despite-change diagnostic, not alongside it; got {:?}",
+        s_out.diagnostics,
+    );
+}
+
+/// The post-fire mirror of the mask-blindspot upgrade: the rebase loop's own `retry_streak`
+/// (incremented at every `Rebasing → Settling` loop-back, fresh across the fire boundary) reaches
+/// the floor with every window event-silent, and the `RebaseCeiling` terminal's disagreement then
+/// emits `ChangeOutsideEventMask` **instead of** `RebaseCeilingForced`. The commit semantics are
+/// unchanged: the freshest observation is still pinned as the rebased baseline.
+#[test]
+fn post_fire_forced_ceiling_after_retry_streak_emits_mask_hint() {
+    let floor = crate::transitions::CHANGE_OUTSIDE_MASK_RETRY_FLOOR;
+    let mut e = Engine::new();
+    let r = e.tree.ensure_root("anchor", ResourceRole::User);
+    e.tree.set_kind(r, ResourceKind::Dir);
+    let now = Instant::now();
+    let (sid, pid) = crate::testkit::attach_structure_only(&mut e, r, now);
+    let baseline = dir_tree_snap(vec![]);
+    let seed_done = crate::testkit::seed_to_idle(&mut e, pid, &baseline, now);
+
+    // Fire a Standard burst, complete its Effect → Rebasing probe-first.
+    let fire_snap = dir_tree_snap(vec![("draft", EntryKind::File, 1)]);
+    let fire_start = seed_done + Duration::from_millis(1);
+    let stable_out = crate::testkit::drive_standard_n2_until_stable(
+        &mut e,
+        pid,
+        r,
+        &[Arc::clone(&fire_snap), Arc::clone(&fire_snap)],
+        fire_start,
+    );
+    let key = stable_out.effects()[0].key();
+    let mut at = fire_start + SETTLE * 4 + Duration::from_millis(1);
+    e.step(
+        Input::EffectComplete(EffectCompletion {
+            sub: sid,
+            key,
+            outcome: EffectOutcome::Ok,
+        }),
+        at,
+    );
+
+    // `floor` Retry loop-backs: each Rebasing sample hashes differently from the carrier's prior
+    // (round 1 via `prior = None`), folding Retry → Settling (streak bump); the settle expiry
+    // re-arms Rebasing for the next sample. No FsEvent is absorbed anywhere: the streak holds.
+    for round in 0..floor {
+        let corr = e
+            .pending_probe_for(pid)
+            .expect("Rebasing probe in flight each round");
+        let sample = dir_tree_snap(vec![("draft", EntryKind::File, u64::from(round) + 2)]);
+        at += SETTLE * 2;
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: pid,
+                correlation: corr,
+                outcome: ProbeOutcome::SubtreeProven {
+                    snapshot: sample,
+                    authority: ProofAuthority::Authoritative,
+                },
+            }),
+            at,
+        );
+        assert!(
+            out.diagnostics
+                .iter()
+                .all(|d| !matches!(d, Diagnostic::RebaseCeilingForced { .. })),
+            "round {round}: Retry before the ceiling emits no forced diagnostic",
+        );
+        // Settling → Rebasing for the next sample — except after the last round, where the
+        // ceiling (not the settle timer) drives the terminal probe below.
+        if round + 1 < floor {
+            let settle_id = match e.profiles.get(pid).unwrap().state() {
+                ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
+                    PostFirePhase::Settling { settle_timer } => *settle_timer,
+                    other => panic!("expected Settling after Retry; got {other:?}"),
+                },
+                other => panic!("expected Active(PostFire); got {other:?}"),
+            };
+            at += SETTLE;
+            e.step(
+                Input::TimerExpired {
+                    profile: pid,
+                    kind: TimerKind::PostFireSettle,
+                    id: settle_id,
+                },
+                at,
+            );
+        }
+    }
+
+    // RebaseCeiling mid-Settling: latch the forced terminal + drive the final Rebasing probe.
+    let ceiling = rebase_ceiling_timer(&e, pid);
+    at += Duration::from_millis(1);
+    let ceiling_out = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::RebaseCeiling,
+            id: ceiling,
+        },
+        at,
+    );
+    let corr_forced = ceiling_out
+        .probe_ops()
+        .iter()
+        .find_map(|op| match op {
+            ProbeOp::Probe { request } => Some(request.correlation()),
+            ProbeOp::Cancel { .. } => None,
+        })
+        .expect("RebaseCeiling in Settling drives a fresh forced Rebasing probe");
+
+    // The forced sample still disagrees — `hash_channel_disagreed = true` at `retry_streak ==
+    // floor` selects the hint over the generic RebaseCeilingForced.
+    let final_sample = dir_tree_snap(vec![("draft", EntryKind::File, u64::from(floor) + 2)]);
+    let s_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: corr_forced,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: Arc::clone(&final_sample),
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        at + Duration::from_millis(1),
+    );
+
+    assert!(
+        matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
+        "the forced terminal still finishes the burst to Idle",
+    );
+    assert_eq!(
+        baseline_hash(&e, pid),
+        Some(final_sample.dir_hash()),
+        "the hint changes the diagnostic, never the freshest-observation pin",
+    );
+    assert!(
+        s_out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ChangeOutsideEventMask { profile, intent, retries }
+                if *profile == pid && *intent == BurstIntent::Standard && *retries == floor,
+        )),
+        "post-fire streak at the floor upgrades the forced terminal to the mask hint; got {:?}",
+        s_out.diagnostics,
+    );
+    assert!(
+        s_out
+            .diagnostics
+            .iter()
+            .all(|d| !matches!(d, Diagnostic::RebaseCeilingForced { .. })),
+        "the hint replaces RebaseCeilingForced, not alongside it; got {:?}",
+        s_out.diagnostics,
+    );
+}
+
 // ---------- rebase_baseline witness clears at every site ----------
 
 /// Construct an `Active(PreFire)` state populated with default empty per-burst sets and the
@@ -7681,6 +7946,7 @@ mod props {
                         &e.tree,
                         &e.profiles,
                         pid,
+                        &mut std::path::PathBuf::new(),
                     ));
                 }
             }

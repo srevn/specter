@@ -378,6 +378,12 @@ pub(crate) enum WireDiagnostic {
         first_unread: WirePath,
         intent: WireBurstIntent,
     },
+    ChangeOutsideEventMask {
+        at: WireTime,
+        profile: WireId,
+        intent: WireBurstIntent,
+        retries: u32,
+    },
     SensorOverflow {
         at: WireTime,
         scope: WireOverflowScope,
@@ -704,6 +710,16 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 first_unread: WirePath::from(first_unread),
                 intent: WireBurstIntent::from(*intent),
             },
+            Diagnostic::ChangeOutsideEventMask {
+                profile,
+                intent,
+                retries,
+            } => Self::ChangeOutsideEventMask {
+                at: at.clone(),
+                profile: WireId::from(*profile),
+                intent: WireBurstIntent::from(*intent),
+                retries: *retries,
+            },
             Diagnostic::SensorOverflow { scope } => Self::SensorOverflow {
                 at: at.clone(),
                 scope: WireOverflowScope::from(*scope),
@@ -859,6 +875,7 @@ impl WireDiagnostic {
             }
             Self::RebaseCeilingForced { .. } => "rebase_ceiling_forced",
             Self::RebaseCeilingUnreadable { .. } => "rebase_ceiling_unreadable",
+            Self::ChangeOutsideEventMask { .. } => "change_outside_event_mask",
             Self::SensorOverflow { .. } => "sensor_overflow",
             Self::PerFileDriftDroppedOnRecovery { .. } => "per_file_drift_dropped_on_recovery",
             Self::PerFileFireSkippedOnFreshSeed { .. } => "per_file_fire_skipped_on_fresh_seed",
@@ -929,6 +946,7 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "quiescence_ceiling_forced_despite_change",
     "rebase_ceiling_forced",
     "rebase_ceiling_unreadable",
+    "change_outside_event_mask",
     "sensor_overflow",
     "per_file_drift_dropped_on_recovery",
     "per_file_fire_skipped_on_fresh_seed",
@@ -1921,6 +1939,12 @@ mod tests {
                 profile: WireId(122),
                 first_unread: WirePath::from(Path::new("/tmp/z")),
                 intent: WireBurstIntent::Seed,
+            },
+            WireDiagnostic::ChangeOutsideEventMask {
+                at: at(),
+                profile: WireId(125),
+                intent: WireBurstIntent::Standard,
+                retries: 4,
             },
             WireDiagnostic::SensorOverflow {
                 at: at(),

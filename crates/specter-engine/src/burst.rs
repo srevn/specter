@@ -92,7 +92,7 @@ use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, BurstFinish, BurstHelper, BurstIntent, CeilingState, Diagnostic, DirtyProvenance,
     FsEvent, PostFirePhase, PreFireBurst, PreFirePhase, ProbeSlot, Profile, ProfileId,
-    ProfileState, ReapTrigger, ResourceId, ResourceKind, ScanConfig, StepOutput, TimerId,
+    ProfileState, ReapTrigger, Resource, ResourceId, ResourceKind, ScanConfig, StepOutput, TimerId,
     TimerKind, Tree,
 };
 use std::num::NonZeroU32;
@@ -523,6 +523,9 @@ impl Engine {
             .and_then(Profile::pre_fire_burst_mut)
         {
             pre.last_event_time = Some(now);
+            // A delivered in-mask event explains any sample-to-sample motion, so the
+            // mask-blindspot streak breaks here — only event-*silent* retry windows count.
+            pre.retry_streak = 0;
             pre.dirty.note(event_resource, Arc::clone(event_path));
             if let Some(timer_id) = new_settle_timer {
                 pre.phase = PreFirePhase::Batching {
@@ -587,6 +590,10 @@ impl Engine {
         {
             pre.phase = PreFirePhase::Batching { settle_timer };
             pre.last_event_time = Some(now);
+            // One more settle window that was event-silent yet did not certify — the streak the
+            // forced-ceiling terminal reads for the mask-blindspot upgrade
+            // (`Diagnostic::ChangeOutsideEventMask`).
+            pre.retry_streak = pre.retry_streak.saturating_add(1);
         }
     }
 
@@ -1091,6 +1098,9 @@ impl Engine {
             );
             post.phase = PostFirePhase::Settling { settle_timer };
             post.last_event_time = Some(now);
+            // One more rebase window that was event-silent yet did not certify — the post-fire
+            // half of the mask-blindspot streak (`Diagnostic::ChangeOutsideEventMask`).
+            post.retry_streak = post.retry_streak.saturating_add(1);
         }
     }
 
@@ -1235,6 +1245,7 @@ impl Engine {
                         &self.tree,
                         &self.profiles,
                         id,
+                        &mut self.coverage_scratch,
                     ))
                 .then_some(id)
             })
@@ -1297,6 +1308,9 @@ impl Engine {
             post.final_window_residual
                 .note(event_resource, Arc::clone(event_path));
             post.last_event_time = Some(now);
+            // An absorbed in-mask event explains the rebase loop's sample motion — the
+            // mask-blindspot streak breaks, mirroring `event_drives_batching`'s pre-fire reset.
+            post.retry_streak = 0;
             out.diagnostics.push(Diagnostic::EventAbsorbedByFireTail {
                 profile: profile_id,
                 resource: event_resource,
@@ -1436,10 +1450,10 @@ fn resolve_under_anchor(
     path: &Path,
     tree: &Tree,
 ) -> ResourceId {
-    let Some(anchor_path) = tree.get(anchor).map(|r| Arc::clone(r.path())) else {
+    let Some(anchor_path) = tree.get(anchor).map(Resource::path) else {
         return anchor;
     };
-    let Ok(rel) = path.strip_prefix(&anchor_path) else {
+    let Ok(rel) = path.strip_prefix(anchor_path) else {
         return anchor;
     };
     let mut cur = anchor;
