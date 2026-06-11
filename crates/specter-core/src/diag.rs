@@ -118,20 +118,22 @@ pub enum SpliceFailureCause {
 ///   `has_fired` continuity is what the in-place arm preserves.
 /// - [`Self::IpcDisabled`]: an operator runtime-disabled the Sub via the bin's IPC `disable` verb;
 ///   the bin sends [`crate::Input::DetachSub`] carrying this reason verbatim.
-/// - [`Self::AnchorLost`]: a discovery-minted Sub's anchor disappeared and the all-dynamic
-///   anchor-terminal teardown unwound its Profile — the honest vocabulary for "the watched path is
-///   gone", with no source-entity reap implied (the discovery template stays live and re-mints on
-///   reappearance). Pairs with [`Diagnostic::DiscoverySubReaped`] (source-keyed, path-carrying
-///   narration).
+/// - [`Self::MatchVanished`]: a discovery reconcile's certified match set no longer contains the
+///   terminus this minted Sub anchors at, so the removal pass detached it — reconcile is the
+///   single lifecycle authority for minted Subs, both directions. Deliberately *not* an
+///   anchor-loss story: an atomic replace keeps the terminus in the set (slot identity is
+///   `(parent, segment)`), so the minted Sub survives replaces with its fire history intact and
+///   only a genuinely vanished match reaps. Pairs with [`Diagnostic::DiscoverySubReaped`]
+///   (source-keyed, path-carrying narration).
 /// - [`Self::DiscoverySourceDetached`]: the discovery Sub that minted this Sub was detached, so the
 ///   cascade reaped the minted set — named for what actually happened to *this* Sub's source rather
-///   than overloading the anchor story.
+///   than overloading the match story.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DetachReason {
     ConfigDiffRemoved,
     ConfigDiffIdentityChanged,
     IpcDisabled,
-    AnchorLost,
+    MatchVanished,
     DiscoverySourceDetached,
 }
 
@@ -602,10 +604,13 @@ pub enum Diagnostic {
     /// (likely too broad, e.g. `/*` without further constraint). One-shot per template lifetime;
     /// the latch on the template carrier (`DiscoveryTemplate::fanout_warned`) suppresses repeats.
     DiscoveryFanoutThreshold { source: SubId, count: usize },
-    /// A dynamic Sub minted by the discovery template `source` at `path` was reaped because its
-    /// anchor disappeared. Operator narration; if the path re-materialises the next reconcile
-    /// re-mints it (under a fresh [`SubId`]). Pairs with the per-Sub [`Self::SubDetached`] carrying
-    /// [`DetachReason::AnchorLost`].
+    /// A dynamic Sub minted by the discovery template `source` at `path` was reaped because the
+    /// reconcile's certified match set no longer contains its terminus — the removal half of the
+    /// reconcile-owned minted lifecycle. Operator narration; if the path re-materialises a later
+    /// reconcile re-mints it (under a fresh [`SubId`]). A *replaced* terminus never reaches here:
+    /// its slot survives the replace, so the dedup finds the still-attached Sub and its own
+    /// recovery descent fires. Pairs with the per-Sub [`Self::SubDetached`] carrying
+    /// [`DetachReason::MatchVanished`].
     DiscoverySubReaped {
         source: SubId,
         sub: SubId,

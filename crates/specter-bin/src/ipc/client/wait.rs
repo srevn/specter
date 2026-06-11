@@ -235,15 +235,15 @@ mod tests {
     }
 
     /// `--kind detach` against `SubDetached` matches regardless of reason (`ConfigDiffRemoved`,
-    /// `IpcDisabled`, `AnchorLost`, `ConfigDiffIdentityChanged`). Operators waiting for "this Sub
-    /// left" don't differentiate the cause.
+    /// `IpcDisabled`, `MatchVanished`, `ConfigDiffIdentityChanged`). Operators waiting for "this
+    /// Sub left" don't differentiate the cause.
     #[test]
     fn classify_detach_matches_subdetached_any_reason() {
         for reason in [
             WireDetachReason::ConfigDiffRemoved,
             WireDetachReason::ConfigDiffIdentityChanged,
             WireDetachReason::IpcDisabled,
-            WireDetachReason::AnchorLost,
+            WireDetachReason::MatchVanished,
         ] {
             assert!(matches!(
                 classify(WaitKind::Detach, &sub_detached(reason)),

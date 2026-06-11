@@ -1156,8 +1156,8 @@ impl Engine {
     /// cascade: child's burst end → parent reconfirm Probe in one `step` call.
     ///
     /// **Burst-finish directive.** If the prior state's [`BurstFinish`] is [`BurstFinish::Reap`]
-    /// (the last Sub was detached mid-burst, or the anchor's all-dynamic teardown converged on a
-    /// still-Active Profile), `Engine::reap_profile` runs in the same step after the Draining sweep
+    /// (the last Sub was detached mid-burst), `Engine::reap_profile` runs in the same step after
+    /// the Draining sweep
     /// — `via = DeferredFromBurst` distinguishes this path from the immediate reap in
     /// `detach_sub_inner`. Otherwise the Profile rests at [`ProfileState::Idle`].
     pub(crate) fn finish_burst_to_idle(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
@@ -1171,8 +1171,8 @@ impl Engine {
         //    disarmed via take_owner_probe; nothing between that disarm and the call re-arms.
         //  - Awaiting-phase callers (on_effect_complete reap, handle_gate_deadline zombie) are
         //    guarded to Active(PostFire(Awaiting)) — Awaiting holds no slot.
-        //  - Pure-teardown callers (finalize_anchor_lost, on_anchor_terminal_all_dynamic,
-        //    detach_sub_inner's last-Sub Active arm, on_sensor_overflow's Active arm) disarm first:
+        //  - Pure-teardown callers (finalize_anchor_lost, detach_sub_inner's last-Sub Active arm,
+        //    on_sensor_overflow's Active arm) disarm first:
         //    cancel_owner_probe on teardown / overflow-reap paths, take_owner_probe on the
         //    overflow-reseed path. Named at this boundary, not left solely to the far-end
         //    ProbeSlot::drop tripwire — that fires frames downstream and is structurally bypassed
@@ -1246,9 +1246,9 @@ impl Engine {
         }
 
         // Honour the burst-finish directive captured from the prior state. `Reap` is set by
-        // `detach_sub_inner` (last Sub detached mid-burst) or `on_anchor_terminal_all_dynamic`
-        // (all-dynamic anchor teardown); we defer the reap to here so the Profile's burst doesn't
-        // fire Effects against a Sub registry that no longer holds the reference. `ReturnToIdle`
+        // `detach_sub_inner` (last Sub detached mid-burst); we defer the reap to here so the
+        // Profile's burst doesn't fire Effects against a Sub registry that no longer holds the
+        // reference. `ReturnToIdle`
         // leaves the Profile resting at Idle (the `map_state` Active arm above installed it as part
         // of the same single reconcile).
         if matches!(finish, BurstFinish::Reap) {

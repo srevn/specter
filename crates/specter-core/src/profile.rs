@@ -1172,8 +1172,7 @@ impl ActiveBurst {
 ///
 /// **Writers.**
 /// - [`ProfileState::mark_active_for_reap`] flips [`Self::ReturnToIdle`] → [`Self::Reap`]. Sole
-///   callers: `detach_sub_inner` (last Sub detached mid-burst) and `on_anchor_terminal_all_dynamic`
-///   (all-dynamic anchor-terminal teardown converged on a still-Active Profile).
+///   caller: `detach_sub_inner` (last Sub detached mid-burst).
 /// - [`ProfileState::clear_active_reap`] flips [`Self::Reap`] → [`Self::ReturnToIdle`]. Sole
 ///   caller: `attach_sub_inner`'s zombie-revival arm — a fresh Sub joining a zombie Profile
 ///   resurrects it under the new Sub set.
@@ -1223,8 +1222,7 @@ pub enum DetachLifecycle {
 /// paths converge on the same `reap_profile` machinery:
 ///
 /// - [`Self::Immediate`]: `detach_sub_inner` on an Idle/Pending Profile whose last Sub just
-///   detached. No burst to wait on, so reap runs inline. Also reached by
-///   `on_anchor_terminal_all_dynamic`'s non-Active arm.
+///   detached. No burst to wait on, so reap runs inline.
 /// - [`Self::DeferredFromBurst`]: `finish_burst_to_idle` honouring the [`BurstFinish::Reap`]
 ///   directive at burst-end. The Profile spent time as a zombie burst before reaching reap.
 ///
@@ -1363,9 +1361,8 @@ impl ProfileState {
     /// [`Self::detach_lifecycle`] or a `matches!` guard). The `bool` return surfaces "did the flip
     /// land" so callers can `debug_assert!` against a future routing breach.
     ///
-    /// **Sole writers.** `detach_sub_inner` (refcount→0 on Active) and
-    /// `on_anchor_terminal_all_dynamic` (all-dynamic anchor-terminal teardown on Active). No other
-    /// site has a legitimate need to mark a burst for reap.
+    /// **Sole writer.** `detach_sub_inner` (refcount→0 on Active). No other site has a
+    /// legitimate need to mark a burst for reap.
     #[must_use]
     pub const fn mark_active_for_reap(&mut self) -> bool {
         if let Self::Active(_, finish) = self {

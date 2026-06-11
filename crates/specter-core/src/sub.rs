@@ -642,11 +642,12 @@ impl Sub {
     }
 
     /// Whether this Sub was minted by a discovery reconcile rather than declared by the operator.
-    /// The anchor-terminal recovery fan-out reads it to split all-dynamic Profiles (wholesale
-    /// teardown; the source re-mints on reappearance) from mixed/static ones (the static Sub's
-    /// `watch_root_parent` recovery channel keeps the Profile alive). A discovery *template* is
-    /// operator-declared (`false`) — its recovery is the static channel, exactly like any other
-    /// `[[watch]]`.
+    /// Lifecycle is uniform across the split — anchor loss re-enters descent for every Profile,
+    /// and a minted Sub's removal authority is its source's reconcile, not its anchor — so the
+    /// predicate is purely operator-facing: the IPC enable/disable dispatcher refuses to detach a
+    /// minted Sub by name (the next reconcile would just re-mint it; disable the template
+    /// instead), and the `show` projection renders the origin. A discovery *template* is
+    /// operator-declared (`false`).
     #[must_use]
     pub const fn is_dynamic(&self) -> bool {
         self.minted_by().is_some()
@@ -998,10 +999,9 @@ impl SubRegistry {
     /// truth — no mirror to drift. Returns `Some(count)` the first time `count` exceeds `threshold`
     /// and latches [`DiscoveryTemplate::fanout_warned`] so later crossings return `None` — a
     /// pathological pattern warns once per template lifetime. The check-and-latch is atomic here,
-    /// so the one-shot property is structural rather than a caller convention; the engine reads the
-    /// latch off the template carrier as a pre-gate so it can skip computing `count` once warned. A
-    /// stale `SubId` or a non-template Sub is a silent `None` — the latch lives on the template
-    /// carrier, so the miss mirrors [`Self::mark_fired`]'s died-with-the-entry contract.
+    /// so the one-shot property is structural rather than a caller convention. A stale `SubId` or
+    /// a non-template Sub is a silent `None` — the latch lives on the template carrier, so the
+    /// miss mirrors [`Self::mark_fired`]'s died-with-the-entry contract.
     pub fn latch_fanout_warning(
         &mut self,
         sub: SubId,

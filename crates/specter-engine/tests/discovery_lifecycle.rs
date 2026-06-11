@@ -13,10 +13,10 @@ use specter_core::testkit::{
     anchor_ok, covered, dir_snap, dir_snap_nested, file_leaf, leaf, proven, uncovered,
 };
 use specter_core::{
-    ActiveBurst, ClassSet, ContribKey, DetachReason, Diagnostic, DirSnapshot, EffectScope,
-    EntryKind, FsEvent, Input, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId,
-    ProfileState, ResourceId, ResourceKind, ScanConfig, StepOutput, SubAttachAnchor, SubId,
-    TimerKind, WatchOp,
+    ActiveBurst, ClassSet, ContribKey, DetachReason, Diagnostic, DirSnapshot, EffectCompletion,
+    EffectOutcome, EffectScope, EntryKind, FsEvent, Input, OverflowScope, ProbeOp, ProbeOutcome,
+    ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind, ScanConfig, StepOutput,
+    SubAttachAnchor, SubId, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -431,9 +431,12 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// A vanished terminus reaps its minted Sub through the minted Profile's own anchor-terminal path
-/// (`DiscoverySubReaped` + `SubDetached(AnchorLost)`); the next reconcile mints nothing; the path's
-/// reappearance re-mints under a fresh `SubId`.
+/// A vanished terminus reaps its minted Sub through the reconcile's removal pass
+/// (`DiscoverySubReaped` + `SubDetached(MatchVanished)`), not through its own anchor terminal —
+/// the loss step parks the minted Profile in a recovery descent (`Pending`), and the certified
+/// empty listing then reaps it from there in one step: the graft deletes the leaf entry and its
+/// try-reap is refused on the minted back-ref, the removal pass detaches the Sub, and the
+/// Profile's reap cascades the slot. The path's reappearance re-mints under a fresh `SubId`.
 #[test]
 fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
     let mut e = Engine::new();
@@ -456,6 +459,7 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
     settle_minted_seeds(&mut e, sid, now);
     let minted = discovery_subs_of(&e, sid);
     let (&terminus, &old_mid) = minted.iter().next().expect("one mint");
+    let minted_pid = pid_of(&e, old_mid);
 
     // Kernel-faithful vanish pair: `Removed` on the terminus FD (anchor-terminal for the minted
     // Profile; class CONTENT for a File, so the discovery mask drops it as a descendant event) +
@@ -469,28 +473,55 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
         t1,
     );
     assert!(
-        rm.diagnostics.iter().any(|d| matches!(
+        matches!(
+            e.profiles().get(minted_pid).unwrap().state(),
+            ProfileState::Pending(_)
+        ),
+        "the loss step re-enters descent — removal authority is the reconcile, not the terminal",
+    );
+    assert!(
+        e.subs().get(old_mid).is_some(),
+        "the minted Sub survives its anchor terminal",
+    );
+    assert!(
+        !rm.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
+        "no reap narration in the loss step; got {:?}",
+        rm.diagnostics,
+    );
+
+    let (gone, t2) = burst_and_respond(&mut e, pid, data, &dir_snap(&[]), t1);
+    assert!(
+        gone.diagnostics.iter().any(|d| matches!(
             d,
             Diagnostic::DiscoverySubReaped { source, sub, .. }
                 if *source == sid && *sub == old_mid
         )),
-        "source-keyed reap narration; got {:?}",
-        rm.diagnostics,
+        "source-keyed reap narration rides the reconcile; got {:?}",
+        gone.diagnostics,
     );
     assert!(
-        rm.diagnostics.iter().any(|d| matches!(
+        gone.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::SubDetached { sub, reason: DetachReason::AnchorLost, .. }
+            Diagnostic::SubDetached { sub, reason: DetachReason::MatchVanished, .. }
                 if *sub == old_mid
         )),
-        "the minted Sub's lifecycle signal carries AnchorLost",
+        "the minted Sub's lifecycle signal carries MatchVanished",
     );
-    assert!(e.subs().get(old_mid).is_none(), "minted Sub removed");
-
-    let (gone, t2) = burst_and_respond(&mut e, pid, data, &dir_snap(&[]), t1);
     assert!(
         minted_paths(&gone).is_empty(),
         "vanished match mints nothing"
+    );
+    assert!(e.subs().get(old_mid).is_none(), "minted Sub removed");
+    assert!(
+        e.profiles().get(minted_pid).is_none(),
+        "the Pending minted Profile reaped from the removal pass",
+    );
+    assert!(
+        e.tree().lookup(Some(data), "x.log").is_none(),
+        "the graft's refused try-reap resolves in the same step once the removal pass \
+         drops the minted back-ref — no orphan slot",
     );
     assert!(discovery_subs_of(&e, sid).is_empty());
 
@@ -512,6 +543,95 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
         "disc@/data/x.log",
         "same path ⇒ same synthesised name (the old entry freed it)",
     );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// An ancestor directory rename produces **no terminal at the minted anchor** (the terminus inode
+/// is untouched; watch FDs are inode-bound), so only the reconcile can observe the move.
+/// Still-matching direction (`a/log → b/log`): one pass reaps the old minted Sub from Idle
+/// (`MatchVanished`, narrated with the *old* path — path identity changed, so fresh history is
+/// correct) and mints the new path. Non-matching direction (the renamed dir leaves the pattern):
+/// reap only. Without the removal pass this shape leaked the old Sub as a permanent anchorless
+/// zombie alongside the double mint.
+#[test]
+fn ancestor_rename_reaps_old_minted_and_mints_new() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(srv),
+        "/srv/*/log",
+        mint_template(),
+        now,
+    );
+    let chain_a = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
+    let _ = respond(&mut e, pid, &chain_a, now);
+    settle_minted_seeds(&mut e, sid, now);
+    let old_mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
+
+    // mv /srv/a /srv/b — kernel-faithful for the minted FD: nothing at all (the minted Profile
+    // stays Idle throughout; this is the no-terminal leak shape). Only the discovery anchor's
+    // STRUCTURE notification fires, and the certified listing then shows the move.
+    let chain_b = dir_snap_nested(&[("b", covered(dir_snap_nested(&[("log", uncovered(11))])))]);
+    let t1 = now + Duration::from_millis(10);
+    let (moved, t2) = burst_and_respond(&mut e, pid, srv, &chain_b, t1);
+    assert!(
+        moved.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DiscoverySubReaped { source, sub, path }
+                if *source == sid && *sub == old_mid
+                    && path.display().to_string() == "/srv/a/log"
+        )),
+        "the old path reaps, narrated with the OLD path; got {:?}",
+        moved.diagnostics,
+    );
+    assert!(
+        moved.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::SubDetached { sub, reason: DetachReason::MatchVanished, .. }
+                if *sub == old_mid
+        )),
+        "the reap carries MatchVanished",
+    );
+    assert_eq!(
+        minted_paths(&moved),
+        vec![(sid, "/srv/b/log".to_string())],
+        "the new path mints in the same pass",
+    );
+    assert!(
+        e.subs().get(old_mid).is_none(),
+        "no zombie Sub at the old path"
+    );
+    let new_mid = *discovery_subs_of(&e, sid)
+        .values()
+        .next()
+        .expect("re-minted");
+    assert_ne!(
+        new_mid, old_mid,
+        "path identity changed — fresh history is correct",
+    );
+    settle_minted_seeds(&mut e, sid, t2);
+
+    // mv /srv/b out of the pattern: reap only, nothing mints.
+    let (gone, _) = burst_and_respond(
+        &mut e,
+        pid,
+        srv,
+        &dir_snap(&[]),
+        t2 + Duration::from_millis(10),
+    );
+    assert!(
+        gone.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::SubDetached { sub, reason: DetachReason::MatchVanished, .. }
+                if *sub == new_mid
+        )),
+        "non-matching rename reaps without minting",
+    );
+    assert!(minted_paths(&gone).is_empty());
+    assert!(discovery_subs_of(&e, sid).is_empty());
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -612,12 +732,14 @@ fn second_template_shares_profile_and_walk_mints_per_template() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Prefix `rm -rf` recovery: minted Subs reap bottom-up via their own anchors, the discovery
-/// Profile recovers through `watch_root_parent` descent, and the recovery Seed's consequence is a
-/// re-minting Reconcile — with **no** `PerFileDriftDroppedOnRecovery` even though the template
-/// stores a per-file scope (the template's reaction is minting, not a per-file Effect).
+/// Prefix `rm -rf` recovery: every Profile re-enters its own recovery descent (anchor loss is
+/// uniform — the minted Sub *survives*, parked `Pending`), the discovery Profile recovers through
+/// `watch_root_parent` descent, and the recovery Seed's reconcile finds the reappeared terminus
+/// live (slot identity) — no reap, no re-mint — with **no** `PerFileDriftDroppedOnRecovery` even
+/// though the template stores a per-file scope (the template's reaction is minting, not a
+/// per-file Effect).
 #[test]
-fn prefix_rm_rf_recovery_remints_without_per_file_warning() {
+fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let root = e.tree().parent(data).expect("FS root");
@@ -635,9 +757,9 @@ fn prefix_rm_rf_recovery_remints_without_per_file_warning() {
     let old_mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
     let x = e.tree().lookup(Some(data), "x").expect("terminus slot");
 
-    // rm -rf bottom-up: terminus first (minted all-dynamic teardown), then the anchor
-    // (anchor-terminal for the discovery Profile — template is operator-declared, so the
-    // mixed/static recovery path preserves watch_root_parent).
+    // rm -rf bottom-up: terminus first (the minted Profile re-enters descent at its
+    // watch_root_parent), then the anchor (same uniform loss path for the discovery Profile;
+    // watch_root_parent is preserved either way).
     let t1 = now + Duration::from_millis(10);
     let mut outs: Vec<StepOutput> = Vec::new();
     outs.push(e.step(
@@ -654,7 +776,10 @@ fn prefix_rm_rf_recovery_remints_without_per_file_warning() {
         },
         t1,
     ));
-    assert!(e.subs().get(old_mid).is_none(), "minted Sub reaped");
+    assert!(
+        e.subs().get(old_mid).is_some(),
+        "minted Sub survives the loss window — reconcile is the removal authority",
+    );
     assert!(e.subs().get(sid).is_some(), "template survives anchor loss");
 
     // Reappearance: the parent's StructureChanged re-enters descent; one hop materialises the
@@ -678,13 +803,22 @@ fn prefix_rm_rf_recovery_remints_without_per_file_warning() {
     let t3 = t2 + SETTLE * 2;
     drain_due(&mut e, t3);
     let recovered = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 9)]), t3);
-    assert_eq!(
-        minted_paths(&recovered).len(),
-        1,
-        "recovery Seed reconciles and re-mints (never a SilentPin)",
+    assert!(
+        minted_paths(&recovered).is_empty(),
+        "the reappeared terminus kept its slot — the still-attached Sub dedups the mint",
     );
-    let new_mid = *discovery_subs_of(&e, sid).values().next().expect("re-mint");
-    assert_ne!(new_mid, old_mid, "fresh SubId after the loss window");
+    assert!(
+        !recovered
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
+        "a live terminus is never a removal victim",
+    );
+    let survivor = *discovery_subs_of(&e, sid).values().next().expect("minted");
+    assert_eq!(
+        survivor, old_mid,
+        "same Sub across the rm -rf window — identity preserved",
+    );
     outs.push(recovered);
     for out in &outs {
         assert!(
@@ -1062,9 +1196,11 @@ fn mid_burst_minted_descendant_still_drains_through_discovery() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// A static Sub joining the minted identity makes the minted Profile mixed: anchor loss routes to
-/// the static recovery path (minted Sub survives), and the next reconcile's dedup finds the
-/// still-attached Sub — no double-mint after recovery.
+/// A static Sub joining the minted identity makes the minted Profile mixed; anchor loss is the
+/// same uniform recovery descent regardless, and the pin is the registry seam: the projection
+/// keys minted Subs only (the static co-resident never confuses it), the recovering terminus is
+/// back in the certified set so the Sub is no removal victim, and the dedup finds it still
+/// attached — no double-mint after recovery.
 #[test]
 fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
     let mut e = Engine::new();
@@ -1110,13 +1246,13 @@ fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
     );
     assert!(
         e.subs().get(mid).is_some(),
-        "mixed Profile routes to finalize_anchor_lost — the minted Sub survives",
+        "anchor loss re-enters descent — the minted Sub survives the terminal",
     );
     assert!(
         !rm.diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
-        "no wholesale teardown narration on the mixed path",
+        "no reap narration in the loss step",
     );
 
     // The terminus reappears: dedup finds the still-attached minted Sub — no second mint.
@@ -1503,8 +1639,9 @@ fn descent_vanish_preserves_co_resident_discovery_contribution() {
 
 /// `rm -rf` above the anchor: recovery descent rewinds one level per `Vanished` response, the chain
 /// terminating at the FS root (where a probe is always answerable), then re-advances component by
-/// component and the recovery Seed's reconcile re-mints — the probe-target ladder `/a/b → /a → / →
-/// /a → /a/b → /a/b/c` is the witness.
+/// component and the recovery Seed's reconcile finds the reappeared terminus live — the minted Sub
+/// survives the whole cascade. The probe-target ladder `/a/b → /a → / → /a → /a/b → /a/b/c` is the
+/// witness.
 #[test]
 fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     let mut e = Engine::new();
@@ -1523,8 +1660,9 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     let old_mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
     let x = e.tree().lookup(Some(c), "x").expect("terminus slot");
 
-    // rm -rf /a, bottom-up: the minted anchor tears down all-dynamic, the discovery anchor goes
-    // terminal (template survives, Idle with no current).
+    // rm -rf /a, bottom-up: both anchors go terminal and both Profiles re-enter their own
+    // recovery descents (the minted Sub stays attached throughout — reconcile is its removal
+    // authority, and the terminus reappears below).
     let t1 = now + Duration::from_millis(10);
     let _ = e.step(
         Input::FsEvent {
@@ -1540,7 +1678,10 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
         },
         t1,
     );
-    assert!(e.subs().get(old_mid).is_none(), "minted Sub reaped");
+    assert!(
+        e.subs().get(old_mid).is_some(),
+        "minted Sub survives the cascade's terminals",
+    );
 
     // The loss step itself re-enters descent at the watch_root_parent — no entry event needed.
     // /a/b and /a are gone too, so each probe answers Vanished and the descent rewinds one level,
@@ -1601,15 +1742,70 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
         "anchor materialised — recovery Seed probes the subtree",
     );
     let recovered = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 5)]), t2);
-    assert_eq!(minted_paths(&recovered).len(), 1, "recovery re-mints");
-    let new_mid = *discovery_subs_of(&e, sid).values().next().expect("re-mint");
-    assert_ne!(new_mid, old_mid, "fresh SubId after the loss window");
+    assert!(
+        minted_paths(&recovered).is_empty(),
+        "the reappeared terminus kept its slot — no re-mint past the surviving Sub",
+    );
+    let survivor = *discovery_subs_of(&e, sid).values().next().expect("minted");
+    assert_eq!(survivor, old_mid, "same Sub across the rm -rf cascade");
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Three loss → recovery → re-mint cycles leave every shared refcount where one cycle leaves it:
-/// the parent edge's demand, the anchor's demand, and the minted set size are invariant across
-/// cycles — repeated recovery neither leaks nor double-releases parent-edge contributions.
+/// Drive a minted Profile from its parked recovery descent back to Idle: answer the in-flight
+/// descent probe with `listing` (the parent enumeration), then satisfy the triggered Seed —
+/// the EMPTY-mask `mint_template` folds `HashChannel` verdicts, so each certification needs two
+/// equal samples — and drain any fire cycle the witnessed recovery owes. Returns the instant the
+/// Profile rests at Idle.
+fn settle_minted_recovery(
+    e: &mut Engine,
+    mid: SubId,
+    minted_pid: ProfileId,
+    listing: &Arc<DirSnapshot>,
+    mut at: Instant,
+) -> Instant {
+    let _ = descent_advance(e, minted_pid, listing, at);
+    // Bounded convergence loop: respond to whatever probe the burst surfaces (verify, re-sample,
+    // rebase) with a byte-identical empty subtree, complete any fired effect, advance the clock a
+    // settle window when the burst is waiting on a timer.
+    for _ in 0..10 {
+        if matches!(
+            e.profiles().get(minted_pid).unwrap().state(),
+            ProfileState::Idle
+        ) {
+            return at;
+        }
+        if let Some(correlation) = e.pending_probe_for(minted_pid) {
+            let out = e.step(
+                Input::ProbeResponse(ProbeResponse {
+                    owner: minted_pid,
+                    correlation,
+                    outcome: proven(dir_snap(&[])),
+                }),
+                at,
+            );
+            for eff in out.effects().iter() {
+                let _ = e.step(
+                    Input::EffectComplete(EffectCompletion {
+                        sub: mid,
+                        key: eff.key(),
+                        outcome: EffectOutcome::Ok,
+                    }),
+                    at,
+                );
+            }
+        } else {
+            at += SETTLE * 2;
+            drain_due(e, at);
+        }
+    }
+    panic!("minted recovery did not converge to Idle");
+}
+
+/// Three loss → recovery cycles leave every shared refcount where one cycle leaves it: the parent
+/// edge's demand, the anchor's demand, and the minted set are invariant across cycles — the
+/// minted Sub survives each cycle through its own recovery descent (cycle 0's witnessed recovery
+/// owes and fires the first fire; later cycles pin silently on the unchanged witness), and
+/// repeated recovery neither leaks nor double-releases parent-edge contributions.
 #[test]
 fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
     let mut e = Engine::new();
@@ -1626,6 +1822,8 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
     );
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     settle_minted_seeds(&mut e, sid, now);
+    let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
+    let minted_pid = pid_of(&e, mid);
     let root_demand = e.tree().get(root).unwrap().watch_demand();
     let anchor_demand = e.tree().get(data).unwrap().watch_demand();
 
@@ -1674,12 +1872,25 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
             &dir_snap(&[("x", EntryKind::Dir, 20 + cycle)]),
             at,
         );
-        assert_eq!(
-            minted_paths(&recovered).len(),
-            1,
-            "cycle {cycle}: recovery re-mints",
+        assert!(
+            minted_paths(&recovered).is_empty(),
+            "cycle {cycle}: the surviving Sub dedups the mint",
         );
-        settle_minted_seeds(&mut e, sid, at);
+        assert!(
+            !recovered
+                .diagnostics
+                .iter()
+                .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
+            "cycle {cycle}: a live terminus is never a removal victim",
+        );
+        // The minted Profile recovers through its own descent — same parent listing.
+        at = settle_minted_recovery(
+            &mut e,
+            mid,
+            minted_pid,
+            &dir_snap(&[("x", EntryKind::Dir, 20 + cycle)]),
+            at,
+        );
 
         assert_eq!(
             e.tree().get(root).unwrap().watch_demand(),
@@ -1692,7 +1903,11 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
             anchor_demand,
             "cycle {cycle}: anchor demand invariant",
         );
-        assert_eq!(discovery_subs_of(&e, sid).len(), 1, "cycle {cycle}");
+        assert_eq!(
+            discovery_subs_of(&e, sid).into_values().collect::<Vec<_>>(),
+            vec![mid],
+            "cycle {cycle}: same minted Sub across cycles",
+        );
         assert_eq!(
             e.profiles().get(pid).unwrap().watch_root_parent(),
             Some(root),

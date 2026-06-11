@@ -3250,23 +3250,6 @@ fn anchor_terminal_event_clears_anchor_claim() {
     );
 }
 
-/// Defensive guard: a Profile already gone from the map reaching `on_anchor_terminal_all_dynamic`
-/// (the caller filters empty-Subs, not a vanished Profile) returns cleanly. Pre-guard this fell
-/// through to `path_of(default-id)` → `None` → a `debug_assert!` that panics in test builds with a
-/// "live Profile anchor" message — the opposite of the real state.
-#[test]
-fn on_anchor_terminal_all_dynamic_on_vanished_profile_is_noop() {
-    let mut e = Engine::new();
-    let mut out = StepOutput::default();
-    // The slotmap never yields the null/default key, so this id was never inserted — `profiles.get`
-    // is `None`.
-    e.on_anchor_terminal_all_dynamic(specter_core::ProfileId::default(), &mut out);
-    assert!(out.diagnostics.is_empty(), "no diagnostics");
-    assert!(out.probe_ops().is_empty(), "no probe ops");
-    assert!(out.effects().is_empty(), "no effects");
-    assert!(out.watch_ops.is_empty(), "no watch ops");
-}
-
 // ---- detach_sub ----
 
 #[test]

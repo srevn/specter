@@ -27,9 +27,9 @@ use specter_core::{
     ClassSet, DedupKey, DescentRemaining, DetachReason, Diagnostic, Effect, EffectCommon,
     EffectOutcome, EffectScope, FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeFailure,
     ProbeResponse, Profile, ProfileId, ProfileState, ProofAuthority, QuiescenceVerdict,
-    QuiescenceWitness, Reaction, ReapTrigger, Resource, ResourceId, ResourceKind, StableReason,
-    StepOutput, Sub, SubAttachRequest, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot,
-    WatchFailure, quiescence_verdict,
+    QuiescenceWitness, Reaction, Resource, ResourceId, ResourceKind, StableReason, StepOutput,
+    SubAttachRequest, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot, WatchFailure,
+    quiescence_verdict,
 };
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -55,8 +55,9 @@ impl Engine {
     ///    - Descendant events whose class (per [`fs_event_to_class`]) is not in the Profile's
     ///      `events` drop with `EventClassDropped` BEFORE driving the burst — the class filter sits
     ///      before dirty-set bumps.
-    ///    - Terminal-on-anchor → `on_anchor_terminal_event`. Anything else that passes the filter →
-    ///      `drive_burst`.
+    ///    - Terminal-on-anchor → [`Self::finalize_anchor_lost_and_descend`] — anchor loss is
+    ///      uniform across static, mixed, and minted Profiles. Anything else that passes the
+    ///      filter → `drive_burst`.
     pub(crate) fn on_fs_event(
         &mut self,
         resource: ResourceId,
@@ -155,7 +156,7 @@ impl Engine {
             }
 
             if is_identity && is_anchor {
-                self.on_anchor_terminal_event(profile_id, out);
+                self.finalize_anchor_lost_and_descend(profile_id, out);
             } else {
                 // ContentChanged/StructureChanged/MetadataChanged anywhere that passes the filter,
                 // or terminal at a covered descendant whose class matches: drive the burst forward.
@@ -189,7 +190,7 @@ impl Engine {
     /// fire. Later events at the prefix latch via `on_descent_event`.
     ///
     /// **Recovery overlap.** The parent already holds `+1 STRUCTURE` from `Profile.watch_root_parent`
-    /// (set at the original anchor materialization, never cleared on `on_anchor_terminal_event`). The
+    /// (set at the original anchor materialization, never cleared on anchor loss). The
     /// helper bumps another `+1` for the descent contribution; the refcount sums to `+2`. The descent
     /// contribution drops at re-materialization while the `watch_root_parent` contribution persists —
     /// see the rustdoc on `enter_pending_descent` for the full lifecycle.
@@ -1386,152 +1387,6 @@ impl Engine {
                 profile: profile_id,
                 mode,
             });
-        }
-    }
-
-    /// Anchor terminal event (Removed/Renamed/Revoked at `Profile.resource`). Anchor-terminal
-    /// dispatcher. Splits on whether every Sub on the Profile is dynamic
-    /// ([`specter_core::Sub::is_dynamic`] — minted by a discovery reconcile) versus the
-    /// mixed/static case.
-    ///
-    /// **All-dynamic** ⇒ [`Self::on_anchor_terminal_all_dynamic`]: the Profile has no static
-    /// recovery channel; the source re-mints on path reappearance (the discovery template's next
-    /// reconcile), so the Profile is reaped entirely (anchor, descendants, descent prefix,
-    /// watch-root parent — the full quartet) and each Sub's reap is narrated. I-Recovery-Split: the
-    /// predicate is total over non-empty Subs.
-    ///
-    /// **Mixed or pure-static** ⇒ [`Self::finalize_anchor_lost_and_descend`]: the loss is
-    /// finalized and the Profile re-enters pending descent at its `watch_root_parent` in the same
-    /// step — witnessed, so a found replacement materializes into a fire-owing triggered Seed.
-    /// The dynamic Subs (if any) stay attached across the loss. On re-materialisation, the
-    /// source-side dedup gate (`discovery_already_minted`) finds the still-attached dynamic Sub in
-    /// `SubRegistry` and returns `true` (no fresh Sub for an already-known anchor), so no engine
-    /// work is needed for correctness — only the static Sub's recovery descent drives the burst. A
-    /// discovery *template* counts static here by construction: `is_dynamic` reads synthesis
-    /// origin, and templates are operator-declared.
-    ///
-    /// The empty-Subs case is structurally unreachable: a Profile with no Subs reaped on the last
-    /// detach. Routed defensively to the same wrapper for idempotence.
-    fn on_anchor_terminal_event(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        let subs = self.subs.at(profile_id);
-        if subs.is_empty() {
-            self.finalize_anchor_lost_and_descend(profile_id, out);
-            return;
-        }
-        let all_dynamic = subs
-            .iter()
-            .all(|sid| self.subs.get(*sid).is_some_and(Sub::is_dynamic));
-        if all_dynamic {
-            self.on_anchor_terminal_all_dynamic(profile_id, out);
-        } else {
-            self.finalize_anchor_lost_and_descend(profile_id, out);
-        }
-    }
-
-    /// All-dynamic anchor-terminal teardown. Narrates each minted Sub's reap, removes every dynamic
-    /// Sub from `SubRegistry`, then reaps the Profile entirely.
-    ///
-    /// The reap delegates to [`Engine::reap_profile`] / [`Engine::finish_burst_to_idle`] depending
-    /// on the Profile's state — mirrors `detach_sub_inner`'s lifecycle dispatch but force-runs the
-    /// deferred-end path synchronously (the anchor is dead now; we cannot wait for the burst to
-    /// complete naturally against a stale anchor).
-    ///
-    /// Idempotent: a guard at entry returns early when `profile_id` is no longer in the map (the
-    /// caller filters empty-Subs, not a vanished Profile). The Sub-removal loop is also idempotent:
-    /// a stale Sub id on the Profile's `by_profile` list is a structural impossibility (the
-    /// registry maintains by_profile in lockstep with subs).
-    fn on_anchor_terminal_all_dynamic(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        // The caller filtered the empty-Subs case but not a Profile already gone from the map. A
-        // vanished Profile would fall through to `path_of(default-id)` → `None` → a `debug_assert!`
-        // whose message claims a live anchor, the opposite of the real state. Return early —
-        // nothing to tear down.
-        if self.profiles.get(profile_id).is_none() {
-            return;
-        }
-
-        // 1. Disarm + Cancel iff a probe is in flight — Active+Verifying may have one. Idempotent
-        //    when the slot is already unarmed.
-        self.cancel_owner_probe(profile_id, out);
-
-        // 2. Resolve the anchor resource + path ONCE for the per-Sub loop. Every dynamic Sub on
-        //    this Profile shares the same anchor by the `(resource, config_hash)` find-or-create
-        //    dedup in `attach_sub_inner`; the path is the operator-facing diagnostic payload. The
-        //    Profile is present (guarded at entry) and not yet reaped, so its anchor_claim still
-        //    holds the slot alive and `path_of` resolves. The fallbacks now guard only a
-        //    present-Profile / dead-anchor regression — loud in dev, degrade in release.
-        let anchor_resource: ResourceId = self
-            .profiles
-            .get(profile_id)
-            .map(Profile::resource)
-            .unwrap_or_default();
-        let anchor_path: Arc<Path> = self.tree.path_of(anchor_resource).unwrap_or_else(|| {
-            debug_assert!(
-                false,
-                "on_anchor_terminal_all_dynamic: present Profile's anchor slot must be live \
-                 until reap_profile (profile = {profile_id:?}, resource = {anchor_resource:?})",
-            );
-            empty_path()
-        });
-
-        // 3. Narrate each Sub's reap; emit the per-Sub lifecycle signal; then remove each dynamic
-        //    Sub from SubRegistry. The source-keyed narration (`DiscoverySubReaped`) is
-        //    path-carrying; [`Diagnostic::SubDetached`] is the per-Sub operator-facing signal a
-        //    `wait --kind detach` IPC client filters on. Both fire in the same loop while the
-        //    registry borrow is still live for the source lookup; the remove pass below tears the
-        //    entries down once the narration is done. SubRegistry's `by_profile` index drops the
-        //    entry on the last remove, so the post-loop registry has no back-references for this
-        //    Profile. The reason is `AnchorLost` — the watched path is gone, no source-entity reap
-        //    implied (the template stays live and re-mints on reappearance).
-        let sub_ids: SmallVec<[SubId; 2]> = self.subs.at(profile_id).iter().copied().collect();
-        for sid in sub_ids.iter().copied() {
-            let Some(minted_by) = self.subs.get(sid).map(Sub::minted_by) else {
-                continue;
-            };
-            match minted_by {
-                Some(src) => {
-                    out.diagnostics.push(Diagnostic::DiscoverySubReaped {
-                        source: src,
-                        sub: sid,
-                        path: Arc::clone(&anchor_path),
-                    });
-                    out.diagnostics.push(Diagnostic::SubDetached {
-                        sub: sid,
-                        profile: profile_id,
-                        reason: DetachReason::AnchorLost,
-                    });
-                }
-                None => {
-                    // The all-dynamic predicate admitted only minted Subs; a static Sub here is a
-                    // routing breach — loud in dev. In release the removal pass below still tears
-                    // it down (the Profile is being reaped wholesale); only the per-origin
-                    // narration is skipped, never mis-attributed.
-                    debug_assert!(
-                        false,
-                        "all-dynamic anchor-terminal teardown reached a static Sub \
-                         (sub = {sid:?}, profile = {profile_id:?})",
-                    );
-                }
-            }
-        }
-        for sid in sub_ids {
-            let _ = self.subs.remove(sid);
-        }
-
-        // 4. Reap the Profile. Active Profiles need their burst force- ended via
-        //    `finish_burst_to_idle`; Idle / Pending Profiles reap synchronously. The Active branch
-        //    flips [`BurstFinish::Reap`] via `mark_active_for_reap` so `finish_burst_to_idle` runs
-        //    `reap_profile` internally with `via = DeferredFromBurst` (single source of truth for
-        //    the four-claim release + ProfileMap detach).
-        let marked = self
-            .profiles
-            .get_mut(profile_id)
-            .is_some_and(specter_core::Profile::mark_active_for_reap);
-        if marked {
-            self.finish_burst_to_idle(profile_id, out);
-        } else if self.profiles.get(profile_id).is_some() {
-            // Non-Active arm: the all-dynamic teardown reached a Profile in Idle or Pending. Reap
-            // inline.
-            self.reap_profile(profile_id, ReapTrigger::Immediate, out);
         }
     }
 

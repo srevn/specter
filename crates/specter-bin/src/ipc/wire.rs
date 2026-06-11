@@ -1251,7 +1251,7 @@ pub(crate) enum WireDetachReason {
     ConfigDiffRemoved,
     ConfigDiffIdentityChanged,
     IpcDisabled,
-    AnchorLost,
+    MatchVanished,
     DiscoverySourceDetached,
 }
 
@@ -1261,7 +1261,7 @@ impl From<DetachReason> for WireDetachReason {
             DetachReason::ConfigDiffRemoved => Self::ConfigDiffRemoved,
             DetachReason::ConfigDiffIdentityChanged => Self::ConfigDiffIdentityChanged,
             DetachReason::IpcDisabled => Self::IpcDisabled,
-            DetachReason::AnchorLost => Self::AnchorLost,
+            DetachReason::MatchVanished => Self::MatchVanished,
             DetachReason::DiscoverySourceDetached => Self::DiscoverySourceDetached,
         }
     }
@@ -1273,7 +1273,7 @@ impl WireDetachReason {
             Self::ConfigDiffRemoved => "config_diff_removed",
             Self::ConfigDiffIdentityChanged => "config_diff_identity_changed",
             Self::IpcDisabled => "ipc_disabled",
-            Self::AnchorLost => "anchor_lost",
+            Self::MatchVanished => "match_vanished",
             Self::DiscoverySourceDetached => "discovery_source_detached",
         }
     }
@@ -2130,7 +2130,7 @@ mod tests {
                 WireDetachReason::ConfigDiffRemoved,
                 WireDetachReason::ConfigDiffIdentityChanged,
                 WireDetachReason::IpcDisabled,
-                WireDetachReason::AnchorLost,
+                WireDetachReason::MatchVanished,
                 WireDetachReason::DiscoverySourceDetached,
             ],
             WireDetachReason::as_str,

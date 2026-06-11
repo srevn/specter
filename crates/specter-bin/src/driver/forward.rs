@@ -505,7 +505,7 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?source,
             ?sub,
             path = %path.display(),
-            "discovery-minted Sub reaped (anchor terminal — Profile all-dynamic teardown)",
+            "discovery-minted Sub reaped (matched path vanished from the certified match set)",
         ),
         Diagnostic::InvalidBurstTransition {
             profile,

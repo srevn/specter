@@ -950,9 +950,8 @@ impl Engine {
     /// across the two helpers.
     ///
     /// Sole call sites: `detach_sub_inner` (Idle / Pending Profile, immediate reap; `via =
-    /// Immediate`), `on_anchor_terminal_all_dynamic` (non-Active arm of the all-dynamic
-    /// anchor-terminal teardown path; `via = Immediate`), and `finish_burst_to_idle` (deferred reap
-    /// when [`BurstFinish::Reap`] was set mid-burst; `via = DeferredFromBurst`).
+    /// Immediate`) and `finish_burst_to_idle` (deferred reap when [`BurstFinish::Reap`] was set
+    /// mid-burst; `via = DeferredFromBurst`).
     pub(crate) fn reap_profile(
         &mut self,
         profile_id: ProfileId,
