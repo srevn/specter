@@ -158,6 +158,15 @@ pub(crate) fn lookup_descendant(
 /// contribution wherever this holds, and Phase 1 releases the contribution this same predicate would
 /// have installed on a prior probe response. Install and release stay in lockstep because they read
 /// one predicate, not two expressions that must be kept mirrored by hand.
+///
+/// Classification runs on the diff **entry's** kind, never the Tree slot's
+/// current kind. The two agree on install (Phase 2 stamps the slot from the entry first) but can
+/// diverge on release: a co-covering Profile's graft may have re-stamped a shared slot's kind
+/// between this Profile's install and its Phase-1 delete, and at a boundary-capable depth (the
+/// `max_depth` rim, depth 1 under `recursive=false`) a File→Dir re-stamp would flip the
+/// classification to `Boundary` and strand the per-file contribution on the slot forever. The
+/// delete entry carries the baseline-side kind — exactly the kind the contribution was installed
+/// under — so keying on it makes release read what install read.
 fn wants_descendant_watch(
     profile: &Profile,
     r: ResourceId,
@@ -165,7 +174,7 @@ fn wants_descendant_watch(
     tree: &Tree,
     scratch: &mut PathBuf,
 ) -> bool {
-    match (classify(profile, r, tree, scratch), kind) {
+    match (classify(profile, r, kind.into(), tree, scratch), kind) {
         (CoverageClass::Interior, EntryKind::Dir) => true,
         (CoverageClass::Interior, EntryKind::File | EntryKind::Symlink | EntryKind::Other) => {
             profile.has_per_file_fds()
@@ -652,6 +661,72 @@ mod tests {
             &mut PathBuf::new(),
         );
         assert_eq!(count_unwatch(&out), 1);
+    }
+
+    #[test]
+    fn apply_diff_release_keys_on_entry_kind_not_restamped_slot_kind() {
+        // A co-covering Profile's graft can re-stamp a shared slot's kind between this Profile's
+        // install and its release. At a boundary-capable depth (depth 1 under recursive=false) a
+        // File→Dir re-stamp would classify the slot's *current* kind as Boundary and skip the
+        // release — stranding the per-file contribution, which keeps `has_anchors` true and blocks
+        // the slot's reap (and its kernel FD) for the daemon's lifetime. The delete entry carries
+        // the baseline-side kind the contribution was installed under; release must key on that.
+        let mut tree = Tree::new();
+        let mut profiles = ProfileMap::new();
+        let r = tree.ensure_root("root", ResourceRole::User);
+        tree.set_kind(r, ResourceKind::Dir);
+        let pid = profiles.attach(
+            &mut tree,
+            Profile::new(
+                r,
+                ProfileIdentity::new(
+                    ScanConfig::builder().recursive(false).build(),
+                    MAX_SETTLE,
+                    ClassSet::CONTENT,
+                ),
+                SETTLE,
+                None,
+            ),
+        );
+        let leaf_id = tree
+            .ensure_child(r, "current", ResourceRole::User)
+            .expect("test live parent");
+        tree.set_kind(leaf_id, ResourceKind::File);
+        crate::refcounts::add_watch(
+            &mut tree,
+            leaf_id,
+            specter_core::ContribKey::ProfileDescendant(pid),
+            ClassSet::CONTENT,
+            &mut StepOutput::default(),
+        );
+
+        // The re-stamp: another Profile observed an atomic File→Dir replace at the same path and
+        // grafted first.
+        tree.set_kind(leaf_id, ResourceKind::Dir);
+
+        let diff = Diff {
+            deleted: smallvec![EntryRef {
+                segment: CompactString::new("current"),
+                kind: EntryKind::File,
+                fs_id: FsIdentity::synthetic(1, 0),
+            }],
+            ..Default::default()
+        };
+        let mut out = StepOutput::default();
+        apply_diff_to_tree(
+            &diff,
+            profiles.get(pid).unwrap(),
+            pid,
+            r,
+            &mut tree,
+            &mut out,
+            &mut PathBuf::new(),
+        );
+        assert_eq!(
+            count_unwatch(&out),
+            1,
+            "release reads the entry's installed-under kind, not the re-stamped slot kind",
+        );
     }
 
     // ---------------------------------------------------------------------------

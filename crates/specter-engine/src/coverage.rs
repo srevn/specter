@@ -68,19 +68,39 @@ pub(crate) fn descends_at(config: &ScanConfig, depth: u32) -> bool {
 }
 
 /// True iff `profile` would scan `target` given its `ScanConfig` — the boolean projection of
-/// [`classify`] (`!= Outside`).
+/// [`classify`] (`!= Outside`) at the Tree's current view of the target's kind.
 ///
 /// The chain queries ([`nearest_covering_ancestor`] / [`chain_reaches`]) and cross-crate consumers
-/// read coverage at this granularity; the three proof-object consumers read [`classify`] directly.
+/// read coverage at this granularity. Live observation is the only kind authority available here,
+/// so the unprobed-slot collapse to File-shape ([`Resource::kind_or_file`]) is applied inline.
 #[must_use]
 pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut PathBuf) -> bool {
+    let target_kind = tree
+        .get(target)
+        .map_or(ResourceKind::File, Resource::kind_or_file);
     !matches!(
-        classify(profile, target, tree, scratch),
+        classify(profile, target, target_kind, tree, scratch),
         CoverageClass::Outside
     )
 }
 
-/// Classify `target` against `profile`'s proof object — see [`CoverageClass`] for the vocabulary.
+/// Classify `target` against `profile`'s proof object **as** `target_kind` — see [`CoverageClass`]
+/// for the vocabulary.
+///
+/// The final-prefix kind is a parameter, not a Tree read, because callers hold different kind
+/// authorities and the choice is load-bearing — there is deliberately no tree-reading default, so
+/// every call site states which authority it classifies under:
+///
+/// - **Live observation** ([`Resource::kind_or_file`], unprobed collapsed to File-shape per the
+///   backend-mask convention shared with `fs_event_to_class` and the kqueue / inotify
+///   translators): [`covers`] and [`covering_profiles`] classify the slot as it is now — the File
+///   collapse lands unprobed slots on `Interior`, deliberately conservative-toward-driving (the
+///   probe and the target clamp sort out what the slot really is).
+/// - **The installed-under record** (a diff entry's baseline-side kind):
+///   `reconcile::wants_descendant_watch`'s release direction must read the kind the contribution
+///   was installed under — a co-covering Profile's graft may have re-stamped the shared slot's
+///   kind between this Profile's install and its release, and at a boundary-capable depth the
+///   re-stamp would otherwise flip the classification and strand the contribution.
 ///
 /// **Depth-0 (`target == profile.resource`).** Always [`CoverageClass::Interior`]. The anchor is
 /// part of the Profile's scope by construction — `FsEvent`s at the anchor must drive the anchor's
@@ -90,13 +110,9 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut 
 /// **Descendants.** Build the cumulative relative path segment-by-segment from `profile.resource`
 /// to `target`, calling `accepts` at each prefix. Intermediate prefixes are typed
 /// [`ResourceKind::Dir`] (the Tree invariant: a non-Dir parent can't have children); the final
-/// prefix's kind is `target`'s own kind, collapsed to `File` for unprobed slots
-/// ([`Resource::kind_or_file`], matching the backend-mask convention shared with
-/// `fs_event_to_class` and the kqueue / inotify translators — the File collapse also lands
-/// unprobed slots on `Interior`, deliberately conservative-toward-driving: the probe and the
-/// target clamp sort out what the slot really is). A failure at any prefix short-circuits to
-/// [`CoverageClass::Outside`]; an admitted Dir target then forks `Interior` / `Boundary` on the
-/// recursion edge at its own depth ([`descends_at`]).
+/// prefix tests as `target_kind`. A failure at any prefix short-circuits to
+/// [`CoverageClass::Outside`]; an admitted `target_kind == Dir` target then forks `Interior` /
+/// `Boundary` on the recursion edge at its own depth ([`descends_at`]).
 ///
 /// Per-prefix evaluation through the same predicate the walker consumes is what makes
 /// pattern/exclude/depth/recursive/hidden semantics co-evolve across the two callers. Drift is
@@ -112,6 +128,7 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut 
 pub(crate) fn classify(
     profile: &Profile,
     target: ResourceId,
+    target_kind: ResourceKind,
     tree: &Tree,
     scratch: &mut PathBuf,
 ) -> CoverageClass {
@@ -149,16 +166,6 @@ pub(crate) fn classify(
     rev.reverse();
 
     let total = rev.len();
-    // Hoist `target`'s kind out of the per-prefix loop — every intermediate prefix is `Dir` (Tree
-    // invariant), only the final prefix's kind feeds the pattern arm of `accepts`. `kind_or_file`
-    // collapses unprobed slots to File-shape, matching the backend- mask convention shared with
-    // `fs_event_to_class` and the kqueue / inotify translators — a freshly-touched file in the
-    // window between `create_child`'s slot materialization and the follow-up probe is still
-    // pattern-filtered (raw-`kind` Unknown would have bypassed the pattern).
-    let target_kind = tree
-        .get(target)
-        .map_or(ResourceKind::File, Resource::kind_or_file);
-
     let config = profile.config();
     // One incremental build into the engine-owned `scratch` (capacity retained across calls;
     // `clear()` per call so the cross-call residue is never observable). `scratch.as_path()` after
@@ -262,6 +269,12 @@ pub(crate) fn covering_profiles(
     resource: ResourceId,
     scratch: &mut PathBuf,
 ) -> SmallVec<[(ProfileId, CoverageClass); 2]> {
+    // One live kind read hoisted out of the per-Profile loop — routing classifies the slot as it
+    // is now (the same `kind_or_file` value the caller's head capture reads, so the routing
+    // guard's kind arm and the classification cannot diverge within the step).
+    let target_kind = tree
+        .get(resource)
+        .map_or(ResourceKind::File, Resource::kind_or_file);
     let mut out: SmallVec<[(ProfileId, CoverageClass); 2]> = SmallVec::new();
     let mut cur = Some(resource);
     while let Some(rid) = cur {
@@ -272,7 +285,7 @@ pub(crate) fn covering_profiles(
             if matches!(p.state(), ProfileState::Pending(_)) {
                 continue;
             }
-            let class = classify(p, resource, tree, scratch);
+            let class = classify(p, resource, target_kind, tree, scratch);
             if !matches!(class, CoverageClass::Outside) && !out.iter().any(|&(q, _)| q == pid) {
                 out.push((pid, class));
             }
@@ -827,17 +840,17 @@ mod tests {
 
         let mut scratch = PathBuf::new();
         assert_eq!(
-            classify(&profile, dir, &tree, &mut scratch),
+            classify(&profile, dir, ResourceKind::Dir, &tree, &mut scratch),
             CoverageClass::Boundary,
             "covered depth-1 Dir under recursive=false is not descended into",
         );
         assert_eq!(
-            classify(&profile, file, &tree, &mut scratch),
+            classify(&profile, file, ResourceKind::File, &tree, &mut scratch),
             CoverageClass::Interior,
             "a covered Leaf at the same depth is Interior — leaf_hash is in the proof object",
         );
         assert_eq!(
-            classify(&profile, deep, &tree, &mut scratch),
+            classify(&profile, deep, ResourceKind::Dir, &tree, &mut scratch),
             CoverageClass::Outside,
             "the boundary's interior is Outside, not Boundary",
         );
@@ -863,17 +876,17 @@ mod tests {
 
         let mut scratch = PathBuf::new();
         assert_eq!(
-            classify(&profile, d1, &tree, &mut scratch),
+            classify(&profile, d1, ResourceKind::Dir, &tree, &mut scratch),
             CoverageClass::Interior,
             "depth 1 < max_depth: the shape descends into it",
         );
         assert_eq!(
-            classify(&profile, d2, &tree, &mut scratch),
+            classify(&profile, d2, ResourceKind::Dir, &tree, &mut scratch),
             CoverageClass::Boundary,
             "the max_depth rim Dir is admitted but not descended into",
         );
         assert_eq!(
-            classify(&profile, f2, &tree, &mut scratch),
+            classify(&profile, f2, ResourceKind::File, &tree, &mut scratch),
             CoverageClass::Interior,
             "a File on the rim depth is Interior",
         );
@@ -886,33 +899,44 @@ mod tests {
         let mut tree = Tree::new();
         let (root, profile) = anchor(&mut tree, "root", ScanConfig::builder().recursive(false));
         assert_eq!(
-            classify(&profile, root, &tree, &mut PathBuf::new()),
+            classify(
+                &profile,
+                root,
+                ResourceKind::Dir,
+                &tree,
+                &mut PathBuf::new()
+            ),
             CoverageClass::Interior,
         );
         let f = tree.ensure_root("log.txt", ResourceRole::User);
         mark(&mut tree, f, ResourceKind::File);
         let fp = profile_at(f, ScanConfig::builder().build());
         assert_eq!(
-            classify(&fp, f, &tree, &mut PathBuf::new()),
+            classify(&fp, f, ResourceKind::File, &tree, &mut PathBuf::new()),
             CoverageClass::Interior,
         );
     }
 
     #[test]
-    fn classify_unprobed_slot_at_boundary_depth_collapses_to_interior() {
-        // An unprobed slot (kind None) collapses to File-shape (`kind_or_file`), so a slot that
-        // *would* be Boundary if it turned out to be a Dir classifies Interior — deliberately
-        // conservative toward driving; the probe and the target clamp sort out what it really is.
+    fn covering_profiles_collapses_unprobed_slot_to_interior() {
+        // The routing surface reads the slot live (`kind_or_file`): an unprobed slot (kind None)
+        // collapses to File-shape, so a slot that *would* be Boundary if it turned out to be a Dir
+        // routes as Interior — deliberately conservative toward driving; the probe and the target
+        // clamp sort out what the slot really is.
         let mut tree = Tree::new();
-        let (root, profile) = anchor(&mut tree, "root", ScanConfig::builder().recursive(false));
+        let mut profiles = ProfileMap::new();
+        let root = tree.ensure_root("root", ResourceRole::User);
+        mark(&mut tree, root, ResourceKind::Dir);
+        let pid = profiles.attach(
+            &mut tree,
+            profile_at(root, ScanConfig::builder().recursive(false).build()),
+        );
         let unprobed = tree
             .ensure_child(root, "sub", ResourceRole::User)
             .expect("test live parent");
         assert!(tree.get(unprobed).unwrap().kind().is_none());
-        assert_eq!(
-            classify(&profile, unprobed, &tree, &mut PathBuf::new()),
-            CoverageClass::Interior,
-        );
+        let got = covering_profiles(&tree, &profiles, unprobed, &mut PathBuf::new());
+        assert_eq!(got.as_slice(), &[(pid, CoverageClass::Interior)]);
     }
 
     // ===== positional covers (MatchChain) =====
@@ -989,11 +1013,17 @@ mod tests {
         let dir_terminus = child(&mut tree, mid, "log", ResourceKind::Dir);
         let mut scratch = PathBuf::new();
         assert_eq!(
-            classify(&profile, mid, &tree, &mut scratch),
+            classify(&profile, mid, ResourceKind::Dir, &tree, &mut scratch),
             CoverageClass::Interior,
         );
         assert_eq!(
-            classify(&profile, dir_terminus, &tree, &mut scratch),
+            classify(
+                &profile,
+                dir_terminus,
+                ResourceKind::Dir,
+                &tree,
+                &mut scratch
+            ),
             CoverageClass::Boundary,
         );
 
@@ -1001,7 +1031,13 @@ mod tests {
         let mid2 = child(&mut tree, root2, "app", ResourceKind::Dir);
         let file_terminus = child(&mut tree, mid2, "x.log", ResourceKind::File);
         assert_eq!(
-            classify(&glob_profile, file_terminus, &tree, &mut scratch),
+            classify(
+                &glob_profile,
+                file_terminus,
+                ResourceKind::File,
+                &tree,
+                &mut scratch
+            ),
             CoverageClass::Interior,
         );
     }
