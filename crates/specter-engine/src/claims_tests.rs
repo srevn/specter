@@ -211,7 +211,7 @@ fn discard_anchor_state_preserves_fired_subs() {
     let (mut e, sid, pid, _anchor, _parent) = engine_with_materialised_profile(ClassSet::EMPTY);
     e.subs.mark_fired(sid);
     assert!(
-        e.subs.get(sid).is_some_and(|s| s.has_fired),
+        e.subs.get(sid).is_some_and(specter_core::Sub::has_fired),
         "precondition: fire recorded",
     );
 
@@ -219,7 +219,7 @@ fn discard_anchor_state_preserves_fired_subs() {
     e.discard_anchor_state(pid, &mut out);
 
     assert!(
-        e.subs.get(sid).is_some_and(|s| s.has_fired),
+        e.subs.get(sid).is_some_and(specter_core::Sub::has_fired),
         "fire history survives anchor loss",
     );
 }

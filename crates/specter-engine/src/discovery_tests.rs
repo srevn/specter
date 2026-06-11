@@ -9,8 +9,8 @@ use crate::testkit::{attach_discovery, discovery_subs_of, mint_template, pre_pla
 use compact_str::CompactString;
 use specter_core::testkit::{covered, dir_snap, dir_snap_nested, empty_program, leaf, uncovered};
 use specter_core::{
-    ClassSet, EffectScope, EntryKind, Input, PatternSpec, ProfileIdentity, ScanConfig, StepOutput,
-    SubAttachAnchor, SubAttachRequest, SubParams,
+    ClassSet, EffectScope, EntryKind, Input, PatternSpec, ProfileIdentity, ReactionSpec,
+    ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubParams,
 };
 use std::sync::Arc;
 use std::time::Instant;
@@ -88,7 +88,7 @@ fn entries_above_the_terminus_that_cannot_recurse_are_skipped() {
 /// The ⟺ attach boundary, template direction: a template on a non-chain Profile is unconstructable
 /// — its Profile would classify a firing consequence it can never use.
 #[test]
-#[should_panic(expected = "SubParams::template ⟺ ScanConfig::MatchChain")]
+#[should_panic(expected = "ReactionSpec::Mint ⟺ ScanConfig::MatchChain")]
 fn template_on_non_chain_profile_is_unconstructable() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
@@ -102,12 +102,8 @@ fn template_on_non_chain_profile_is_unconstructable() {
             ),
             SubParams {
                 name: "disc".into(),
-                program: empty_program(),
-                scope: EffectScope::SubtreeRoot,
                 settle: SETTLE,
-                log_output: false,
-                template: Some(mint_template()),
-                source_discovery: None,
+                reaction: ReactionSpec::Mint(mint_template()),
             },
         )),
         Instant::now(),
@@ -118,7 +114,7 @@ fn template_on_non_chain_profile_is_unconstructable() {
 /// could never react (a chain Profile mints attachments, never Effects). This same assert fires
 /// transitively on a chain-shaped *template*: its mint is a template-less Sub on a chain Profile.
 #[test]
-#[should_panic(expected = "SubParams::template ⟺ ScanConfig::MatchChain")]
+#[should_panic(expected = "ReactionSpec::Mint ⟺ ScanConfig::MatchChain")]
 fn plain_sub_on_chain_profile_is_unconstructable() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);

@@ -1388,7 +1388,7 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
     // SubtreeRoot emit arm. PerFile has no B1 fire-history suppression — it is
     // diff-membership-gated only, so there is no flag to set and none to dedup against.
     assert!(
-        !e.subs().get(sid).unwrap().has_fired,
+        !e.subs().get(sid).unwrap().has_fired(),
         "PerStableFile Sub is never fire-history-marked (mark_fired is SubtreeRoot-only)",
     );
 

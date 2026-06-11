@@ -474,11 +474,11 @@ pub enum Diagnostic {
     ///
     /// `name` carries the Sub's user-facing name verbatim — for static Subs the operator's
     /// `[[watch]].name`; for dynamic Subs the engine's synthesized `<template_name>@<matched_path>`
-    /// shape. `source_discovery` distinguishes the two.
+    /// shape. `minted_by` distinguishes the two.
     SubAttached {
         sub: SubId,
         name: CompactString,
-        source_discovery: Option<SubId>,
+        minted_by: Option<SubId>,
     },
     /// A Sub emitted [`crate::Effect`]s on this `emit_effects` pass. `count` is `1` for a
     /// `SubtreeRoot` emission, and the per-leaf emission count for a `PerStableFile` Sub — the
@@ -588,7 +588,7 @@ pub enum Diagnostic {
     /// A discovery template's live minted-Sub count (derived from `SubRegistry`) crossed the
     /// warning threshold for the first time — the pattern is matching more targets than typical
     /// (likely too broad, e.g. `/*` without further constraint). One-shot per template lifetime;
-    /// the latch on `Sub.fanout_warned` suppresses repeats.
+    /// the latch on the template carrier (`DiscoveryTemplate::fanout_warned`) suppresses repeats.
     DiscoveryFanoutThreshold { source: SubId, count: usize },
     /// A dynamic Sub minted by the discovery template `source` at `path` was reaped because its
     /// anchor disappeared. Operator narration; if the path re-materialises the next reconcile

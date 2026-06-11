@@ -24,9 +24,9 @@ use crate::Engine;
 use compact_str::{CompactString, format_compact};
 use smallvec::SmallVec;
 use specter_core::{
-    ActionProgram, ChildEntry, Diagnostic, DirChild, DirSnapshot, EffectScope, EntryKind,
-    MintTemplate, ProfileId, ResourceId, ResourceRole, StepOutput, SubAttachAnchor,
-    SubAttachRequest, SubId, SubParams,
+    ChildEntry, Diagnostic, DirChild, DirSnapshot, EntryKind, MintTemplate, ProfileId,
+    ReactionSpec, ResourceId, ResourceRole, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
+    SubParams,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -94,18 +94,14 @@ fn collect_into(
     }
 }
 
-/// Owned capture of one template-bearing Sub's mint inputs, collected before the reconcile loop
-/// takes `&mut self` — Arc refcount bumps per pass instead of re-borrowing the registry per mint.
+/// Owned capture of one template Sub's mint inputs, collected before the reconcile loop takes
+/// `&mut self` — an Arc refcount bump per pass instead of re-borrowing the registry per mint. The
+/// template carries everything a mint needs (identity with its sealed hash, debounce, the minted
+/// reaction); only the Sub's `name` (the synthesized-name prefix) rides alongside.
 struct TemplateCapture {
     sid: SubId,
-    spec: Arc<MintTemplate>,
-    /// `spec.identity.config_hash()` precomputed once per pass — the Profile-partition half of the
-    /// dedup key, shared by every terminus this pass visits.
-    cfg_hash: u64,
+    tpl: Arc<MintTemplate>,
     name: CompactString,
-    program: Arc<ActionProgram>,
-    scope: EffectScope,
-    log_output: bool,
     /// Whether this pass minted at least one Sub for this template — the end-of-pass fan-out
     /// sweep's gate. `false` at capture; the mint arm sets it.
     minted: bool,
@@ -161,12 +157,8 @@ impl Engine {
                 let t = s.discovery_template()?;
                 Some(TemplateCapture {
                     sid,
-                    spec: Arc::clone(&t.spec),
-                    cfg_hash: t.spec.identity.config_hash(),
+                    tpl: Arc::clone(&t.spec),
                     name: s.name.clone(),
-                    program: Arc::clone(&s.program),
-                    scope: s.scope,
-                    log_output: s.log_output,
                     minted: false,
                 })
             })
@@ -245,7 +237,7 @@ impl Engine {
 
             let mut abs: Option<Arc<Path>> = None;
             for t in &mut templates {
-                if self.discovery_already_minted(t.sid, slot, t.cfg_hash) {
+                if self.discovery_already_minted(t.sid, slot, t.tpl.identity.config_hash()) {
                     continue;
                 }
                 let abs = abs.get_or_insert_with(|| build_abs(&terminus.segments));
@@ -256,15 +248,18 @@ impl Engine {
                 self.attach_sub_inner(
                     SubAttachRequest::from_parts(
                         SubAttachAnchor::Resource(slot),
-                        t.spec.identity.clone(),
-                        SubParams::minted(
-                            synthesized,
-                            Arc::clone(&t.program),
-                            t.scope,
-                            t.spec.settle,
-                            t.log_output,
-                            t.sid,
-                        ),
+                        t.tpl.identity.clone(),
+                        SubParams {
+                            name: synthesized,
+                            settle: t.tpl.settle,
+                            // The template's sealed spawn clones straight onto the mint — an Arc
+                            // bump plus `Copy` fields, with `needs_diff` derived once at lowering
+                            // rather than once per mint.
+                            reaction: ReactionSpec::Spawn {
+                                spec: t.tpl.spawn.clone(),
+                                minted_by: Some(t.sid),
+                            },
+                        },
                     ),
                     now,
                     out,
@@ -300,7 +295,7 @@ impl Engine {
     ///
     /// Resolves the same `(resource, config_hash)` partition `find_or_create_profile` keys on: a
     /// minted Sub for this `(template, anchor)` pair, if one exists, lives on the Profile at
-    /// `(anchor, template.identity.config_hash())` tagged `source_discovery == Some(source)`. Cost
+    /// `(anchor, template.identity.config_hash())` with `minted_by() == Some(source)`. Cost
     /// is O(Subs on that one Profile) — single-digit in practice.
     fn discovery_already_minted(&self, source: SubId, anchor: ResourceId, cfg_hash: u64) -> bool {
         let Some(profile) = self.profiles.find(anchor, cfg_hash) else {

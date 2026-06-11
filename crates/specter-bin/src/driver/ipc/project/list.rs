@@ -73,7 +73,10 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
     let anchor = profile
         .and_then(|p| engine.tree().path_of(p.resource()))
         .map(|arc| WirePath::from(&arc));
-    let last_fired_at = sub
+    // Faithful render across the reaction sum: a Mint Sub (discovery template) never fires, so
+    // its row reports the stats a never-firing Sub holds forever.
+    let history = sub.fire_history().copied().unwrap_or_default();
+    let last_fired_at = history
         .last_fired_at
         .map(|t| WireTime::from(project_wall(ds.start_wall, ds.start_instant, t)));
     ListRow {
@@ -81,8 +84,8 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
         state,
         anchor,
         last_fired_at,
-        fire_count: Some(sub.fire_count),
-        dedup_suppressed_count: Some(sub.dedup_suppressed_count),
+        fire_count: Some(history.fire_count),
+        dedup_suppressed_count: Some(history.dedup_suppressed_count),
         settle_ms: Some(
             u64::try_from(sub.settle.as_millis())
                 .expect("Duration::as_millis fits u64 for any operator-meaningful settle window"),
@@ -90,7 +93,7 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
         disabled: None,
         sub: Some(WireId::from(sid)),
         profile: Some(WireId::from(sub.profile())),
-        source_discovery: sub.minted_by().map(WireId::from),
+        minted_by: sub.minted_by().map(WireId::from),
     }
 }
 
@@ -108,7 +111,7 @@ fn disabled_row(name: &str, source: DisabledSource) -> ListRow {
         disabled: Some(source),
         sub: None,
         profile: None,
-        source_discovery: None,
+        minted_by: None,
     }
 }
 
@@ -284,7 +287,7 @@ mod tests {
     }
 
     /// Attached row carries every engine-derived field: state, sub id, profile id, fire counters
-    /// (`Some(0)` for a never-fired Sub), settle ms, and a null `source_discovery` for static Subs.
+    /// (`Some(0)` for a never-fired Sub), settle ms, and a null `minted_by` for static Subs.
     #[test]
     fn list_attached_row_carries_every_engine_field() {
         let config = config_from_watches(&[("only", "/tmp/foo", true)]);
@@ -303,19 +306,16 @@ mod tests {
         );
         assert_eq!(row.dedup_suppressed_count, Some(0));
         assert!(row.settle_ms.is_some(), "attached row carries settle_ms");
-        assert!(
-            row.source_discovery.is_none(),
-            "static Sub has no source_discovery",
-        );
+        assert!(row.minted_by.is_none(), "static Sub has no minted_by");
         assert!(row.disabled.is_none(), "attached row's disabled is None");
     }
 
-    /// A dynamic Sub (`source_discovery: Some(_)`) projects with the discriminator populated.
-    /// Construct it by directly attaching a `SubAttachRequest` whose `source_discovery` is
+    /// A dynamic Sub (`minted_by: Some(_)`) projects with the discriminator populated.
+    /// Construct it by directly attaching a `SubAttachRequest` whose `minted_by` is
     /// `Some(_)` — the engine's `attach_sub` does not require the source template to exist for this
     /// projection-side test.
     #[test]
-    fn list_dynamic_sub_carries_source_discovery() {
+    fn list_dynamic_sub_carries_minted_by() {
         use specter_core::{ClassSet, ProfileIdentity};
         use specter_core::{
             EffectScope, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
@@ -351,10 +351,7 @@ mod tests {
         );
         assert_eq!(resp.rows.len(), 1);
         let row = &resp.rows[0];
-        assert!(
-            row.source_discovery.is_some(),
-            "dynamic Sub must carry source_discovery",
-        );
+        assert!(row.minted_by.is_some(), "dynamic Sub must carry minted_by");
     }
 
     fn trivial_program() -> Arc<ActionProgram> {

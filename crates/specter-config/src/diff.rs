@@ -418,7 +418,7 @@ mod tests {
         assert_eq!(d.added.len(), 2);
         assert_eq!(d.added[0].params.name, "logs");
         assert_eq!(d.added[1].params.name, "sites");
-        assert!(d.added.iter().all(|r| r.params.template.is_some()));
+        assert!(d.added.iter().all(|r| r.params.is_template()));
         assert!(d.removed.is_empty());
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
@@ -526,7 +526,7 @@ mod tests {
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
         assert_eq!(d.modified_identity[0].params.name, "foo");
-        assert!(d.modified_identity[0].params.template.is_some());
+        assert!(d.modified_identity[0].params.is_template());
     }
 
     /// Reverse direction: dynamic → static via path edit. Same head guard (template presence on the
@@ -545,7 +545,7 @@ mod tests {
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
         assert_eq!(d.modified_identity[0].params.name, "foo");
-        assert!(d.modified_identity[0].params.template.is_none());
+        assert!(!d.modified_identity[0].params.is_template());
     }
 
     /// Mixed reload: one static modify, one discovery add, one of each removed. Static and
@@ -651,7 +651,7 @@ mod tests {
         let d = diff(&cfg(&[off.as_str()]), &cfg(&[on.as_str()]));
         assert_eq!(d.added.len(), 1);
         assert_eq!(d.added[0].params.name, "logs");
-        assert!(d.added[0].params.template.is_some());
+        assert!(d.added[0].params.is_template());
         assert!(d.removed.is_empty());
     }
 }

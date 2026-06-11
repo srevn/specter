@@ -599,7 +599,6 @@ fn config_diff_add_dynamic_attaches_and_first_reconcile_mints() {
         SubAttachAnchor::Resource(data),
         "/data/*",
         mint_template(),
-        EffectScope::SubtreeRoot,
     ));
     let out = e.step(Input::ConfigDiff(diff), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("diff added the template");
@@ -638,7 +637,6 @@ fn config_diff_add_dynamic_with_missing_prefix_goes_pending() {
         SubAttachAnchor::Path(PathBuf::from("/data/x")),
         "/data/x/*",
         mint_template(),
-        EffectScope::SubtreeRoot,
     ));
     let out = e.step(Input::ConfigDiff(diff), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("diff added the template");
@@ -676,7 +674,6 @@ fn config_diff_modify_template_cascades_and_remints() {
             SubAttachAnchor::Resource(data),
             "/data/*",
             mint_template(),
-            EffectScope::SubtreeRoot,
         )),
         now,
     );
@@ -703,7 +700,6 @@ fn config_diff_modify_template_cascades_and_remints() {
         SubAttachAnchor::Resource(data),
         "/data/*",
         mint_template(),
-        EffectScope::SubtreeRoot,
     ));
     let out = e.step(Input::ConfigDiff(diff), t1);
 
@@ -763,7 +759,6 @@ fn config_diff_remove_dynamic_cascades() {
             SubAttachAnchor::Resource(data),
             "/data/*",
             mint_template(),
-            EffectScope::SubtreeRoot,
         )),
         now,
     );

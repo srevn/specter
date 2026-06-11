@@ -423,8 +423,8 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::SubAttached {
             sub,
             name,
-            source_discovery,
-        } => match source_discovery {
+            minted_by,
+        } => match minted_by {
             // Operator-declared attach: high signal, low rate (one per `[[watch]]` block per
             // reload). INFO is the operator-facing default per the catalog severity table.
             None => tracing::info!(?sub, %name, "sub attached"),
@@ -613,7 +613,7 @@ mod tests {
             diag_sub_id(&Diagnostic::SubAttached {
                 sub: s,
                 name: CompactString::const_new("x"),
-                source_discovery: None,
+                minted_by: None,
             }),
             Some(s)
         );

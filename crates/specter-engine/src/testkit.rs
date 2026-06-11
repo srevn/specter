@@ -15,8 +15,9 @@ use specter_core::{
     ActiveBurst, ClassSet, DedupKey, DirSnapshot, EffectCompletion, EffectOutcome, EffectScope,
     FS_ROOT_SEGMENT, FsEvent, Input, MintTemplate, PatternSpec, PostFireBurst, PostFirePhase,
     PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId,
-    ProfileIdentity, ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput,
-    SubAttachAnchor, SubAttachRequest, SubId, SubParams, TimerId, WatchFailure,
+    ProfileIdentity, ProfileState, ReactionSpec, ResourceId, ResourceKind, ResourceRole,
+    ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
+    TimerId, WatchFailure,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -561,10 +562,19 @@ pub const fn watch_op_rejected_input(resource: ResourceId) -> Input {
     }
 }
 
-/// The fixture [`MintTemplate`]: a `recursive` `Subtree` minted identity with `ClassSet::EMPTY` and
-/// `MAX_SETTLE`; minted debounce `SETTLE`.
+/// The fixture [`MintTemplate`] with the default `SubtreeRoot` minted-reaction scope.
+///
+/// A `recursive` `Subtree` minted identity with `ClassSet::EMPTY` and `MAX_SETTLE`; minted
+/// debounce `SETTLE`; minted reaction `/bin/true`-shaped (`empty_program`, no log forwarding).
 #[must_use]
 pub fn mint_template() -> Arc<MintTemplate> {
+    mint_template_scoped(EffectScope::SubtreeRoot)
+}
+
+/// [`mint_template`] with an explicit minted-reaction scope — the per-file recovery pins thread
+/// `PerStableFile` through the template's spawn.
+#[must_use]
+pub fn mint_template_scoped(scope: EffectScope) -> Arc<MintTemplate> {
     Arc::new(MintTemplate {
         identity: ProfileIdentity::new(
             ScanConfig::builder().recursive(true).build(),
@@ -572,6 +582,7 @@ pub fn mint_template() -> Arc<MintTemplate> {
             ClassSet::EMPTY,
         ),
         settle: SETTLE,
+        spawn: SpawnSpec::new(specter_core::testkit::empty_program(), scope, false),
     })
 }
 
@@ -581,17 +592,16 @@ pub fn mint_template() -> Arc<MintTemplate> {
 /// The discovery Sub's own identity mirrors the config lowering's constant-identity shape in
 /// fixture form: `MatchChain(pattern)`, `ClassSet::STRUCTURE` (membership changes are the chain
 /// proof object's only witness classes, so the Profile folds `EventsReliable`), `MAX_SETTLE` /
-/// `SETTLE`, `/bin/true`. The fixture need not byte-match the lowering's settle constants — those
-/// are config policy, pinned in the config crate. `scope` is explicit because it doubles as the
-/// minted Subs' reaction scope — the per-file recovery-warn pin needs `PerStableFile` here.
-/// `anchor` is explicit (pre-placed `Resource` or pending `Path`).
+/// `SETTLE`. The fixture need not byte-match the lowering's settle constants — those are config
+/// policy, pinned in the config crate. The minted reaction (scope included) lives on the
+/// `template`'s spawn — [`mint_template_scoped`] threads a non-default scope. `anchor` is explicit
+/// (pre-placed `Resource` or pending `Path`).
 #[must_use]
 pub fn discovery_req(
     name: &str,
     anchor: SubAttachAnchor,
     pattern: &str,
     template: Arc<MintTemplate>,
-    scope: EffectScope,
 ) -> SubAttachRequest {
     let spec = Arc::new(PatternSpec::parse(pattern).expect("valid test pattern"));
     SubAttachRequest::from_parts(
@@ -603,18 +613,15 @@ pub fn discovery_req(
         ),
         SubParams {
             name: name.into(),
-            program: specter_core::testkit::empty_program(),
-            scope,
             settle: SETTLE,
-            log_output: false,
-            template: Some(template),
-            source_discovery: None,
+            reaction: ReactionSpec::Mint(template),
         },
     )
 }
 
 /// Attach a discovery template Sub for `pattern` at `anchor`, returning the attach `StepOutput`
-/// too. The request shape is [`discovery_req`]'s.
+/// too. The request shape is [`discovery_req`]'s; the minted reaction (scope included) is the
+/// `template`'s.
 #[must_use]
 pub fn attach_discovery_returning(
     e: &mut Engine,
@@ -622,11 +629,10 @@ pub fn attach_discovery_returning(
     anchor: SubAttachAnchor,
     pattern: &str,
     template: Arc<MintTemplate>,
-    scope: EffectScope,
     now: Instant,
 ) -> (SubId, ProfileId, StepOutput) {
     let out = e.step(
-        Input::AttachSub(discovery_req(name, anchor, pattern, template, scope)),
+        Input::AttachSub(discovery_req(name, anchor, pattern, template)),
         now,
     );
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_discovery succeeded");
@@ -634,8 +640,7 @@ pub fn attach_discovery_returning(
     (sid, pid, out)
 }
 
-/// [`attach_discovery_returning`] with the fixture `SubtreeRoot` scope, discarding the attach
-/// `StepOutput` — the common case.
+/// [`attach_discovery_returning`] discarding the attach `StepOutput` — the common case.
 #[must_use]
 pub fn attach_discovery(
     e: &mut Engine,
@@ -645,15 +650,7 @@ pub fn attach_discovery(
     template: Arc<MintTemplate>,
     now: Instant,
 ) -> (SubId, ProfileId) {
-    let (sid, pid, _) = attach_discovery_returning(
-        e,
-        name,
-        anchor,
-        pattern,
-        template,
-        EffectScope::SubtreeRoot,
-        now,
-    );
+    let (sid, pid, _) = attach_discovery_returning(e, name, anchor, pattern, template, now);
     (sid, pid)
 }
 

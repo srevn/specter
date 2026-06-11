@@ -2758,7 +2758,7 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
     let diag = Diagnostic::SubAttached {
         sub: sid,
         name: CompactString::const_new("build"),
-        source_discovery: None,
+        minted_by: None,
     };
     rig.driver
         .ipc
@@ -3490,7 +3490,7 @@ fn subscribe_ack_precedes_diag_on_wire() {
     out.diagnostics.push(specter_core::Diagnostic::SubAttached {
         sub: sid,
         name: CompactString::const_new("build"),
-        source_discovery: None,
+        minted_by: None,
     });
     let _ = rig.driver.forward(out);
 

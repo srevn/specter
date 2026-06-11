@@ -2230,7 +2230,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
-    assert!(e.subs.get(sid).unwrap().needs_diff);
+    assert!(e.subs.get(sid).unwrap().spawn_spec().unwrap().needs_diff());
 
     // Seed burst → baseline = empty snapshot.
     complete_seed_burst(&mut e, pid);
@@ -3834,7 +3834,7 @@ fn records_fired_subs_after_subtree_effect() {
     // The Subtree fire is recorded on this Sub — the post-emit fire-history flag that gates later
     // B1 suppression.
     assert!(
-        e.subs.get(sid).is_some_and(|s| s.has_fired),
+        e.subs.get(sid).is_some_and(specter_core::Sub::has_fired),
         "post-emit: Subtree fire recorded for this Sub",
     );
 }
@@ -6610,7 +6610,7 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
 
     // Property 3 (part a): the freshly attached Sub starts unfired.
     assert!(
-        !e.subs.get(sid_a).unwrap().has_fired,
+        !e.subs.get(sid_a).unwrap().has_fired(),
         "fresh attach: sid_a starts unfired",
     );
     assert!(
@@ -6644,7 +6644,7 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
     );
     // Property 3 (part b): the sibling attaches unfired.
     assert!(
-        !e.subs.get(sid_b).unwrap().has_fired,
+        !e.subs.get(sid_b).unwrap().has_fired(),
         "fresh attach: sibling starts unfired",
     );
     let _ = e.cancel_all_in_flight_probes();
@@ -6653,7 +6653,7 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
     // and observe it through the registry — the exact signal `seed_drift_observed` / B1 read.
     e.subs.mark_fired(sid_a);
     assert!(
-        e.subs.get(sid_a).unwrap().has_fired,
+        e.subs.get(sid_a).unwrap().has_fired(),
         "Property 1: B1/SeedDrift fire-history reads Sub.has_fired",
     );
     assert!(
@@ -6845,8 +6845,15 @@ fn standard_burst_born_under_window_folds_without_firing() {
         "the advanced baseline is the drifted sample, not the pre-fold empty tree",
     );
     let sub = e.subs.get(sid).unwrap();
-    assert!(!sub.has_fired, "a fold is not a fire — has_fired untouched");
-    assert_eq!(sub.fire_count, 0, "a fold does not bump fire_count");
+    assert!(
+        !sub.has_fired(),
+        "a fold is not a fire — has_fired untouched"
+    );
+    assert_eq!(
+        sub.fire_history().unwrap().fire_count,
+        0,
+        "a fold does not bump fire_count"
+    );
     assert_eq!(
         e.profiles.get(pid).unwrap().absorb_count(),
         1,
@@ -6926,7 +6933,7 @@ fn arming_window_retro_latches_in_flight_batching_burst() {
         "retro-latched fold emits QuiescenceAbsorbed",
     );
     assert_eq!(e.profiles.get(pid).unwrap().absorb_count(), 1);
-    assert!(!e.subs.get(sid).unwrap().has_fired);
+    assert!(!e.subs.get(sid).unwrap().has_fired());
 }
 
 /// `ConsumeOnFirst` (the `None`-duration default) retires the window on the first fold. A second,
@@ -6952,7 +6959,7 @@ fn consume_on_first_folds_once_then_fires() {
         "ConsumeOnFirst retires the window on the first fold",
     );
     assert_eq!(e.profiles.get(pid).unwrap().absorb_count(), 1);
-    assert!(!e.subs.get(sid).unwrap().has_fired, "fold did not fire");
+    assert!(!e.subs.get(sid).unwrap().has_fired(), "fold did not fire");
 
     // Second, separate episode — no live window ⇒ fires normally.
     let t1 = t0 + SETTLE * 10;
@@ -6971,7 +6978,7 @@ fn consume_on_first_folds_once_then_fires() {
         1,
         "a real fire does not bump absorb_count",
     );
-    assert!(e.subs.get(sid).unwrap().has_fired, "second episode fired");
+    assert!(e.subs.get(sid).unwrap().has_fired(), "second episode fired");
 }
 
 /// `PersistUntil` (a `Some(duration)` window) survives folds: two separate episodes within the
@@ -7020,7 +7027,7 @@ fn persist_until_folds_repeatedly_then_fires_after_expiry() {
         2,
         "both folds bumped the count",
     );
-    assert!(!e.subs.get(sid).unwrap().has_fired, "no fold fired");
+    assert!(!e.subs.get(sid).unwrap().has_fired(), "no fold fired");
 
     // Third episode, born after expiry ⇒ window inert ⇒ fires.
     let t2 = t0 + window + Duration::from_millis(1);
@@ -7035,7 +7042,7 @@ fn persist_until_folds_repeatedly_then_fires_after_expiry() {
         "a burst born past the PersistUntil expiry fires",
     );
     assert!(
-        e.subs.get(sid).unwrap().has_fired,
+        e.subs.get(sid).unwrap().has_fired(),
         "post-expiry episode fired"
     );
 }
@@ -7121,7 +7128,7 @@ fn cold_seed_under_window_stays_silent_pin_and_preserves_window() {
         "the first fireable fold finally consumes the ConsumeOnFirst window",
     );
     assert!(
-        !e.subs.get(sid).unwrap().has_fired,
+        !e.subs.get(sid).unwrap().has_fired(),
         "the fireable burst folded, not fired"
     );
 }
@@ -7218,7 +7225,7 @@ fn residual_restart_under_window_folds() {
         other => panic!("expected a restarted Active(PreFire) burst; got {other:?}"),
     };
     let absorb_count_before = e.profiles.get(pid).unwrap().absorb_count();
-    let fire_count_before = e.subs.get(sid).unwrap().fire_count;
+    let fire_count_before = e.subs.get(sid).unwrap().fire_history().unwrap().fire_count;
 
     // Drive the restarted burst to its verdict → folds.
     let _ = e.step(
@@ -7261,7 +7268,7 @@ fn residual_restart_under_window_folds() {
         "the residual-restart fold bumps absorb_count",
     );
     assert_eq!(
-        e.subs.get(sid).unwrap().fire_count,
+        e.subs.get(sid).unwrap().fire_history().unwrap().fire_count,
         fire_count_before,
         "the fold did not fire — fire_count unchanged across the restart fold",
     );

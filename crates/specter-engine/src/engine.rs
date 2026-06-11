@@ -259,7 +259,7 @@ impl Engine {
         debug_assert_eq!(
             req.params.is_template(),
             req.identity.config().match_chain().is_some(),
-            "attach_sub_inner: SubParams::template ⟺ ScanConfig::MatchChain \
+            "attach_sub_inner: ReactionSpec::Mint ⟺ ScanConfig::MatchChain \
              (a template mints; a chain Profile reconciles — neither exists without the other)",
         );
 
@@ -442,12 +442,12 @@ impl Engine {
         out: &mut StepOutput,
     ) -> SubId {
         let diag_name = params.name.clone();
-        let diag_source_discovery = params.minted_by();
+        let diag_minted_by = params.minted_by();
         let sub_id = self.subs.insert(Sub::from_request(profile_id, params));
         out.diagnostics.push(Diagnostic::SubAttached {
             sub: sub_id,
             name: diag_name,
-            source_discovery: diag_source_discovery,
+            minted_by: diag_minted_by,
         });
         sub_id
     }
@@ -769,11 +769,11 @@ impl Engine {
         // denormalised mirror of this and has been removed.
         let remaining_subs = self.subs.at(profile_id).len();
 
-        // No fire-history purge: the detached Sub's `Sub.has_fired` died with it at
-        // `self.subs.remove(sub)` above. The flag is per-Sub and slotmap-scoped, so a future drift
-        // verdict on this Profile structurally cannot re-fire a detached Sub (and a
-        // hot-reload-modified Sub re-attaches under a fresh `SubId` starting `false`). The old
-        // per-Profile `fired_subs` set needed a targeted purge here; the per-Sub home dissolves it.
+        // No fire-history purge: the detached Sub's `FireHistory` died with it at
+        // `self.subs.remove(sub)` above. The history is per-Sub and slotmap-scoped, so a future
+        // drift verdict on this Profile structurally cannot re-fire a detached Sub (and a
+        // hot-reload-modified Sub re-attaches under a fresh `SubId` starting unfired) — there is
+        // no per-Profile fire container to purge.
         if remaining_subs > 0 {
             // Recompute Profile.settle = min(remaining_subs.settles).
             //
@@ -816,9 +816,9 @@ impl Engine {
     }
 
     /// In-place per-Sub rebind — the `modified_params` arm of [`Self::on_config_diff`]. Replaces
-    /// `sub`'s `program`, `scope`, `settle`, and `log_output` via the engine-internal edge method
-    /// [`SubRegistry::rebind`]; preserves `SubId`, `profile`, `name`, `source_discovery`, and
-    /// `has_fired`.
+    /// `sub`'s spawn spec (`program` / `scope` / `log_output`) and `settle` via the engine-internal
+    /// edge method [`SubRegistry::rebind`]; preserves `SubId`, `profile`, `name`, `minted_by`, and
+    /// the fire history.
     ///
     /// Touches no Profile state, no Tree slot, and no kernel watch: the silent biggest win over the
     /// `modified_identity` detach+attach path is that the anchor's `watch_demand` stays installed
@@ -1745,10 +1745,10 @@ mod tests {
         //     live Sub),
         //   - emit `Diagnostic::ReapPendingCancelled`.
         //
-        // (No `fired_subs` cleanup is asserted because there is none to assert: fire history is
-        // per-Sub (`Sub.has_fired`) and dies with the slotmap entry on detach. A revived Profile's
-        // freshly-attached Subs start `has_fired == false` structurally — there is no per-Profile
-        // fire container to purge.)
+        // (No fire-history cleanup is asserted because there is none to assert: the history is
+        // per-Sub (`FireHistory` on the Spawn reaction) and dies with the slotmap entry on detach.
+        // A revived Profile's freshly-attached Subs start unfired structurally — there is no
+        // per-Profile fire container to purge.)
         let mut e = Engine::new();
         let r = e
             .tree

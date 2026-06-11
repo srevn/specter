@@ -57,8 +57,8 @@ pub use snapshot::tree::{
     diff_dir_pair, diff_tree, splice, subtree_at_dir,
 };
 pub use sub::{
-    ClassSet, DiscoveryTemplate, EffectScope, MintTemplate, Sub, SubAttachAnchor, SubAttachRequest,
-    SubParams, SubRegistry, SubRegistryDiff,
+    ClassSet, DiscoveryTemplate, EffectScope, FireHistory, MintTemplate, Reaction, ReactionSpec,
+    SpawnSpec, Sub, SubAttachAnchor, SubAttachRequest, SubParams, SubRegistry, SubRegistryDiff,
 };
 pub use tree::{AttachPathError, FS_ROOT_SEGMENT, StaleIdError, Tree, TreePath};
 

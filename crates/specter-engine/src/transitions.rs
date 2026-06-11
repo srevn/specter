@@ -27,9 +27,9 @@ use specter_core::{
     ClassSet, DedupKey, DescentRemaining, DetachReason, Diagnostic, Effect, EffectCommon,
     EffectOutcome, EffectScope, FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeFailure,
     ProbeResponse, Profile, ProfileId, ProfileState, ProofAuthority, QuiescenceVerdict,
-    QuiescenceWitness, ReapTrigger, Resource, ResourceId, ResourceKind, StableReason, StepOutput,
-    Sub, SubAttachRequest, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot, WatchFailure,
-    quiescence_verdict,
+    QuiescenceWitness, Reaction, ReapTrigger, Resource, ResourceId, ResourceKind, StableReason,
+    StepOutput, Sub, SubAttachRequest, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot,
+    WatchFailure, quiescence_verdict,
 };
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -2687,7 +2687,7 @@ impl Engine {
         };
 
         // Per-Profile structural component of B1 dedup. The full Subtree suppress decision combines
-        // `nothing_changed` with the per-Sub `Sub.has_fired` flag (read once below, alongside scope /
+        // `nothing_changed` with the per-Sub `has_fired` flag (read once below, alongside scope /
         // needs_diff / log_output, in the loop's single `subs.get`): a Sub that has never fired
         // suppresses nothing — it is its own "first emission" — even when the tree happens to match.
         let nothing_changed = p
@@ -2703,7 +2703,27 @@ impl Engine {
         let mut count: u32 = 0;
         for sub_id in sub_ids {
             let (scope, needs_diff, log_output, already_fired) = match self.subs.get(sub_id) {
-                Some(s) => (s.scope, s.needs_diff, s.log_output, s.has_fired),
+                Some(s) => match s.reaction() {
+                    Reaction::Spawn { spec, history, .. } => (
+                        spec.scope(),
+                        spec.needs_diff(),
+                        spec.log_output(),
+                        history.has_fired,
+                    ),
+                    // A Mint Sub never fires — discovery's "fire" is the reconcile's batch of
+                    // attachments, and the verdict floor classifies its Profile to Reconcile before
+                    // the fire fork. Reaching here is a routing breach; the skip is the
+                    // semantically correct degrade (a Mint must not fire), loud in dev so the
+                    // misrouting dispatcher gets fixed, never daemon-fatal in release.
+                    Reaction::Mint(_) => {
+                        debug_assert!(
+                            false,
+                            "emit_effects reached a Mint Sub \
+                             (sub = {sub_id:?}, profile = {profile_id:?})",
+                        );
+                        continue;
+                    }
+                },
                 None => continue,
             };
             match fire_decision(mode, scope, sub_id, already_fired, nothing_changed) {
@@ -2728,6 +2748,12 @@ impl Engine {
                     let Some(sub) = self.subs.get(sub_id) else {
                         continue;
                     };
+                    // The funnel head classified this Sub as Spawn; a None here would mean the
+                    // reaction changed under a live borrow-free window, which rebind cannot do
+                    // (variant-typed Spawn↔Spawn) — the silent skip mirrors the stale-id arm.
+                    let Some(spec) = sub.spawn_spec() else {
+                        continue;
+                    };
                     out.push_effect(Effect::subtree(
                         EffectCommon {
                             sub: sub_id,
@@ -2740,7 +2766,7 @@ impl Engine {
                             forced: effect_forced,
                             capture_output: log_output,
                             sub_name: sub.name.clone(),
-                            program: Arc::clone(&sub.program),
+                            program: Arc::clone(spec.program()),
                             anchor_path: Arc::clone(&anchor_path),
                             anchor_kind,
                             exclude: Arc::clone(&exclude_strings),
@@ -2861,11 +2887,15 @@ impl Engine {
             };
 
             let correlation = self.effect_correlations.next();
-            // The Sub may have been removed mid-burst; defensive lookup.
+            // The Sub may have been removed mid-burst; defensive lookup. The spawn-spec read
+            // shares the same silent-skip discipline — the funnel's PerStableFile dispatch
+            // already proved the variant.
             let Some(sub) = self.subs.get(sub_id) else {
                 continue;
             };
-            let log_output = sub.log_output;
+            let Some(spec) = sub.spawn_spec() else {
+                continue;
+            };
             out.push_effect(Effect::per_file(
                 EffectCommon {
                     sub: sub_id,
@@ -2873,9 +2903,9 @@ impl Engine {
                     anchor,
                     correlation,
                     forced,
-                    capture_output: log_output,
+                    capture_output: spec.log_output(),
                     sub_name: sub.name.clone(),
-                    program: Arc::clone(&sub.program),
+                    program: Arc::clone(spec.program()),
                     anchor_path: Arc::clone(anchor_path),
                     anchor_kind,
                     exclude: Arc::clone(exclude_strings),

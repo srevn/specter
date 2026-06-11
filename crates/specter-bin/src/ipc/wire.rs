@@ -382,7 +382,7 @@ pub(crate) enum WireDiagnostic {
         at: WireTime,
         sub: WireId,
         name: CompactString,
-        source_discovery: Option<WireId>,
+        minted_by: Option<WireId>,
     },
     SubFired {
         at: WireTime,
@@ -691,12 +691,12 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
             Diagnostic::SubAttached {
                 sub,
                 name,
-                source_discovery,
+                minted_by,
             } => Self::SubAttached {
                 at: at.clone(),
                 sub: WireId::from(*sub),
                 name: name.clone(),
-                source_discovery: source_discovery.map(WireId::from),
+                minted_by: minted_by.map(WireId::from),
             },
             Diagnostic::SubFired {
                 sub,
@@ -1850,7 +1850,7 @@ mod tests {
                 at: at(),
                 sub: WireId(150),
                 name: "watch".into(),
-                source_discovery: None,
+                minted_by: None,
             },
             WireDiagnostic::SubFired {
                 at: at(),

@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use compact_str::CompactString;
 use specter_config::Config;
-use specter_core::{Profile, Sub, SubId};
+use specter_core::{FireHistory, Profile, Reaction, Sub, SubId};
 use specter_engine::Engine;
 
 use crate::driver::DriverState;
@@ -108,24 +108,31 @@ fn project_details(
             expiry: WireTime::from(project_wall(ds.start_wall, ds.start_instant, w.expiry)),
             mode: WireAbsorbMode::from(w.mode),
         });
+    // Faithful render across the reaction sum: a Spawn Sub reads its own payload; a Mint Sub
+    // (discovery template) reaches through its template's spawn for scope/program — the values
+    // the minted Subs run under — and reports the fire stats a never-firing Sub holds forever.
+    let (spawn, history) = match sub.reaction() {
+        Reaction::Spawn { spec, history, .. } => (spec, *history),
+        Reaction::Mint(t) => (&t.spec.spawn, FireHistory::default()),
+    };
     SubDetails {
         name: sub.name.to_string(),
         sub: WireId::from(sid),
         profile: WireId::from(sub.profile()),
         state,
         anchor,
-        last_fired_at: sub
+        last_fired_at: history
             .last_fired_at
             .map(|t| WireTime::from(project_wall(ds.start_wall, ds.start_instant, t))),
-        fire_count: sub.fire_count,
-        dedup_suppressed_count: sub.dedup_suppressed_count,
+        fire_count: history.fire_count,
+        dedup_suppressed_count: history.dedup_suppressed_count,
         absorb,
         absorb_count: profile.map_or(0, Profile::absorb_count),
         settle_ms: u64::try_from(sub.settle.as_millis())
             .expect("Duration::as_millis fits u64 for any operator-meaningful settle window"),
-        source_discovery: sub.minted_by().map(WireId::from),
-        scope: WireEffectScope::from(sub.scope),
-        program: program::render(&sub.program),
+        minted_by: sub.minted_by().map(WireId::from),
+        scope: WireEffectScope::from(spawn.scope()),
+        program: program::render(spawn.program()),
     }
 }
 
@@ -245,10 +252,7 @@ mod tests {
                 assert_eq!(d.fire_count, 0, "never fired");
                 assert!(d.last_fired_at.is_none(), "never fired ⇒ None");
                 assert!(!d.program.is_empty(), "program renders ≥1 line");
-                assert!(
-                    d.source_discovery.is_none(),
-                    "static Sub has no source_discovery",
-                );
+                assert!(d.minted_by.is_none(), "static Sub has no minted_by");
             }
             other => panic!("expected Active, got {other:?}"),
         }
@@ -505,7 +509,7 @@ mod tests {
             ShowResponse::Active(d) => {
                 assert_eq!(d.name, "disc");
                 assert!(
-                    d.source_discovery.is_none(),
+                    d.minted_by.is_none(),
                     "a template is operator-declared, not minted",
                 );
             }

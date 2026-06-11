@@ -409,7 +409,7 @@ pub(crate) struct ListRow {
     pub(crate) profile: Option<WireId>,
     /// `Sub::minted_by()` projection — `Some(_)` iff the Sub is discovery-minted, `None` for
     /// operator-declared Subs (templates included) and for non-attached rows.
-    pub(crate) source_discovery: Option<WireId>,
+    pub(crate) minted_by: Option<WireId>,
 }
 
 /// `specter show <name>` response — internally tagged on `status` so the three operator outcomes
@@ -488,7 +488,7 @@ pub(crate) struct SubDetails {
     /// `Sub::minted_by()` projection — `Some(_)` iff the Sub was minted by a discovery template.
     /// Distinct from a TOML-declared Sub with the same anchor: the source id locates which template
     /// produced the entry.
-    pub(crate) source_discovery: Option<WireId>,
+    pub(crate) minted_by: Option<WireId>,
     /// `Sub.scope` projection.
     pub(crate) scope: WireEffectScope,
     /// One line per `ActionProgram` instruction. Rendering rules live with the projection helper

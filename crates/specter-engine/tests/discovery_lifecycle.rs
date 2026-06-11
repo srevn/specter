@@ -22,7 +22,7 @@ use specter_engine::Engine;
 use specter_engine::testkit::{
     DEFAULT_EVENTS, MAX_SETTLE, SETTLE, attach, attach_discovery, attach_discovery_returning,
     descent_advance, discovery_subs_of, drain_due, is_draining, last_probe_path, mint_template,
-    pid_of, pre_place_dir, seed_to_idle,
+    mint_template_scoped, pid_of, pre_place_dir, seed_to_idle,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -208,7 +208,9 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
     let attached = out
         .diagnostics
         .iter()
-        .filter(|d| matches!(d, Diagnostic::SubAttached { source_discovery, .. } if *source_discovery == Some(sid)))
+        .filter(
+            |d| matches!(d, Diagnostic::SubAttached { minted_by, .. } if *minted_by == Some(sid)),
+        )
         .count();
     assert_eq!(attached, 2, "one SubAttached per mint, keyed to its source");
 
@@ -625,8 +627,7 @@ fn prefix_rm_rf_recovery_remints_without_per_file_warning() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
-        EffectScope::PerStableFile,
+        mint_template_scoped(EffectScope::PerStableFile),
         now,
     );
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
@@ -1230,7 +1231,6 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
         SubAttachAnchor::Path("/data/x".into()),
         "/data/x/*",
         mint_template(),
-        EffectScope::SubtreeRoot,
         now,
     );
     assert!(

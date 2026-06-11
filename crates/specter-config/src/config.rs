@@ -7,8 +7,8 @@ use crate::template;
 use compact_str::CompactString;
 use specter_core::{
     self as core, ActionProgram, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    MintTemplate, PatternSpec, ProfileIdentity, ScanConfig, SubAttachAnchor, SubAttachRequest,
-    SubParams,
+    MintTemplate, PatternSpec, ProfileIdentity, ReactionSpec, ScanConfig, SpawnSpec,
+    SubAttachAnchor, SubAttachRequest, SubParams,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -223,7 +223,9 @@ pub struct SubSpec {
 /// Config-side mirror rather than `MintTemplate` directly: `MintTemplate`/`ProfileIdentity`
 /// deliberately carry no `Eq` (the hash is the engine's only identity comparison), while the diff
 /// layer compares *specs* structurally — its existing discipline. The mirror keeps that discipline
-/// without weakening the core types.
+/// without weakening the core types, and keeps the sealed `SpawnSpec` / eager identity hash out of
+/// the `Eq` derive (the spec's flat `program`/`scope`/`log_output` already carry the same
+/// information for comparison).
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TemplateSpec {
     /// Minted Profiles' scan — the `Subtree` built from the block's `recursive` / `hidden` /
@@ -241,25 +243,30 @@ pub struct TemplateSpec {
 impl SubSpec {
     #[must_use]
     pub fn to_attach_request(&self) -> SubAttachRequest {
+        // The spec's flat program/scope/log_output seal into one SpawnSpec either way; the
+        // template fork decides whose reaction it is — the Sub's own (static) or the minted Subs'
+        // (the discovery Sub itself spawns nothing).
+        let spawn = SpawnSpec::new(Arc::clone(&self.program), self.scope, self.log_output);
         SubAttachRequest::from_parts(
             SubAttachAnchor::Path(self.path.clone()),
             ProfileIdentity::new(self.scan.clone(), self.max_settle, self.events),
             SubParams {
                 name: self.name.clone(),
-                program: Arc::clone(&self.program),
-                scope: self.scope,
                 settle: self.settle,
-                log_output: self.log_output,
-                // The projection adds nothing: the template's knobs land in the MintTemplate
-                // verbatim, so the minted Profiles' identity hash equals one hand-built over the
-                // same user fields.
-                template: self.template.as_ref().map(|t| {
-                    Arc::new(MintTemplate {
+                reaction: match &self.template {
+                    // The projection adds nothing: the template's knobs land in the MintTemplate
+                    // verbatim, so the minted Profiles' identity hash equals one hand-built over
+                    // the same user fields.
+                    Some(t) => ReactionSpec::Mint(Arc::new(MintTemplate {
                         identity: ProfileIdentity::new(t.scan.clone(), t.max_settle, t.events),
                         settle: t.settle,
-                    })
-                }),
-                source_discovery: None,
+                        spawn,
+                    })),
+                    None => ReactionSpec::Spawn {
+                        spec: spawn,
+                        minted_by: None,
+                    },
+                },
             },
         )
     }
@@ -1281,8 +1288,9 @@ impl WatchAttachmentFields {
     /// chain FDs follow from the mask), [`DISCOVERY_SETTLE`] / [`DISCOVERY_MAX_SETTLE`] — so one
     /// pattern always maps to one discovery Profile. Every user knob moves into the
     /// [`TemplateSpec`]: the `[[watch]]` surface keeps its meaning (`settle` debounces the
-    /// *reaction*, i.e. the minted Subs). `program` / `scope` / `log_output` stay on the Sub — they
-    /// double as the minted reaction spec.
+    /// *reaction*, i.e. the minted Subs). `program` / `scope` / `log_output` stay on the spec's
+    /// flat fields — `to_attach_request` seals them into the template's `SpawnSpec`, the minted
+    /// Subs' reaction (the discovery Sub itself spawns nothing).
     ///
     /// The anchor is the literal prefix **verbatim** — no `canonicalize_lenient`. Parse already
     /// enforces absolute / no `.` / no `..`, and symlink resolution would desync the anchor from
@@ -1513,7 +1521,9 @@ mod tests {
     use super::{Config, LogConfig, LogDestination, LogLevel, SubAttachAnchor, SubSpec};
     use crate::error::{ConfigError, IssueKind};
     use specter_core::program::SpawnBody;
-    use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder, ProfileIdentity, ScanConfig};
+    use specter_core::{
+        ArgPart, ClassSet, EffectScope, Placeholder, ProfileIdentity, ReactionSpec, ScanConfig,
+    };
     use std::path::Path;
     use std::time::Duration;
 
@@ -1708,9 +1718,12 @@ mod tests {
     fn log_output_threads_into_attach_request() {
         let cfg = Config::from_str(&minimal_toml("log_output = true\n")).unwrap();
         let req = cfg.watches[0].to_attach_request();
+        let ReactionSpec::Spawn { spec, .. } = &req.params.reaction else {
+            panic!("static watch lowers to a Spawn reaction");
+        };
         assert!(
-            req.params.log_output,
-            "SubSpec.log_output reaches SubAttachRequest.log_output via to_attach_request",
+            spec.log_output(),
+            "SubSpec.log_output reaches the request's SpawnSpec via to_attach_request",
         );
     }
 
@@ -2533,11 +2546,9 @@ mod tests {
 
         // The attach-request projection: minted identity hash equals the hand-built one.
         let req = cfg.watches[0].to_attach_request();
-        let minted = req
-            .params
-            .template
-            .as_ref()
-            .expect("request carries MintTemplate");
+        let ReactionSpec::Mint(minted) = &req.params.reaction else {
+            panic!("dynamic watch lowers to a Mint reaction");
+        };
         assert_eq!(minted.settle, Duration::from_millis(300));
         let hand_built = ProfileIdentity::new(t.scan.clone(), t.max_settle, t.events);
         assert_eq!(minted.identity.config_hash(), hand_built.config_hash());

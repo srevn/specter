@@ -131,7 +131,7 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
             absorb_mode_str(w.mode),
         );
     }
-    if let Some(src) = d.source_discovery {
+    if let Some(src) = d.minted_by {
         let _ = writeln!(
             out,
             "{}discovery {}",
@@ -231,7 +231,7 @@ mod tests {
             absorb,
             absorb_count,
             settle_ms: 500,
-            source_discovery: None,
+            minted_by: None,
             scope: WireEffectScope::SubtreeRoot,
             program,
         }

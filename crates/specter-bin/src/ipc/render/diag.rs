@@ -400,13 +400,13 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         WireDiagnostic::SubAttached {
             sub,
             name,
-            source_discovery,
+            minted_by,
             ..
         } => {
             field(out, sty, "sub", sub.0);
             field(out, sty, "name", name);
-            if let Some(src) = source_discovery {
-                field(out, sty, "source_discovery", src.0);
+            if let Some(src) = minted_by {
+                field(out, sty, "minted_by", src.0);
             }
         }
         WireDiagnostic::SubFired {
@@ -533,7 +533,7 @@ mod tests {
         assert!(s.ends_with('\n'), "newline-terminated: {s:?}");
     }
 
-    /// `SubAttached.source_discovery = Some(_)` renders an extra `source_discovery=N` field; `None`
+    /// `SubAttached.minted_by = Some(_)` renders an extra `minted_by=N` field; `None`
     /// omits it entirely. Operators distinguishing operator-declared vs discovery-minted Subs read
     /// the presence/absence of the field.
     #[test]
@@ -545,14 +545,14 @@ mod tests {
                 at: WireTime::from(UNIX_EPOCH),
                 sub: WireId(1),
                 name: "static_watch".into(),
-                source_discovery: None,
+                minted_by: None,
             },
             Styler::Plain,
         );
         assert!(static_attach.contains("name=static_watch"));
         assert!(
-            !static_attach.contains("source_discovery"),
-            "None must omit source_discovery: {static_attach:?}",
+            !static_attach.contains("minted_by"),
+            "None must omit minted_by: {static_attach:?}",
         );
 
         let mut dynamic_attach = String::new();
@@ -562,11 +562,11 @@ mod tests {
                 at: WireTime::from(UNIX_EPOCH),
                 sub: WireId(2),
                 name: "t@/tmp/x".into(),
-                source_discovery: Some(WireId(99)),
+                minted_by: Some(WireId(99)),
             },
             Styler::Plain,
         );
-        assert!(dynamic_attach.contains("source_discovery=99"));
+        assert!(dynamic_attach.contains("minted_by=99"));
     }
 
     /// `SubDetached.reason` renders through the typed [`WireDetachReason`] label table
@@ -778,7 +778,7 @@ mod tests {
             }),
             "sensor_overflow" => json!({"diag": tag, "at": at, "scope": global_scope}),
             "sub_attached" => json!({
-                "diag": tag, "at": at, "sub": id, "name": "x", "source_discovery": null,
+                "diag": tag, "at": at, "sub": id, "name": "x", "minted_by": null,
             }),
             "sub_fired" => {
                 json!({"diag": tag, "at": at, "sub": id, "profile": id, "count": 1})
@@ -877,7 +877,7 @@ mod tests {
                 at: WireTime::from(UNIX_EPOCH),
                 sub: WireId(1),
                 name: "w".into(),
-                source_discovery: None,
+                minted_by: None,
             }),
             Severity::Info,
         );
