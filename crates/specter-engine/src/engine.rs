@@ -551,6 +551,11 @@ impl Engine {
     /// arm only enters the descent. It is a thin delegation to `enter_pending_descent` (which runs
     /// the four-step `mint correlation → state-flip → add_watch on prefix → emit probe` sequence);
     /// the named arm is retained for dispatch symmetry with [`Self::bootstrap_immediate`].
+    ///
+    /// Unwitnessed entry: no kernel event drove the attach, so if the entry probe finds the anchor
+    /// already on disk the terminus Seed stays cold and pins silently — attach-over-existing must
+    /// not fire (restart-safe doctrine). An appearance *after* attach reaches the live descent as
+    /// a `StructureChanged` and latches via `on_descent_event`, so it fires.
     fn bootstrap_pending(
         &mut self,
         profile_id: ProfileId,
@@ -558,7 +563,9 @@ impl Engine {
         remaining: DescentRemaining,
         out: &mut StepOutput,
     ) {
-        self.enter_pending_descent(profile_id, prefix, remaining, out);
+        self.enter_pending_descent(
+            profile_id, prefix, remaining, /* witnessed: */ false, out,
+        );
     }
 
     /// Find an existing Profile at `(anchor, identity.config_hash())` or create a fresh one.

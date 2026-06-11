@@ -212,20 +212,24 @@ impl Engine {
     /// through one. `None` and `Some` pick out two disjoint origin classes the engine distinguishes
     /// structurally:
     ///
-    /// - **`None` ⇔ cold attach** (no driving `FsEvent`). The Seed was decided by the engine — a
-    ///   fresh-attach, a descent terminus, or an overflow re-seed — not in response to a kernel
-    ///   signal. There is no triggering event to record into `dirty`, so `dirty.is_empty()` holds at
-    ///   first verify, and `seed_owes_first_fire` projects to `false` ⇒ the first `Authoritative`
-    ///   response pins the baseline silently. There is no event activity to debounce against either,
-    ///   so opening a `Batching` phase would amortise nothing — the cold path arms `Verifying` at
-    ///   burst construction and emits the cold walk immediately. `last_event_time = None` is the
-    ///   first-class construction state: no event drove this burst, no settle deadline to source.
-    /// - **`Some((resource, path))` ⇔ triggered re-Seed.** A driving `FsEvent` reached an `Idle +
-    ///   !baseline_is_some()` Profile — the post-recovery isolated change reached via the
-    ///   `undischarged_consequence` ceiling terminal. The triggering event threads into `dirty` so
-    ///   `seed_owes_first_fire` sees the activity witness it owes a fire on. The burst opens in
-    ///   `Batching { settle_timer }` exactly like `start_standard_burst`, so further `FsEvent`s
-    ///   debounce identically; `last_event_time = Some(now)` seeds the settle deadline.
+    /// - **`None` ⇔ cold** (no witnessed kernel activity). The Seed was decided by the engine — a
+    ///   fresh attach, an *unwitnessed* descent terminus, or an overflow re-seed — with no kernel
+    ///   signal vouching for a change. There is no triggering event to record into `dirty`, so
+    ///   `dirty.is_empty()` holds at first verify, and `seed_owes_first_fire` projects to `false`
+    ///   ⇒ the first `Authoritative` response pins the baseline silently. There is no event
+    ///   activity to debounce against either, so opening a `Batching` phase would amortise nothing
+    ///   — the cold path arms `Verifying` at burst construction and emits the cold walk
+    ///   immediately. `last_event_time = None` is the first-class construction state: no event
+    ///   drove this burst, no settle deadline to source.
+    /// - **`Some((resource, path))` ⇔ triggered re-Seed.** Witnessed kernel activity stands behind
+    ///   this Seed: a driving `FsEvent` reached an `Idle + !baseline_is_some()` Profile (the
+    ///   post-recovery isolated change reached via the `undischarged_consequence` ceiling
+    ///   terminal), or a descent whose witnessed-activity latch was set materialised its anchor
+    ///   (`materialize_profile_anchor` threads the anchor as the trigger). The trigger threads
+    ///   into `dirty` so `seed_owes_first_fire` sees the activity witness it owes a fire on. The
+    ///   burst opens in `Batching { settle_timer }` exactly like `start_standard_burst`, so
+    ///   further `FsEvent`s debounce identically; `last_event_time = Some(now)` seeds the settle
+    ///   deadline.
     ///
     /// **`burst_deadline` armed in both arms.** The pre-fire bound holds across the two paths: a
     /// triggered Seed's settle / verify loop, or a cold Seed whose walk runs > `max_settle` (slow
@@ -250,15 +254,18 @@ impl Engine {
     /// re-introduces exactly the dispatch flag the burst-helper doctrine rejects. The bodies differ
     /// in `intent`, the trigger discriminator above, and Standard's mandatory `event_resource`.
     ///
-    /// **Callers.** Four cold sites (`None`); one triggered site (`Some`):
+    /// **Callers.** Three unconditionally-cold sites, one latch-selected site, one
+    /// unconditionally-triggered site:
     /// - [`Self::bootstrap_immediate`] — fresh attach with an already-materialised anchor on disk
     ///   (cold).
-    /// - `materialize_profile_anchor` (descent terminus reached via `dispatch_descent_ok`) — the
-    ///   anchor just became live on disk (cold).
     /// - `on_sensor_overflow` Idle path — reseed every Profile in the overflow scope (cold).
     /// - `on_sensor_overflow` Active path — after `finish_burst_to_idle` flushes the in-flight
     ///   burst (cold).
-    /// - `drive_burst`'s Idle + `!baseline_is_some()` branch — the sole triggered call site.
+    /// - `materialize_profile_anchor` (descent terminus reached via `dispatch_descent_ok`) — cold
+    ///   or triggered, selected by the descent's witnessed-activity latch: a witnessed appearance
+    ///   threads the anchor as the trigger, an unwitnessed terminus (attach-time entry probe found
+    ///   the anchor without any kernel event) stays cold.
+    /// - `drive_burst`'s Idle + `!baseline_is_some()` branch — unconditionally triggered.
     ///
     /// `EffectComplete::Ok` does NOT call this helper; post-Effect rebase routes through
     /// `transition_to_rebasing`.

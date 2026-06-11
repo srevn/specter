@@ -2973,18 +2973,27 @@ fn sensor_overflow_pending_profile_with_in_flight_probe_not_duplicated() {
         .pending_probe_for(pid)
         .expect("fixture: descent probe in flight");
 
-    let pre_state = format!("{:?}", e.profiles.get(pid).unwrap().state());
+    let pre_prefix = e.descent_state(pid).unwrap().current_prefix();
     let out = e.step(
         Input::SensorOverflow {
             scope: OverflowScope::Global,
         },
         Instant::now(),
     );
-    let post_state = format!("{:?}", e.profiles.get(pid).unwrap().state());
 
+    let descent = e
+        .descent_state(pid)
+        .expect("Pending preserved across overflow");
     assert_eq!(
-        pre_state, post_state,
-        "Pending Profile state preserved across overflow",
+        descent.current_prefix(),
+        pre_prefix,
+        "descent position preserved across overflow",
+    );
+    assert!(
+        descent.witnessed(),
+        "overflow latches witnessed activity even when the in-flight probe absorbs the \
+         re-probe — the overflow window proves dropped events, so a materialization off \
+         that probe's response owes a fire",
     );
     assert!(
         !out.probe_ops()

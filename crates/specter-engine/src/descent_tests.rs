@@ -1130,6 +1130,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         foo,
         specter_core::DescentRemaining::from_vec(vec![CompactString::from("bar")])
             .expect("non-empty by test construction"),
+        /* witnessed: */ false,
         &mut out,
     );
 

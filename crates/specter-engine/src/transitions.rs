@@ -170,6 +170,15 @@ impl Engine {
     /// Profile's anchor segment becomes the sole remaining component; `enter_pending_descent` emits
     /// the descent probe at the parent.
     ///
+    /// **The entry event does not latch the descent's activity witness.** The event that selected
+    /// this Profile into the recoveries arm is a `StructureChanged` at the *parent* — it can be
+    /// sibling churn entirely out of the Sub's scope, and latching it would false-first-fire a
+    /// never-fired Sub whose anchor the entry probe then finds unchanged on disk (the transient
+    /// probe-`Failed` discard is the canonical shape: the anchor typically never left). Fired Subs
+    /// are protected by witness-drift either way. Accepted narrow miss: when the entry event was
+    /// itself the replacement *and* the entry probe finds it, a never-fired Sub misses that one
+    /// fire. Later events at the prefix latch via `on_descent_event`.
+    ///
     /// **Recovery overlap.** The parent already holds `+1 STRUCTURE` from `Profile.watch_root_parent`
     /// (set at the original anchor materialization, never cleared on `on_anchor_terminal_event`). The
     /// helper bumps another `+1` for the descent contribution; the refcount sums to `+2`. The descent
@@ -191,7 +200,9 @@ impl Engine {
         // structurally `Some`. `expect` documents the contract.
         let remaining = DescentRemaining::from_vec(vec![anchor_name])
             .expect("start_pending_recovery: single-segment remaining is non-empty");
-        self.enter_pending_descent(profile_id, parent, remaining, out);
+        self.enter_pending_descent(
+            profile_id, parent, remaining, /* witnessed: */ false, out,
+        );
     }
 
     /// Dispatch a [`ProbeResponse`]. Every probe — `Pending` descent, `Active(PreFire(Verifying))`,

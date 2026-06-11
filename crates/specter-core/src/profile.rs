@@ -1653,6 +1653,18 @@ pub struct DescentState {
     /// path — [`Self::arm_probe`] (mint), [`Self::probe_correlation`] (read),
     /// [`Self::disarm_probe`] (consume). It cannot be cloned, so it is consumed where it lives.
     probe: ProbeSlot,
+    /// Witnessed-activity latch: kernel activity was observed that could have changed the anchor's
+    /// proof object since the last settled observation. Set at construction (a descent entered
+    /// from an observed anchor loss) or by [`Self::note_witnessed_activity`] (any event reaching a
+    /// live descent); never reset — the latch persists through rewinds and forward advances, which
+    /// mutate the sibling fields in place. The terminus consumes it: a witnessed descent's anchor
+    /// materialization opens a *triggered* Seed (the witness lands in `dirty`, so
+    /// `seed_owes_first_fire` sees the activity), an unwitnessed one stays cold and pins silently.
+    ///
+    /// An explicit field, not inferred: `watch_root_parent.is_some()` happens to distinguish
+    /// re-entered from attach-time descents today, but that is incidental — the latch states the
+    /// semantics.
+    witnessed: bool,
 }
 
 impl DescentState {
@@ -1667,16 +1679,23 @@ impl DescentState {
     /// constructor takes the `probe` slot — typically [`ProbeSlot::armed`] with the just-minted
     /// correlation. The engine's refcount setup runs around this constructor (the contribution at
     /// `current_prefix` is installed by `add_watch` separately).
+    ///
+    /// `witnessed` is the activity latch's birth value: `true` only for a descent entered from an
+    /// observed anchor loss (the loss event *is* the witness); attach-time entries and the
+    /// event-scan recovery construct `false` — see the field doc and the engine call sites for
+    /// the per-entry rationale.
     #[must_use]
     pub const fn new(
         current_prefix: ResourceId,
         remaining_components: DescentRemaining,
         probe: ProbeSlot,
+        witnessed: bool,
     ) -> Self {
         Self {
             current_prefix,
             remaining_components,
             probe,
+            witnessed,
         }
     }
 
@@ -1699,6 +1718,21 @@ impl DescentState {
     /// the prefix's segment via [`DescentRemaining::prepend`]).
     pub const fn remaining_components_mut(&mut self) -> &mut DescentRemaining {
         &mut self.remaining_components
+    }
+
+    /// Whether the descent has witnessed kernel activity that could have changed the anchor's
+    /// proof object — the latch the terminus Seed's cold/triggered split reads. See the field doc
+    /// for the full semantics.
+    #[must_use]
+    pub const fn witnessed(&self) -> bool {
+        self.witnessed
+    }
+
+    /// Set the witnessed-activity latch — the sole writer after construction. One-way: there is no
+    /// reset, so the latch survives every in-place descent mutation (advance, rewind, re-arm)
+    /// until the terminus consumes it at anchor materialization.
+    pub const fn note_witnessed_activity(&mut self) {
+        self.witnessed = true;
     }
 
     /// Rewrite the descent's current prefix. Used by the engine's descent dispatcher on forward
@@ -3736,6 +3770,7 @@ mod tests {
             r,
             DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
             ProbeSlot::empty(),
+            false,
         ));
         let _prior = profiles
             .transition_state(pid, pending)
@@ -4422,6 +4457,7 @@ mod tests {
             ResourceId::default(),
             DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
             ProbeSlot::empty(),
+            false,
         ));
         for k in [
             TimerKind::Settle,
@@ -4473,6 +4509,7 @@ mod tests {
                 r,
                 DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
                 ProbeSlot::empty(),
+                false,
             )),
             ProfileState::Active(
                 ActiveBurst::PreFire(unit_pre(
@@ -4531,6 +4568,7 @@ mod tests {
             r,
             DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
             ProbeSlot::empty(),
+            false,
         );
         let pending = ProfileState::Pending(descent);
         assert!(pending.descent_state().is_some());
@@ -4553,6 +4591,7 @@ mod tests {
             DescentRemaining::from_vec(vec![CompactString::from("a"), CompactString::from("b")])
                 .expect("non-empty"),
             ProbeSlot::empty(),
+            false,
         ));
 
         {
@@ -4584,6 +4623,7 @@ mod tests {
                 r,
                 DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
                 ProbeSlot::armed(c, ()),
+                false,
             ))
         };
 
@@ -4601,6 +4641,7 @@ mod tests {
             r,
             DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
             ProbeSlot::empty(),
+            false,
         ));
         assert_eq!(idle_pending.probe_correlation(), None);
         assert_eq!(idle_pending.take_probe(), None);
@@ -4629,6 +4670,7 @@ mod tests {
             r,
             DescentRemaining::from_vec(vec![CompactString::from("seg")]).expect("non-empty"),
             ProbeSlot::empty(),
+            false,
         ))
     }
 
@@ -5481,6 +5523,7 @@ mod tests {
             DescentRemaining::from_vec(vec![CompactString::from("a"), CompactString::from("b")])
                 .expect("non-empty"),
             ProbeSlot::empty(),
+            false,
         )));
         p.descent_state_mut()
             .expect("Pending carries descent")

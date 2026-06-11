@@ -27,15 +27,17 @@
 //! 3. `dispatch_descent_probe` consumes the response:
 //!    - `Ok(snap)`: look for the next remaining component as a single-level child. Found and is the
 //!      anchor → materialize (promote to `User`, set kind, bump anchor's `watch_demand`, drop the
-//!      prefix's, transition Pending → Idle, start a Seed burst). Found but not the anchor →
+//!      prefix's, transition Pending → Idle, start a Seed burst — cold, or Batching-first
+//!      triggered when the descent's witnessed-activity latch is set). Found but not the anchor →
 //!      advance descent one segment. Not found → await the next event.
 //!    - `Vanished`: the prefix itself is gone. Sub the prefix's contribution; vacate; rewind to the
 //!      next-existing ancestor; emit a fresh probe.
 //!    - `Failed { errno }`: retain Pending state; emit Diagnostic; await next event.
-//! 4. `on_descent_event` triggers a fresh probe (no settle) on `StructureChanged` at
-//!    `current_prefix`. I5: drops the event if a probe is already in flight (the descent slot is
-//!    armed).
+//! 4. `on_descent_event` latches the descent's witnessed-activity bit, then triggers a fresh probe
+//!    (no settle) on `StructureChanged` at `current_prefix`. I5: drops the re-probe if a probe is
+//!    already in flight (the latch still lands — the in-flight response reflects the change).
 
+use crate::path::empty_path;
 use crate::probe::DescentOutcome;
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
@@ -180,6 +182,13 @@ impl crate::Engine {
     /// `Pending`, bumps the prefix's `STRUCTURE` `watch_demand` contribution, and emits the descent
     /// probe — the four-step Idle → Pending entry sequence as a single helper.
     ///
+    /// `witnessed` is the descent's activity-latch birth value ([`DescentState::new`]): `true`
+    /// when the entry itself was driven by an observed anchor loss (the loss event is the
+    /// witness), `false` when no kernel signal vouches for the anchor having changed — the
+    /// attach-time entry (no event at all) and the event-scan recovery (whose entry event can be
+    /// sibling churn at the parent, out of the Sub's scope). Later events reaching the live
+    /// descent latch via [`Self::on_descent_event`] regardless of the birth value.
+    ///
     /// **Ordering: mint → state-flip → add_watch → emit.** Symmetric with
     /// [`Self::materialize_profile_anchor`]'s state-before-refcount pattern. The mint runs *first*
     /// so the `Pending` state is constructed with its probe slot already armed — phase-without-
@@ -202,6 +211,7 @@ impl crate::Engine {
         profile_id: ProfileId,
         prefix: ResourceId,
         remaining: DescentRemaining,
+        witnessed: bool,
         out: &mut StepOutput,
     ) {
         debug_assert!(
@@ -241,6 +251,7 @@ impl crate::Engine {
                 prefix,
                 remaining,
                 ProbeSlot::armed(correlation, ()),
+                witnessed,
             )),
         );
 
@@ -427,19 +438,25 @@ impl crate::Engine {
     /// remaining segment and the Profile is about to leave `Pending` for `Idle → Active(Seed)`.
     ///
     /// Sequence (load-bearing):
-    /// 1. Promote the slot's role to `User` via [`specter_core::Tree::promote_scaffold`] — a no-op
+    /// 1. Read the witnessed-activity latch off the descent state — it must happen before step 3's
+    ///    `Pending → Idle` flip destroys the [`DescentState`] carrying it (the descent's probe
+    ///    slot is already disarmed at this depth, so the drop is tripwire-safe).
+    /// 2. Promote the slot's role to `User` via [`specter_core::Tree::promote_scaffold`] — a no-op
     ///    if a co-resident peer already gave the slot a real role (`WatchRootParent` / `User`), so
     ///    materialization never clobbers a peer's claim.
-    /// 2. Capture `Profile.events` for the anchor's contribution.
     /// 3. Transition the Profile **before** any refcount op via
     ///    [`specter_core::Profile::materialize_anchor`] — atomic `Pending → Idle`, claim install,
     ///    kind pin. The recompute (multi-contributor case) reads `Profile.state` and
     ///    `Profile.anchor_claim` to attribute contributions; the post-flip world has the prefix's
     ///    STRUCTURE source gone (state no longer Pending) and the anchor's mask source owed.
-    /// 4. Sub the prefix's STRUCTURE; add the anchor's mask.
+    /// 4. Sub the prefix's STRUCTURE; add the anchor's mask (captured from `Profile.events`).
     /// 5. Install the watch-root-parent contribution (deferred from `attach_sub_inner` because the
     ///    parent didn't exist on disk when the Profile attached).
-    /// 6. Start the Seed burst.
+    /// 6. Start the Seed burst — triggered with the anchor as provenance iff the descent witnessed
+    ///    activity, cold otherwise. The trigger's only job is landing in the Seed's `dirty` so
+    ///    `seed_owes_first_fire` sees the witness (every Seed probe targets the anchor regardless);
+    ///    a triggered Seed opens Batching-first, so a storm of appearances debounces on the user's
+    ///    settle window.
     fn materialize_profile_anchor(
         &mut self,
         profile_id: ProfileId,
@@ -449,6 +466,10 @@ impl crate::Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
+        let witnessed = self
+            .descent_state(profile_id)
+            .is_some_and(DescentState::witnessed);
+
         // `new_resource` is either a freshly-ensured DescentScaffold or a peer's pre-existing slot
         // (the caller's lookup hit). `promote_scaffold` flips only a still-scaffold slot and no-ops
         // on a real role, so materialization never clobbers a co-resident peer's WatchRootParent /
@@ -489,7 +510,28 @@ impl crate::Engine {
         );
 
         self.set_watch_root_parent(profile_id, out);
-        self.start_seed_burst(profile_id, None, now, out);
+
+        // A witnessed descent owes its terminus Seed the activity provenance: the anchor threads
+        // in as the trigger, so the Seed opens Batching-first and classifies
+        // `Consequence::FreshSeedFire` / drift on the stable verdict. An unwitnessed descent (the
+        // attach-time entry probe found the anchor without any kernel event) stays cold —
+        // attach-over-existing pins silently, the restart-safe doctrine.
+        let trigger = witnessed.then(|| {
+            // The anchor slot is live by construction (ensured by the caller this step; its claim
+            // installed just above), so `path_of` resolves. The degrade keeps the witness — an
+            // empty path in `dirty` still counts as activity, and a Seed probe targets the anchor
+            // off `Profile.resource`, never the dirty paths.
+            let path = self.tree.path_of(new_resource).unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "materialize_profile_anchor: just-materialized anchor slot must resolve \
+                     (profile = {profile_id:?}, resource = {new_resource:?})",
+                );
+                empty_path()
+            });
+            (new_resource, path)
+        });
+        self.start_seed_burst(profile_id, trigger, now, out);
     }
 
     /// **Rewind chain depth.** A `Vanished` response on a rewound prefix triggers a further rewind
@@ -602,10 +644,21 @@ impl crate::Engine {
         // Retain in-descent state; await next event at the prefix.
     }
 
-    /// Handler for `FsEvent` arriving at a descent's `current_prefix`. Triggers a fresh probe (no
-    /// settle wait — descent is event-driven). I5: drops the event if a probe is already in flight
-    /// (the in-flight probe will pick up the change in its response). The "in flight" signal is an
-    /// armed descent probe slot for this Profile.
+    /// Handler for `FsEvent` arriving at a descent's `current_prefix`. Latches the descent's
+    /// witnessed-activity bit, then triggers a fresh probe (no settle wait — descent is
+    /// event-driven). I5: drops the event if a probe is already in flight (the in-flight probe
+    /// will pick up the change in its response). The "in flight" signal is an armed descent probe
+    /// slot for this Profile.
+    ///
+    /// **The latch precedes the I5 gate — load-bearing.** With the gate first, an event arriving
+    /// while the attach-time cold probe is in flight would drop unlatched: the in-flight response
+    /// then finds the anchor and the terminus Seed pins silently, while the same creation one
+    /// millisecond later (post-response) would fire. The latch is a side effect on the descent
+    /// state; the bool return contract ("re-armed and emitted") is unchanged by it.
+    ///
+    /// The overflow reseed path (`on_sensor_overflow`'s Pending arm) calls this directly, so an
+    /// overflow latches too — deliberate: overflow proves events were dropped, and an appearance
+    /// inside an overflow window is real witnessed appearance.
     ///
     /// Returns `true` iff it re-armed the descent slot and emitted a fresh probe; `false` when a
     /// gate skipped (probe already in flight, or the Profile is no longer descending). The overflow
@@ -618,19 +671,19 @@ impl crate::Engine {
         _now: Instant,
         out: &mut StepOutput,
     ) -> bool {
-        if self.pending_probe_for(owner).is_some() {
+        // Liveness gate and latch in one resolution: an `FsEvent` for an owner no longer
+        // descending is a benign post-transition race — nothing to latch, nothing to re-probe.
+        let Some(d) = self.descent_state_mut(owner) else {
             return false;
-        }
-        // Liveness gate: an `FsEvent` for an owner no longer descending is a benign post-transition
-        // race — nothing to re-probe. The choke reads `current_prefix` back off the descent slot at
-        // emit time.
-        if self.descent_state(owner).is_none() {
+        };
+        d.note_witnessed_activity();
+        if self.pending_probe_for(owner).is_some() {
             return false;
         }
 
         let correlation = self.mint_probe_correlation();
-        // Loud arm — the `descent_state` gate just above proved the owner in descent and (no
-        // in-flight probe ⇒) nothing mutated it, so this `_mut` re-projection is structurally `Some`.
+        // Loud arm — the liveness resolution above proved the owner in descent and (no in-flight
+        // probe ⇒) nothing mutated it, so this `_mut` re-projection is structurally `Some`.
         let Some(d) = self.descent_state_mut(owner) else {
             unreachable!(
                 "on_descent_event: owner {owner:?} left descent between \
