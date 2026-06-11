@@ -127,10 +127,10 @@ impl Engine {
     /// (post-vacate slots, or slots a prior sub-walk in this take-and-apply pass already drained —
     /// see the [`crate::refcounts`] module rustdoc).
     ///
-    /// **Sole call sites.** [`Engine::reap_profile`] and the seven `dispatch_*_vanished/failed` +
-    /// `finalize_anchor_lost` sites in `transitions.rs`. Completes the four-claim release symmetry:
-    /// the three 1-to-1 claims (anchor / watch-root parent / descent prefix) plus the 1-to-N
-    /// descendant claims encoded in `Profile.current`.
+    /// **Sole call sites.** [`Engine::reap_profile`] and [`Engine::discard_anchor_state`] (reached
+    /// through the `finalize_anchor_lost` coordinator in `transitions.rs`). Completes the
+    /// four-claim release symmetry: the three 1-to-1 claims (anchor / watch-root parent / descent
+    /// prefix) plus the 1-to-N descendant claims encoded in `Profile.current`.
     pub(crate) fn release_descendant_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Take the snapshot atomically. Idempotent: subsequent calls find `None` and short-circuit
         // without further work.
@@ -224,11 +224,10 @@ impl Engine {
     ///   exclusive *by construction* in the anchor sum — the old `baseline.is_some() ⇒ …is_none()`
     ///   rule is a type property now, not a step-boundary invariant.
     ///
-    /// **Pre-condition.** The owner's probe slot must already be disarmed. Callers either took the
-    /// response-dispatch path (which disarms the slot before any dispatch arm runs, see
-    /// `on_probe_response`) or invoked [`Engine::cancel_owner_probe`] first
-    /// (`finalize_anchor_lost`'s pattern). The helper does not call `cancel_owner_probe` itself —
-    /// matches the `release_*_claim` cancel-first contract.
+    /// **Pre-condition.** The owner's probe slot must already be disarmed. The sole caller,
+    /// `finalize_anchor_lost`, invokes [`Engine::cancel_owner_probe`] first (a no-op on the
+    /// response-dispatch routes, whose slot `on_probe_response` already disarmed). The helper does
+    /// not call `cancel_owner_probe` itself — matches the `release_*_claim` cancel-first contract.
     ///
     /// **Idempotence.** Each step short-circuits on already-cleared state: `release_descendant_claim`
     /// finds `current.is_none()` and returns; `clear_anchor_classification` on an
@@ -246,8 +245,10 @@ impl Engine {
     /// to `Unclassified` in one move; it runs synchronously inside one `Engine::step` under `&mut
     /// self`, so no reader observes an intermediate.
     ///
-    /// **Sole call sites.** The seven `dispatch_*_vanished/failed` + `finalize_anchor_lost` sites
-    /// in `transitions.rs`. **Not** called by [`Engine::reap_profile`] — the reap path performs the
+    /// **Sole call site.** `finalize_anchor_lost` in `transitions.rs` — the anchor-loss
+    /// coordinator every observed-loss route (anchor-terminal event, the six probe
+    /// vanished/failed dispatches, the kind-mismatch certifier arm, the watch-rejection purge)
+    /// funnels through. **Not** called by [`Engine::reap_profile`] — the reap path performs the
     /// same two release calls inline rather than via this helper. "Profile dies" has no next Seed
     /// burst, so resetting the classification would be wasted on a struct about to drop; see
     /// `reap_profile`'s rustdoc for the asymmetry rationale.

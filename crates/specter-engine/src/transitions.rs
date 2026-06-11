@@ -1498,6 +1498,14 @@ impl Engine {
     /// `watch_demand` contribution, drop the stale `baseline` / `current` snapshots, and finish the
     /// burst to Idle if Active.
     ///
+    /// **The single anchor-loss coordinator.** Every observed-loss route funnels here: the
+    /// anchor-terminal event path (`on_anchor_terminal_event`), the six probe
+    /// `dispatch_{seed,standard,rebase}_{vanished,failed}` terminals, the kind-mismatch arm of
+    /// `certify_probe_response`, and `on_watch_op_rejected`'s anchor purge. The probe-dispatch
+    /// callers reach this with their slot already disarmed (`take_owner_probe` ran before
+    /// dispatch), so the `cancel_owner_probe` below is a no-op there — no wire Cancel; for the
+    /// event/rejection routes it cancels a genuinely in-flight Verifying/Rebasing probe.
+    ///
     /// **`watch_root_parent` is intentionally preserved.** After anchor loss the Profile remains
     /// "interested" in anchor reappearance via the parent's `StructureChanged`.
     /// `start_pending_recovery` triggers descent on such an event; releasing the parent watch here
@@ -1507,16 +1515,16 @@ impl Engine {
     ///
     /// **Ordering.** The anchor release runs BEFORE `finish_burst_to_idle`, so any deferred
     /// `reap_profile` (`reap_pending`) sees an `AnchorClaim::None` and skips its redundant release
-    /// inside `reap_profile::release_anchor_claim`. This mirrors the `dispatch_*_vanished/failed`
-    /// discipline. Reverse-ordering would have `finish_burst_to_idle` invoke `reap_profile`, which
-    /// would release the anchor; the post-`finish` release would then see an absent contribution
-    /// and silently no-op — correct but redundant. The "release-then-finish" ordering keeps the
-    /// cleanup ordered.
+    /// inside `reap_profile::release_anchor_claim`. Reverse-ordering would have
+    /// `finish_burst_to_idle` invoke `reap_profile`, which would release the anchor; the
+    /// post-`finish` release would then see an absent contribution and silently no-op — correct
+    /// but redundant. The "release-then-finish" ordering keeps the cleanup ordered.
     ///
-    /// **Pending exclusion.** `ProfileState::Pending` is defensive here — `covering_profiles`
-    /// already filters Pending Profiles at the source, so the FsEvent path can't deliver a Pending
-    /// Profile. `on_watch_op_rejected` calls this directly after iterating the full registry, where
-    /// the guard does load-bearing work: a Pending Profile holds no anchor (it is still descending
+    /// **Pending exclusion.** `ProfileState::Pending` is defensive on the FsEvent route
+    /// (`covering_profiles` filters Pending Profiles at the source) and vacuous on the
+    /// probe-dispatch routes (`profile_probe_gate` proves `Active(Verifying | Rebasing)`).
+    /// `on_watch_op_rejected` calls this directly after iterating the full registry, where the
+    /// guard does load-bearing work: a Pending Profile holds no anchor (it is still descending
     /// toward one) — anchor-loss finalization does not apply to it, and its descent-prefix watch
     /// rejection is handled separately as a descent-prefix claim purge.
     pub(crate) fn finalize_anchor_lost(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
@@ -2081,9 +2089,9 @@ impl Engine {
     /// (Seed, Vanished).
     ///
     /// Symmetric with `dispatch_standard_vanished` (treats Vanished as an anchor-disappearance
-    /// signal): releases the anchor's `watch_demand` contribution so the trichotomy invariant in
-    /// `reap_profile` — `!(Pending && AnchorClaim::Held)` — survives the eventual
-    /// `start_pending_recovery` transition.
+    /// signal): routes through [`Self::finalize_anchor_lost`], whose discard releases the anchor's
+    /// `watch_demand` contribution so the trichotomy invariant in `reap_profile` — `!(Pending &&
+    /// AnchorClaim::Held)` — survives the eventual `start_pending_recovery` transition.
     ///
     /// Recovery does not depend on the anchor's FD: the kqueue registration auto-detached on the
     /// inode disappearing, and re-acquisition flows through `watch_root_parent`'s
@@ -2097,19 +2105,13 @@ impl Engine {
             profile: profile_id,
             intent: BurstIntent::Seed,
         });
-        // Discard runs BEFORE finish_burst_to_idle so any deferred `reap_profile` (reap_pending)
-        // sees `AnchorClaim::None` — preserves the trichotomy invariant `!(Pending && Held)` across
-        // the eventual `start_pending_recovery` transition. Clearing `Profile.kind` lets the next
-        // Seed burst route through the kind-agnostic Subtree probe rather than misrouting against a
-        // recreated anchor of a different shape.
-        self.discard_anchor_state(profile_id, out);
-        self.finish_burst_to_idle(profile_id, out);
+        self.finalize_anchor_lost(profile_id, out);
     }
 
     /// (Seed, Failed).
     ///
-    /// Symmetric with `dispatch_standard_failed`: the probe failed at the anchor; release the
-    /// anchor's `watch_demand` contribution. See `dispatch_seed_vanished` for the
+    /// Symmetric with `dispatch_standard_failed`: the probe failed at the anchor; the coordinator
+    /// releases the anchor's `watch_demand` contribution. See `dispatch_seed_vanished` for the
     /// trichotomy-invariant rationale.
     fn dispatch_seed_failed(
         &mut self,
@@ -2125,21 +2127,15 @@ impl Engine {
             intent: BurstIntent::Seed,
             failure,
         });
-        self.discard_anchor_state(profile_id, out);
-        self.finish_burst_to_idle(profile_id, out);
+        self.finalize_anchor_lost(profile_id, out);
     }
 
     /// (Standard, Vanished).
     ///
-    /// Treat as Removed at anchor: release the anchor's `watch_demand` contribution. Standard
-    /// bursts always run on materialized Profiles (`drive_burst` routes baseline-less `FsEvent`s to
-    /// Seed instead), so the guard is effectively unconditional in v1 — kept for robustness against
+    /// Treat as Removed at anchor: route through [`Self::finalize_anchor_lost`]. Standard bursts
+    /// always run on materialized Profiles (`drive_burst` routes baseline-less `FsEvent`s to Seed
+    /// instead), so the guard is effectively unconditional in v1 — kept for robustness against
     /// future routing changes.
-    ///
-    /// Release runs BEFORE `finish_burst_to_idle` so any deferred `reap_profile` (`reap_pending`)
-    /// sees `AnchorClaim::None` and skips a redundant release. Without this ordering the
-    /// post-`finish` release would underflow the now-zero `watch_demand` counter (debug-assert
-    /// panic; release-build silent leak).
     fn dispatch_standard_vanished(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if self.profiles.get(profile_id).is_none() {
             return;
@@ -2148,13 +2144,12 @@ impl Engine {
             profile: profile_id,
             intent: BurstIntent::Standard,
         });
-        self.discard_anchor_state(profile_id, out);
-        self.finish_burst_to_idle(profile_id, out);
+        self.finalize_anchor_lost(profile_id, out);
     }
 
     /// (Standard, Failed).
     ///
-    /// See `dispatch_standard_vanished` for the release-before-finish ordering rationale.
+    /// Same coordinator route as `dispatch_standard_vanished`.
     fn dispatch_standard_failed(
         &mut self,
         profile_id: ProfileId,
@@ -2169,8 +2164,7 @@ impl Engine {
             intent: BurstIntent::Standard,
             failure,
         });
-        self.discard_anchor_state(profile_id, out);
-        self.finish_burst_to_idle(profile_id, out);
+        self.finalize_anchor_lost(profile_id, out);
     }
 
     /// (Rebase, Ok). The shared certifier folded the quiescence verdict over the *post-command* tree
@@ -2315,31 +2309,31 @@ impl Engine {
     }
 
     /// (Rebase, Vanished). Anchor disappeared between fire and rebase. Symmetric path with
-    /// `dispatch_standard_vanished`: clear baseline / current, release the anchor watch
-    /// contribution, finish the burst. Diagnostic carries the burst's actual intent so logs can
-    /// distinguish Seed-driven (drift) vs Standard-driven Rebasing; the lookup falls back to
-    /// `Standard` only on a stale-Profile or non-Active defensive path (the routing in
-    /// `on_probe_response` guarantees `Active(Rebasing)` at entry).
+    /// `dispatch_standard_vanished`: route through [`Self::finalize_anchor_lost`]. Diagnostic
+    /// carries the burst's actual intent so logs can distinguish Seed-driven (drift) vs
+    /// Standard-driven Rebasing; the lookup falls back to `Standard` only on a stale-Profile or
+    /// non-Active defensive path (the routing in `on_probe_response` guarantees `Active(Rebasing)`
+    /// at entry).
     fn dispatch_rebase_vanished(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if self.profiles.get(profile_id).is_none() {
             return;
         }
-        // Read intent BEFORE discard_anchor_state. The helper does not mutate Burst.intent (it
-        // leaves `state` alone — only `finish_burst_to_idle` flips Active → Idle), so the read is
-        // order-insensitive in v1; pinning it before the helper guards against future helpers that
-        // might touch state.
+        // Read intent BEFORE finalize_anchor_lost. The coordinator does not mutate Burst.intent
+        // (its finish_burst_to_idle flips Active → Idle but never rewrites the burst payload), so
+        // the read is order-insensitive in v1; pinning it before the call guards against future
+        // coordinator changes that might touch state.
         let intent = self.rebase_burst_intent(profile_id);
         out.diagnostics.push(Diagnostic::ProbeVanished {
             profile: profile_id,
             intent,
         });
-        self.discard_anchor_state(profile_id, out);
-        self.finish_burst_to_idle(profile_id, out);
+        self.finalize_anchor_lost(profile_id, out);
     }
 
     /// (Rebase, Failed). Probe failed at the anchor between fire and rebase. Same shape as
-    /// `dispatch_rebase_vanished` — clear, release, finish. Diagnostic carries the burst's actual
-    /// intent (Standard fallback on the same defensive path noted there).
+    /// `dispatch_rebase_vanished` — narrate, then the coordinator. Diagnostic carries the burst's
+    /// actual intent (Standard fallback on the same defensive path noted there; read before the
+    /// call for the same reason).
     fn dispatch_rebase_failed(
         &mut self,
         profile_id: ProfileId,
@@ -2355,8 +2349,7 @@ impl Engine {
             intent,
             failure,
         });
-        self.discard_anchor_state(profile_id, out);
-        self.finish_burst_to_idle(profile_id, out);
+        self.finalize_anchor_lost(profile_id, out);
     }
 
     /// Resolve the intent of the burst owning the in-flight Rebase probe. Returns

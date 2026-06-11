@@ -928,8 +928,9 @@ impl Engine {
     /// and `release_anchor_claim` inline rather than via [`Engine::discard_anchor_state`]. The two
     /// helpers differ in purpose:
     ///
-    /// - `discard_anchor_state` exists for the "anchor lost, Profile lives" case — the seven
-    ///   `dispatch_*_vanished/failed` + `finalize_anchor_lost` sites. Its `kind = None` and
+    /// - `discard_anchor_state` exists for the "anchor lost, Profile lives" case — reached solely
+    ///   through the `finalize_anchor_lost` coordinator (the funnel for every observed-loss route,
+    ///   including the six probe vanished/failed dispatches). Its `kind = None` and
     ///   `baseline = None` writes prepare the Profile for the next Seed burst's probe-shape
     ///   dispatch, and it deliberately preserves `watch_root_parent` (the recovery channel).
     /// - `reap_profile` is "Profile dies entirely." There is no next Seed burst — the Profile
