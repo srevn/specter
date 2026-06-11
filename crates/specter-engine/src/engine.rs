@@ -100,8 +100,8 @@ impl Engine {
     }
 
     /// Descent-state accessor. Returns the `DescentState` payload of the Profile's
-    /// `ProfileState::Pending` variant; `None` for Profiles not currently descending, stale ids,
-    /// or any other state.
+    /// `ProfileState::Pending` variant; `None` for Profiles not currently descending, stale ids, or
+    /// any other state.
     ///
     /// Sole reader API for the descent-state payload outside the routing match sites in
     /// `on_*_probe_response`; the state-type projection ([`ProfileState::descent_state`]) owns the
@@ -704,9 +704,8 @@ impl Engine {
     /// origin ([`Input::DetachSub`] is canonically [`DetachReason::IpcDisabled`]; internal call
     /// sites supply their own — `ConfigDiffRemoved` / `ConfigDiffIdentityChanged` from hot-reload,
     /// `DiscoverySourceDetached` from the discovery cascade). The diagnostic is emitted iff the Sub
-    /// was
-    /// actually removed (the `DetachUnknownSub` early-return suppresses it — no lifecycle change
-    /// happened).
+    /// was actually removed (the `DetachUnknownSub` early-return suppresses it — no lifecycle
+    /// change happened).
     ///
     /// Time-independent: detach is a pure registry/refcount operation (no timer scheduling, no
     /// burst transitions that need a `now`). Bursts running on detached Profiles continue under
@@ -944,9 +943,8 @@ impl Engine {
     ///
     /// Sole call sites: `detach_sub_inner` (Idle / Pending Profile, immediate reap; `via =
     /// Immediate`), `on_anchor_terminal_all_dynamic` (non-Active arm of the all-dynamic
-    /// anchor-terminal teardown path; `via = Immediate`), and `finish_burst_to_idle` (deferred
-    /// reap when
-    /// [`BurstFinish::Reap`] was set mid-burst; `via = DeferredFromBurst`).
+    /// anchor-terminal teardown path; `via = Immediate`), and `finish_burst_to_idle` (deferred reap
+    /// when [`BurstFinish::Reap`] was set mid-burst; `via = DeferredFromBurst`).
     pub(crate) fn reap_profile(
         &mut self,
         profile_id: ProfileId,
@@ -1005,11 +1003,11 @@ impl Engine {
 
         // Try to reap the anchor's slot. No-op if it still has children (a descendant Profile /
         // scaffold survives here), other Profiles attached at the same slot, or any co-resident
-        // contribution. On success, [`Tree::try_reap`] cascades upward
-        // through any now-orphaned ancestors — the watch-root parent slot whose only remaining
-        // claim was *this* Profile's anchor as its sole child is freed in the same step. `try_reap`
-        // folds in `Tree::vacate` as its closing-emission step, so any residual kernel-watch
-        // protocol (the closing `Unwatch`) is emitted before the slot leaves the Tree.
+        // contribution. On success, [`Tree::try_reap`] cascades upward through any now-orphaned
+        // ancestors — the watch-root parent slot whose only remaining claim was *this* Profile's
+        // anchor as its sole child is freed in the same step. `try_reap` folds in `Tree::vacate` as
+        // its closing-emission step, so any residual kernel-watch protocol (the closing `Unwatch`)
+        // is emitted before the slot leaves the Tree.
         self.tree.try_reap(anchor, out);
 
         out.diagnostics.push(Diagnostic::ProfileReaped {

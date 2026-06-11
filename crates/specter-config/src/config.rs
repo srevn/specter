@@ -377,6 +377,59 @@ impl Config {
             .collect()
     }
 
+    /// Advisory findings on a validated config — hazards that load and run but probably don't mean
+    /// what the operator wrote. Pull-computed rather than carried on the value: `Config` stays
+    /// exactly the shape the reload diff compares, and the startup load parses before tracing init,
+    /// so the bin pulls and logs these once a subscriber exists (startup and every reload pulse).
+    /// Touches the filesystem (one `canonicalize_lenient` per dynamic watch); callers are load-time
+    /// log sites, never hot paths.
+    ///
+    /// One kind today — [`IssueKind::DynamicPrefixDivergesFromCanonical`]: a dynamic pattern's
+    /// literal prefix anchors verbatim (resolving it would desync the anchor from the pattern
+    /// identity the minted Profiles hash over) while static paths canonicalise, so a symlink inside
+    /// the prefix (macOS `/var`, `/tmp`, `/etc`) anchors the pattern on a branch no static watch
+    /// shares and the burst gating between overlapping watches silently never engages. Deliberately
+    /// one line per offending dynamic watch per load — the noise *is* the composition hazard
+    /// surfacing.
+    ///
+    /// Disabled entries warn too, mirroring the validator's discipline: hazards surface at config
+    /// load, not at re-enable time.
+    #[must_use]
+    pub fn warnings(&self) -> Vec<ValidationIssue> {
+        let mut found = Vec::new();
+        for (i, spec) in self.watches.iter().enumerate() {
+            // Dynamic watches only — `spec.path` is the pattern's literal prefix, verbatim by
+            // `into_discovery_spec`; static paths canonicalised at validation and cannot diverge.
+            let Some(pattern) = spec.scan.match_chain() else {
+                continue;
+            };
+            // Parse already guarantees absolute / no `.` / no `..`, so the only failures left are
+            // I/O faults (EACCES, ELOOP, …) — a runtime concern the descent machinery owns, not a
+            // composition hazard. Skip silently.
+            let Ok(canon) = canonicalize_lenient(&spec.path) else {
+                continue;
+            };
+            if canon != spec.path {
+                found.push(ValidationIssue::new(
+                    Some(i),
+                    "path",
+                    IssueKind::DynamicPrefixDivergesFromCanonical,
+                    format!(
+                        "pattern `{}` anchors at its literal prefix `{}` verbatim, which \
+                         canonicalises to `{}`; static watch paths canonicalise, so a static \
+                         watch on the same tree anchors a different branch and the two never \
+                         compose — write the canonical prefix into the pattern if composition \
+                         with static watches matters",
+                        pattern.source(),
+                        spec.path.display(),
+                        canon.display(),
+                    ),
+                ));
+            }
+        }
+        found
+    }
+
     /// Parse a TOML string into a validated `Config`.
     ///
     /// Inherent name shadows `std::str::FromStr::from_str` (which is also implemented for ergonomic
@@ -2230,9 +2283,9 @@ mod tests {
 
     // ---- @-in-name rejection ----
 
-    /// `@` is reserved for the synthesized `<template_name>@<matched_path>` shape of minted Subs.
-    /// A static [[watch]] with `@` in its name would collide with that scheme on a discovery
-    /// template sharing the substring; reject at config-load.
+    /// `@` is reserved for the synthesized `<template_name>@<matched_path>` shape of minted Subs. A
+    /// static [[watch]] with `@` in its name would collide with that scheme on a discovery template
+    /// sharing the substring; reject at config-load.
     #[test]
     fn at_sign_in_static_name_rejected() {
         let toml = format!(

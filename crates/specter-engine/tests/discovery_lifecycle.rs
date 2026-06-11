@@ -2,9 +2,9 @@
 //!
 //! Drives one `Engine` per scenario through attach → cold-Seed reconcile (mint per terminus ×
 //! template) → Standard re-reconcile → vanish/recovery/overflow/cascade with synthetic
-//! [`ProbeResponse`] injections. The inline tests (`src/discovery_tests.rs`) pin the pure
-//! collector and the attach-boundary asserts; this file pins the composed behaviour: consequence
-//! routing, dedup convergence, lifecycle diagnostics, and the Draining-gate shape filter.
+//! [`ProbeResponse`] injections. The inline tests (`src/discovery_tests.rs`) pin the pure collector
+//! and the attach-boundary asserts; this file pins the composed behaviour: consequence routing,
+//! dedup convergence, lifecycle diagnostics, and the Draining-gate shape filter.
 //!
 //! Assertions are **converged-state** (the minted registry after quiescence), never step traces —
 //! probe cadence is an implementation detail; only the resulting registry is the contract.
@@ -13,9 +13,10 @@ use specter_core::testkit::{
     anchor_ok, covered, dir_snap, dir_snap_nested, file_leaf, leaf, proven, uncovered,
 };
 use specter_core::{
-    ActiveBurst, ClassSet, DetachReason, Diagnostic, DirSnapshot, EffectScope, EntryKind, FsEvent,
-    Input, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ScanConfig, StepOutput, SubAttachAnchor, SubId, TimerKind, WatchOp,
+    ActiveBurst, ClassSet, ContribKey, DetachReason, Diagnostic, DirSnapshot, EffectScope,
+    EntryKind, FsEvent, Input, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId,
+    ProfileState, ResourceId, ResourceKind, ScanConfig, StepOutput, SubAttachAnchor, SubId,
+    TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -92,6 +93,20 @@ fn minted_paths(out: &StepOutput) -> Vec<(SubId, String)> {
         .filter_map(|d| match d {
             Diagnostic::DiscoveryMinted { source, path, .. } => {
                 Some((*source, path.display().to_string()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The `DiscoveryUnsupportedAnchorKind` narration in emission order, projected to `(source, path,
+/// kind)`.
+fn unsupported_warns(out: &StepOutput) -> Vec<(SubId, String, EntryKind)> {
+    out.diagnostics
+        .iter()
+        .filter_map(|d| match d {
+            Diagnostic::DiscoveryUnsupportedAnchorKind { source, path, kind } => {
+                Some((*source, path.display().to_string(), *kind))
             }
             _ => None,
         })
@@ -213,8 +228,8 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
     );
 }
 
-/// A storm of chain events inside one settle window coalesces into one Batching window, one
-/// probe, one reconcile that mints everything — never one probe per event.
+/// A storm of chain events inside one settle window coalesces into one Batching window, one probe,
+/// one reconcile that mints everything — never one probe per event.
 #[test]
 fn storm_coalesces_to_one_probe_and_one_reconcile() {
     let mut e = Engine::new();
@@ -308,6 +323,109 @@ fn terminus_churn_is_a_noop_reconcile_and_never_leaves_pre_fire() {
     );
     assert_idle_or_pre_fire(&e, pid, "after no-op reconcile");
     assert_eq!(discovery_subs_of(&e, sid).len(), 1, "minted set stable");
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// A `Symlink` / `Other` chain terminus skips the mint wholesale — no Tree slot, no minted Sub, no
+/// mint→reap churn — narrated once per template lifetime while a real-file sibling in the same pass
+/// mints normally; replacing the symlink with a regular file at the same path then mints (the latch
+/// gates only the diagnostic; kind is read fresh off the snapshot each pass).
+#[test]
+fn unsupported_terminus_skips_mint_and_warns_once() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(srv),
+        "/srv/*/current",
+        mint_template(),
+        now,
+    );
+
+    // `a/current` carries the parameterised kind, `b/current` is a fifo-shaped `Other`, `c/current`
+    // a regular file — the exact shape a symlink-farm pattern matches.
+    let chain = |a_kind: EntryKind| {
+        dir_snap_nested(&[
+            (
+                "a",
+                covered(dir_snap_nested(&[("current", leaf(a_kind, 10))])),
+            ),
+            (
+                "b",
+                covered(dir_snap_nested(&[("current", leaf(EntryKind::Other, 11))])),
+            ),
+            (
+                "c",
+                covered(dir_snap_nested(&[("current", leaf(EntryKind::File, 12))])),
+            ),
+        ])
+    };
+    let out = respond(&mut e, pid, &chain(EntryKind::Symlink), now);
+
+    assert_eq!(
+        minted_paths(&out),
+        vec![(sid, "/srv/c/current".to_string())],
+        "the skip is per-terminus — the real-file sibling mints in the same pass",
+    );
+    assert_eq!(
+        unsupported_warns(&out),
+        vec![(sid, "/srv/a/current".to_string(), EntryKind::Symlink)],
+        "one-shot narration carrying the snapshot's EntryKind: the first unsupported terminus \
+         (lexicographic) warns; the fifo sibling skips silently under the same latch",
+    );
+    let a = e
+        .tree()
+        .lookup(Some(srv), "a")
+        .expect("chain dir slot (reconciler-watched, independent of minting)");
+    // The post-graft reconciler's diff bookkeeping holds a slot for every created entry — the
+    // skip's claim lives at the registry: nothing anchors there.
+    let skipped = e
+        .tree()
+        .lookup(Some(a), "current")
+        .expect("reconciler bookkeeping slot for the skipped entry");
+    assert!(
+        e.profiles().iter().all(|(_, p)| p.resource() != skipped),
+        "no Profile anchored at a skipped terminus",
+    );
+    assert_eq!(
+        e.profiles().iter().count(),
+        2,
+        "discovery Profile + the one real-file mint — nothing for the skipped termini",
+    );
+    settle_minted_seeds(&mut e, sid, now);
+
+    // Same tree again: the latch silences the narration and nothing churns — the converged minted
+    // set is exactly the real-file mint.
+    let (out2, t2) = burst_and_respond(
+        &mut e,
+        pid,
+        srv,
+        &chain(EntryKind::Symlink),
+        now + Duration::from_millis(10),
+    );
+    assert!(
+        unsupported_warns(&out2).is_empty(),
+        "latched: the second pass narrates nothing",
+    );
+    assert!(minted_paths(&out2).is_empty(), "no re-mint, no churn");
+    assert_eq!(discovery_subs_of(&e, sid).len(), 1, "minted set stable");
+
+    // The symlink is replaced by a regular file at the same path: mints normally.
+    let (out3, _) = burst_and_respond(
+        &mut e,
+        pid,
+        srv,
+        &chain(EntryKind::File),
+        t2 + Duration::from_millis(10),
+    );
+    assert_eq!(
+        minted_paths(&out3),
+        vec![(sid, "/srv/a/current".to_string())],
+        "kind is read fresh — the latch gated only the diagnostic, never the mint",
+    );
+    assert_eq!(discovery_subs_of(&e, sid).len(), 2);
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -649,6 +767,79 @@ fn overflow_reseed_recovers_missed_mints() {
     );
     assert_eq!(minted_paths(&out2), vec![(sid, "/data/z".to_string())]);
     assert_eq!(discovery_subs_of(&e, sid).len(), 3);
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// Overflow membership is **anchors-only**, gap-case direction: a Profile holding descendant-FD
+/// contributions *inside* an `OverflowScope::Resource(r)` scope, anchor above `r`, is NOT reseeded
+/// — no probe, no burst — even though events under `r` are exactly what the overflow window may
+/// have dropped for it. Asserted as chosen: `profiles_in_subtree` walks anchor ancestry only. The
+/// alternative a per-stream backend will force is contribution-based membership — "does this
+/// Profile hold any contribution at-or-below `r`", enumerable off the Tree's per-Resource
+/// contribution map (`ContribKey` is fully Profile-keyed, no `covers` calls). The case stays latent
+/// today because the Profile anchored *below* `r` reseeds through the same rule, usually
+/// re-observing the shared subtree — the second half of the test pins that reach.
+#[test]
+fn overflow_resource_scope_skips_profile_holding_descendant_fds_inside_scope() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let (sid, disc_pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(srv),
+        "/srv/*/log",
+        mint_template(),
+        now,
+    );
+    let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
+    let _ = respond(&mut e, disc_pid, &chain, now);
+    settle_minted_seeds(&mut e, sid, now);
+    let a = e.tree().lookup(Some(srv), "a").expect("chain dir slot");
+
+    // Premise — without this the pin pins nothing: the discovery Profile holds a descendant-FD
+    // contribution at `a` (the chain dir the reconciler watched on its behalf) while its anchor
+    // (`/srv`) sits above `a`.
+    assert!(
+        e.tree()
+            .get(a)
+            .unwrap()
+            .contributions()
+            .contains_key(&ContribKey::ProfileDescendant(disc_pid)),
+        "premise: discovery Profile holds a chain-dir contribution inside the overflow scope",
+    );
+
+    let out = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Resource(a),
+        },
+        now + Duration::from_millis(10),
+    );
+
+    assert!(
+        matches!(
+            e.profiles().get(disc_pid).unwrap().state(),
+            ProfileState::Idle
+        ),
+        "anchors-only membership: the contribution-holding Profile is not reseeded",
+    );
+    assert!(
+        !out.probe_ops().iter().any(|op| matches!(
+            op,
+            ProbeOp::Probe { request } if request.owner() == disc_pid
+        )),
+        "no probe for the skipped Profile",
+    );
+    // The minted Profile (anchor at `a/log`, inside the scope) reseeds through the same rule — the
+    // scope itself was honoured, just anchor-scoped.
+    let minted_pid = pid_of(
+        &e,
+        *discovery_subs_of(&e, sid).values().next().expect("minted"),
+    );
+    assert!(
+        e.pending_probe_for(minted_pid).is_some(),
+        "the Profile anchored below the scope root reseeds",
+    );
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -1188,9 +1379,9 @@ fn second_template_detach_leaves_siblings_minted_set_intact() {
 }
 
 /// The minted Sub's cold-Seed burst deadline derives from reconcile-time `now` — the instant the
-/// mint happened — not from the discovery template's attach instant. The timer-heap boundary is
-/// the witness: nothing referenced is due one tick before `reconcile_now + max_settle`, and the
-/// minted Profile's `BurstDeadline` is due exactly at it.
+/// mint happened — not from the discovery template's attach instant. The timer-heap boundary is the
+/// witness: nothing referenced is due one tick before `reconcile_now + max_settle`, and the minted
+/// Profile's `BurstDeadline` is due exactly at it.
 #[test]
 fn minted_seed_burst_deadline_derives_from_reconcile_now() {
     let mut e = Engine::new();
@@ -1306,10 +1497,10 @@ fn descent_vanish_preserves_co_resident_discovery_contribution() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `rm -rf` above the anchor: recovery descent rewinds one level per `Vanished` response, the
-/// chain terminating at the FS root (where a probe is always answerable), then re-advances
-/// component by component and the recovery Seed's reconcile re-mints — the probe-target ladder
-/// `/a/b → /a → / → /a → /a/b → /a/b/c` is the witness.
+/// `rm -rf` above the anchor: recovery descent rewinds one level per `Vanished` response, the chain
+/// terminating at the FS root (where a probe is always answerable), then re-advances component by
+/// component and the recovery Seed's reconcile re-mints — the probe-target ladder `/a/b → /a → / →
+/// /a → /a/b → /a/b/c` is the witness.
 #[test]
 fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     let mut e = Engine::new();

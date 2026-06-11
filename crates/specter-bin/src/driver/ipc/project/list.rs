@@ -312,8 +312,8 @@ mod tests {
 
     /// A dynamic Sub (`source_discovery: Some(_)`) projects with the discriminator populated.
     /// Construct it by directly attaching a `SubAttachRequest` whose `source_discovery` is
-    /// `Some(_)` — the engine's `attach_sub` does not require the source template to exist for
-    /// this projection-side test.
+    /// `Some(_)` — the engine's `attach_sub` does not require the source template to exist for this
+    /// projection-side test.
     #[test]
     fn list_dynamic_sub_carries_source_discovery() {
         use specter_core::{ClassSet, ProfileIdentity};

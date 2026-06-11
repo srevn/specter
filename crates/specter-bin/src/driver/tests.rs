@@ -2946,8 +2946,8 @@ fn ipc_disable_unknown_dynamic_shape_name_returns_unknown_sub() {
     assert!(rig.driver.disabled_runtime.is_empty());
 }
 
-/// Disable against a real discovery-minted Sub returns [`WireErrorCode::DynamicSubNoOp`].
-/// Inject a dynamic Sub directly so the gate (which reads `is_dynamic`) fires.
+/// Disable against a real discovery-minted Sub returns [`WireErrorCode::DynamicSubNoOp`]. Inject a
+/// dynamic Sub directly so the gate (which reads `is_dynamic`) fires.
 #[test]
 fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
@@ -3026,9 +3026,9 @@ fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
     let _ = rig.driver.begin_shutdown();
 }
 
-/// A discovery **template** is an operator-declared Sub and carries the full disable/enable
-/// surface — only the minted set is the refusal class. Disable detaches it (cascading any minted
-/// Subs engine-side) and records the override; enable clears the override and re-attaches a
+/// A discovery **template** is an operator-declared Sub and carries the full disable/enable surface
+/// — only the minted set is the refusal class. Disable detaches it (cascading any minted Subs
+/// engine-side) and records the override; enable clears the override and re-attaches a
 /// template-bearing Sub through the same lowering the initial attach used.
 #[test]
 fn ipc_disable_and_enable_discovery_template_round_trip() {
@@ -3234,9 +3234,9 @@ fn ipc_absorb_unknown_name_returns_unknown_sub() {
     }
 }
 
-/// `absorb` against a discovery-minted Sub refuses with [`WireErrorCode::DynamicSubNoOp`] —
-/// minted Subs vanish and re-mint with the match set, the same reason `disable` refuses them.
-/// The dynamic Sub is injected directly so the `is_dynamic` gate fires.
+/// `absorb` against a discovery-minted Sub refuses with [`WireErrorCode::DynamicSubNoOp`] — minted
+/// Subs vanish and re-mint with the match set, the same reason `disable` refuses them. The dynamic
+/// Sub is injected directly so the `is_dynamic` gate fires.
 #[test]
 fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};

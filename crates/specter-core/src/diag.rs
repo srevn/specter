@@ -9,6 +9,7 @@ use crate::input::{FsEvent, OverflowScope};
 use crate::op::{ProbeFailure, WatchFailure};
 use crate::profile::{AbsorbMode, BurstIntent, ProfileStateDiscriminant};
 use crate::resource::ResourceKind;
+use crate::snapshot::EntryKind;
 use compact_str::CompactString;
 use std::path::Path;
 use std::sync::Arc;
@@ -123,8 +124,8 @@ pub enum SpliceFailureCause {
 ///   reappearance). Pairs with [`Diagnostic::DiscoverySubReaped`] (source-keyed, path-carrying
 ///   narration).
 /// - [`Self::DiscoverySourceDetached`]: the discovery Sub that minted this Sub was detached, so the
-///   cascade reaped the minted set — named for what actually happened to *this* Sub's source
-///   rather than overloading the anchor story.
+///   cascade reaped the minted set — named for what actually happened to *this* Sub's source rather
+///   than overloading the anchor story.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DetachReason {
     ConfigDiffRemoved,
@@ -472,8 +473,8 @@ pub enum Diagnostic {
     /// `testkit::first_attached_sub` to capture the minted id.
     ///
     /// `name` carries the Sub's user-facing name verbatim — for static Subs the operator's
-    /// `[[watch]].name`; for dynamic Subs the engine's synthesized
-    /// `<template_name>@<matched_path>` shape. `source_discovery` distinguishes the two.
+    /// `[[watch]].name`; for dynamic Subs the engine's synthesized `<template_name>@<matched_path>`
+    /// shape. `source_discovery` distinguishes the two.
     SubAttached {
         sub: SubId,
         name: CompactString,
@@ -534,8 +535,8 @@ pub enum Diagnostic {
         reason: DetachReason,
     },
     /// A Sub's per-Sub fields (`program`, `scope`, `settle`, `log_output`) were rebound in place
-    /// via `rebind_sub_inner` — the `modified_params` arm of [`crate::SubRegistryDiff`].
-    /// Symmetric with [`Self::SubAttached`]; pure operator narration.
+    /// via `rebind_sub_inner` — the `modified_params` arm of [`crate::SubRegistryDiff`]. Symmetric
+    /// with [`Self::SubAttached`]; pure operator narration.
     ///
     /// **`has_fired` is preserved across rebind.** The B1 dedup floor reads it as "this Sub has
     /// already announced the current stable tree state"; a program swap changes *what runs*, not
@@ -555,10 +556,34 @@ pub enum Diagnostic {
     /// A discovery template's reconcile pass matched `path` and minted a dynamic Sub for it; `kind`
     /// is the snapshot's kind for the matched terminus. `source` is the discovery Sub the mint ran
     /// for. Operator narration — the bin logs it as a mint observed.
+    ///
+    /// `kind` is [`ResourceKind`] — it names the minted *slot's* kind, exactly what the Tree
+    /// stamped at mint. The sibling [`Self::DiscoveryUnsupportedAnchorKind`] deliberately carries
+    /// [`EntryKind`] instead; see its rustdoc.
     DiscoveryMinted {
         source: SubId,
         path: Arc<Path>,
         kind: ResourceKind,
+    },
+    /// A discovery reconcile matched a chain terminus whose kind can never anchor a minted Sub —
+    /// `Symlink` or `Other` (fifo / socket / device) — and skipped the mint wholesale: no Sub
+    /// attaches, no Profile anchors there (the post-graft reconciler's own diff bookkeeping is
+    /// independent). Minting would create a File-kind Sub whose first probe folds `Vanished` (the
+    /// anchor-file walk accepts only regular files), tearing it down and re-minting on the next
+    /// reconcile — a mint→reap round-trip per chain event, forever, precisely on the patterns
+    /// symlink farms match (`/srv/*/current`).
+    ///
+    /// One-shot per template lifetime (the `unsupported_kind_warned` latch on the template
+    /// carrier): later unsupported matches under the same template skip silently. The latch gates
+    /// only this narration — the terminus kind is read fresh off the snapshot each pass, so
+    /// replacing the symlink with a regular file at the same path mints normally.
+    ///
+    /// `kind` is [`EntryKind`], **not** [`ResourceKind`]: the Tree projection folds `Symlink`/`Other`
+    /// into `File`, which would make the narration name the one kind the terminus isn't.
+    DiscoveryUnsupportedAnchorKind {
+        source: SubId,
+        path: Arc<Path>,
+        kind: EntryKind,
     },
     /// A discovery template's live minted-Sub count (derived from `SubRegistry`) crossed the
     /// warning threshold for the first time — the pattern is matching more targets than typical
@@ -567,8 +592,8 @@ pub enum Diagnostic {
     DiscoveryFanoutThreshold { source: SubId, count: usize },
     /// A dynamic Sub minted by the discovery template `source` at `path` was reaped because its
     /// anchor disappeared. Operator narration; if the path re-materialises the next reconcile
-    /// re-mints it (under a fresh [`SubId`]). Pairs with the per-Sub [`Self::SubDetached`]
-    /// carrying [`DetachReason::AnchorLost`].
+    /// re-mints it (under a fresh [`SubId`]). Pairs with the per-Sub [`Self::SubDetached`] carrying
+    /// [`DetachReason::AnchorLost`].
     DiscoverySubReaped {
         source: SubId,
         sub: SubId,

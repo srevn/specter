@@ -82,6 +82,16 @@ pub enum IssueKind {
     /// segment, non-absolute, Windows prefix, or a malformed glob segment. Detail carries the
     /// rendered [`specter_core::PatternError`] message.
     InvalidPattern,
+    /// A dynamic `[[watch]]` pattern's literal prefix resolves to a different path than its
+    /// verbatim spelling — a symlink sits inside the prefix (on macOS `/var`, `/tmp`, `/etc` all
+    /// qualify). Advisory, never fatal: the only kind [`crate::Config::warnings`] emits and
+    /// `validate` never does. Dynamic prefixes deliberately stay verbatim (the pattern source folds
+    /// into the minted Profiles' identity hash; resolving would desync the anchor from the pattern)
+    /// while static paths canonicalise, so a static watch and a dynamic watch meant to cover one
+    /// tree anchor different Tree branches and the burst gating between them silently never
+    /// engages. The detail carries the remedy: write the canonical prefix into the pattern if
+    /// composition with static watches matters.
+    DynamicPrefixDivergesFromCanonical,
     /// `actions[i].timeout` is set on an action variant that doesn't support a top-level timeout.
     /// v1: only `exec` accepts it. Future variants (`pipe`, `conditional`) set timeouts on their
     /// stages / predicate, not on the action itself; this kind catches the "operator misread the
@@ -241,6 +251,7 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::DuplicateEventClass => "duplicate-event-class",
         IssueKind::InvalidName => "invalid-name",
         IssueKind::InvalidPattern => "invalid-pattern",
+        IssueKind::DynamicPrefixDivergesFromCanonical => "dynamic-prefix-diverges-from-canonical",
         IssueKind::TimeoutNotApplicable => "timeout-not-applicable",
         IssueKind::TimeoutZero => "timeout-zero",
         IssueKind::ConditionalIncomplete => "conditional-incomplete",

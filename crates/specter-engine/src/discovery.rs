@@ -32,11 +32,11 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Threshold beyond which the engine emits a one-shot
-/// [`Diagnostic::DiscoveryFanoutThreshold`] for a discovery template. Operator signal that the
-/// pattern is matching more targets than typical — likely a too-broad pattern. The registry-side
-/// check-and-latch (`SubRegistry::latch_fanout_warning`) is atomic, so a steady-state busy source
-/// warns once per lifetime by construction.
+/// Threshold beyond which the engine emits a one-shot [`Diagnostic::DiscoveryFanoutThreshold`] for
+/// a discovery template. Operator signal that the pattern is matching more targets than typical —
+/// likely a too-broad pattern. The registry-side check-and-latch
+/// (`SubRegistry::latch_fanout_warning`) is atomic, so a steady-state busy source warns once per
+/// lifetime by construction.
 pub(crate) const FANOUT_WARNING_THRESHOLD: usize = 1000;
 
 /// One matched chain terminus: the anchor-relative path as root-first snapshot entry names, plus
@@ -106,6 +106,9 @@ struct TemplateCapture {
     program: Arc<ActionProgram>,
     scope: EffectScope,
     log_output: bool,
+    /// Whether this pass minted at least one Sub for this template — the end-of-pass fan-out
+    /// sweep's gate. `false` at capture; the mint arm sets it.
+    minted: bool,
 }
 
 impl Engine {
@@ -164,6 +167,7 @@ impl Engine {
                     program: Arc::clone(&s.program),
                     scope: s.scope,
                     log_output: s.log_output,
+                    minted: false,
                 })
             })
             .collect();
@@ -185,11 +189,51 @@ impl Engine {
         };
 
         for terminus in collect_chain_termini(&root, spec.terminus_depth()) {
-            // Slot dance, `try_promote`'s semantics verbatim: `ensure_child` is get-or-create, so
-            // the walk is idempotent over the chain-dir slots the post-graft reconciler already
-            // created (role `User`) and creates only the terminus slots (Uncovered dirs / leaves
-            // get no reconciler contribution). Stamping the observed kind lets `Profile.kind` cache
-            // at attach instead of waiting for the minted Profile's first Seed probe.
+            // The absolute path (name suffix + diag payload) materialises lazily — on the first
+            // dedup miss, or on a newly-latched unsupported-kind warning: a steady-state pass where
+            // every template already minted (or already warned) allocates no paths — O(termini)
+            // allocations would otherwise recur on every no-op reconcile.
+            let build_abs = |segments: &[CompactString]| -> Arc<Path> {
+                let mut p = anchor_path.to_path_buf();
+                for seg in segments {
+                    p.push(seg.as_str());
+                }
+                Arc::from(p)
+            };
+
+            // A `Symlink` / `Other` (fifo / socket / device) terminus skips the mint wholesale —
+            // the slot dance never runs (the post-graft reconciler's own diff bookkeeping is
+            // independent of this arm), no kind is stamped, no Sub attaches. Minting one would be a
+            // lie the state machine immediately unwinds: the kind projects to a File slot, the
+            // minted Profile's first anchor probe `lstat`s and folds `Vanished` on `!is_file()`,
+            // and the all-dynamic teardown reaps it — a mint→reap round-trip per chain event,
+            // forever, exactly on the patterns symlink farms match (`/srv/*/current`). Narrated
+            // once per template lifetime through the registry's check-and-latch; the latch gates
+            // only the diagnostic — kind is read fresh off the snapshot each pass, so a real file
+            // replacing the symlink at the same path mints normally below.
+            if !matches!(terminus.kind, EntryKind::File | EntryKind::Dir) {
+                let mut abs: Option<Arc<Path>> = None;
+                for t in &templates {
+                    if !self.subs.latch_unsupported_kind_warning(t.sid) {
+                        continue;
+                    }
+                    let abs = abs.get_or_insert_with(|| build_abs(&terminus.segments));
+                    out.diagnostics
+                        .push(Diagnostic::DiscoveryUnsupportedAnchorKind {
+                            source: t.sid,
+                            path: Arc::clone(abs),
+                            kind: terminus.kind,
+                        });
+                }
+                continue;
+            }
+
+            // Slot dance, get-or-create per segment: `ensure_child` is idempotent over the
+            // chain-dir slots the post-graft reconciler already created (role `User`) and creates
+            // only the terminus slots (Uncovered dirs / leaves get no reconciler contribution).
+            // Stamping the observed kind — only `File | Dir` reaches here, so the `EntryKind →
+            // ResourceKind` projection is faithful — lets `Profile.kind` cache at attach instead of
+            // waiting for the minted Profile's first Seed probe.
             let mut slot = anchor;
             for seg in &terminus.segments {
                 slot = self
@@ -199,21 +243,12 @@ impl Engine {
             }
             self.tree.set_kind(slot, terminus.kind.into());
 
-            // The absolute path (name suffix + diag payload) materialises on the first dedup miss
-            // only: a steady-state pass where every template already minted allocates no paths —
-            // O(termini) allocations would otherwise recur on every no-op reconcile.
             let mut abs: Option<Arc<Path>> = None;
-            for t in &templates {
+            for t in &mut templates {
                 if self.discovery_already_minted(t.sid, slot, t.cfg_hash) {
                     continue;
                 }
-                let abs = abs.get_or_insert_with(|| {
-                    let mut p = anchor_path.to_path_buf();
-                    for seg in &terminus.segments {
-                        p.push(seg.as_str());
-                    }
-                    Arc::from(p)
-                });
+                let abs = abs.get_or_insert_with(|| build_abs(&terminus.segments));
                 // `format_compact!` writes straight into the `CompactString` that becomes
                 // `SubParams.name`; the `@` byte is reserved at config validation, so synthesised
                 // names never collide with operator names in the registry's `by_name` index.
@@ -242,14 +277,21 @@ impl Engine {
                 out.diagnostics.push(Diagnostic::DiscoveryMinted {
                     source: t.sid,
                     path: Arc::clone(abs),
+                    // Faithful here, unlike on the skip arm's diagnostic: only `File | Dir` termini
+                    // reach the mint, so the `ResourceKind` projection loses nothing and names
+                    // exactly the kind the Tree stamped.
                     kind: terminus.kind.into(),
                 });
+                t.minted = true;
             }
         }
 
-        // Once per template per pass, after the loop — one registry scan per template instead of
-        // one per mint.
-        for t in &templates {
+        // End-of-pass fan-out sweep, gated on minted-this-pass. The live count crosses the
+        // threshold upward only via a mint and mints happen only in the loop above, so a pass that
+        // minted nothing cannot be the crossing pass — quiet steady-state reconciles are scan-free
+        // — while the check on the crossing pass itself still latches, and a mint-heavy pass still
+        // scans once per template rather than once per mint.
+        for t in templates.iter().filter(|t| t.minted) {
             self.maybe_warn_discovery_fanout(t.sid, out);
         }
     }
@@ -275,11 +317,13 @@ impl Engine {
     /// Emit the one-shot [`Diagnostic::DiscoveryFanoutThreshold`] iff template `source`'s *live*
     /// minted-Sub count first crosses [`FANOUT_WARNING_THRESHOLD`].
     ///
-    /// The template carrier's `fanout_warned` is the cheap pre-gate: an already-warned
-    /// (pathological) template never re-runs the O(total Subs) scan on later reconciles, so total
-    /// scan cost is bounded by the pre-warning prefix of each template's life.
+    /// Two cheap gates bound the O(total Subs) count scan to passes that could actually cross: the
+    /// call site runs this only for templates that minted this pass (the count moves upward only
+    /// via a mint), and the template carrier's `fanout_warned` pre-gate below skips an
+    /// already-warned (pathological) template on later minting passes. So the scan runs only on
+    /// minting passes within the pre-warning prefix of each template's life.
     /// `SubRegistry::latch_fanout_warning`'s atomic check-and-latch remains the structural
-    /// one-shot; this pre-gate is additive, not its replacement.
+    /// one-shot; both gates are additive, not its replacement.
     fn maybe_warn_discovery_fanout(&mut self, source: SubId, out: &mut StepOutput) {
         if self
             .subs

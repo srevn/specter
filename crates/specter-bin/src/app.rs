@@ -169,6 +169,13 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         config = %config.display(),
         "specter starting"
     );
+    // Advisory config findings (today: dynamic prefixes diverging from canonical). The initial load
+    // (#2) runs before the subscriber exists, so the loaded value is interrogated here —
+    // `Config::warnings` is pull-computed for exactly this gap. Reloads re-narrate through
+    // `dispatch_reload`'s own pull.
+    for issue in initial_config.warnings() {
+        tracing::warn!(issue = %issue, "config warning");
+    }
 
     // 4. Bin-side reload state — handed to the engine driver and mutated only via
     //    `Loader::rotate_apply` / `rotate_meta_only` (the sole-writer claim on `Loader`'s module

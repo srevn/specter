@@ -14,9 +14,9 @@ use std::path::Path;
 /// two filesystem paths).
 ///
 /// **`sub_total` semantics** — every Sub currently in the engine registry, *including*
-/// discovery-minted Subs. An operator wanting "only static, only attached" derives it from
-/// `list`. The minimal `status` shape avoids carrying multiple counts that would skew
-/// interpretation at a glance.
+/// discovery-minted Subs. An operator wanting "only static, only attached" derives it from `list`.
+/// The minimal `status` shape avoids carrying multiple counts that would skew interpretation at a
+/// glance.
 pub(crate) fn status(
     engine: &Engine,
     ds: &DriverState,
@@ -30,8 +30,8 @@ pub(crate) fn status(
         reload_count: ds.reload_count,
         last_reload: ds.last_reload.map(WireLastReload::from),
         sub_total: engine.subs().len(),
-        // Inline filter+count over `config.watches` rather than `Config::disabled_names()` —
-        // the latter allocates a `Vec<&str>` just to read `.len()`, a heap allocation for what is
+        // Inline filter+count over `config.watches` rather than `Config::disabled_names()` — the
+        // latter allocates a `Vec<&str>` just to read `.len()`, a heap allocation for what is
         // structurally a counter.
         sub_disabled_toml: config.watches.iter().filter(|s| !s.enabled).count(),
         sub_disabled_runtime: disabled_runtime.len(),

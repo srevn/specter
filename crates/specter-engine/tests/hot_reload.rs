@@ -585,8 +585,8 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
 }
 
 /// A `ConfigDiff` added bucket carrying a discovery template attaches it like any Sub: the cold
-/// Seed probe rides the diff step and the first reconcile mints per terminus — the reload route
-/// and the direct-attach route converge on one lifecycle.
+/// Seed probe rides the diff step and the first reconcile mints per terminus — the reload route and
+/// the direct-attach route converge on one lifecycle.
 #[test]
 fn config_diff_add_dynamic_attaches_and_first_reconcile_mints() {
     let mut e = Engine::new();
@@ -660,12 +660,11 @@ fn config_diff_add_dynamic_with_missing_prefix_goes_pending() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `modified_identity` on a template-bearing pair — the diff layer's classification for *any*
-/// field change on a dynamic block: the old template detaches under `ConfigDiffIdentityChanged`,
-/// its minted set cascades under `DiscoverySourceDetached` (a mid-cold-Seed minted probe is
-/// cancelled cleanly), and the replacement attaches in the same step. Its first reconcile re-mints
-/// fresh `SubId`s — never an in-place rebind, which would strand minted `Arc`s of the old
-/// template's program.
+/// `modified_identity` on a template-bearing pair — the diff layer's classification for *any* field
+/// change on a dynamic block: the old template detaches under `ConfigDiffIdentityChanged`, its minted
+/// set cascades under `DiscoverySourceDetached` (a mid-cold-Seed minted probe is cancelled cleanly),
+/// and the replacement attaches in the same step. Its first reconcile re-mints fresh `SubId`s — never
+/// an in-place rebind, which would strand minted `Arc`s of the old template's program.
 #[test]
 fn config_diff_modify_template_cascades_and_remints() {
     let mut e = Engine::new();
@@ -751,8 +750,8 @@ fn config_diff_modify_template_cascades_and_remints() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// A removed dynamic name reaps the template under `ConfigDiffRemoved` and cascades its minted
-/// set — one reload line removes the whole discovery family, Profiles included.
+/// A removed dynamic name reaps the template under `ConfigDiffRemoved` and cascades its minted set
+/// — one reload line removes the whole discovery family, Profiles included.
 #[test]
 fn config_diff_remove_dynamic_cascades() {
     let mut e = Engine::new();

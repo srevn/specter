@@ -7676,10 +7676,9 @@ mod props {
                 );
 
                 // Slot-discipline I5: at most one outstanding probe per Profile, expressed as a
-                // single state-resident probe slot reachable via `pid`.
-                // `pending_probe_for` returns `Option<ProbeCorrelation>` so `<= 1` is trivially
-                // true; the assertion is a regression guard against a future widening of the
-                // per-owner slot shape.
+                // single state-resident probe slot reachable via `pid`. `pending_probe_for` returns
+                // `Option<ProbeCorrelation>` so `<= 1` is trivially true; the assertion is a
+                // regression guard against a future widening of the per-owner slot shape.
                 let probing_count =
                     u32::from(e.pending_probe_for(pid).is_some());
                 prop_assert!(

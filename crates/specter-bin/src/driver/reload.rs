@@ -146,6 +146,13 @@ impl<W: FsWatcher> EngineDriver<W> {
             return ControlFlow::Continue(());
         };
 
+        // Advisory findings re-narrated on every successful parse — the class is per-load (an
+        // unchanged offending watch still warrants its line, greppable beside the reload that
+        // re-applied it). Startup's pre-subscriber load logs through `App::run`'s own pull.
+        for issue in new_config.warnings() {
+            tracing::warn!(issue = %issue, "config warning");
+        }
+
         // Parse succeeded — bump the reload counters. The bump records that the operator's pulse
         // was acknowledged, not that the engine-side apply succeeded: a shutdown observed mid-apply
         // (forward returning Break below) still leaves the bump standing, mirroring the

@@ -343,9 +343,9 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// 1. A name absent from the engine's `by_name` index is refused with
     ///    [`WireErrorCode::UnknownSub`].
-    /// 2. A discovery-minted Sub (`is_dynamic()`) is refused with
-    ///    [`WireErrorCode::DynamicSubNoOp`] — the discovery Profile's next reconcile would simply
-    ///    re-mint it; disabling the *template* is the lever (its cascade reaps the minted set).
+    /// 2. A discovery-minted Sub (`is_dynamic()`) is refused with [`WireErrorCode::DynamicSubNoOp`]
+    ///    — the discovery Profile's next reconcile would simply re-mint it; disabling the
+    ///    *template* is the lever (its cascade reaps the minted set).
     /// 3. A name already in `disabled_runtime` is refused with [`WireErrorCode::NotDisabled`] — the
     ///    verb's precondition (sub is runtime-enabled) is violated.
     ///
@@ -469,9 +469,8 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// 1. A name absent from the engine's `by_name` index is refused with
     ///    [`WireErrorCode::UnknownSub`].
-    /// 2. A discovery-minted Sub (`is_dynamic()`) is refused with
-    ///    [`WireErrorCode::DynamicSubNoOp`] — minted Subs vanish and re-mint with the match set,
-    ///    the same reason `disable` refuses them.
+    /// 2. A discovery-minted Sub (`is_dynamic()`) is refused with [`WireErrorCode::DynamicSubNoOp`] —
+    ///    minted Subs vanish and re-mint with the match set, the same reason `disable` refuses them.
     ///
     /// On the apply path the operator's `duration_ms` is rebuilt into a [`Duration`] **and
     /// clamped** to [`MAX_ABSORB_WINDOW`] before the engine step — the lone overflow guard for the

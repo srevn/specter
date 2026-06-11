@@ -115,8 +115,8 @@ pub struct Resource {
     /// `specter-engine::refcounts`) — direct mutation outside those helpers (and
     /// [`crate::Tree::vacate`]) breaks the 0↔non-empty Watch / Unwatch invariant.
     ///
-    /// **Source of truth.** Coverage and Profile state are never walked to recompute the union;
-    /// the map is directly read. Each call site that bumps or releases a contribution passes the
+    /// **Source of truth.** Coverage and Profile state are never walked to recompute the union; the
+    /// map is directly read. Each call site that bumps or releases a contribution passes the
     /// explicit [`ContribKey`], so removal is O(log k) by key, not O(registry).
     ///
     /// `pub(crate)` — the legitimate external mutators are the typed methods on `Resource`
@@ -236,11 +236,10 @@ impl Resource {
     ///
     /// **Why all three fields, not just contributions.** The two back-ref vectors (`children`,
     /// `profiles`) describe live ownership *without* implying a kernel-watch demand: a Pending
-    /// Profile's User-roled leaf carries `profiles` but no contribution at the leaf (the leaf's
-    /// only contribution arrives at materialization); a non-leaf descent scaffold carries
-    /// `children` but no contribution of its own (its descent contribution belongs to its
-    /// deepest-existing descendant). The union of all three is "anything reaches into this slot
-    /// from somewhere."
+    /// Profile's User-roled leaf carries `profiles` but no contribution at the leaf (the leaf's only
+    /// contribution arrives at materialization); a non-leaf descent scaffold carries `children` but
+    /// no contribution of its own (its descent contribution belongs to its deepest-existing
+    /// descendant). The union of all three is "anything reaches into this slot from somewhere."
     #[must_use]
     pub fn has_anchors(&self) -> bool {
         !self.children.is_empty() || !self.profiles.is_empty() || !self.contributions.is_empty()

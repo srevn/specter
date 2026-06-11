@@ -90,9 +90,9 @@ pub struct SubParams {
     /// `Arc`: every reconcile pass collects the Profile's template set before minting — a refcount
     /// bump per pass instead of a `ScanConfig` deep-clone, and `SubParams: Clone` stays cheap.
     pub template: Option<Arc<MintTemplate>>,
-    /// Discovery Sub that minted this Sub — `None` for operator-declared Subs. Read at the
-    /// engine's recovery fan-out ([`Sub::is_dynamic`]) and by the detach cascade
-    /// (`source_discovery == detached id` reaps the minted set).
+    /// Discovery Sub that minted this Sub — `None` for operator-declared Subs. Read at the engine's
+    /// recovery fan-out ([`Sub::is_dynamic`]) and by the detach cascade (`source_discovery ==
+    /// detached id` reaps the minted set).
     pub source_discovery: Option<SubId>,
 }
 
@@ -350,16 +350,23 @@ impl std::ops::BitAndAssign for ClassSet {
 /// A discovery template's runtime carrier on [`Sub`]: the intent ([`MintTemplate`], frozen at
 /// attach) plus the per-template-lifetime state that has no meaning off a template.
 ///
-/// `fanout_warned` is the one-shot fan-out warning latch — `true` once this template's live
-/// minted-Sub count first crossed the warning threshold, so a pathological pattern warns once per
-/// template lifetime. Same discipline as [`Sub::has_fired`]: a plain bool whose lifetime *is* the
-/// slotmap entry's, mutated only through [`SubRegistry::latch_fanout_warning`] (the registry holds
-/// the sole `&mut Sub`). Homing the latch here rather than as a `Sub` field makes a latched
-/// non-template unrepresentable.
+/// The two warning latches share one discipline — same as [`Sub::has_fired`]: a plain bool whose
+/// lifetime *is* the slotmap entry's, mutated only through its single registry edge (the registry
+/// holds the sole `&mut Sub`), one-shot per template lifetime so a steady-state pathological
+/// pattern narrates once, not once per reconcile. Homing the latches here rather than as `Sub`
+/// fields makes a latched non-template unrepresentable.
 #[derive(Debug)]
 pub struct DiscoveryTemplate {
     pub spec: Arc<MintTemplate>,
+    /// `true` once this template's live minted-Sub count first crossed the fan-out warning
+    /// threshold. Mutated only through [`SubRegistry::latch_fanout_warning`].
     pub fanout_warned: bool,
+    /// `true` once a reconcile pass observed a `Symlink`/`Other` chain terminus under this template
+    /// and narrated the skip. Mutated only through [`SubRegistry::latch_unsupported_kind_warning`].
+    /// Gates only the *diagnostic*, never the skip itself — the terminus kind is read fresh off the
+    /// snapshot each pass, so a symlink later replaced by a regular file at the same path mints
+    /// normally.
+    pub unsupported_kind_warned: bool,
 }
 
 #[derive(Debug)]
@@ -389,11 +396,12 @@ pub struct Sub {
     /// with the `MatchChain` Profile shape). The carried `spec` is never mutated post-attach: a
     /// template change is an identity change at the config layer (reap + reattach), never an
     /// in-place rebind — the minted Subs hold `Arc`s of the template's program, so a rebind would
-    /// strand them on stale reaction state. The carrier's `fanout_warned` latch is the one runtime
-    /// field, mutated only through [`SubRegistry::latch_fanout_warning`].
+    /// strand them on stale reaction state. The carrier's warning latches are the only runtime
+    /// fields, each mutated only through its registry edge ([`SubRegistry::latch_fanout_warning`] /
+    /// [`SubRegistry::latch_unsupported_kind_warning`]).
     pub template: Option<DiscoveryTemplate>,
-    /// Discovery Sub that minted this Sub — `None` for operator-declared Subs. Read at the
-    /// engine's recovery fan-out (`on_anchor_terminal_event`); never mutated post-attach.
+    /// Discovery Sub that minted this Sub — `None` for operator-declared Subs. Read at the engine's
+    /// recovery fan-out (`on_anchor_terminal_event`); never mutated post-attach.
     pub source_discovery: Option<SubId>,
     /// The per-Sub Effect fire history: `true` once this Sub has emitted at least one Effect. Sole
     /// load-bearing reader is the B1 dedup suppress (`!forced && nothing_changed && has_fired` — a
@@ -454,6 +462,7 @@ impl Sub {
             template: params.template.map(|spec| DiscoveryTemplate {
                 spec,
                 fanout_warned: false,
+                unsupported_kind_warned: false,
             }),
             source_discovery: params.source_discovery,
             has_fired: false,
@@ -487,10 +496,10 @@ impl Sub {
 /// - `by_profile` groups Subs by `ProfileId` (insertion order within a Profile).
 /// - `by_name` resolves an operator-facing or synthesised name to its `SubId`. Indexes **every**
 ///   Sub regardless of `source_discovery`: the config validator reserves the `@` byte, so a
-///   `[[watch]].name` never carries one and a minted `<template_name>@<matched_path>` always does
-///   — the two populations are disjoint by construction and their union is unique. Callers that
-///   need the static-vs-dynamic discrimination read [`Sub::is_dynamic`] on the resolved Sub. The
-///   index is load-bearing — hot-reload resolves every `removed`/`modified` name to an id through
+///   `[[watch]].name` never carries one and a minted `<template_name>@<matched_path>` always does —
+///   the two populations are disjoint by construction and their union is unique. Callers that need
+///   the static-vs-dynamic discrimination read [`Sub::is_dynamic`] on the resolved Sub. The index
+///   is load-bearing — hot-reload resolves every `removed`/`modified` name to an id through
 ///   [`Self::find_by_name`] (O(log N)).
 ///
 /// `by_name` mirrors the slotmap entry's lifetime: [`Self::insert`] populates it, [`Self::remove`]
@@ -659,14 +668,13 @@ impl SubRegistry {
     /// [`Self::find_by_name`] in the same step as the rebind, so a stale id is structurally
     /// unexpected; the caller surfaces it via [`crate::Diagnostic::RebindUnknownSub`].
     ///
-    /// `debug_assert!`s pin the `name` / `source_discovery` invariants — a
-    /// release-mode breach would silently rewrite the identifying fields under the registry's
-    /// `by_name` index, leaving the index pointing at the wrong [`SubId`]; the assertions catch the
-    /// breach at the call site. The template assertion is both-`None`, not equality
-    /// (`ProfileIdentity` deliberately has no `Eq`): any field change on a template-bearing spec
-    /// classifies as `modified_identity` (wholesale reap + reattach) at the config diff, never an
-    /// in-place rebind — the minted Subs hold `Arc`s of the template's program, so a rebind would
-    /// strand them on stale reaction state.
+    /// `debug_assert!`s pin the `name` / `source_discovery` invariants — a release-mode breach would
+    /// silently rewrite the identifying fields under the registry's `by_name` index, leaving the
+    /// index pointing at the wrong [`SubId`]; the assertions catch the breach at the call site. The
+    /// template assertion is both-`None`, not equality (`ProfileIdentity` deliberately has no `Eq`):
+    /// any field change on a template-bearing spec classifies as `modified_identity` (wholesale reap
+    /// + reattach) at the config diff, never an in-place rebind — the minted Subs hold `Arc`s of the
+    /// template's program, so a rebind would strand them on stale reaction state.
     pub fn rebind(&mut self, sub: SubId, new_params: SubParams) -> Option<(Duration, ProfileId)> {
         let s = self.subs.get_mut(sub)?;
         debug_assert_eq!(
@@ -747,6 +755,22 @@ impl SubRegistry {
             t.fanout_warned = true;
             count
         })
+    }
+
+    /// One-shot unsupported-terminus warning latch for the discovery template `sub` — the sibling
+    /// of [`Self::latch_fanout_warning`] for the `Symlink`/`Other` mint-skip narration.
+    ///
+    /// Returns `true` exactly once per template lifetime: the first call latches
+    /// [`DiscoveryTemplate::unsupported_kind_warned`] and reports "newly latched"; later calls
+    /// return `false`. The check-and-latch is atomic here, so the one-shot property is structural
+    /// rather than a caller convention. A stale `SubId` or a non-template Sub is a silent `false` —
+    /// the latch lives on the template carrier, mirroring [`Self::latch_fanout_warning`]'s
+    /// died-with-the-entry contract.
+    pub fn latch_unsupported_kind_warning(&mut self, sub: SubId) -> bool {
+        let Some(t) = self.subs.get_mut(sub).and_then(|s| s.template.as_mut()) else {
+            return false;
+        };
+        !std::mem::replace(&mut t.unsupported_kind_warned, true)
     }
 
     /// Whether `profile` has at least one attached Sub that *reacts* per-stable-file — the scope
@@ -1148,10 +1172,9 @@ mod tests {
         assert!(reg.find_by_name("build").is_none());
     }
 
-    /// `by_name` indexes every Sub regardless of `source_discovery` — both a static operator name
-    /// and a minted `<template_name>@<matched_path>` resolve through `find_by_name`. The two
-    /// populations are disjoint by the config validator's `@`-byte reservation, so their indexed
-    /// union is unique.
+    /// `by_name` indexes every Sub regardless of `source_discovery` — both a static operator name and
+    /// a minted `<template_name>@<matched_path>` resolve through `find_by_name`. The two populations
+    /// are disjoint by the config validator's `@`-byte reservation, so their indexed union is unique.
     #[test]
     fn by_name_indexes_static_and_dynamic_subs() {
         let mut reg = SubRegistry::new();

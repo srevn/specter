@@ -205,6 +205,52 @@ fn duplicate_name_across_enabled_and_disabled_rejected() {
     assert_kinds(&toml, &[IssueKind::DuplicateName]);
 }
 
+/// [`Config::warnings`], the advisory channel: a symlink inside a dynamic pattern's literal prefix
+/// diverges from canonical and warns (the prefix anchors verbatim while static paths canonicalise),
+/// the same pattern written against the canonical prefix is silent, and a static watch through the
+/// same symlink is silent (it already canonicalised at validation — the asymmetry the warning
+/// exists to surface).
+#[cfg(unix)]
+#[test]
+fn warnings_flag_dynamic_prefix_diverging_from_canonical() {
+    let td = tempfile::tempdir().unwrap();
+    let canon_root = td.path().canonicalize().unwrap();
+    let target = canon_root.join("target");
+    std::fs::create_dir(&target).unwrap();
+    let link = canon_root.join("link");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let offending = format!(
+        "[[watch]]\nname = \"dynamic\"\npath = \"{link}/*/log\"\nactions = [{{ exec = [\"echo\"] }}]\n\
+         [[watch]]\nname = \"static\"\npath = \"{link}\"\nactions = [{{ exec = [\"echo\"] }}]",
+        link = link.display(),
+    );
+    let warnings = Config::from_str(&offending).unwrap().warnings();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "the dynamic entry warns; the static sibling through the same symlink is silent: \
+         {warnings:?}",
+    );
+    let w = &warnings[0];
+    assert_eq!(w.kind, IssueKind::DynamicPrefixDivergesFromCanonical);
+    assert_eq!(w.watch_index, Some(0));
+    assert!(
+        w.detail.contains(&target.display().to_string()),
+        "detail names the canonical prefix (the remedy): {}",
+        w.detail,
+    );
+
+    let canonical = format!(
+        "[[watch]]\nname = \"dynamic\"\npath = \"{target}/*/log\"\nactions = [{{ exec = [\"echo\"] }}]",
+        target = target.display(),
+    );
+    assert!(
+        Config::from_str(&canonical).unwrap().warnings().is_empty(),
+        "a canonical prefix produces no advisory",
+    );
+}
+
 #[test]
 fn kitchen_sink_collects_five_distinct_issues() {
     let toml = "[[watch]]\nname = \"\"\npath = \"src\"\nactions = [{ exec = [] }]\nsettle = \"0ms\"\nmax_depth = 0";

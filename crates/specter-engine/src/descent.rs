@@ -283,10 +283,10 @@ impl crate::Engine {
     /// queries an anchor's `lstat` shape or a subtree proof). The typed [`DescentOutcome`] parse
     /// rejected the payload at the demux seam; this **abandons** the descent prefix.
     ///
-    /// `debug_assert!` in dev/CI (a production walker never emits this shape), then in release emits
-    /// [`Diagnostic::WalkerContractViolated`] and routes through
-    /// [`Self::release_descent_prefix_claim`] — the abandon terminal (the same release path
-    /// the root-prefix `dispatch_descent_vanished` branch uses), **not** `dispatch_descent_vanished`
+    /// `debug_assert!` in dev/CI (a production walker never emits this shape), then in release
+    /// emits [`Diagnostic::WalkerContractViolated`] and routes through
+    /// [`Self::release_descent_prefix_claim`] — the abandon terminal (the same release path the
+    /// root-prefix `dispatch_descent_vanished` branch uses), **not** `dispatch_descent_vanished`
     /// itself: that rewinds to the parent and re-arms a fresh probe, which against a
     /// persistently-buggy walker is a tight re-probe loop. Abandoning leaves the Profile
     /// operator-recoverable (stuck Idle) and self-healing on a fresh descent. The probe slot was
@@ -310,11 +310,11 @@ impl crate::Engine {
 
     /// Dispatch a successful descent response. The walker honoured the `Descent` request shape and
     /// returned a single-level `Arc<DirSnapshot>` for the prefix; this routine looks up the next
-    /// remaining segment by name and either advances descent one level, materializes the anchor,
-    /// or awaits the next event.
+    /// remaining segment by name and either advances descent one level, materializes the anchor, or
+    /// awaits the next event.
     ///
-    /// **Caller (`on_probe_response`).** The descent probe slot was disarmed (consume-once)
-    /// before dispatch; the advance / rewind branches re-arm it with a freshly-minted correlation.
+    /// **Caller (`on_probe_response`).** The descent probe slot was disarmed (consume-once) before
+    /// dispatch; the advance / rewind branches re-arm it with a freshly-minted correlation.
     pub(crate) fn dispatch_descent_ok(
         &mut self,
         owner: ProfileId,
@@ -330,12 +330,12 @@ impl crate::Engine {
         };
         let prefix = descent.current_prefix();
 
-        // The walker echoes `(owner, correlation)` verbatim — the gate match in
-        // `on_probe_response` already enforces request/response pairing, so any divergence would
-        // surface as `StaleProbeResponse`, not reach this point. The snapshot itself carries pure
-        // content; engine identity stays engine-side (here, `descent.current_prefix()`).
-        // `DescentRemaining` is non-empty by type invariant, so there is no defensive empty-arm
-        // recovery path and no corresponding `Diagnostic` variants.
+        // The walker echoes `(owner, correlation)` verbatim — the gate match in `on_probe_response`
+        // already enforces request/response pairing, so any divergence would surface as
+        // `StaleProbeResponse`, not reach this point. The snapshot itself carries pure content;
+        // engine identity stays engine-side (here, `descent.current_prefix()`). `DescentRemaining`
+        // is non-empty by type invariant, so there is no defensive empty-arm recovery path and no
+        // corresponding `Diagnostic` variants.
         let next_segment = descent.remaining_components().head().clone();
         let is_terminal = descent.remaining_components().is_terminal();
 
@@ -572,18 +572,18 @@ impl crate::Engine {
             None => {
                 // Root prefix vanished — no rewind target. Delegate to the release helper
                 // (state-flip terminal + counter-aware sub + try_reap). Its preconditions hold
-                // here: the descent probe slot was disarmed by `on_probe_response` before
-                // dispatch (cancel-first contract) and descent state is unflipped at entry.
+                // here: the descent probe slot was disarmed by `on_probe_response` before dispatch
+                // (cancel-first contract) and descent state is unflipped at entry.
                 //
-                // The Profile is left stuck Idle without a usable descent path — operator
-                // recovery is required.
+                // The Profile is left stuck Idle without a usable descent path — operator recovery
+                // is required.
                 self.release_descent_prefix_claim(owner, out);
             }
         }
     }
 
-    /// Failed response handler. The descent retains in-descent state and emits a diagnostic;
-    /// the next event at the prefix re-triggers via [`Self::on_descent_event`].
+    /// Failed response handler. The descent retains in-descent state and emits a diagnostic; the
+    /// next event at the prefix re-triggers via [`Self::on_descent_event`].
     pub(crate) fn dispatch_descent_failed(
         &self,
         owner: ProfileId,
@@ -602,16 +602,16 @@ impl crate::Engine {
         // Retain in-descent state; await next event at the prefix.
     }
 
-    /// Handler for `FsEvent` arriving at a descent's `current_prefix`. Triggers a fresh probe
-    /// (no settle wait — descent is event-driven). I5: drops the event if a probe is already in
-    /// flight (the in-flight probe will pick up the change in its response). The "in flight"
-    /// signal is an armed descent probe slot for this Profile.
+    /// Handler for `FsEvent` arriving at a descent's `current_prefix`. Triggers a fresh probe (no
+    /// settle wait — descent is event-driven). I5: drops the event if a probe is already in flight
+    /// (the in-flight probe will pick up the change in its response). The "in flight" signal is an
+    /// armed descent probe slot for this Profile.
     ///
     /// Returns `true` iff it re-armed the descent slot and emitted a fresh probe; `false` when a
     /// gate skipped (probe already in flight, or the Profile is no longer descending). The overflow
-    /// reseed path keys its diagnostic on this — the gates here are the single source of
-    /// "did a reseed happen", so an external re-check could never drift from them. The `FsEvent`
-    /// dispatch loop discards the value (a skipped descent event needs no narration).
+    /// reseed path keys its diagnostic on this — the gates here are the single source of "did a
+    /// reseed happen", so an external re-check could never drift from them. The `FsEvent` dispatch
+    /// loop discards the value (a skipped descent event needs no narration).
     pub(crate) fn on_descent_event(
         &mut self,
         owner: ProfileId,

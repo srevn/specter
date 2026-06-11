@@ -147,9 +147,9 @@ pub(crate) enum ResponsePayload {
 pub(crate) enum WireErrorCode {
     /// Sub name not in the engine registry, the operator-runtime disable set, or the TOML watches.
     UnknownSub,
-    /// Operator targeted a dynamic (discovery-minted) Sub with an op the bin refuses to apply:
-    /// the discovery Profile's next reconcile would simply re-mint it. Disabling the *template*
-    /// is the lever — its detach cascade reaps the whole minted set.
+    /// Operator targeted a dynamic (discovery-minted) Sub with an op the bin refuses to apply: the
+    /// discovery Profile's next reconcile would simply re-mint it. Disabling the *template* is the
+    /// lever — its detach cascade reaps the whole minted set.
     ///
     /// Consumed by the `disable` / `enable` IPC handlers in [`crate::driver`].
     DynamicSubNoOp,

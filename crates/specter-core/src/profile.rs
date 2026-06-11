@@ -1656,9 +1656,9 @@ pub struct DescentState {
 }
 
 impl DescentState {
-    /// Construct a fresh descent payload. Sole producer pattern used by `materialize_path_or_pending`
-    /// (Profile pending arm) and the recovery / rewind flows in `engine::descent` that re-enter
-    /// `Pending` after an anchor-terminal event.
+    /// Construct a fresh descent payload. Sole producer pattern used by
+    /// `materialize_path_or_pending` (Profile pending arm) and the recovery / rewind flows in
+    /// `engine::descent` that re-enter `Pending` after an anchor-terminal event.
     ///
     /// Field-private; callers route through this constructor so the invariants on `current_prefix`
     /// (Watched, refcounted), `remaining_components` (non-empty by [`DescentRemaining`]'s own
@@ -1680,8 +1680,8 @@ impl DescentState {
         }
     }
 
-    /// The deepest currently-Watched ancestor on the descent path. Carries this Profile's
-    /// `+1 STRUCTURE` [`crate::ContribKey::ProfileDescent`] contribution.
+    /// The deepest currently-Watched ancestor on the descent path. Carries this Profile's `+1
+    /// STRUCTURE` [`crate::ContribKey::ProfileDescent`] contribution.
     #[must_use]
     pub const fn current_prefix(&self) -> ResourceId {
         self.current_prefix
@@ -1737,8 +1737,7 @@ impl DescentState {
     /// Crate-internal by design. The engine-facing "single consume per owner" law remains the `pub`
     /// [`crate::ProfileState::take_probe`], which delegates its descent arm here, so the consume
     /// routes through the typed protocol instead of a raw field and `probe` stays module-private.
-    /// Routing-once is unaffected — the engine still sees exactly one consume entry point per
-    /// owner.
+    /// Routing-once is unaffected — the engine still sees exactly one consume entry point per owner.
     #[must_use]
     pub(crate) const fn disarm_probe(&mut self) -> Option<ProbeCorrelation> {
         self.probe.disarm()

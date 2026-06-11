@@ -9,11 +9,11 @@
 //! `on_probe_response` routes every response by *state*: the gated correlation lives on a
 //! state-resident [`specter_core::ProbeSlot`], and the gate ([`Engine::profile_probe_gate`]) reads
 //! that correlation *and* the routing class in one resolution (pre-disarm); the slot is then
-//! disarmed once on dispatch. The Verifying choke and the post-fire Rebase arm share one
-//! certifier, `certify_probe_response`: lower the outcome, verify kind agreement, and fold the
-//! single quiescence verdict via [`specter_core::quiescence_verdict`]. `dispatch_burst_outcome`
-//! then fans the certified result out per [`specter_core::BurstIntent`]; the Rebase arm maps it to
-//! the rebase-loop consequence.
+//! disarmed once on dispatch. The Verifying choke and the post-fire Rebase arm share one certifier,
+//! `certify_probe_response`: lower the outcome, verify kind agreement, and fold the single
+//! quiescence verdict via [`specter_core::quiescence_verdict`]. `dispatch_burst_outcome` then fans
+//! the certified result out per [`specter_core::BurstIntent`]; the Rebase arm maps it to the
+//! rebase-loop consequence.
 
 use crate::Engine;
 use crate::engine::is_timer_referenced;
@@ -67,9 +67,9 @@ impl Engine {
         // `watch_demand == 0` is a race between Unwatch and the Sensor's drain (drop with
         // `EventOnUnwatchedResource`). A live, watched slot yields the event path, captured here —
         // pre-dispatch, off the proven-live `&Resource`. The path is the staleness-immune
-        // historical fact the burst accumulators need: a later covering dispatch can reap the
-        // slot, so a post-dispatch `path_of` would be fallible exactly where the obligation must
-        // not lose an entry.
+        // historical fact the burst accumulators need: a later covering dispatch can reap the slot,
+        // so a post-dispatch `path_of` would be fallible exactly where the obligation must not lose
+        // an entry.
         let Some(r) = self.tree.get(resource) else {
             out.diagnostics
                 .push(Diagnostic::EventOnUnwatchedResource { resource });
@@ -194,9 +194,9 @@ impl Engine {
         self.enter_pending_descent(profile_id, parent, remaining, out);
     }
 
-    /// Dispatch a [`ProbeResponse`]. Every probe — `Pending` descent,
-    /// `Active(PreFire(Verifying))`, `Active(PostFire(Rebasing))` — carries its correlation on a
-    /// state-resident [`specter_core::ProbeSlot`]. One uniform sequence, no per-carrier branch:
+    /// Dispatch a [`ProbeResponse`]. Every probe — `Pending` descent, `Active(PreFire(Verifying))`,
+    /// `Active(PostFire(Rebasing))` — carries its correlation on a state-resident
+    /// [`specter_core::ProbeSlot`]. One uniform sequence, no per-carrier branch:
     ///
     /// **Gate.** `profile_probe_gate(response.owner)` yields the gated slot's own correlation and
     /// routing class in one resolution. The response is gated by `correlation == received`; a
@@ -884,10 +884,10 @@ impl Engine {
 
     /// Dispatch a [`specter_core::Input::ConfigDiff`].
     ///
-    /// Atomic, name-keyed apply of the [`SubRegistryDiff`] buckets in the canonical order. The
-    /// diff carries operator names, never engine ids: name → id resolution is a registry-owner
-    /// operation and homes here against the engine's authoritative `by_name` index, never bin-side
-    /// off the order-unguaranteed diagnostic stream.
+    /// Atomic, name-keyed apply of the [`SubRegistryDiff`] buckets in the canonical order. The diff
+    /// carries operator names, never engine ids: name → id resolution is a registry-owner operation
+    /// and homes here against the engine's authoritative `by_name` index, never bin-side off the
+    /// order-unguaranteed diagnostic stream.
     ///
     /// # Four buckets, validate-then-act
     ///
@@ -980,8 +980,8 @@ impl Engine {
     ///
     /// 1. [`specter_core::Tree::vacate`] the rejected slot — clear every contribution atomically,
     ///    so the engine's view of "is this slot watched?" matches reality.
-    /// 2. Walk every Profile that holds a claim on `resource` (anchor / watch-root parent /
-    ///    descent prefix) and clean up its bookkeeping — otherwise the owner flag contradicts the
+    /// 2. Walk every Profile that holds a claim on `resource` (anchor / watch-root parent / descent
+    ///    prefix) and clean up its bookkeeping — otherwise the owner flag contradicts the
     ///    post-vacate counter, and any subsequent owner-driven release path would either see the
     ///    wrong union on recompute or silently drift further out of sync.
     /// 3. Emit one `ProfileClaimPurged` Diagnostic per affected (owner, claim_kind) pair, plus the
@@ -1003,8 +1003,8 @@ impl Engine {
         out.diagnostics
             .push(Diagnostic::WatchOpRejected { resource, failure });
 
-        // Snapshot every claimer BEFORE any mutation. Borrow checker (we'll mutate self.profiles
-        // in the loops) and we want a stable view of the pre-clamp world: a Profile that's
+        // Snapshot every claimer BEFORE any mutation. Borrow checker (we'll mutate self.profiles in
+        // the loops) and we want a stable view of the pre-clamp world: a Profile that's
         // `Pending(d)` with `d.current_prefix() == resource` must be detected here, because the
         // helpers we run below transition the Profile to Idle.
         let mut anchor_claimers: smallvec::SmallVec<[ProfileId; 2]> = smallvec::SmallVec::new();
@@ -1027,6 +1027,13 @@ impl Engine {
         // Atomic terminus for the rejected slot: clear the contributions map, emitting the closing
         // `Unwatch`. The per-claimer loops below run their owner-bookkeeping and call `sub_watch`,
         // which short-circuits on the post-vacate state (absent key). One slot, one terminus.
+        //
+        // The three claimer classes below — anchor, watch-root parent, descent prefix — are the
+        // only owners notified. A vacated `ProfileDescendant` contribution notifies no one, and the
+        // post-graft reconciler re-watches only diff-created entries, so a rejected chain /
+        // descendant watch never self-heals while the entry stays in the snapshot; observation
+        // converges opportunistically through probes from still-watched ancestors. Accepted debt:
+        // watch rejection is EMFILE-rare.
         self.tree.vacate(resource, out);
 
         // Anchor claimers: synthesise an anchor-loss. `finalize_anchor_lost` cancels any in-flight
@@ -1350,17 +1357,17 @@ impl Engine {
     /// **All-dynamic** ⇒ [`Self::on_anchor_terminal_all_dynamic`]: the Profile has no static
     /// recovery channel; the source re-mints on path reappearance (the discovery template's next
     /// reconcile), so the Profile is reaped entirely (anchor, descendants, descent prefix,
-    /// watch-root parent — the full quartet) and each Sub's reap is narrated. I-Recovery-Split:
-    /// the predicate is total over non-empty Subs.
+    /// watch-root parent — the full quartet) and each Sub's reap is narrated. I-Recovery-Split: the
+    /// predicate is total over non-empty Subs.
     ///
     /// **Mixed or pure-static** ⇒ [`Self::finalize_anchor_lost`]: the existing recovery flow runs.
     /// The dynamic Subs (if any) stay attached — the static Sub keeps the Profile alive via
-    /// `Profile.watch_root_parent`'s recovery channel. On re-materialisation, the source-side
-    /// dedup gate (`discovery_already_minted`) finds the still-attached dynamic Sub in
-    /// `SubRegistry` and returns `true` (no fresh Sub for an already-known anchor), so no engine
-    /// work is needed for correctness — only the static Sub's recovery flow drives the burst. A
-    /// discovery *template* counts static here by construction: `is_dynamic` reads synthesis
-    /// origin, and templates are operator-declared.
+    /// `Profile.watch_root_parent`'s recovery channel. On re-materialisation, the source-side dedup
+    /// gate (`discovery_already_minted`) finds the still-attached dynamic Sub in `SubRegistry` and
+    /// returns `true` (no fresh Sub for an already-known anchor), so no engine work is needed for
+    /// correctness — only the static Sub's recovery flow drives the burst. A discovery *template*
+    /// counts static here by construction: `is_dynamic` reads synthesis origin, and templates are
+    /// operator-declared.
     ///
     /// The empty-Subs case is structurally unreachable: a Profile with no Subs reaped on the last
     /// detach. Routed defensively to `finalize_anchor_lost` for idempotence.
@@ -1380,8 +1387,8 @@ impl Engine {
         }
     }
 
-    /// All-dynamic anchor-terminal teardown. Narrates each minted Sub's reap, removes every
-    /// dynamic Sub from `SubRegistry`, then reaps the Profile entirely.
+    /// All-dynamic anchor-terminal teardown. Narrates each minted Sub's reap, removes every dynamic
+    /// Sub from `SubRegistry`, then reaps the Profile entirely.
     ///
     /// The reap delegates to [`Engine::reap_profile`] / [`Engine::finish_burst_to_idle`] depending
     /// on the Profile's state — mirrors `detach_sub_inner`'s lifecycle dispatch but force-runs the
@@ -2892,29 +2899,28 @@ impl Engine {
     /// - **Descent** ([`ProfileId`]): Profiles currently descending whose
     ///   `DescentState.current_prefix() == resource` (`ProfileState::Pending(d)`). Each descent
     ///   owner gets a fresh probe via [`Engine::on_descent_event`].
-    /// - **Recovery** ([`ProfileId`]): `Idle` Profiles whose `watch_root_parent ==
-    ///   Some(resource)` and whose anchor is currently absent (`current.is_none()`).
+    /// - **Recovery** ([`ProfileId`]): `Idle` Profiles whose `watch_root_parent == Some(resource)`
+    ///   and whose anchor is currently absent (`current.is_none()`).
     ///   [`Engine::start_pending_recovery`] re-enters pending descent.
     ///
     /// **O(1) carrier gate.** The scan body is O(profiles), but under a sustained storm every
     /// Profile is in a steady `Active` burst, so it iterates the full registry only to return
     /// empty. The registry maintains a `nonsteady` count of the carrier-*eligible* owners
     /// ([`Profile::is_nonsteady`]); when it is zero no carrier of either class can exist, so the
-    /// scan is provably empty and skipped in O(1) — the keeps-up-storm win an operator feels as
-    /// the daemon no longer pegging a core during a build.
+    /// scan is provably empty and skipped in O(1) — the keeps-up-storm win an operator feels as the
+    /// daemon no longer pegging a core during a build.
     ///
     /// The count is over a pure state(+anchor) bucket, deliberately *not* the per-resource index a
     /// naïve reading invites. The recovery predicate couples multiple fields (`state` +
-    /// `watch_root_parent` + anchor presence), and
-    /// [`Profile::materialize_anchor`] writes `state` outside the
-    /// [`specter_core::ProfileMap::transition_state`] chokepoint — a state-keyed index silently
-    /// desyncs at that bypass. The bucket instead over-approximates to a single-field-ish predicate
-    /// that is invariant under the bypass by construction (`Pending` and anchorless `Idle` are the
-    /// same counted bucket) and sound (every true carrier is counted), so a zero gate is never a
-    /// false skip; it is also *tight* — a healthy anchored `Idle` Profile is excluded, so a quiet
-    /// watcher coexisting with a storm does not defeat the gate. A `#[cfg(debug_assertions)]` full
-    /// recount tripwire below pins each maintained count every call; release pays only the O(1)
-    /// compare.
+    /// `watch_root_parent` + anchor presence), and [`Profile::materialize_anchor`] writes `state`
+    /// outside the [`specter_core::ProfileMap::transition_state`] chokepoint — a state-keyed index
+    /// silently desyncs at that bypass. The bucket instead over-approximates to a single-field-ish
+    /// predicate that is invariant under the bypass by construction (`Pending` and anchorless
+    /// `Idle` are the same counted bucket) and sound (every true carrier is counted), so a zero
+    /// gate is never a false skip; it is also *tight* — a healthy anchored `Idle` Profile is
+    /// excluded, so a quiet watcher coexisting with a storm does not defeat the gate. A
+    /// `#[cfg(debug_assertions)]` full recount tripwire below pins each maintained count every
+    /// call; release pays only the O(1) compare.
     fn classify_event_carriers(&self, resource: ResourceId) -> EventCarriers {
         #[cfg(debug_assertions)]
         {
@@ -2949,13 +2955,13 @@ impl Engine {
 }
 
 /// Per-resource dispatch fan-out collected by [`Engine::classify_event_carriers`]. The SmallVec
-/// inline caps of 2 cover the typical "shared scaffold" case (two Subs anchored at sibling
-/// children of one parent) without a heap allocation.
+/// inline caps of 2 cover the typical "shared scaffold" case (two Subs anchored at sibling children
+/// of one parent) without a heap allocation.
 ///
-/// `descents` (via `current_prefix`) and `recoveries` (via `watch_root_parent`) are honest
-/// parallel fields: the entry helpers genuinely differ ([`Engine::on_descent_event`] re-probes a
-/// live descent; `start_pending_recovery` asserts an `Idle` Profile and re-enters descent), so a
-/// merged list would only force a match-dispatch back into the two distinct helpers.
+/// `descents` (via `current_prefix`) and `recoveries` (via `watch_root_parent`) are honest parallel
+/// fields: the entry helpers genuinely differ ([`Engine::on_descent_event`] re-probes a live
+/// descent; `start_pending_recovery` asserts an `Idle` Profile and re-enters descent), so a merged
+/// list would only force a match-dispatch back into the two distinct helpers.
 struct EventCarriers {
     descents: SmallVec<[ProfileId; 2]>,
     recoveries: SmallVec<[ProfileId; 2]>,

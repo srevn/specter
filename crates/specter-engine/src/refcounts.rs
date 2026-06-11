@@ -2,9 +2,9 @@
 //!
 //! One refcount: the **contributions map** (`Resource.contributions`) gates FD lifetime — a
 //! Resource is Watched iff the map is non-empty. The map is a `BTreeMap<ContribKey, ClassSet>`:
-//! each key identifies a single contributor (Profile anchor / parent / descent / descendant);
-//! the value is that contributor's `ClassSet` mask. The per-Resource
-//! events union is the OR fold over the map's values.
+//! each key identifies a single contributor (Profile anchor / parent / descent / descendant); the
+//! value is that contributor's `ClassSet` mask. The per-Resource events union is the OR fold over
+//! the map's values.
 //!
 //! Each primitive emits `WatchOp` ops as follows:
 //! - [`add_watch`]: `Watch` on the empty → non-empty edge OR on any union change at non-empty.
@@ -92,9 +92,9 @@ pub(crate) fn add_watch(
 /// **No registry walk.** Removal is by key; no Profile state is read.
 ///
 /// **No release-of-state contract.** The caller's bookkeeping (`Profile.anchor_claim`,
-/// `Profile.watch_root_parent`, `Profile.state`, etc.) can be cleared in either
-/// order relative to this call — the contribution map is the source of truth for refcounting,
-/// independent of owner state.
+/// `Profile.watch_root_parent`, `Profile.state`, etc.) can be cleared in either order relative to
+/// this call — the contribution map is the source of truth for refcounting, independent of owner
+/// state.
 ///
 /// **Idempotent.** Absent key ⇒ silent no-op. Reachable post-vacate ([`specter_core::Tree::vacate`]
 /// cleared the map) or post-prior-sub-walk (a sister helper drained this slot earlier in the same
@@ -137,16 +137,14 @@ pub(crate) fn sub_watch(tree: &mut Tree, r: ResourceId, key: ContribKey, out: &m
 /// **Anchors and contributions.** [`specter_core::Resource::has_anchors`] reads three retention
 /// sources: `children`, the `profiles` back-ref, and the contributions map itself. The map is
 /// canonical for "this slot holds a live kernel-watch claim"; removing the last contribution at a
-/// slot zeroes that source, and the slot reaps iff neither back-ref source still reaches into it.
-/// The role tag (`User` / `WatchRootParent` / `DescentScaffold`) is metadata and never gates
-/// retention.
+/// slot zeroes that source, and the slot reaps iff neither back-ref source still reaches into it. The
+/// role tag (`User` / `WatchRootParent` / `DescentScaffold`) is metadata and never gates retention.
 ///
 /// In every production call site, at least one *other* claim is structurally certain to keep the
-/// slot alive across this release — for the descent-prefix release, the prefix's child chain
-/// toward the anchor; for the watch-root parent release, the anchor child slot.
-/// [`specter_core::Tree::try_reap`] cascades upward when its own reap orphans a parent, so a
-/// single release helper at a leaf-most slot transparently frees the whole prefix chain it
-/// owned.
+/// slot alive across this release — for the descent-prefix release, the prefix's child chain toward
+/// the anchor; for the watch-root parent release, the anchor child slot.
+/// [`specter_core::Tree::try_reap`] cascades upward when its own reap orphans a parent, so a single
+/// release helper at a leaf-most slot transparently frees the whole prefix chain it owned.
 ///
 /// **Distinct from [`Tree::vacate`].** Vacate is the protocol terminus: it clears the entire
 /// contribution map in one atomic step, emitting the closing `Unwatch`. Use vacate when every

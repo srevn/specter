@@ -55,7 +55,7 @@ use compact_str::CompactString;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use specter_core::{
     AbsorbMode, BurstHelper, BurstIntent, ClaimKind, DetachReason, Diagnostic, EffectScope,
-    FsEvent, OverflowScope, ProfileStateDiscriminant, ReapTrigger, ResourceKind,
+    EntryKind, FsEvent, OverflowScope, ProfileStateDiscriminant, ReapTrigger, ResourceKind,
     SpliceFailureCause, StateLabel, WatchFailure,
 };
 use std::path::{Path, PathBuf};
@@ -419,6 +419,12 @@ pub(crate) enum WireDiagnostic {
         path: WirePath,
         kind: WireResourceKind,
     },
+    DiscoveryUnsupportedAnchorKind {
+        at: WireTime,
+        source: WireId,
+        path: WirePath,
+        kind: WireEntryKind,
+    },
     DiscoveryFanoutThreshold {
         at: WireTime,
         source: WireId,
@@ -735,6 +741,14 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 path: WirePath::from(path),
                 kind: WireResourceKind::from(*kind),
             },
+            Diagnostic::DiscoveryUnsupportedAnchorKind { source, path, kind } => {
+                Self::DiscoveryUnsupportedAnchorKind {
+                    at: at.clone(),
+                    source: WireId::from(*source),
+                    path: WirePath::from(path),
+                    kind: WireEntryKind::from(*kind),
+                }
+            }
             Diagnostic::DiscoveryFanoutThreshold { source, count } => {
                 Self::DiscoveryFanoutThreshold {
                     at: at.clone(),
@@ -822,6 +836,7 @@ impl WireDiagnostic {
             Self::SubRebound { .. } => "sub_rebound",
             Self::RebindUnknownSub { .. } => "rebind_unknown_sub",
             Self::DiscoveryMinted { .. } => "discovery_minted",
+            Self::DiscoveryUnsupportedAnchorKind { .. } => "discovery_unsupported_anchor_kind",
             Self::DiscoveryFanoutThreshold { .. } => "discovery_fanout_threshold",
             Self::DiscoverySubReaped { .. } => "discovery_sub_reaped",
             Self::InvalidBurstTransition { .. } => "invalid_burst_transition",
@@ -889,6 +904,7 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "sub_rebound",
     "rebind_unknown_sub",
     "discovery_minted",
+    "discovery_unsupported_anchor_kind",
     "discovery_fanout_threshold",
     "discovery_sub_reaped",
     "invalid_burst_transition",
@@ -1093,6 +1109,47 @@ impl WireResourceKind {
             Self::Dir => "dir",
             Self::Unknown => "unknown",
         }
+    }
+}
+
+/// Mirror of [`specter_core::EntryKind`] — the snapshot-side kind, distinct from
+/// [`WireResourceKind`] (the Tree-slot kind) because the Tree projection folds `Symlink`/`Other`
+/// into `File`. `DiscoveryUnsupportedAnchorKind` exists precisely to name those folded-away kinds,
+/// so its wire field must carry the un-projected vocabulary.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WireEntryKind {
+    File,
+    Dir,
+    Symlink,
+    Other,
+}
+
+impl From<EntryKind> for WireEntryKind {
+    fn from(k: EntryKind) -> Self {
+        match k {
+            EntryKind::File => Self::File,
+            EntryKind::Dir => Self::Dir,
+            EntryKind::Symlink => Self::Symlink,
+            EntryKind::Other => Self::Other,
+        }
+    }
+}
+
+impl WireEntryKind {
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::File => "file",
+            Self::Dir => "dir",
+            Self::Symlink => "symlink",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl std::fmt::Display for WireEntryKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
     }
 }
 
@@ -1490,9 +1547,10 @@ impl std::fmt::Display for WireReloadTrigger {
 mod tests {
     use super::{
         KNOWN_WIRE_VARIANTS, WireAbsorbMode, WireBurstHelper, WireBurstIntent, WireClaimKind,
-        WireDetachReason, WireDiagnostic, WireEffectScope, WireFsEvent, WireOverflowScope,
-        WirePath, WireProfileStateDiscriminant, WireReapTrigger, WireReloadTrigger,
-        WireResourceKind, WireSpliceFailureCause, WireStateLabel, WireTime, WireWatchFailure,
+        WireDetachReason, WireDiagnostic, WireEffectScope, WireEntryKind, WireFsEvent,
+        WireOverflowScope, WirePath, WireProfileStateDiscriminant, WireReapTrigger,
+        WireReloadTrigger, WireResourceKind, WireSpliceFailureCause, WireStateLabel, WireTime,
+        WireWatchFailure,
     };
     use crate::ipc::protocol::WireId;
     use std::collections::BTreeSet;
@@ -1829,6 +1887,12 @@ mod tests {
                 path: WirePath::from(Path::new("/srv/app1/log")),
                 kind: WireResourceKind::Dir,
             },
+            WireDiagnostic::DiscoveryUnsupportedAnchorKind {
+                at: at(),
+                source: WireId(194),
+                path: WirePath::from(Path::new("/srv/app1/current")),
+                kind: WireEntryKind::Symlink,
+            },
             WireDiagnostic::DiscoveryFanoutThreshold {
                 at: at(),
                 source: WireId(191),
@@ -1955,6 +2019,19 @@ mod tests {
                 WireResourceKind::Unknown,
             ],
             WireResourceKind::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_entry_kind_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[
+                WireEntryKind::File,
+                WireEntryKind::Dir,
+                WireEntryKind::Symlink,
+                WireEntryKind::Other,
+            ],
+            WireEntryKind::as_str,
         );
     }
 

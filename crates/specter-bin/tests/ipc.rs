@@ -52,8 +52,7 @@ impl Sandbox {
         let cfg = dir.join("specter.toml");
         let log = dir.join("specter.log");
         let socket = dir.join("specter.sock");
-        // Minimal valid config — no watches. Tests that need watches write a richer
-        // TOML themselves.
+        // Minimal valid config — no watches. Tests that need watches write a richer TOML themselves.
         fs::write(&cfg, "").expect("write empty config");
         Self {
             _tmp: tmp,

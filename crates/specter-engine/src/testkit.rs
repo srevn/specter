@@ -510,8 +510,8 @@ pub fn descent_advance(
 /// decrement).
 ///
 /// **Carve-out callers** that need the rebase probe correlation (e.g. answering with a custom
-/// `Vanished` / `Failed` outcome) read it via `pending_probe_for(pid)` right
-/// after this step — the probe is already in flight, no settle expiry between.
+/// `Vanished` / `Failed` outcome) read it via `pending_probe_for(pid)` right after this step — the
+/// probe is already in flight, no settle expiry between.
 #[must_use]
 pub fn complete_effect_to_rebasing(
     e: &mut Engine,
@@ -561,8 +561,8 @@ pub const fn watch_op_rejected_input(resource: ResourceId) -> Input {
     }
 }
 
-/// The fixture [`MintTemplate`]: a `recursive` `Subtree` minted identity with `ClassSet::EMPTY`
-/// and `MAX_SETTLE`; minted debounce `SETTLE`.
+/// The fixture [`MintTemplate`]: a `recursive` `Subtree` minted identity with `ClassSet::EMPTY` and
+/// `MAX_SETTLE`; minted debounce `SETTLE`.
 #[must_use]
 pub fn mint_template() -> Arc<MintTemplate> {
     Arc::new(MintTemplate {
@@ -613,8 +613,8 @@ pub fn discovery_req(
     )
 }
 
-/// Attach a discovery template Sub for `pattern` at `anchor`, returning the attach `StepOutput` too.
-/// The request shape is [`discovery_req`]'s.
+/// Attach a discovery template Sub for `pattern` at `anchor`, returning the attach `StepOutput`
+/// too. The request shape is [`discovery_req`]'s.
 #[must_use]
 pub fn attach_discovery_returning(
     e: &mut Engine,

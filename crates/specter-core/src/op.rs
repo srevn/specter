@@ -120,8 +120,8 @@ pub enum ProbeRequest {
     /// `lstat` is definitionally authoritative — no subtree to discharge a proof over), no `forced`
     /// (mtime-skip is not a concept for `lstat`).
     AnchorFile {
-        /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and
-        /// used by the Sensor's expectation-map insertion.
+        /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and used
+        /// by the Sensor's expectation-map insertion.
         owner: ProfileId,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
@@ -134,8 +134,8 @@ pub enum ProbeRequest {
     /// (or `Vanished` / `Failed`); the `authority` certifies whether the response discharged the
     /// `obligation`.
     Subtree {
-        /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and
-        /// used by the Sensor's expectation-map insertion.
+        /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and used
+        /// by the Sensor's expectation-map insertion.
         owner: ProfileId,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
@@ -206,15 +206,15 @@ pub enum ProbeRequest {
     /// snapshot (it is never spliced into `Profile.current`). No `obligation` (a structural query
     /// is not a quiescence observation).
     Descent {
-        /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and
-        /// used by the Sensor's expectation-map insertion.
+        /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and used
+        /// by the Sensor's expectation-map insertion.
         owner: ProfileId,
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
         /// Filesystem path of the descent prefix at probe-emission time. The engine routes
         /// responses by `(owner, correlation)` against the owner's state-resident `ProbeSlot` (the
-        /// descent prefix lives on `DescentState`); the walker only needs the path. `Arc::clone`
-        /// of the slot's materialised path — no rebuild.
+        /// descent prefix lives on `DescentState`); the walker only needs the path. `Arc::clone` of
+        /// the slot's materialised path — no rebuild.
         target_path: Arc<Path>,
     },
 }

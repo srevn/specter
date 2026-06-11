@@ -76,16 +76,16 @@
 //!   anchor unconditionally and bypass this helper. `transition_to_verifying` resolves the target
 //!   through it and constructs [`PreFirePhase::Verifying`] with the target on the variant payload
 //!   for the choke to read back.
-//! - [`Engine::emit_owner_probe`] (in `probe`) — the single emission choke. Each
-//!   burst-launch helper is `mint → arm → emit_owner_probe(owner)`, with every post-gate state
-//!   resolution loud (`unreachable!()` on the gate-proven-impossible miss) and the arm guarded at
-//!   its re-acquire edge (`ProbeSlot::arm`) and destroy edge (`Drop` tripwire); the choke resolves
-//!   the owner's state once, reads the correlation back off the armed slot, kind-dispatches, and
-//!   materializes the per-carrier proof obligation as a pure `&self` read (the pre-fire Standard
-//!   burst's `dirty` captured paths as `Chains`; `WholeSubtree` for Seed and the post-fire Rebase —
-//!   no accumulator drain, the fire-tail residual reset is owned by `transition_to_rebasing`).
-//!   Unclassified anchors take the Subtree arm — the walker returns `Vanished` on kind mismatch and
-//!   the engine recovers via descent.
+//! - [`Engine::emit_owner_probe`] (in `probe`) — the single emission choke. Each burst-launch
+//!   helper is `mint → arm → emit_owner_probe(owner)`, with every post-gate state resolution loud
+//!   (`unreachable!()` on the gate-proven-impossible miss) and the arm guarded at its re-acquire
+//!   edge (`ProbeSlot::arm`) and destroy edge (`Drop` tripwire); the choke resolves the owner's
+//!   state once, reads the correlation back off the armed slot, kind-dispatches, and materializes
+//!   the per-carrier proof obligation as a pure `&self` read (the pre-fire Standard burst's `dirty`
+//!   captured paths as `Chains`; `WholeSubtree` for Seed and the post-fire Rebase — no accumulator
+//!   drain, the fire-tail residual reset is owned by `transition_to_rebasing`). Unclassified
+//!   anchors take the Subtree arm — the walker returns `Vanished` on kind mismatch and the engine
+//!   recovers via descent.
 
 use crate::Engine;
 use smallvec::SmallVec;

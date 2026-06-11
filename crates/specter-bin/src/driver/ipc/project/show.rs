@@ -4,8 +4,8 @@
 //! Resolution order matches the `disable` resolver in [`crate::driver::ipc`] so an operator who can
 //! `show foo` can also `disable foo`. Dynamic Subs are addressed through `list -o json`, not
 //! `show`: a synthesised name resolves through `SubRegistry::find_by_name` to a live id, but a
-//! local guard at the lookup site returns `Unknown` for any discovery-minted Sub.
-//! The verb's contract lives at its own callsite, not inside the index.
+//! local guard at the lookup site returns `Unknown` for any discovery-minted Sub. The verb's
+//! contract lives at its own callsite, not inside the index.
 
 use std::collections::BTreeSet;
 use std::time::Instant;
@@ -27,10 +27,10 @@ use super::{program, project_wall};
 ///
 /// Resolution is total:
 /// 1. `engine.subs().find_by_name(name)` resolves to a Sub. If it is operator-declared
-///    (`!is_dynamic()`, discovery templates included) → `Active`; if minted → `Unknown` (the
-///    verb's contract: minted Subs are reached through `list`, not `show`). A minted-Sub hit
-///    short-circuits to `Unknown` rather than falling through, because by the `@`-byte
-///    reservation a synthesised name never appears in `disabled_runtime` or `config.watches`.
+///    (`!is_dynamic()`, discovery templates included) → `Active`; if minted → `Unknown` (the verb's
+///    contract: minted Subs are reached through `list`, not `show`). A minted-Sub hit
+///    short-circuits to `Unknown` rather than falling through, because by the `@`-byte reservation
+///    a synthesised name never appears in `disabled_runtime` or `config.watches`.
 /// 2. `disabled_runtime.contains(name)?`  → `Disabled { Runtime }`
 /// 3. `config.watches[*].name == name && !enabled` → `Disabled { Toml }`
 /// 4. otherwise → `Unknown`
@@ -418,9 +418,9 @@ mod tests {
         }
     }
 
-    /// A minted Sub's synthesised name resolves through `SubRegistry::find_by_name` to a live
-    /// id, but the verb's local guard maps `is_dynamic()` back to `Unknown` — preserving the
-    /// operator contract that minted Subs are addressed through `list`, not `show`.
+    /// A minted Sub's synthesised name resolves through `SubRegistry::find_by_name` to a live id,
+    /// but the verb's local guard maps `is_dynamic()` back to `Unknown` — preserving the operator
+    /// contract that minted Subs are addressed through `list`, not `show`.
     #[test]
     fn show_dynamic_sub_name_resolves_unknown() {
         let req = SubAttachRequest::from_parts(

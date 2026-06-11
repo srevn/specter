@@ -235,8 +235,8 @@ mod tests {
     }
 
     /// `--kind detach` against `SubDetached` matches regardless of reason (`ConfigDiffRemoved`,
-    /// `IpcDisabled`, `AnchorLost`, `ConfigDiffIdentityChanged`). Operators waiting for "this
-    /// Sub left" don't differentiate the cause.
+    /// `IpcDisabled`, `AnchorLost`, `ConfigDiffIdentityChanged`). Operators waiting for "this Sub
+    /// left" don't differentiate the cause.
     #[test]
     fn classify_detach_matches_subdetached_any_reason() {
         for reason in [

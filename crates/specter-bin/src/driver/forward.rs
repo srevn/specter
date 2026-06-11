@@ -136,8 +136,8 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// **`WireTime` projection is also once per call.** The `humantime::format_rfc3339_seconds`
     /// allocation runs once here; every per-diag [`crate::ipc::wire::WireDiagnostic::from`]
     /// projection bumps the `Arc<str>` refcount instead of re-formatting. For a high-fanout
-    /// `StepOutput` (e.g., a 256-fanout `DiscoveryMinted` burst) this collapses N format
-    /// calls into 1 + N atomic refcount bumps.
+    /// `StepOutput` (e.g., a 256-fanout `DiscoveryMinted` burst) this collapses N format calls into
+    /// 1 + N atomic refcount bumps.
     ///
     /// **Empty-slice short-circuit.** Most ticks emit zero diagnostics; the early return keeps the
     /// [`SystemTime::now`] syscall and the `WireTime` projection off the common path.
@@ -478,6 +478,14 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?kind,
             "discovery reconcile minted a dynamic Sub",
         ),
+        Diagnostic::DiscoveryUnsupportedAnchorKind { source, path, kind } => tracing::warn!(
+            ?source,
+            path = %path.display(),
+            ?kind,
+            "discovery match skipped: terminus kind cannot anchor a watch \
+             (regular files and directories only); later unsupported matches \
+             under this template skip silently",
+        ),
         Diagnostic::DiscoveryFanoutThreshold { source, count } => tracing::warn!(
             ?source,
             count,
@@ -534,10 +542,11 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::EffectCompleteForUnknownSub { sub }
         | D::EffectCompleteOutsideAwaiting { sub, .. } => Some(*sub),
 
-        // The discovery trio keys to the *source* template — the entity an operator names in a
+        // The discovery family keys to the *source* template — the entity an operator names in a
         // per-Sub filter. The minted/reaped Sub's own lifecycle signals (`SubAttached` /
         // `SubDetached`) project their own ids alongside.
         D::DiscoveryMinted { source, .. }
+        | D::DiscoveryUnsupportedAnchorKind { source, .. }
         | D::DiscoveryFanoutThreshold { source, .. }
         | D::DiscoverySubReaped { source, .. } => Some(*source),
 

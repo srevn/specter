@@ -35,8 +35,8 @@ use crate::ipc::wire::{WireDiagnostic, WireTime};
 /// reuses one [`String`] for the lifetime of the stream loop, symmetric with
 /// [`crate::ipc::client::subscribe::Subscription`]'s reused inbound `line_buf`. A 1000-evt/s tail
 /// carries no per-event allocation through the human path; the compound-enum Display impls
-/// ([`crate::ipc::wire::WireOverflowScope`] / [`crate::ipc::wire::WireWatchFailure`]) write
-/// through the same formatter so the compound fields likewise carry no allocation.
+/// ([`crate::ipc::wire::WireOverflowScope`] / [`crate::ipc::wire::WireWatchFailure`]) write through
+/// the same formatter so the compound fields likewise carry no allocation.
 pub(crate) fn render(out: &mut String, d: &WireDiagnostic, sty: Styler) {
     let _ = write!(
         out,
@@ -93,6 +93,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::SubRebound { at, .. }
         | WireDiagnostic::RebindUnknownSub { at, .. }
         | WireDiagnostic::DiscoveryMinted { at, .. }
+        | WireDiagnostic::DiscoveryUnsupportedAnchorKind { at, .. }
         | WireDiagnostic::DiscoveryFanoutThreshold { at, .. }
         | WireDiagnostic::DiscoverySubReaped { at, .. }
         | WireDiagnostic::InvalidBurstTransition { at, .. }
@@ -163,6 +164,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::SensorOverflow { .. }
         | W::PerFileDriftDroppedOnRecovery { .. }
         | W::RebindUnknownSub { .. }
+        | W::DiscoveryUnsupportedAnchorKind { .. }
         | W::DiscoveryFanoutThreshold { .. }
         | W::InvalidBurstTransition { .. }
         | W::Missed { .. } => Severity::Warn,
@@ -437,6 +439,13 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "path", path);
             field(out, sty, "kind", kind);
         }
+        WireDiagnostic::DiscoveryUnsupportedAnchorKind {
+            source, path, kind, ..
+        } => {
+            field(out, sty, "source", source.0);
+            field(out, sty, "path", path);
+            field(out, sty, "kind", kind);
+        }
         WireDiagnostic::DiscoveryFanoutThreshold { source, count, .. } => {
             field(out, sty, "source", source.0);
             field(out, sty, "count", count);
@@ -524,9 +533,9 @@ mod tests {
         assert!(s.ends_with('\n'), "newline-terminated: {s:?}");
     }
 
-    /// `SubAttached.source_discovery = Some(_)` renders an extra `source_discovery=N` field;
-    /// `None` omits it entirely. Operators distinguishing operator-declared vs discovery-minted
-    /// Subs read the presence/absence of the field.
+    /// `SubAttached.source_discovery = Some(_)` renders an extra `source_discovery=N` field; `None`
+    /// omits it entirely. Operators distinguishing operator-declared vs discovery-minted Subs read
+    /// the presence/absence of the field.
     #[test]
     fn render_sub_attached_discovery_field_optional() {
         let mut static_attach = String::new();
@@ -784,6 +793,9 @@ mod tests {
             "sub_rebound" | "rebind_unknown_sub" => json!({"diag": tag, "at": at, "sub": id}),
             "discovery_minted" => json!({
                 "diag": tag, "at": at, "source": id, "path": "/x", "kind": "dir",
+            }),
+            "discovery_unsupported_anchor_kind" => json!({
+                "diag": tag, "at": at, "source": id, "path": "/x", "kind": "symlink",
             }),
             "discovery_fanout_threshold" => json!({
                 "diag": tag, "at": at, "source": id, "count": 1024,

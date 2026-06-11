@@ -44,14 +44,15 @@
 use crate::ProbeFailureExt;
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ProbeFailure, ProbeOutcome,
-    ProofAuthority, ProofObligation, ScanConfig,
+    ChildEntry, ClassSet, DirChild, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ProbeFailure,
+    ProbeOutcome, ProfileIdentity, ProofAuthority, ProofObligation, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 /// Recursion-invariant inputs shared across every frame of one subtree probe. Built once at probe
 /// entry ([`walk_root`]) from the `ProbeRequest::Subtree` payload, then threaded by reference into
@@ -377,16 +378,24 @@ pub(super) fn probe_subtree(
     }
 }
 
-/// Sentinel `captured_with` value stamped on every `DirSnapshot` returned from a [`probe_descent`]
-/// walk.
+/// `captured_with` stamp for every `DirSnapshot` a [`probe_descent`] walk returns — the canonical
+/// identity hash of the descent scan shape itself ([`ScanConfig::Descent`] with no settle ceiling
+/// and no event classes; descent is a structural query, so neither knob has meaning here).
 ///
-/// Descent dispatch never reads the field: the snapshot is consumed by `arc.entries.get(name)` and
-/// dropped before any [`specter_core::DirSnapshot::dir_hash`] computation could fold it in. Any
-/// value is therefore sound today. The constant exists so the call site reads as the named contract
-/// rather than a bare `0`, guarding a future caller that pulls a descent snapshot through a
-/// `dir_hash` comparison: an accidental collision with a real `Profile.config_hash` would be
-/// inferable from the name, not from re-deriving the obligation chain.
-const DESCENT_CAPTURED_WITH: u64 = 0;
+/// Descent dispatch never reads the field today (the snapshot is consumed by `arc.entries.get(name)`
+/// and dropped before any [`specter_core::DirSnapshot::dir_hash`] computation could fold it in), but
+/// the honest stamp means a future caller that pulls a descent snapshot through a `dir_hash`
+/// comparison can never collide with a live Profile's `config_hash` by accident — the hash route is
+/// the same one Profile partitioning uses, keyed on a shape no Profile carries. One sip128 per
+/// descent probe; descent is rare (one probe per missing path component during `Pending`).
+fn descent_captured_with() -> u64 {
+    ProfileIdentity {
+        config: ScanConfig::Descent,
+        max_settle: Duration::ZERO,
+        events: ClassSet::EMPTY,
+    }
+    .config_hash()
+}
 
 /// Descent prefix probe. Single-level enumeration of `target_path` under the
 /// [`ScanConfig::Descent`] scan shape, whose predicate arms admit *every* dirent at one level —
@@ -401,9 +410,9 @@ const DESCENT_CAPTURED_WITH: u64 = 0;
 /// here — the `Descent` shape never descends and `baseline=None` makes mtime-skip unreachable, so
 /// it never refuses a skip that could matter.
 ///
-/// `captured_with` is stamped as [`DESCENT_CAPTURED_WITH`] — descent dispatch never reads the field
-/// (the snapshot is consumed by the engine and dropped before any consumer compares hashes), so the
-/// value is observationally irrelevant. Callers should not rely on a particular sentinel.
+/// `captured_with` carries the canonical hash of the descent identity ([`descent_captured_with`]),
+/// honest rather than sentinel-shaped — though descent dispatch never reads the field (the snapshot
+/// is consumed by the engine and dropped before any consumer compares hashes).
 pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
     let mut sink = ProofLedger::default();
     // Descent roots and scopes at the same path: target == anchor, so every dirent's `rel` is its
@@ -412,7 +421,7 @@ pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
         target_path,
         target_path,
         &ScanConfig::Descent,
-        DESCENT_CAPTURED_WITH,
+        descent_captured_with(),
         None,
         &ProofObligation::WholeSubtree,
         false,
