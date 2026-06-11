@@ -37,9 +37,13 @@
 //! on `ProbeRequest::Subtree`'s `anchor_path` and re-derived per dirent via `strip_prefix`.
 //! Matching the predicate body alone is not enough: scope inputs must share an origin too, or an
 //! anchor-relative glob desyncs from an LCA-relative `rel`. The shared basis keeps walker and
-//! engine in lockstep across every scope axis; [`WalkContext::note_filter_drop`] is the runtime
-//! witness of that lockstep — an obligation-chain leaf the walker nonetheless filters degrades the
-//! frame to `Undischarged` rather than silently dropping it.
+//! engine in lockstep across the *structural* scope axes (name + depth + frozen config);
+//! [`WalkContext::note_structural_filter_drop`] is the runtime witness of that lockstep — an
+//! obligation-chain leaf the structural gate nonetheless filters degrades the frame to
+//! `Undischarged` rather than silently dropping it. The kinded gate ([`ScanConfig::accepts_kinded`])
+//! is exempt: kind is time-varying (an atomic replace can flip a chained Dir to a pattern-failing
+//! file between event capture and probe), so its drop is a legitimate identity change the walker
+//! omits as observed-absent-from-scope.
 
 use crate::ProbeFailureExt;
 use compact_str::CompactString;
@@ -67,8 +71,9 @@ use std::time::Duration;
 /// (the `Covered`/`Uncovered(fs_id)` gate at the dirent) and
 /// [`try_mtime_skip`](Self::try_mtime_skip) (the no-op-when-unchanged primitive). The two
 /// obligation-sensitive decisions — [`obligation_at_or_under`](Self::obligation_at_or_under) (the
-/// mtime-skip refusal) and [`note_filter_drop`](Self::note_filter_drop) (the on-chain filter-drop
-/// tripwire) — both project the obligation through the single
+/// mtime-skip refusal) and
+/// [`note_structural_filter_drop`](Self::note_structural_filter_drop) (the structural on-chain
+/// filter-drop tripwire) — both project the obligation through the single
 /// [`chain_through`](Self::chain_through) query, so the chain structure is read one way.
 ///
 /// `anchor_path` is the **scope basis** — the Profile anchor the per-dirent `rel` is measured from
@@ -209,7 +214,8 @@ impl WalkContext<'_> {
     ///
     /// The single read of the obligation's chain structure, shared by the two obligation-sensitive
     /// decisions: [`obligation_at_or_under`](Self::obligation_at_or_under) (the mtime-skip refusal)
-    /// and [`note_filter_drop`](Self::note_filter_drop) (the on-chain filter-drop tripwire).
+    /// and [`note_structural_filter_drop`](Self::note_structural_filter_drop) (the structural
+    /// on-chain filter-drop tripwire).
     ///
     /// Component-wise `Path::starts_with`, not byte-lex: probing `/a` must match a chain `/a/b/c`
     /// (we descend toward the leaf, so `/a` may not be skipped) but not a sibling `/ab`. A
@@ -231,16 +237,22 @@ impl WalkContext<'_> {
         self.chain_through(path) || matches!(self.obligation, ProofObligation::WholeSubtree)
     }
 
-    /// Fold a **filter** drop into the running [`Completeness`], tripping when the drop is a scope
-    /// regression.
+    /// Fold a **structural** filter drop into the running [`Completeness`], tripping when the drop
+    /// is a scope regression.
     ///
-    /// [`enumerate_dir`] calls this at each scope-predicate `continue` (the `accepts_structural`
-    /// gate and the `accepts_kinded` gate) — the drops that mean *out of scope*, distinct from an
-    /// I/O fault (which degrades the frame directly) and from an observed-absent delete (absent
-    /// from `read_dir`, so it never reaches a filter arm). The walker measures scope from the
-    /// anchor on the wire, the same basis the engine's `covers` uses, so every obligation-chain
-    /// leaf the engine tracks is in scope for the walker too: a filter dropping an on-chain dirent
-    /// is a scope regression, never a legitimate exclusion.
+    /// [`enumerate_dir`] calls this at the `accepts_structural` `continue` only. That gate reads
+    /// nothing but the dirent's name and depth against the frozen config (exclude / hidden / depth
+    /// bound / positional segment) — all time-invariant for a chained slot. The walker measures
+    /// scope from the anchor on the wire, the same basis the engine's `covers` uses, so every
+    /// obligation-chain leaf the engine tracks is structurally in scope for the walker too. A rename
+    /// drops the old chained name from `read_dir` entirely (observed-absent, never reaching a filter
+    /// arm), so a structural filter dropping a *present* on-chain dirent can only mean the scope
+    /// basis desynced — a regression, never a legitimate exclusion.
+    ///
+    /// The kinded gate ([`ScanConfig::accepts_kinded`]) carries no such tripwire: it reads the
+    /// dirent's current `is_dir`, which an atomic replace can flip between the chaining event and
+    /// this probe. Its drop is a legitimate identity change, so [`enumerate_dir`] omits the entry
+    /// inline rather than routing it here.
     ///
     /// On regression it is loud in dev (`debug_assert`) and degrades in release — returns
     /// [`Completeness::Incomplete`] so [`snapshot_dir`] records this frame (an ancestor of
@@ -248,7 +260,7 @@ impl WalkContext<'_> {
     /// `level` unchanged. A delete never reaches a filter arm, so a legitimately-removed chain leaf
     /// never trips this — absence and filtering are distinguishable here by construction.
     #[must_use]
-    fn note_filter_drop(&self, child_path: &Path, level: Completeness) -> Completeness {
+    fn note_structural_filter_drop(&self, child_path: &Path, level: Completeness) -> Completeness {
         let on_chain = self.chain_through(child_path);
         debug_assert!(
             !on_chain,
@@ -466,15 +478,17 @@ fn snapshot_dir(
 ///
 /// Errors at this level are skip-and-continue. The level is `Incomplete` iff its own read was
 /// unfaithful: `read_dir` failed (non-NotFound), a dirent / non-UTF-8 / `strip_prefix` / per-child
-/// `lstat` (non-NotFound) fault dropped an entry, or [`WalkContext::note_filter_drop`] caught a
-/// scope filter dropping an on-chain dirent (a should-never-happen scope regression, loud in dev).
-/// Two faults stay `Complete` because they are *observed-absent*, not blindness, and self-correct
-/// (empty/short snapshot hash-differs → `Retry` → converge): `read_dir` `NotFound` (raced-empty
-/// dir) and a per-child `lstat` `NotFound` (a child unlinked between `read_dir` and the `lstat` — a
-/// raced delete during `rm -rf` / `rsync --delete` / log-rotate). Degrading either would wedge that
-/// common scenario into permanent `Undischarged`/never-fire. The partially-populated `BTreeMap`
-/// becomes `DirChild::Covered(empty_or_partial_arc)`; the uncovered variant stays the static-config
-/// gates' (`build_dir_child`).
+/// `lstat` (non-NotFound) fault dropped an entry, or [`WalkContext::note_structural_filter_drop`]
+/// caught the structural gate dropping an on-chain dirent (a should-never-happen scope regression,
+/// loud in dev). Three drops stay `Complete` because they are *observed-absent*, not blindness, and
+/// self-correct (short snapshot hash-differs → `Retry` → converge): `read_dir` `NotFound`
+/// (raced-empty dir), a per-child `lstat` `NotFound` (a child unlinked between `read_dir` and the
+/// `lstat` — a raced delete during `rm -rf` / `rsync --delete` / log-rotate), and a kinded-gate
+/// drop (the dirent's current kind left scope, e.g. an atomic replace swapped a chained Dir for a
+/// pattern-failing file). Degrading any of them would wedge a common production lifecycle into
+/// permanent `Undischarged`/never-fire. The partially-populated `BTreeMap` becomes
+/// `DirChild::Covered(empty_or_partial_arc)`; the uncovered variant stays the static-config gates'
+/// (`build_dir_child`).
 fn enumerate_dir(
     ctx: &WalkContext<'_>,
     path: &Path,
@@ -544,10 +558,10 @@ fn enumerate_dir(
         // is thousands of dirents). Agreement invariant with the recursion edge: the structural
         // depth bound admits every depth `descends_into` reaches (`descends_into(d−1) ⇒ dirents
         // enumerate at depth d ⇒ the bound admits d`), so a drop here is always a genuine scope
-        // filter, never a depth-bound desync — `note_filter_drop` is the runtime tripwire for
-        // exactly that regression.
+        // filter, never a depth-bound desync — `note_structural_filter_drop` is the runtime
+        // tripwire for exactly that regression.
         if !ctx.config.accepts_structural(rel, entry_depth) {
-            completeness = ctx.note_filter_drop(&child_path, completeness);
+            completeness = ctx.note_structural_filter_drop(&child_path, completeness);
             continue;
         }
         let cmeta = match std::fs::symlink_metadata(&child_path) {
@@ -581,8 +595,21 @@ fn enumerate_dir(
         // gate above has already discharged the structural half, so re-running `accepts` here would
         // re-evaluate it for nothing. Same `entry_depth` both halves read — one derivation from
         // `rel`, so the positional gates cannot desync.
+        //
+        // A drop here carries no scope-regression tripwire: `accepts_kinded` reads the dirent's
+        // *current* kind, which can flip between the event that chained this path and this probe (an
+        // atomic replace — a same-named pattern-failing file swapped over a chained Dir, or a
+        // mid-chain position turned non-dir). The engine chained the path against its prior kind;
+        // the walker observes the new one. That divergence is a legitimate identity change, not a
+        // basis desync, so the entry is observed-absent-from-scope: omit it and leave the level
+        // `Complete` (the raced-unlink arm's semantics). The omission hash-differs from a baseline
+        // that still holds the prior in-scope entity, firing the change through the ordinary diff
+        // path instead of wedging the obligation in `Undischarged`.
         if !ctx.config.accepts_kinded(rel, is_dir, entry_depth) {
-            completeness = ctx.note_filter_drop(&child_path, completeness);
+            tracing::trace!(
+                ?child_path,
+                "probe_subtree dirent kind now out of scope (atomic replace); omitting"
+            );
             continue;
         }
 
@@ -629,8 +656,8 @@ fn build_dir_child(
     if !ctx.should_recurse(child_depth, cmeta.dev()) {
         // Uncovered branch: not recursive, beyond max_depth, or cross-fs. Walker stores the entry
         // but does not recurse — the dirent is still observed, so this is not a filter drop and
-        // carries no `note_filter_drop` tripwire: any out-of-scope descendant below an Uncovered
-        // dir is on no obligation chain.
+        // carries no `note_structural_filter_drop` tripwire: any out-of-scope descendant below an
+        // Uncovered dir is on no obligation chain.
         return ChildEntry::Dir(DirChild::Uncovered(fs_id));
     }
     // Build the subdir's DirMeta from the caller-held `cmeta`: a second

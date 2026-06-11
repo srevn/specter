@@ -1551,12 +1551,16 @@ fn depth_is_anchor_relative_when_rooted_below_anchor() {
 // ---------------------------------------------------------------- walk: on-chain filter-drop
 // tripwire
 //
-// `WalkContext::note_filter_drop` is the runtime witness that walker scope equals engine `covers`: an
-// obligation-chain leaf the walker nonetheless filters is a scope regression (the engine only chains
-// covers()-accepted paths, which are walker-accepted under the shared anchor basis). Feeding the
-// nested-secret fixture with `anchor_path == target` sets the scope basis to the LCA instead of the
-// true anchor, so the start-anchored `secret/**` matches the LCA-relative `secret/a` and drops the
-// on-chain leaf. The walker refuses to certify it: loud in dev, degrade to `Undischarged` in release.
+// `WalkContext::note_structural_filter_drop` is the runtime witness that walker *structural* scope
+// equals engine `covers`: an obligation-chain leaf the structural gate filters is a scope regression
+// (the engine only chains covers()-accepted paths, structurally walker-accepted under the shared
+// anchor basis — name + depth against frozen config). Feeding the nested-secret fixture with
+// `anchor_path == target` sets the scope basis to the LCA instead of the true anchor, so the
+// start-anchored `secret/**` matches the LCA-relative `secret/a` and drops the on-chain leaf at the
+// structural (exclude) gate. The walker refuses to certify it: loud in dev, degrade to
+// `Undischarged` in release. The kinded gate carries no such tripwire (its drop is a legitimate
+// atomic-replace identity change) — `on_chain_kinded_drop_omits_and_stays_authoritative` pins that
+// distinction.
 
 #[cfg(debug_assertions)]
 #[test]
@@ -1583,6 +1587,59 @@ fn on_chain_filter_drop_degrades_to_undischarged_in_release() {
     assert!(
         matches!(authority, ProofAuthority::Undischarged { .. }),
         "an on-chain filter drop degrades the frame ⇒ refuse to fire; got {authority:?}",
+    );
+}
+
+// The kinded gate carries no on-chain tripwire — kind is time-varying. The structural gate above
+// reads only name + depth against frozen config, so an on-chain drop there is a real basis desync;
+// `accepts_kinded` reads the dirent's *current* kind, which an atomic replace can flip between the
+// event that chained the path and this probe. A path chained while it was a Dir, swapped for a
+// same-named pattern-failing file before the probe, is dropped at the kinded gate — observed-absent
+// -from-scope, not a regression. The walker omits it and stays `Authoritative`; the omission
+// hash-differs from a baseline holding the prior Dir, so the change fires through the diff path
+// rather than wedging the obligation in `Undischarged`.
+
+#[test]
+fn on_chain_kinded_drop_omits_and_stays_authoritative() {
+    let tmp = TempDir::new().unwrap();
+    // A regular file where the engine had chained a Dir of the same name. Under `pattern = *.log`
+    // a non-`.log` file fails the kinded gate, while the structural gate (recursive, no
+    // exclude/hidden/depth bound) admits it — so the drop lands on the kinded gate alone, the path
+    // the previous two tests cannot reach.
+    std::fs::write(tmp.path().join("build"), b"").unwrap();
+    let cfg = ScanConfig::builder()
+        .recursive(true)
+        .pattern(GlobPattern::compile("*.log").unwrap())
+        .build();
+    let mut chain = BTreeSet::new();
+    chain.insert(Arc::from(tmp.path().join("build")));
+    let outcome = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &chains_from(chain),
+        false,
+    );
+
+    let ProbeOutcome::SubtreeProven {
+        snapshot,
+        authority,
+    } = outcome
+    else {
+        panic!("expected SubtreeProven, got {outcome:?}");
+    };
+    assert!(
+        snapshot.entries().is_empty(),
+        "the pattern-failing file is out of scope and omitted; got {:?}",
+        snapshot.entries().keys().collect::<Vec<_>>(),
+    );
+    assert_eq!(
+        authority,
+        ProofAuthority::Authoritative,
+        "a kinded-gate drop is observed-absent-from-scope, not a degraded frame — the obligation \
+         discharges so the change fires through the diff path; got {authority:?}",
     );
 }
 
