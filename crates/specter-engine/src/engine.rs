@@ -257,7 +257,7 @@ impl Engine {
         // and transitively forbids a chain-shaped *template* (its mint would be a template-less Sub
         // on a chain Profile and trip this same assert at mint time).
         debug_assert_eq!(
-            req.params.template.is_some(),
+            req.params.is_template(),
             req.identity.config.match_chain().is_some(),
             "attach_sub_inner: SubParams::template ⟺ ScanConfig::MatchChain \
              (a template mints; a chain Profile reconciles — neither exists without the other)",
@@ -430,7 +430,7 @@ impl Engine {
     /// Consumes `params` for the [`Sub::from_request`] move (which moves `params.name` into
     /// `Sub.name`), so the narration name is captured first as one `CompactString` clone — inline
     /// for typical short names, the single irreducible copy on the static attach path.
-    /// `source_discovery` is a cheap `Option<SubId>` copy.
+    /// `params.minted_by()` is a cheap `Option<SubId>` copy.
     ///
     /// Sole emitter of `SubAttached`; downstream Phase-3 helpers never re-emit. The diagnostic is
     /// pure operator narration — identity is resolved engine-side via the registry's `by_name`
@@ -442,7 +442,7 @@ impl Engine {
         out: &mut StepOutput,
     ) -> SubId {
         let diag_name = params.name.clone();
-        let diag_source_discovery = params.source_discovery;
+        let diag_source_discovery = params.minted_by();
         let sub_id = self.subs.insert(Sub::from_request(profile_id, params));
         out.diagnostics.push(Diagnostic::SubAttached {
             sub: sub_id,
@@ -711,11 +711,11 @@ impl Engine {
     /// burst transitions that need a `now`). Bursts running on detached Profiles continue under
     /// their existing schedule until `finish_burst_to_idle`.
     ///
-    /// **Detaching a discovery template cascades to its minted set**: every Sub with
-    /// `source_discovery == sub` detaches recursively under
+    /// **Detaching a discovery template cascades to its minted set**: every Sub it minted
+    /// (`minted_by() == Some(sub)`) detaches recursively under
     /// [`DetachReason::DiscoverySourceDetached`], whatever `reason` removed the template (IPC
-    /// disable, config removal, identity change). Depth is structurally one — minted Subs carry
-    /// `template: None`, so the recursive frames never re-enter the cascade arm.
+    /// disable, config removal, identity change). Depth is structurally one — minted Subs are never
+    /// themselves templates, so the recursive frames never re-enter the cascade arm.
     pub(crate) fn detach_sub_inner(
         &mut self,
         sub: SubId,
@@ -723,7 +723,7 @@ impl Engine {
         out: &mut StepOutput,
     ) {
         let (profile_id, was_template) = match self.subs.remove(sub) {
-            Some(s) => (s.profile(), s.template.is_some()),
+            Some(s) => (s.profile(), s.is_template()),
             None => {
                 out.diagnostics.push(Diagnostic::DetachUnknownSub { sub });
                 return;
@@ -751,7 +751,7 @@ impl Engine {
             let minted: Vec<SubId> = self
                 .subs
                 .iter()
-                .filter(|(_, s)| s.source_discovery == Some(sub))
+                .filter(|(_, s)| s.minted_by() == Some(sub))
                 .map(|(id, _)| id)
                 .collect();
             for mid in minted {

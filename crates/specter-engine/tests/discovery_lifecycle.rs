@@ -202,8 +202,8 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
             "minted Profile {mp:?} cold-Seed probe rides the reconcile step",
         );
         let s = e.subs().get(mid).unwrap();
-        assert_eq!(s.source_discovery, Some(sid), "mint carries its source");
-        assert!(s.template.is_none(), "minted Subs are never templates");
+        assert_eq!(s.minted_by(), Some(sid), "mint carries its source");
+        assert!(!s.is_template(), "minted Subs are never templates");
     }
     let attached = out
         .diagnostics

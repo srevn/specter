@@ -39,7 +39,7 @@ pub(crate) fn status(
         discovery_active: engine
             .subs()
             .iter()
-            .filter(|(_, s)| s.template.is_some())
+            .filter(|(_, s)| s.is_template())
             .count(),
         config_path: WirePath::from(config_path),
         socket_path: WirePath::from(&ds.socket_path),

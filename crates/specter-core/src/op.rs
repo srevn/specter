@@ -164,9 +164,9 @@ pub enum ProbeRequest {
         /// not unsound: the per-dirent `strip_prefix` fails, drops the dirent, and degrades the
         /// level ⇒ the proof refuses to fire.
         anchor_path: Arc<Path>,
-        /// `ScanConfig` to honour (recursive, hidden, exclude, pattern, `max_depth`). The
-        /// Profile's frozen config behind its sharing handle — a refcount bump at emit time;
-        /// workers read the same allocation concurrently across probes.
+        /// `ScanConfig` to honour (recursive, hidden, exclude, pattern, `max_depth`). The Profile's
+        /// frozen config behind its sharing handle — a refcount bump at emit time; workers read the
+        /// same allocation concurrently across probes.
         scan_config: Arc<ScanConfig>,
         /// `Profile.config_hash` at emission time. Walker stamps every `DirSnapshot.captured_with`
         /// so two Profiles sharing a Resource with different filters cannot produce identical

@@ -1443,10 +1443,10 @@ impl Engine {
         //    implied (the template stays live and re-mints on reappearance).
         let sub_ids: SmallVec<[SubId; 2]> = self.subs.at(profile_id).iter().copied().collect();
         for sid in sub_ids.iter().copied() {
-            let Some(source_discovery) = self.subs.get(sid).map(|s| s.source_discovery) else {
+            let Some(minted_by) = self.subs.get(sid).map(Sub::minted_by) else {
                 continue;
             };
-            match source_discovery {
+            match minted_by {
                 Some(src) => {
                     out.diagnostics.push(Diagnostic::DiscoverySubReaped {
                         source: src,

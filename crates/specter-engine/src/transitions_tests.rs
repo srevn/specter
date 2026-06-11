@@ -76,15 +76,13 @@ fn engine_with_attached_sub() -> (
             MAX_SETTLE,
             DEFAULT_EVENTS,
         ),
-        params: SubParams {
-            name: "test-sub".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "test-sub".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -238,15 +236,13 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
             MAX_SETTLE,
             NO_EVENTS,
         ),
-        params: SubParams {
-            name: "test-sub".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "test-sub".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -305,15 +301,13 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
             MAX_SETTLE,
             NO_EVENTS,
         ),
-        params: SubParams {
-            name: "test-sub".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "test-sub".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -369,15 +363,13 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
             MAX_SETTLE,
             NO_EVENTS,
         ),
-        params: SubParams {
-            name: "test-sub".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "test-sub".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -540,15 +532,13 @@ fn kind_mismatched_response_routes_through_finalize_anchor_lost_debug() {
             MAX_SETTLE,
             NO_EVENTS,
         ),
-        params: SubParams {
-            name: "test-sub".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "test-sub".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -632,15 +622,13 @@ fn attach_sub_existing_profile_bumps_refcount() {
             MAX_SETTLE,
             DEFAULT_EVENTS,
         ),
-        params: SubParams {
-            name: "second".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "second".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let out = e.step(Input::AttachSub(req), now);
     let sid2 = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -1004,15 +992,13 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
             MAX_SETTLE,
             DEFAULT_EVENTS,
         ),
-        params: SubParams {
-            name: "build".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "build".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -1100,15 +1086,13 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
             MAX_SETTLE,
             DEFAULT_EVENTS,
         ),
-        params: SubParams {
-            name: "build".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "build".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -1643,15 +1627,13 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
             MAX_SETTLE,
             ClassSet::STRUCTURE,
         ),
-        params: SubParams {
-            name: "test-sub".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "test-sub".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -2237,15 +2219,13 @@ fn effect_emission_carries_diff_when_needs_diff() {
             MAX_SETTLE,
             NO_EVENTS,
         ),
-        params: SubParams {
-            name: "fmt".into(),
-            program: diff_program(), // references ${specter.created}
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "fmt".into(),
+            diff_program(), // references ${specter.created}
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -2366,15 +2346,13 @@ fn probe_op_for_file_anchor_is_file_kind() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
-        params: SubParams {
-            name: "file-sub".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "file-sub".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
@@ -3128,15 +3106,13 @@ fn sensor_overflow_resource_scope_filters_profiles() {
             MAX_SETTLE,
             NO_EVENTS,
         ),
-        params: SubParams {
-            name: "sub-a".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "sub-a".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let req_b = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(b),
@@ -3392,15 +3368,13 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
         Input::AttachSub(SubAttachRequest {
             anchor: SubAttachAnchor::Resource(r),
             identity: ProfileIdentity::new(cfg.clone(), MAX_SETTLE, NO_EVENTS),
-            params: SubParams {
-                name: "fast".into(),
-                program: empty_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: Duration::from_millis(50),
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            params: SubParams::spawn(
+                "fast".into(),
+                empty_program(),
+                EffectScope::SubtreeRoot,
+                Duration::from_millis(50),
+                false,
+            ),
         }),
         now,
     );
@@ -3411,15 +3385,13 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
         Input::AttachSub(SubAttachRequest {
             anchor: SubAttachAnchor::Resource(r),
             identity: ProfileIdentity::new(cfg, MAX_SETTLE, NO_EVENTS),
-            params: SubParams {
-                name: "slow".into(),
-                program: empty_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: Duration::from_millis(200),
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            params: SubParams::spawn(
+                "slow".into(),
+                empty_program(),
+                EffectScope::SubtreeRoot,
+                Duration::from_millis(200),
+                false,
+            ),
         }),
         now,
     );
@@ -3449,15 +3421,13 @@ fn config_diff_added_only_attaches_subs() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
-        params: SubParams {
-            name: "added".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "added".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let mut diff = specter_core::SubRegistryDiff::default();
     diff.added.push(req);
@@ -3609,15 +3579,13 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
             MAX_SETTLE,
             ClassSet::DEFAULT_PER_FILE,
         ),
-        params: SubParams {
-            name: "fmt".into(),
-            program: diff_program(),
-            scope: EffectScope::PerStableFile,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "fmt".into(),
+            diff_program(),
+            EffectScope::PerStableFile,
+            SETTLE,
+            false,
+        ),
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -3721,15 +3689,13 @@ fn per_stable_file_skips_dir_entries() {
             MAX_SETTLE,
             ClassSet::DEFAULT_PER_FILE,
         ),
-        params: SubParams {
-            name: "fmt".into(),
-            program: diff_program(),
-            scope: EffectScope::PerStableFile,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "fmt".into(),
+            diff_program(),
+            EffectScope::PerStableFile,
+            SETTLE,
+            false,
+        ),
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -3962,15 +3928,13 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
-        params: SubParams {
-            name: "fmt".into(),
-            program: empty_program(),
-            scope: EffectScope::PerStableFile,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "fmt".into(),
+            empty_program(),
+            EffectScope::PerStableFile,
+            SETTLE,
+            false,
+        ),
     };
     let _ = e.step(Input::AttachSub(req), now);
     let pid = e.profiles.iter().next().unwrap().0;
@@ -4044,15 +4008,13 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
-        params: SubParams {
-            name: "formatter".into(),
-            program: empty_program(),
-            scope: EffectScope::PerStableFile,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "formatter".into(),
+            empty_program(),
+            EffectScope::PerStableFile,
+            SETTLE,
+            false,
+        ),
     };
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
@@ -4071,15 +4033,13 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
-        params: SubParams {
-            name: "formatter-2".into(),
-            program: empty_program(),
-            scope: EffectScope::PerStableFile,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "formatter-2".into(),
+            empty_program(),
+            EffectScope::PerStableFile,
+            SETTLE,
+            false,
+        ),
     };
     let _ = e.step(Input::AttachSub(req2), Instant::now());
     assert!(e.profiles.get(pid).unwrap().has_per_file_fds());
@@ -4105,15 +4065,13 @@ fn structure_only_profile_has_per_file_fds_false() {
             MAX_SETTLE,
             ClassSet::STRUCTURE,
         ),
-        params: SubParams {
-            name: "ls-only".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "ls-only".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -4427,15 +4385,13 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
-        params: SubParams {
-            name: "test-sub".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "test-sub".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -4614,15 +4570,13 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
-        params: SubParams {
-            name: "test-sub".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "test-sub".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -6328,15 +6282,13 @@ fn attach_per_stable_file_sibling(
             MAX_SETTLE,
             DEFAULT_EVENTS,
         ),
-        params: SubParams {
-            name: "per-file-sibling".into(),
-            program: empty_program(),
-            scope: EffectScope::PerStableFile,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "per-file-sibling".into(),
+            empty_program(),
+            EffectScope::PerStableFile,
+            SETTLE,
+            false,
+        ),
     };
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("per-file sibling attached");
@@ -6675,15 +6627,13 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
             MAX_SETTLE,
             DEFAULT_EVENTS,
         ),
-        params: SubParams {
-            name: "sibling".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "sibling".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let out_b = e.step(Input::AttachSub(req_b), now);
     let sid_b = specter_core::testkit::first_attached_sub(&out_b).expect("sibling attached");
@@ -7546,15 +7496,13 @@ mod props {
                 MAX_SETTLE,
                 NO_EVENTS,
             ),
-            params: SubParams {
-                name: "test".into(),
-                program: empty_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            params: SubParams::spawn(
+                "test".into(),
+                empty_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         };
         let out = e.step(Input::AttachSub(req), now);
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");

@@ -555,11 +555,11 @@ pub(crate) fn compute_config_hash(
 /// the sole identity operation — a structural derive would be a second identity route that could
 /// diverge from the hash the partition actually keys on.
 ///
-/// `config` sits behind an `Arc`: an identity is frozen at construction and then travels — onto
-/// the Profile, into every `MintTemplate` identity clone at mint time, and (the config half alone)
-/// onto each `ProbeRequest::Subtree` wire — so each of those is a refcount bump, never a
-/// `ScanConfig` deep-copy. [`Self::new`] is the sole minting point of the handle; the other two
-/// fields are `Copy`, so `ProfileIdentity: Clone` is cheap by construction.
+/// `config` sits behind an `Arc`: an identity is frozen at construction and then travels — onto the
+/// Profile, into every `MintTemplate` identity clone at mint time, and (the config half alone) onto
+/// each `ProbeRequest::Subtree` wire — so each of those is a refcount bump, never a `ScanConfig`
+/// deep-copy. [`Self::new`] is the sole minting point of the handle; the other two fields are
+/// `Copy`, so `ProfileIdentity: Clone` is cheap by construction.
 #[derive(Clone, Debug)]
 pub struct ProfileIdentity {
     pub config: Arc<ScanConfig>,

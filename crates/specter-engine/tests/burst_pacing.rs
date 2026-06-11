@@ -34,15 +34,13 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
-        params: SubParams {
-            name: "build".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "build".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -160,15 +158,13 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
-        params: SubParams {
-            name: "build".into(),
-            program: empty_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        params: SubParams::spawn(
+            "build".into(),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     };
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");

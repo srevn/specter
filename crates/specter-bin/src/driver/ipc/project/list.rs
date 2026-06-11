@@ -90,7 +90,7 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
         disabled: None,
         sub: Some(WireId::from(sid)),
         profile: Some(WireId::from(sub.profile())),
-        source_discovery: sub.source_discovery.map(WireId::from),
+        source_discovery: sub.minted_by().map(WireId::from),
     }
 }
 
@@ -330,15 +330,14 @@ mod tests {
                 Duration::from_hours(1),
                 ClassSet::DEFAULT_SUBTREE_ROOT,
             ),
-            SubParams {
-                name: CompactString::const_new("template@/tmp/dyn_anchor"),
+            SubParams::minted(
+                CompactString::const_new("template@/tmp/dyn_anchor"),
                 program,
-                scope: EffectScope::SubtreeRoot,
-                settle: Duration::from_millis(100),
-                log_output: false,
-                template: None,
-                source_discovery: Some(SubId::default()),
-            },
+                EffectScope::SubtreeRoot,
+                Duration::from_millis(100),
+                false,
+                SubId::default(),
+            ),
         );
         let mut engine = Engine::new();
         let _ = engine.step(Input::AttachSub(req), Instant::now());

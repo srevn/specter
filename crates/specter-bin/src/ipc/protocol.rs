@@ -407,7 +407,7 @@ pub(crate) struct ListRow {
     pub(crate) sub: Option<WireId>,
     /// `ProfileId` projection of the Sub's hosting Profile. `None` for non-attached rows.
     pub(crate) profile: Option<WireId>,
-    /// `Sub.source_discovery` projection — `Some(_)` iff the Sub is discovery-minted, `None` for
+    /// `Sub::minted_by()` projection — `Some(_)` iff the Sub is discovery-minted, `None` for
     /// operator-declared Subs (templates included) and for non-attached rows.
     pub(crate) source_discovery: Option<WireId>,
 }
@@ -485,9 +485,9 @@ pub(crate) struct SubDetails {
     pub(crate) absorb_count: u64,
     /// `Sub.settle.as_millis()`.
     pub(crate) settle_ms: u64,
-    /// `Sub.source_discovery` projection — `Some(_)` iff the Sub was minted by a discovery
-    /// template. Distinct from a TOML-declared Sub with the same anchor: the source id locates
-    /// which template produced the entry.
+    /// `Sub::minted_by()` projection — `Some(_)` iff the Sub was minted by a discovery template.
+    /// Distinct from a TOML-declared Sub with the same anchor: the source id locates which template
+    /// produced the entry.
     pub(crate) source_discovery: Option<WireId>,
     /// `Sub.scope` projection.
     pub(crate) scope: WireEffectScope,

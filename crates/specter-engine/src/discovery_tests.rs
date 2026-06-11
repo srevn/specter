@@ -132,15 +132,13 @@ fn plain_sub_on_chain_profile_is_unconstructable() {
                 MAX_SETTLE,
                 ClassSet::STRUCTURE,
             ),
-            SubParams {
-                name: "plain".into(),
-                program: empty_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "plain".into(),
+                empty_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         )),
         Instant::now(),
     );

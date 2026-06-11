@@ -123,7 +123,7 @@ fn project_details(
         absorb_count: profile.map_or(0, Profile::absorb_count),
         settle_ms: u64::try_from(sub.settle.as_millis())
             .expect("Duration::as_millis fits u64 for any operator-meaningful settle window"),
-        source_discovery: sub.source_discovery.map(WireId::from),
+        source_discovery: sub.minted_by().map(WireId::from),
         scope: WireEffectScope::from(sub.scope),
         program: program::render(&sub.program),
     }
@@ -430,15 +430,14 @@ mod tests {
                 Duration::from_hours(1),
                 ClassSet::DEFAULT_SUBTREE_ROOT,
             ),
-            SubParams {
-                name: CompactString::const_new("template@/tmp/dyn_anchor"),
-                program: trivial_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: Duration::from_millis(100),
-                log_output: false,
-                template: None,
-                source_discovery: Some(SubId::default()),
-            },
+            SubParams::minted(
+                CompactString::const_new("template@/tmp/dyn_anchor"),
+                trivial_program(),
+                EffectScope::SubtreeRoot,
+                Duration::from_millis(100),
+                false,
+                SubId::default(),
+            ),
         );
         let mut engine = Engine::new();
         let _ = engine.step(Input::AttachSub(req), Instant::now());
@@ -490,8 +489,7 @@ mod tests {
                 .subs()
                 .get(sid)
                 .expect("live sub")
-                .template
-                .is_some(),
+                .is_template(),
             "fixture lowered to a template (load-bearing precondition)",
         );
 

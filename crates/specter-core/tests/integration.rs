@@ -59,15 +59,13 @@ fn shared_profile_via_config_hash() {
     });
     let _sid_a = subs.insert(Sub::from_request(
         pid_a,
-        SubParams {
-            name: "build-a".into(),
-            program: build_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: SETTLE,
-            log_output: false,
-            template: None,
-            source_discovery: None,
-        },
+        SubParams::spawn(
+            "build-a".into(),
+            build_program(),
+            EffectScope::SubtreeRoot,
+            SETTLE,
+            false,
+        ),
     ));
 
     // Sub B: same (resource, hash); reuses the Profile.

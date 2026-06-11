@@ -97,6 +97,69 @@ pub struct SubParams {
     pub source_discovery: Option<SubId>,
 }
 
+impl SubParams {
+    /// Params for a Sub whose reaction is spawning its own program — both discovery fields `None`.
+    /// The construction funnel for everything that is neither a template nor minted: call sites
+    /// name only the spawn fields, so the provenance axes cannot be half-filled by accident.
+    #[must_use]
+    pub const fn spawn(
+        name: CompactString,
+        program: Arc<ActionProgram>,
+        scope: EffectScope,
+        settle: Duration,
+        log_output: bool,
+    ) -> Self {
+        Self {
+            name,
+            program,
+            scope,
+            settle,
+            log_output,
+            template: None,
+            source_discovery: None,
+        }
+    }
+
+    /// Params for a discovery-minted Sub — [`Self::spawn`] plus the minting template's id. The sole
+    /// production caller is the discovery reconcile's mint arm; tests injecting dynamic Subs
+    /// directly build the same shape through it.
+    #[must_use]
+    pub const fn minted(
+        name: CompactString,
+        program: Arc<ActionProgram>,
+        scope: EffectScope,
+        settle: Duration,
+        log_output: bool,
+        minted_by: SubId,
+    ) -> Self {
+        Self {
+            name,
+            program,
+            scope,
+            settle,
+            log_output,
+            template: None,
+            source_discovery: Some(minted_by),
+        }
+    }
+
+    /// The discovery template these params attribute the Sub to — `None` for operator-declared
+    /// Subs. Pre-attach twin of [`Sub::minted_by`]; consumers read provenance through it rather
+    /// than binding to the field encoding.
+    #[must_use]
+    pub const fn minted_by(&self) -> Option<SubId> {
+        self.source_discovery
+    }
+
+    /// Whether these params declare a discovery template — the mint reaction. The engine's attach
+    /// boundary asserts the iff-coupling with the `MatchChain` Profile shape on exactly this
+    /// predicate.
+    #[must_use]
+    pub const fn is_template(&self) -> bool {
+        self.template.is_some()
+    }
+}
+
 /// Public-API request to attach a Sub.
 ///
 /// Three orthogonal parts: *where* ([`SubAttachAnchor`]), *which Profile* ([`ProfileIdentity`]),
@@ -131,9 +194,10 @@ impl SubAttachRequest {
         }
     }
 
-    /// Build a static (operator-declared) attach request — `template` and `source_discovery` are
-    /// both `None`. Discovery templates and their minted Subs carry their extra fields through
-    /// [`Self::from_parts`] directly. Not `const`: minting the identity's config handle allocates.
+    /// Build a static (operator-declared) attach request — [`SubParams::spawn`] params. Discovery
+    /// templates (config lowering) and minted Subs ([`SubParams::minted`], discovery reconcile)
+    /// build their params explicitly and flow through [`Self::from_parts`]. Not `const`: minting
+    /// the identity's config handle allocates.
     #[must_use]
     pub fn for_anchor(
         name: CompactString,
@@ -149,15 +213,7 @@ impl SubAttachRequest {
         Self::from_parts(
             anchor,
             ProfileIdentity::new(config, max_settle, events),
-            SubParams {
-                name,
-                program,
-                scope,
-                settle,
-                log_output,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(name, program, scope, settle, log_output),
         )
     }
 }
@@ -396,10 +452,14 @@ pub struct Sub {
     /// strand them on stale reaction state. The carrier's warning latches are the only runtime
     /// fields, each mutated only through its registry edge ([`SubRegistry::latch_fanout_warning`] /
     /// [`SubRegistry::latch_unsupported_kind_warning`]).
-    pub template: Option<DiscoveryTemplate>,
-    /// Discovery Sub that minted this Sub — `None` for operator-declared Subs. Read at the engine's
-    /// recovery fan-out (`on_anchor_terminal_event`); never mutated post-attach.
-    pub source_discovery: Option<SubId>,
+    ///
+    /// Module-private: external consumers read through [`Self::is_template`] /
+    /// [`Self::discovery_template`], so they bind to the predicate, not the optional-field encoding.
+    template: Option<DiscoveryTemplate>,
+    /// Discovery Sub that minted this Sub — `None` for operator-declared Subs. Never mutated
+    /// post-attach. Module-private: external consumers read through [`Self::minted_by`] /
+    /// [`Self::is_dynamic`].
+    source_discovery: Option<SubId>,
     /// The per-Sub Effect fire history: `true` once this Sub has emitted at least one Effect. Sole
     /// load-bearing reader is the B1 dedup suppress (`!forced && nothing_changed && has_fired` — a
     /// never-fired Sub is its own first emission); the per-Profile SeedDrift filter
@@ -484,7 +544,30 @@ impl Sub {
     /// `[[watch]]`.
     #[must_use]
     pub const fn is_dynamic(&self) -> bool {
-        self.source_discovery.is_some()
+        self.minted_by().is_some()
+    }
+
+    /// The discovery template that minted this Sub — `None` for operator-declared Subs, discovery
+    /// templates included. The canonical Sub-side provenance read: the detach cascade reaps a
+    /// detached template's minted set by it, the mint dedup resolves "already minted for this
+    /// anchor?" through it, and the IPC projections render it.
+    #[must_use]
+    pub const fn minted_by(&self) -> Option<SubId> {
+        self.source_discovery
+    }
+
+    /// Whether this Sub is a discovery template — its reaction is minting Subs, never firing
+    /// Effects. Coupled iff with the Profile's `MatchChain` shape at the engine's attach boundary.
+    #[must_use]
+    pub const fn is_template(&self) -> bool {
+        self.template.is_some()
+    }
+
+    /// The discovery-template carrier when this Sub is a template: the frozen mint spec plus the
+    /// per-lifetime warning latches the reconcile pass reads.
+    #[must_use]
+    pub const fn discovery_template(&self) -> Option<&DiscoveryTemplate> {
+        self.template.as_ref()
     }
 }
 
@@ -669,9 +752,9 @@ impl SubRegistry {
     /// silently rewrite the identifying fields under the registry's `by_name` index, leaving the
     /// index pointing at the wrong [`SubId`]; the assertions catch the breach at the call site. The
     /// template assertion is both-`None`, not equality (`ProfileIdentity` deliberately has no `Eq`):
-    /// any field change on a template-bearing spec classifies as `modified_identity` (wholesale
-    /// reap + reattach) at the config diff, never an in-place rebind — the minted Subs hold `Arc`s
-    /// of the template's program, so a rebind would strand them on stale reaction state.
+    /// any field change on a template-bearing spec classifies as `modified_identity` (wholesale reap
+    /// + reattach) at the config diff, never an in-place rebind — the minted Subs hold `Arc`s of the
+    /// template's program, so a rebind would strand them on stale reaction state.
     pub fn rebind(&mut self, sub: SubId, new_params: SubParams) -> Option<(Duration, ProfileId)> {
         let s = self.subs.get_mut(sub)?;
         debug_assert_eq!(
@@ -882,15 +965,13 @@ mod tests {
     fn needs_diff_set_for_per_stable_file_scope() {
         let sub = Sub::from_request(
             ProfileId::default(),
-            SubParams {
-                name: "fmt".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::PerStableFile,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "fmt".into(),
+                anchor_only_program(),
+                EffectScope::PerStableFile,
+                SETTLE,
+                false,
+            ),
         );
         assert!(sub.needs_diff);
     }
@@ -899,15 +980,13 @@ mod tests {
     fn needs_diff_set_for_diff_placeholder_in_subtree_scope() {
         let sub = Sub::from_request(
             ProfileId::default(),
-            SubParams {
-                name: "report".into(),
-                program: program_with(Placeholder::Created),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "report".into(),
+                program_with(Placeholder::Created),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         );
         assert!(sub.needs_diff);
     }
@@ -916,15 +995,13 @@ mod tests {
     fn needs_diff_false_for_anchor_subtree_combo() {
         let sub = Sub::from_request(
             ProfileId::default(),
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         );
         assert!(!sub.needs_diff);
     }
@@ -939,15 +1016,13 @@ mod tests {
     fn fresh_sub_starts_unfired() {
         let sub = Sub::from_request(
             ProfileId::default(),
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         );
         assert!(!sub.has_fired, "fresh Sub: no prior Effect emission");
         assert!(sub.last_fired_at.is_none(), "no fire timestamp");
@@ -964,15 +1039,13 @@ mod tests {
         let pid = ProfileId::default();
         let sid = reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
         let t0 = Instant::now();
         reg.record_fired(sid, 1, t0);
@@ -1005,15 +1078,13 @@ mod tests {
         let pid = ProfileId::default();
         let sid = reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
         reg.record_dedup_suppressed(sid);
         reg.record_dedup_suppressed(sid);
@@ -1037,27 +1108,23 @@ mod tests {
 
         let s1 = reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "a".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "a".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
         let s2 = reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "b".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "b".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
 
         let mut got = reg.at(pid).to_vec();
@@ -1083,15 +1150,13 @@ mod tests {
         let mk = |name: &str| {
             Sub::from_request(
                 pid,
-                SubParams {
-                    name: name.into(),
-                    program: anchor_only_program(),
-                    scope: EffectScope::SubtreeRoot,
-                    settle: SETTLE,
-                    log_output: false,
-                    template: None,
-                    source_discovery: None,
-                },
+                SubParams::spawn(
+                    name.into(),
+                    anchor_only_program(),
+                    EffectScope::SubtreeRoot,
+                    SETTLE,
+                    false,
+                ),
             )
         };
         let a = reg.insert(mk("a"));
@@ -1130,15 +1195,13 @@ mod tests {
         let pid = ProfileId::default();
         let id = reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
         assert_eq!(reg.find_by_name("build"), Some(id));
     }
@@ -1155,15 +1218,13 @@ mod tests {
         let pid = ProfileId::default();
         let id = reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
         reg.remove(id);
         assert!(reg.find_by_name("build").is_none());
@@ -1177,18 +1238,24 @@ mod tests {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
         let mk = |name: &str, source: Option<SubId>| {
-            Sub::from_request(
-                pid,
-                SubParams {
-                    name: name.into(),
-                    program: anchor_only_program(),
-                    scope: EffectScope::SubtreeRoot,
-                    settle: SETTLE,
-                    log_output: false,
-                    template: None,
-                    source_discovery: source,
-                },
-            )
+            let params = match source {
+                Some(src) => SubParams::minted(
+                    name.into(),
+                    anchor_only_program(),
+                    EffectScope::SubtreeRoot,
+                    SETTLE,
+                    false,
+                    src,
+                ),
+                None => SubParams::spawn(
+                    name.into(),
+                    anchor_only_program(),
+                    EffectScope::SubtreeRoot,
+                    SETTLE,
+                    false,
+                ),
+            };
+            Sub::from_request(pid, params)
         };
 
         let static_id = reg.insert(mk("foo", None));
@@ -1218,15 +1285,14 @@ mod tests {
         let pid = ProfileId::default();
         let dynamic_id = reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "p@/tmp/x".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: Some(SubId::default()),
-            },
+            SubParams::minted(
+                "p@/tmp/x".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+                SubId::default(),
+            ),
         ));
         assert_eq!(reg.find_by_name("p@/tmp/x"), Some(dynamic_id));
 
@@ -1247,15 +1313,13 @@ mod tests {
         let pid = ProfileId::default();
         let sid = reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
 
         let removed = reg.remove(sid);
@@ -1271,15 +1335,13 @@ mod tests {
     fn sub_program_is_arc_wrapped() {
         let sub = Sub::from_request(
             ProfileId::default(),
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         );
 
         let initial = Arc::strong_count(&sub.program);
@@ -1304,15 +1366,13 @@ mod tests {
         let before = Arc::as_ptr(&program);
         let sub = Sub::from_request(
             ProfileId::default(),
-            SubParams {
-                name: "build".into(),
-                program: Arc::clone(&program),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                Arc::clone(&program),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         );
         assert!(
             std::ptr::eq(before, Arc::as_ptr(&sub.program)),
@@ -1389,15 +1449,13 @@ mod tests {
         let original = anchor_only_program();
         let sid = reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "build".into(),
-                program: Arc::clone(&original),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                Arc::clone(&original),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
         reg.mark_fired(sid);
         let fired_at = Instant::now();
@@ -1408,15 +1466,13 @@ mod tests {
         let new_settle = SETTLE + SETTLE;
         let prior = reg.rebind(
             sid,
-            SubParams {
-                name: "build".into(),
-                program: Arc::clone(&new_program),
-                scope: EffectScope::PerStableFile,
-                settle: new_settle,
-                log_output: true,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                Arc::clone(&new_program),
+                EffectScope::PerStableFile,
+                new_settle,
+                true,
+            ),
         );
 
         assert_eq!(
@@ -1461,28 +1517,24 @@ mod tests {
         let pid = ProfileId::default();
         let sid = reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
         reg.remove(sid).expect("removed");
         let res = reg.rebind(
             sid,
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         );
         assert!(res.is_none(), "stale SubId yields None");
     }
@@ -1552,15 +1604,13 @@ mod tests {
         let mut reg = SubRegistry::new();
         let plain = reg.insert(Sub::from_request(
             ProfileId::default(),
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
         assert_eq!(
             reg.latch_fanout_warning(plain, 0, 10),
@@ -1583,27 +1633,24 @@ mod tests {
         let mut reg = SubRegistry::new();
         let sid = reg.insert(Sub::from_request(
             ProfileId::default(),
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
         ));
         let _ = reg.rebind(
             sid,
-            SubParams {
-                name: "build".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::SubtreeRoot,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: Some(SubId::default()),
-            },
+            SubParams::minted(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+                SubId::default(),
+            ),
         );
     }
 
@@ -1638,15 +1685,13 @@ mod tests {
         );
         reg.insert(Sub::from_request(
             pid,
-            SubParams {
-                name: "fmt".into(),
-                program: anchor_only_program(),
-                scope: EffectScope::PerStableFile,
-                settle: SETTLE,
-                log_output: false,
-                template: None,
-                source_discovery: None,
-            },
+            SubParams::spawn(
+                "fmt".into(),
+                anchor_only_program(),
+                EffectScope::PerStableFile,
+                SETTLE,
+                false,
+            ),
         ));
         assert!(
             reg.has_per_stable_file_sub(pid),

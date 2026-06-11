@@ -663,7 +663,7 @@ pub fn attach_discovery(
 pub fn discovery_subs_of(e: &Engine, sid: SubId) -> BTreeMap<ResourceId, SubId> {
     e.subs()
         .iter()
-        .filter(|(_, s)| s.source_discovery == Some(sid))
+        .filter(|(_, s)| s.minted_by() == Some(sid))
         .map(|(mid, s)| {
             let anchor = e
                 .profiles()

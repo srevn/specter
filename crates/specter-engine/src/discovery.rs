@@ -158,7 +158,7 @@ impl Engine {
             .iter()
             .filter_map(|&sid| {
                 let s = self.subs.get(sid)?;
-                let t = s.template.as_ref()?;
+                let t = s.discovery_template()?;
                 Some(TemplateCapture {
                     sid,
                     spec: Arc::clone(&t.spec),
@@ -257,15 +257,14 @@ impl Engine {
                     SubAttachRequest::from_parts(
                         SubAttachAnchor::Resource(slot),
                         t.spec.identity.clone(),
-                        SubParams {
-                            name: synthesized,
-                            program: Arc::clone(&t.program),
-                            scope: t.scope,
-                            settle: t.spec.settle,
-                            log_output: t.log_output,
-                            template: None,
-                            source_discovery: Some(t.sid),
-                        },
+                        SubParams::minted(
+                            synthesized,
+                            Arc::clone(&t.program),
+                            t.scope,
+                            t.spec.settle,
+                            t.log_output,
+                            t.sid,
+                        ),
                     ),
                     now,
                     out,
@@ -310,7 +309,7 @@ impl Engine {
         self.subs.at(profile).iter().any(|&sid| {
             self.subs
                 .get(sid)
-                .is_some_and(|s| s.source_discovery == Some(source))
+                .is_some_and(|s| s.minted_by() == Some(source))
         })
     }
 
@@ -328,14 +327,14 @@ impl Engine {
         if self
             .subs
             .get(source)
-            .is_none_or(|s| s.template.as_ref().is_none_or(|t| t.fanout_warned))
+            .is_none_or(|s| s.discovery_template().is_none_or(|t| t.fanout_warned))
         {
             return;
         }
         let count = self
             .subs
             .iter()
-            .filter(|(_, s)| s.source_discovery == Some(source))
+            .filter(|(_, s)| s.minted_by() == Some(source))
             .count();
         if let Some(count) = self
             .subs

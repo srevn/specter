@@ -720,7 +720,7 @@ fn run_initial_attach_registers_discovery_sub_for_dynamic_watch() {
         .find_by_name("logs")
         .expect("discovery Sub 'logs' registered");
     let sub = rig.driver.engine.subs().get(sid).expect("live Sub");
-    assert!(sub.template.is_some(), "dynamic watch lowers to a template");
+    assert!(sub.is_template(), "dynamic watch lowers to a template");
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -1007,7 +1007,7 @@ actions   = [{{ exec = ["true"] }}]
         .find_by_name("logs")
         .expect("discovery Sub 'logs' attached on reload");
     let sub = rig.driver.engine.subs().get(sid).expect("live Sub");
-    assert!(sub.template.is_some());
+    assert!(sub.is_template());
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -1134,13 +1134,12 @@ actions   = [{{ exec = ["true"] }}]
         .find_by_name("foo")
         .expect("static Sub 'foo' attached");
     assert!(
-        rig.driver
+        !rig.driver
             .engine
             .subs()
             .get(static_sid)
             .expect("live Sub")
-            .template
-            .is_none()
+            .is_template()
     );
 
     std::fs::write(&cfg_path, &new_text).unwrap();
@@ -1161,8 +1160,7 @@ actions   = [{{ exec = ["true"] }}]
             .subs()
             .get(dyn_sid)
             .expect("live Sub")
-            .template
-            .is_some()
+            .is_template()
     );
 
     let _ = rig.driver.begin_shutdown();
@@ -1208,8 +1206,7 @@ actions   = [{{ exec = ["true"] }}]
             .subs()
             .get(dyn_sid)
             .expect("live Sub")
-            .template
-            .is_some()
+            .is_template()
     );
 
     std::fs::write(&cfg_path, &new_text).unwrap();
@@ -1225,13 +1222,12 @@ actions   = [{{ exec = ["true"] }}]
         .expect("static Sub 'foo' attached post-migration");
     assert_ne!(static_sid, dyn_sid, "wholesale replace, not a rebind");
     assert!(
-        rig.driver
+        !rig.driver
             .engine
             .subs()
             .get(static_sid)
             .expect("live Sub")
-            .template
-            .is_none()
+            .is_template()
     );
 
     let _ = rig.driver.begin_shutdown();
@@ -1864,8 +1860,7 @@ actions   = [{{ exec = ["true"] }}]
             .subs()
             .get(logs_sid)
             .expect("live Sub")
-            .template
-            .is_some()
+            .is_template()
     );
     assert_eq!(
         rig.driver.engine.subs().len(),
@@ -2980,15 +2975,14 @@ fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
             Duration::from_hours(1),
             ClassSet::DEFAULT_SUBTREE_ROOT,
         ),
-        SubParams {
-            name: CompactString::const_new(dynamic_name),
-            program: trivial_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: Duration::from_millis(100),
-            log_output: false,
-            template: None,
-            source_discovery: Some(SubId::default()),
-        },
+        SubParams::minted(
+            CompactString::const_new(dynamic_name),
+            trivial_program(),
+            EffectScope::SubtreeRoot,
+            Duration::from_millis(100),
+            false,
+            SubId::default(),
+        ),
     );
     let _ = rig
         .driver
@@ -3044,7 +3038,7 @@ fn ipc_disable_and_enable_discovery_template_round_trip() {
         .find_by_name("logs")
         .expect("template attached");
     let sub = rig.driver.engine.subs().get(sid).expect("live sub");
-    assert!(sub.template.is_some(), "fixture lowered to a template");
+    assert!(sub.is_template(), "fixture lowered to a template");
     assert!(!sub.is_dynamic(), "a template is operator-declared");
 
     let mut client_a = ipc_connect(&rig);
@@ -3085,8 +3079,7 @@ fn ipc_disable_and_enable_discovery_template_round_trip() {
             .subs()
             .get(sid)
             .expect("live sub")
-            .template
-            .is_some(),
+            .is_template(),
         "re-attach went through the discovery lowering",
     );
 
@@ -3269,15 +3262,14 @@ fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
             Duration::from_hours(1),
             ClassSet::DEFAULT_SUBTREE_ROOT,
         ),
-        SubParams {
-            name: CompactString::const_new(dynamic_name),
-            program: trivial_program(),
-            scope: EffectScope::SubtreeRoot,
-            settle: Duration::from_millis(100),
-            log_output: false,
-            template: None,
-            source_discovery: Some(SubId::default()),
-        },
+        SubParams::minted(
+            CompactString::const_new(dynamic_name),
+            trivial_program(),
+            EffectScope::SubtreeRoot,
+            Duration::from_millis(100),
+            false,
+            SubId::default(),
+        ),
     );
     let _ = rig
         .driver
