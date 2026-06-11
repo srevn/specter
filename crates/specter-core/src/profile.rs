@@ -1,9 +1,9 @@
 //! `Profile`, `ProfileMap`, and burst types.
 //!
 //! `Profile.config_hash` is sealed onto the [`ProfileIdentity`] at its construction (one fold over
-//! `(config, max_settle, events)`) and is the lifetime-stable identity of the Profile.
-//! `ProfileMap` keeps `(resource, config_hash) → ProfileId` and updates `Resource.profiles` in
-//! lockstep — `attach`/`detach` are the only mutators of either index.
+//! `(config, max_settle, events)`) and is the lifetime-stable identity of the Profile. `ProfileMap`
+//! keeps `(resource, config_hash) → ProfileId` and updates `Resource.profiles` in lockstep —
+//! `attach`/`detach` are the only mutators of either index.
 
 use crate::ids::{ProbeCorrelation, ProfileId, ResourceId, TimerId};
 use crate::op::ProofAuthority;
@@ -1361,8 +1361,8 @@ impl ProfileState {
     /// [`Self::detach_lifecycle`] or a `matches!` guard). The `bool` return surfaces "did the flip
     /// land" so callers can `debug_assert!` against a future routing breach.
     ///
-    /// **Sole writer.** `detach_sub_inner` (refcount→0 on Active). No other site has a
-    /// legitimate need to mark a burst for reap.
+    /// **Sole writer.** `detach_sub_inner` (refcount→0 on Active). No other site has a legitimate
+    /// need to mark a burst for reap.
     #[must_use]
     pub const fn mark_active_for_reap(&mut self) -> bool {
         if let Self::Active(_, finish) = self {
@@ -1651,9 +1651,9 @@ pub struct DescentState {
     /// [`Self::disarm_probe`] (consume). It cannot be cloned, so it is consumed where it lives.
     probe: ProbeSlot,
     /// Witnessed-activity latch: kernel activity was observed that could have changed the anchor's
-    /// proof object since the last settled observation. Set at construction (a descent entered
-    /// from an observed anchor loss) or by [`Self::note_witnessed_activity`] (any event reaching a
-    /// live descent); never reset — the latch persists through rewinds and forward advances, which
+    /// proof object since the last settled observation. Set at construction (a descent entered from
+    /// an observed anchor loss) or by [`Self::note_witnessed_activity`] (any event reaching a live
+    /// descent); never reset — the latch persists through rewinds and forward advances, which
     /// mutate the sibling fields in place. The terminus consumes it: a witnessed descent's anchor
     /// materialization opens a *triggered* Seed (the witness lands in `dirty`, so
     /// `seed_owes_first_fire` sees the activity), an unwitnessed one stays cold and pins silently.
@@ -1679,8 +1679,8 @@ impl DescentState {
     ///
     /// `witnessed` is the activity latch's birth value: `true` only for a descent entered from an
     /// observed anchor loss (the loss event *is* the witness); attach-time entries and the
-    /// event-scan recovery construct `false` — see the field doc and the engine call sites for
-    /// the per-entry rationale.
+    /// event-scan recovery construct `false` — see the field doc and the engine call sites for the
+    /// per-entry rationale.
     #[must_use]
     pub const fn new(
         current_prefix: ResourceId,
@@ -1717,17 +1717,17 @@ impl DescentState {
         &mut self.remaining_components
     }
 
-    /// Whether the descent has witnessed kernel activity that could have changed the anchor's
-    /// proof object — the latch the terminus Seed's cold/triggered split reads. See the field doc
-    /// for the full semantics.
+    /// Whether the descent has witnessed kernel activity that could have changed the anchor's proof
+    /// object — the latch the terminus Seed's cold/triggered split reads. See the field doc for the
+    /// full semantics.
     #[must_use]
     pub const fn witnessed(&self) -> bool {
         self.witnessed
     }
 
     /// Set the witnessed-activity latch — the sole writer after construction. One-way: there is no
-    /// reset, so the latch survives every in-place descent mutation (advance, rewind, re-arm)
-    /// until the terminus consumes it at anchor materialization.
+    /// reset, so the latch survives every in-place descent mutation (advance, rewind, re-arm) until
+    /// the terminus consumes it at anchor materialization.
     pub const fn note_witnessed_activity(&mut self) {
         self.witnessed = true;
     }
@@ -2105,15 +2105,15 @@ enum AnchorClassification {
     },
 }
 
-/// Frozen config identity plus the two caches that are *total functions* of it. Private fields
-/// and a sole constructor make "derived once from a frozen identity, never independently writable"
-/// a structural property rather than a documented convention. The partition hash is not cached
-/// here: the identity arrives already sealed over it ([`ProfileIdentity::config_hash`] is a field
-/// read), so a Profile-side mirror would be a second copy of the same key.
+/// Frozen config identity plus the two caches that are *total functions* of it. Private fields and
+/// a sole constructor make "derived once from a frozen identity, never independently writable" a
+/// structural property rather than a documented convention. The partition hash is not cached here:
+/// the identity arrives already sealed over it ([`ProfileIdentity::config_hash`] is a field read),
+/// so a Profile-side mirror would be a second copy of the same key.
 ///
-/// `identity` ([`ProfileIdentity`] = `{config, max_settle, events, hash}`) is the Profile
-/// partition key's config half; `exclude_strings` and `has_per_file_fds` are each a pure
-/// projection of it, materialised once at [`Self::new`].
+/// `identity` ([`ProfileIdentity`] = `{config, max_settle, events, hash}`) is the Profile partition
+/// key's config half; `exclude_strings` and `has_per_file_fds` are each a pure projection of it,
+/// materialised once at [`Self::new`].
 #[derive(Debug)]
 struct ProfileConfig {
     identity: ProfileIdentity,

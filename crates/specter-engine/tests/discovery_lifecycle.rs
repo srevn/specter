@@ -2,7 +2,7 @@
 //!
 //! Drives one `Engine` per scenario through attach → cold-Seed reconcile (mint per terminus ×
 //! template) → Standard re-reconcile → vanish/recovery/overflow/cascade with synthetic
-//! [`ProbeResponse`] injections. The inline tests (`src/discovery_tests.rs`) pin the pure collector
+//! [`ProbeResponse`] injections. The inline tests (`src/discovery.rs`) pin the pure collector
 //! and the attach-boundary asserts; this file pins the composed behaviour: consequence routing,
 //! dedup convergence, lifecycle diagnostics, and the Draining-gate shape filter.
 //!
@@ -10,19 +10,21 @@
 //! probe cadence is an implementation detail; only the resulting registry is the contract.
 
 use specter_core::testkit::{
-    anchor_ok, covered, dir_snap, dir_snap_nested, file_leaf, leaf, proven, uncovered,
+    anchor_ok, covered, dir_snap, dir_snap_nested, empty_program, file_leaf, leaf, proven,
+    uncovered,
 };
 use specter_core::{
     ActiveBurst, ClassSet, ContribKey, DetachReason, Diagnostic, DirSnapshot, EffectCompletion,
-    EffectOutcome, EffectScope, EntryKind, FsEvent, Input, OverflowScope, ProbeOp, ProbeOutcome,
-    ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind, ScanConfig, StepOutput,
-    SubAttachAnchor, SubId, TimerKind, WatchOp,
+    EffectOutcome, EffectScope, EntryKind, FsEvent, Input, MintTemplate, OverflowScope, ProbeOp,
+    ProbeOutcome, ProbeResponse, ProfileId, ProfileIdentity, ProfileState, ResourceId,
+    ResourceKind, ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor, SubId, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
     DEFAULT_EVENTS, MAX_SETTLE, SETTLE, attach, attach_discovery, attach_discovery_returning,
-    descent_advance, discovery_subs_of, drain_due, is_draining, last_probe_path, mint_template,
-    mint_template_scoped, pid_of, pre_place_dir, seed_to_idle,
+    complete_effect_to_rebasing, descent_advance, discovery_subs_of, drain_due, fire_standard_once,
+    is_draining, last_probe_path, mint_template, mint_template_scoped, pid_of, pre_place_dir,
+    respond_anchor_file, seed_to_idle, seed_to_idle_with,
 };
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -62,27 +64,72 @@ fn burst_and_respond(
     (respond(e, pid, snap, at), at)
 }
 
+/// Drive one minted Profile to Idle from whatever entry state it holds. A parked recovery descent
+/// advances first (answer the in-flight descent probe with `listing`, the parent enumeration —
+/// required for that entry alone); the convergence loop then answers whatever probe the burst
+/// surfaces (cold walk, verify, re-sample, rebase) with a byte-identical kind-appropriate sample
+/// (File anchors `AnchorOk`, Dir anchors an empty subtree), completes any fired effect, and advances
+/// the clock a settle window when the burst waits on a timer. The EMPTY-mask `mint_template` folds
+/// `HashChannel` verdicts, so each certification needs two equal samples; a cold Seed pins on its
+/// single sample without a clock advance. Returns the instant the Profile rests at Idle.
+fn settle_minted(
+    e: &mut Engine,
+    mid: SubId,
+    listing: Option<&Arc<DirSnapshot>>,
+    mut at: Instant,
+) -> Instant {
+    let pid = pid_of(e, mid);
+    if matches!(
+        e.profiles().get(pid).expect("minted Profile live").state(),
+        ProfileState::Pending(_)
+    ) {
+        let listing = listing.expect("a parked descent advances on the parent listing");
+        let _ = descent_advance(e, pid, listing, at);
+    }
+    for _ in 0..10 {
+        if matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle) {
+            return at;
+        }
+        if let Some(correlation) = e.pending_probe_for(pid) {
+            let outcome = match e.profiles().get(pid).expect("minted Profile live").kind() {
+                Some(ResourceKind::File) => anchor_ok(file_leaf(EntryKind::File, 1)),
+                _ => proven(dir_snap(&[])),
+            };
+            let out = e.step(
+                Input::ProbeResponse(ProbeResponse {
+                    owner: pid,
+                    correlation,
+                    outcome,
+                }),
+                at,
+            );
+            for eff in out.effects().iter() {
+                let _ = e.step(
+                    Input::EffectComplete(EffectCompletion {
+                        sub: mid,
+                        key: eff.key(),
+                        outcome: EffectOutcome::Ok,
+                    }),
+                    at,
+                );
+            }
+        } else {
+            at += SETTLE * 2;
+            drain_due(e, at);
+        }
+    }
+    panic!("minted Profile did not converge to Idle");
+}
+
 /// Drive every freshly-minted Profile's cold Seed to Idle so later timeline drains never collide
-/// with minted-burst timers: File anchors answer `AnchorOk`, Dir anchors an empty subtree.
+/// with minted-burst timers. Probe-less minted Profiles are skipped (already settled), so the pass
+/// never advances the clock — a cold Seed pins on its single sample.
 fn settle_minted_seeds(e: &mut Engine, source: SubId, at: Instant) {
     let minted: Vec<SubId> = discovery_subs_of(e, source).into_values().collect();
     for mid in minted {
-        let pid = pid_of(e, mid);
-        let Some(corr) = e.pending_probe_for(pid) else {
-            continue;
-        };
-        let outcome = match e.profiles().get(pid).expect("minted Profile live").kind() {
-            Some(ResourceKind::File) => anchor_ok(file_leaf(EntryKind::File, 1)),
-            _ => proven(dir_snap(&[])),
-        };
-        let _ = e.step(
-            Input::ProbeResponse(ProbeResponse {
-                owner: pid,
-                correlation: corr,
-                outcome,
-            }),
-            at,
-        );
+        if e.pending_probe_for(pid_of(e, mid)).is_some() {
+            let _ = settle_minted(e, mid, None, at);
+        }
     }
 }
 
@@ -432,11 +479,11 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
 }
 
 /// A vanished terminus reaps its minted Sub through the reconcile's removal pass
-/// (`DiscoverySubReaped` + `SubDetached(MatchVanished)`), not through its own anchor terminal —
-/// the loss step parks the minted Profile in a recovery descent (`Pending`), and the certified
-/// empty listing then reaps it from there in one step: the graft deletes the leaf entry and its
-/// try-reap is refused on the minted back-ref, the removal pass detaches the Sub, and the
-/// Profile's reap cascades the slot. The path's reappearance re-mints under a fresh `SubId`.
+/// (`DiscoverySubReaped` + `SubDetached(MatchVanished)`), not through its own anchor terminal — the
+/// loss step parks the minted Profile in a recovery descent (`Pending`), and the certified empty
+/// listing then reaps it from there in one step: the graft deletes the leaf entry and its try-reap
+/// is refused on the minted back-ref, the removal pass detaches the Sub, and the Profile's reap
+/// cascades the slot. The path's reappearance re-mints under a fresh `SubId`.
 #[test]
 fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
     let mut e = Engine::new();
@@ -635,6 +682,162 @@ fn ancestor_rename_reaps_old_minted_and_mints_new() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
+/// An atomic replace of a matched terminus is identical to static: the terminal re-enters descent in
+/// the loss step (Sub and Profile survive with identity intact), the descent finds the replacement,
+/// the triggered Seed re-fires (`RecoveryFire` — fire history preserved), and the same-step reconcile
+/// neither reaps nor double-mints the still-live terminus (anchor-slot membership keeps it in `M ∩ T`
+/// while the minted Profile is mid-recovery). The template carries a content mask (the user's
+/// file-watch shape) — single-sample verdicts, unlike the EMPTY-mask fixture template.
+#[test]
+fn terminus_replace_keeps_minted_sub_and_re_fires() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+
+    let template = Arc::new(MintTemplate {
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            DEFAULT_EVENTS,
+        ),
+        settle: SETTLE,
+        spawn: SpawnSpec::new(empty_program(), EffectScope::SubtreeRoot, false),
+    });
+    let (src, dpid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        template,
+        now,
+    );
+    // Discovery cold Seed: enumerate one terminus -> mint.
+    let out = respond(
+        &mut e,
+        dpid,
+        &dir_snap(&[("x.log", EntryKind::File, 5)]),
+        now,
+    );
+    assert!(out.effects().is_empty(), "discovery never fires");
+    let minted = discovery_subs_of(&e, src);
+    assert_eq!(minted.len(), 1);
+    let (&terminus, &mid) = minted.iter().next().unwrap();
+    let minted_pid = pid_of(&e, mid);
+    assert!(
+        e.profiles()
+            .get(minted_pid)
+            .unwrap()
+            .watch_root_parent()
+            .is_some(),
+        "minted Profile holds the watch_root_parent recovery channel from attach",
+    );
+    // Minted cold Seed pins silently.
+    let t0 = seed_to_idle_with(
+        &mut e,
+        minted_pid,
+        || anchor_ok(file_leaf(EntryKind::File, 5)),
+        now,
+    );
+
+    // The minted Sub fires once (in-place content change).
+    let t1 = fire_standard_once(&mut e, mid, terminus, 6, t0 + SETTLE);
+    assert!(e.subs().get(mid).unwrap().has_fired());
+
+    // Atomic replace: the terminal re-enters descent in the loss step — Sub and Profile survive.
+    let t2 = t1 + Duration::from_millis(10);
+    let out = e.step(
+        Input::FsEvent {
+            resource: terminus,
+            event: FsEvent::Removed,
+        },
+        t2,
+    );
+    assert!(out.effects().is_empty());
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
+        "no reap on the terminal — reconcile is the removal authority",
+    );
+    assert!(e.subs().get(mid).is_some(), "minted Sub survives");
+    assert!(
+        matches!(
+            e.profiles().get(minted_pid).unwrap().state(),
+            ProfileState::Pending(_)
+        ),
+        "the loss step re-enters descent",
+    );
+
+    // The rename's parent STRUCTURE event drives the discovery burst; the minted Profile's live
+    // descent absorbs the same event (I5 — its probe is already in flight).
+    let t3 = t2 + Duration::from_millis(1);
+    let _ = e.step(
+        Input::FsEvent {
+            resource: data,
+            event: FsEvent::StructureChanged,
+        },
+        t3,
+    );
+    // The minted descent finds the replacement (inode 7 != 6 — a fire-worthy change) and
+    // materializes into a triggered Seed, Batching-first.
+    let out = descent_advance(
+        &mut e,
+        minted_pid,
+        &dir_snap(&[("x.log", EntryKind::File, 7)]),
+        t3,
+    );
+    assert!(out.effects().is_empty(), "descent itself never fires");
+
+    // Both settle windows expire in one drain: the discovery burst and the minted Seed go Verifying
+    // together.
+    let t4 = t3 + SETTLE * 2;
+    drain_due(&mut e, t4);
+    let out = respond(
+        &mut e,
+        dpid,
+        &dir_snap(&[("x.log", EntryKind::File, 7)]),
+        t4,
+    );
+    assert!(out.effects().is_empty(), "reconcile never fires");
+    assert!(
+        !out.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                Diagnostic::DiscoverySubReaped { .. } | Diagnostic::DiscoveryMinted { .. }
+            )
+        }),
+        "the replaced terminus kept its slot — no reap, no double-mint; got {:?}",
+        out.diagnostics,
+    );
+    assert_eq!(
+        discovery_subs_of(&e, src).into_values().collect::<Vec<_>>(),
+        vec![mid],
+        "same SubId across the replace",
+    );
+
+    // The minted Seed's verify folds the recovery verdict: fired before + witness drift ⇒
+    // RecoveryFire. Full parity with the static replace.
+    let out = respond_anchor_file(&mut e, minted_pid, 7, t4);
+    assert_eq!(
+        out.effects().len(),
+        1,
+        "the replace re-fires through the surviving Sub",
+    );
+    assert!(
+        e.subs().get(mid).unwrap().has_fired(),
+        "fire history preserved across the replace",
+    );
+    // Drain the fire cycle: effect Ok -> rebase -> Idle.
+    let key = out.effects()[0].key();
+    let _ = complete_effect_to_rebasing(&mut e, mid, key, t4);
+    let _ = respond_anchor_file(&mut e, minted_pid, 7, t4);
+    assert!(matches!(
+        e.profiles().get(minted_pid).unwrap().state(),
+        ProfileState::Idle
+    ));
+    let _ = e.cancel_all_in_flight_probes();
+}
+
 /// Detaching the discovery template cascades: the template detaches under the caller's reason,
 /// every minted Sub under `DiscoverySourceDetached`, and every Profile reaps.
 #[test]
@@ -732,12 +935,11 @@ fn second_template_shares_profile_and_walk_mints_per_template() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Prefix `rm -rf` recovery: every Profile re-enters its own recovery descent (anchor loss is
-/// uniform — the minted Sub *survives*, parked `Pending`), the discovery Profile recovers through
-/// `watch_root_parent` descent, and the recovery Seed's reconcile finds the reappeared terminus
-/// live (slot identity) — no reap, no re-mint — with **no** `PerFileDriftDroppedOnRecovery` even
-/// though the template stores a per-file scope (the template's reaction is minting, not a
-/// per-file Effect).
+/// Prefix `rm -rf` recovery: every Profile re-enters its own recovery descent (anchor loss is uniform
+/// — the minted Sub *survives*, parked `Pending`), the discovery Profile recovers through
+/// `watch_root_parent` descent, and the recovery Seed's reconcile finds the reappeared terminus live
+/// (slot identity) — no reap, no re-mint — with **no** `PerFileDriftDroppedOnRecovery` even though
+/// the template stores a per-file scope (the template's reaction is minting, not a per-file Effect).
 #[test]
 fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
     let mut e = Engine::new();
@@ -1196,11 +1398,11 @@ fn mid_burst_minted_descendant_still_drains_through_discovery() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// A static Sub joining the minted identity makes the minted Profile mixed; anchor loss is the
-/// same uniform recovery descent regardless, and the pin is the registry seam: the projection
-/// keys minted Subs only (the static co-resident never confuses it), the recovering terminus is
-/// back in the certified set so the Sub is no removal victim, and the dedup finds it still
-/// attached — no double-mint after recovery.
+/// A static Sub joining the minted identity makes the minted Profile mixed; anchor loss is the same
+/// uniform recovery descent regardless, and the pin is the registry seam: the projection keys
+/// minted Subs only (the static co-resident never confuses it), the recovering terminus is back in
+/// the certified set so the Sub is no removal victim, and the dedup finds it still attached — no
+/// double-mint after recovery.
 #[test]
 fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
     let mut e = Engine::new();
@@ -1660,9 +1862,9 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     let old_mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
     let x = e.tree().lookup(Some(c), "x").expect("terminus slot");
 
-    // rm -rf /a, bottom-up: both anchors go terminal and both Profiles re-enter their own
-    // recovery descents (the minted Sub stays attached throughout — reconcile is its removal
-    // authority, and the terminus reappears below).
+    // rm -rf /a, bottom-up: both anchors go terminal and both Profiles re-enter their own recovery
+    // descents (the minted Sub stays attached throughout — reconcile is its removal authority, and
+    // the terminus reappears below).
     let t1 = now + Duration::from_millis(10);
     let _ = e.step(
         Input::FsEvent {
@@ -1683,8 +1885,8 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
         "minted Sub survives the cascade's terminals",
     );
 
-    // The loss step itself re-enters descent at the watch_root_parent — no entry event needed.
-    // /a/b and /a are gone too, so each probe answers Vanished and the descent rewinds one level,
+    // The loss step itself re-enters descent at the watch_root_parent — no entry event needed. /a/b
+    // and /a are gone too, so each probe answers Vanished and the descent rewinds one level,
     // re-arming at the parent.
     assert_eq!(last_probe_path(&loss), Some("/a/b".into()));
     let vanish = |e: &mut Engine, at| {
@@ -1751,61 +1953,11 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Drive a minted Profile from its parked recovery descent back to Idle: answer the in-flight
-/// descent probe with `listing` (the parent enumeration), then satisfy the triggered Seed —
-/// the EMPTY-mask `mint_template` folds `HashChannel` verdicts, so each certification needs two
-/// equal samples — and drain any fire cycle the witnessed recovery owes. Returns the instant the
-/// Profile rests at Idle.
-fn settle_minted_recovery(
-    e: &mut Engine,
-    mid: SubId,
-    minted_pid: ProfileId,
-    listing: &Arc<DirSnapshot>,
-    mut at: Instant,
-) -> Instant {
-    let _ = descent_advance(e, minted_pid, listing, at);
-    // Bounded convergence loop: respond to whatever probe the burst surfaces (verify, re-sample,
-    // rebase) with a byte-identical empty subtree, complete any fired effect, advance the clock a
-    // settle window when the burst is waiting on a timer.
-    for _ in 0..10 {
-        if matches!(
-            e.profiles().get(minted_pid).unwrap().state(),
-            ProfileState::Idle
-        ) {
-            return at;
-        }
-        if let Some(correlation) = e.pending_probe_for(minted_pid) {
-            let out = e.step(
-                Input::ProbeResponse(ProbeResponse {
-                    owner: minted_pid,
-                    correlation,
-                    outcome: proven(dir_snap(&[])),
-                }),
-                at,
-            );
-            for eff in out.effects().iter() {
-                let _ = e.step(
-                    Input::EffectComplete(EffectCompletion {
-                        sub: mid,
-                        key: eff.key(),
-                        outcome: EffectOutcome::Ok,
-                    }),
-                    at,
-                );
-            }
-        } else {
-            at += SETTLE * 2;
-            drain_due(e, at);
-        }
-    }
-    panic!("minted recovery did not converge to Idle");
-}
-
 /// Three loss → recovery cycles leave every shared refcount where one cycle leaves it: the parent
-/// edge's demand, the anchor's demand, and the minted set are invariant across cycles — the
-/// minted Sub survives each cycle through its own recovery descent (cycle 0's witnessed recovery
-/// owes and fires the first fire; later cycles pin silently on the unchanged witness), and
-/// repeated recovery neither leaks nor double-releases parent-edge contributions.
+/// edge's demand, the anchor's demand, and the minted set are invariant across cycles — the minted
+/// Sub survives each cycle through its own recovery descent (cycle 0's witnessed recovery owes and
+/// fires the first fire; later cycles pin silently on the unchanged witness), and repeated recovery
+/// neither leaks nor double-releases parent-edge contributions.
 #[test]
 fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
     let mut e = Engine::new();
@@ -1823,7 +1975,6 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     settle_minted_seeds(&mut e, sid, now);
     let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
-    let minted_pid = pid_of(&e, mid);
     let root_demand = e.tree().get(root).unwrap().watch_demand();
     let anchor_demand = e.tree().get(data).unwrap().watch_demand();
 
@@ -1884,11 +2035,10 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
             "cycle {cycle}: a live terminus is never a removal victim",
         );
         // The minted Profile recovers through its own descent — same parent listing.
-        at = settle_minted_recovery(
+        at = settle_minted(
             &mut e,
             mid,
-            minted_pid,
-            &dir_snap(&[("x", EntryKind::Dir, 20 + cycle)]),
+            Some(&dir_snap(&[("x", EntryKind::Dir, 20 + cycle)])),
             at,
         );
 

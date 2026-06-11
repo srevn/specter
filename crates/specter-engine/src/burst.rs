@@ -215,21 +215,20 @@ impl Engine {
     /// - **`None` ⇔ cold** (no witnessed kernel activity). The Seed was decided by the engine — a
     ///   fresh attach, an *unwitnessed* descent terminus, or an overflow re-seed — with no kernel
     ///   signal vouching for a change. There is no triggering event to record into `dirty`, so
-    ///   `dirty.is_empty()` holds at first verify, and `seed_owes_first_fire` projects to `false`
-    ///   ⇒ the first `Authoritative` response pins the baseline silently. There is no event
-    ///   activity to debounce against either, so opening a `Batching` phase would amortise nothing
-    ///   — the cold path arms `Verifying` at burst construction and emits the cold walk
-    ///   immediately. `last_event_time = None` is the first-class construction state: no event
-    ///   drove this burst, no settle deadline to source.
+    ///   `dirty.is_empty()` holds at first verify, and `seed_owes_first_fire` projects to `false` ⇒
+    ///   the first `Authoritative` response pins the baseline silently. There is no event activity
+    ///   to debounce against either, so opening a `Batching` phase would amortise nothing — the
+    ///   cold path arms `Verifying` at burst construction and emits the cold walk immediately.
+    ///   `last_event_time = None` is the first-class construction state: no event drove this burst,
+    ///   no settle deadline to source.
     /// - **`Some((resource, path))` ⇔ triggered re-Seed.** Witnessed kernel activity stands behind
     ///   this Seed: a driving `FsEvent` reached an `Idle + !baseline_is_some()` Profile (the
     ///   post-recovery isolated change reached via the `undischarged_consequence` ceiling
     ///   terminal), or a descent whose witnessed-activity latch was set materialised its anchor
-    ///   (`materialize_profile_anchor` threads the anchor as the trigger). The trigger threads
-    ///   into `dirty` so `seed_owes_first_fire` sees the activity witness it owes a fire on. The
-    ///   burst opens in `Batching { settle_timer }` exactly like `start_standard_burst`, so
-    ///   further `FsEvent`s debounce identically; `last_event_time = Some(now)` seeds the settle
-    ///   deadline.
+    ///   (`materialize_profile_anchor` threads the anchor as the trigger). The trigger threads into
+    ///   `dirty` so `seed_owes_first_fire` sees the activity witness it owes a fire on. The burst
+    ///   opens in `Batching { settle_timer }` exactly like `start_standard_burst`, so further
+    ///   `FsEvent`s debounce identically; `last_event_time = Some(now)` seeds the settle deadline.
     ///
     /// **`burst_deadline` armed in both arms.** The pre-fire bound holds across the two paths: a
     /// triggered Seed's settle / verify loop, or a cold Seed whose walk runs > `max_settle` (slow
@@ -1157,9 +1156,8 @@ impl Engine {
     ///
     /// **Burst-finish directive.** If the prior state's [`BurstFinish`] is [`BurstFinish::Reap`]
     /// (the last Sub was detached mid-burst), `Engine::reap_profile` runs in the same step after
-    /// the Draining sweep
-    /// — `via = DeferredFromBurst` distinguishes this path from the immediate reap in
-    /// `detach_sub_inner`. Otherwise the Profile rests at [`ProfileState::Idle`].
+    /// the Draining sweep — `via = DeferredFromBurst` distinguishes this path from the immediate
+    /// reap in `detach_sub_inner`. Otherwise the Profile rests at [`ProfileState::Idle`].
     pub(crate) fn finish_burst_to_idle(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         // Cancel-first entry precondition (debug). The `map_state` below consumes the prior burst;
         // an armed Verifying/Rebasing slot reaching that drop trips ProbeSlot's linearity tripwire.
@@ -1172,18 +1170,17 @@ impl Engine {
         //  - Awaiting-phase callers (on_effect_complete reap, handle_gate_deadline zombie) are
         //    guarded to Active(PostFire(Awaiting)) — Awaiting holds no slot.
         //  - Pure-teardown callers (finalize_anchor_lost, detach_sub_inner's last-Sub Active arm,
-        //    on_sensor_overflow's Active arm) disarm first:
-        //    cancel_owner_probe on teardown / overflow-reap paths, take_owner_probe on the
-        //    overflow-reseed path. Named at this boundary, not left solely to the far-end
-        //    ProbeSlot::drop tripwire — that fires frames downstream and is structurally bypassed
-        //    by every test that pre-consumes the slot. The tripwire stays the release fail-stop;
-        //    this makes the omission fail in unit tests on the dev (kqueue) platform too.
-        //    Deliberately the strong form: pending_probe_for also covers a Pending Profile's
-        //    descent slot, so this additionally forbids reaching here mid-descent armed — vacuous
-        //    in v1 (no caller does) but free extra defense at the same boundary; narrowing to
-        //    Active-only would add a phase branch for an unreachable case. Borrow-clean: the &self
-        //    projection ends before the &mut get_mut, and a stale id yields None so the assert
-        //    holds trivially ahead of the get_mut early-return.
+        //    on_sensor_overflow's Active arm) disarm first: cancel_owner_probe on teardown /
+        //    overflow-reap paths, take_owner_probe on the overflow-reseed path. Named at this
+        //    boundary, not left solely to the far-end ProbeSlot::drop tripwire — that fires frames
+        //    downstream and is structurally bypassed by every test that pre-consumes the slot. The
+        //    tripwire stays the release fail-stop; this makes the omission fail in unit tests on
+        //    the dev (kqueue) platform too. Deliberately the strong form: pending_probe_for also
+        //    covers a Pending Profile's descent slot, so this additionally forbids reaching here
+        //    mid-descent armed — vacuous in v1 (no caller does) but free extra defense at the same
+        //    boundary; narrowing to Active-only would add a phase branch for an unreachable case.
+        //    Borrow-clean: the &self projection ends before the &mut get_mut, and a stale id yields
+        //    None so the assert holds trivially ahead of the get_mut early-return.
         debug_assert!(
             self.pending_probe_for(profile_id).is_none(),
             "finish_burst_to_idle: probe slot still armed — the caller \
@@ -1248,9 +1245,8 @@ impl Engine {
         // Honour the burst-finish directive captured from the prior state. `Reap` is set by
         // `detach_sub_inner` (last Sub detached mid-burst); we defer the reap to here so the
         // Profile's burst doesn't fire Effects against a Sub registry that no longer holds the
-        // reference. `ReturnToIdle`
-        // leaves the Profile resting at Idle (the `map_state` Active arm above installed it as part
-        // of the same single reconcile).
+        // reference. `ReturnToIdle` leaves the Profile resting at Idle (the `map_state` Active arm
+        // above installed it as part of the same single reconcile).
         if matches!(finish, BurstFinish::Reap) {
             self.reap_profile(profile_id, ReapTrigger::DeferredFromBurst, out);
         }

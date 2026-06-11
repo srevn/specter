@@ -4075,7 +4075,7 @@ fn structure_only_profile_has_per_file_fds_false() {
 // ---------- Anchor-loss kind-cache invalidation ----------
 //
 // Per-site assertions that every dispatch path through `Engine::discard_anchor_state` clears the
-// cached `Profile.kind`. The helper unit tests in `claims_tests.rs` pin the contract in isolation;
+// cached `Profile.kind`. The helper unit tests in `claims.rs` pin the contract in isolation;
 // these tests pin the integration at the seven production call sites so the kind-clear cannot
 // regress at any one of them without a test failure.
 

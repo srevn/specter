@@ -554,8 +554,8 @@ impl Engine {
     ///
     /// Unwitnessed entry: no kernel event drove the attach, so if the entry probe finds the anchor
     /// already on disk the terminus Seed stays cold and pins silently — attach-over-existing must
-    /// not fire (restart-safe doctrine). An appearance *after* attach reaches the live descent as
-    /// a `StructureChanged` and latches via `on_descent_event`, so it fires.
+    /// not fire (restart-safe doctrine). An appearance *after* attach reaches the live descent as a
+    /// `StructureChanged` and latches via `on_descent_event`, so it fires.
     fn bootstrap_pending(
         &mut self,
         profile_id: ProfileId,
@@ -779,8 +779,8 @@ impl Engine {
         // No fire-history purge: the detached Sub's `FireHistory` died with it at
         // `self.subs.remove(sub)` above. The history is per-Sub and slotmap-scoped, so a future
         // drift verdict on this Profile structurally cannot re-fire a detached Sub (and a
-        // hot-reload-modified Sub re-attaches under a fresh `SubId` starting unfired) — there is
-        // no per-Profile fire container to purge.
+        // hot-reload-modified Sub re-attaches under a fresh `SubId` starting unfired) — there is no
+        // per-Profile fire container to purge.
         if remaining_subs > 0 {
             // Recompute Profile.settle = min(remaining_subs.settles).
             //
@@ -937,9 +937,9 @@ impl Engine {
     ///
     /// - `discard_anchor_state` exists for the "anchor lost, Profile lives" case — reached solely
     ///   through the `finalize_anchor_lost` coordinator (the funnel for every observed-loss route,
-    ///   including the six probe vanished/failed dispatches). Its `kind = None` and
-    ///   `baseline = None` writes prepare the Profile for the next Seed burst's probe-shape
-    ///   dispatch, and it deliberately preserves `watch_root_parent` (the recovery channel).
+    ///   including the six probe vanished/failed dispatches). Its `kind = None` and `baseline =
+    ///   None` writes prepare the Profile for the next Seed burst's probe-shape dispatch, and it
+    ///   deliberately preserves `watch_root_parent` (the recovery channel).
     /// - `reap_profile` is "Profile dies entirely." There is no next Seed burst — the Profile
     ///   detaches in group (3) — so the `kind` and `baseline` writes that `discard_anchor_state`
     ///   would perform are wasted on a struct about to drop. Reap also releases

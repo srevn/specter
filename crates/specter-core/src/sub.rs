@@ -76,8 +76,8 @@ impl SpawnSpec {
         self.scope
     }
 
-    /// Forward subprocess stdout/stderr to Specter's own stdio (`Stdio::inherit()`); `false`
-    /// routes child output to `/dev/null`. Threaded onto each emitted [`crate::Effect`] as
+    /// Forward subprocess stdout/stderr to Specter's own stdio (`Stdio::inherit()`); `false` routes
+    /// child output to `/dev/null`. Threaded onto each emitted [`crate::Effect`] as
     /// `capture_output`; not identity.
     #[must_use]
     pub const fn log_output(&self) -> bool {
@@ -118,8 +118,7 @@ pub struct MintTemplate {
     pub spawn: SpawnSpec,
 }
 
-/// Per-Sub Effect fire history — the four spawn-state fields in one home; `Default` is "never
-/// fired".
+/// Per-Sub Effect fire history — the four spawn-state fields in one home; `Default` is "never fired".
 ///
 /// Lives on the `Spawn` reaction variant, not on [`SpawnSpec`]: a [`MintTemplate`]'s `spawn` is
 /// shared immutable config, while each minted Sub needs its own history — state and spec must not
@@ -138,21 +137,20 @@ pub struct FireHistory {
     /// invariant is the weakest tier in the engine — drift self-corrects on the next real change —
     /// so a plain `bool` carries it with no edge-method ceremony beyond the registry funnel.
     pub has_fired: bool,
-    /// Engine instant of this Sub's last Effect emission; `None` until the first fire.
-    /// Observational only — distinct from `has_fired` (the load-bearing B1-dedup signal): this
-    /// carries the timestamp the operator-facing `list` UI renders (via the bin's
-    /// `start_instant`/`start_wall` reference pair). Written only through
-    /// [`SubRegistry::record_fired`].
+    /// Engine instant of this Sub's last Effect emission; `None` until the first fire. Observational
+    /// only — distinct from `has_fired` (the load-bearing B1-dedup signal): this carries the
+    /// timestamp the operator-facing `list` UI renders (via the bin's `start_instant`/`start_wall`
+    /// reference pair). Written only through [`SubRegistry::record_fired`].
     pub last_fired_at: Option<Instant>,
     /// Cumulative Effect emissions across this Sub's lifetime — `SubtreeRoot` increments by 1 per
-    /// fire, `PerStableFile` by the per-file count of the emission pass. Observational; surfaces
-    /// in the IPC `list` projection. Saturating-add on increment (`u64` holds a millennium of
+    /// fire, `PerStableFile` by the per-file count of the emission pass. Observational; surfaces in
+    /// the IPC `list` projection. Saturating-add on increment (`u64` holds a millennium of
     /// microsecond-cadence fires).
     pub fire_count: u64,
     /// Cumulative B1-dedup-suppressed verdicts — bumped when this `SubtreeRoot` Sub's
-    /// `fire_decision` resolves to `FireVerdict::SuppressDedup` (unchanged tree, already fired,
-    /// not forced). Observational; surfaces in `list --wide`. `PerStableFile` never suppresses
-    /// (its dedup is diff-membership), so this counter stays zero on those Subs.
+    /// `fire_decision` resolves to `FireVerdict::SuppressDedup` (unchanged tree, already fired, not
+    /// forced). Observational; surfaces in `list --wide`. `PerStableFile` never suppresses (its
+    /// dedup is diff-membership), so this counter stays zero on those Subs.
     pub dedup_suppressed_count: u64,
 }
 
@@ -161,16 +159,15 @@ pub struct FireHistory {
 /// [`Sub::from_request`] enriches it into a [`Reaction`]: `Spawn` gains a fresh [`FireHistory`],
 /// `Mint` wraps the per-template warning latches.
 ///
-/// - `Spawn` — run a program when the Profile settles. `minted_by` is the Sub-side provenance
-///   axis: `Some` iff a discovery reconcile minted this Sub. Living *inside* the variant, a minted
-///   template is unrepresentable, and the detach cascade is structurally depth-one (a minted Sub
-///   is always `Spawn`, so the cascade's recursive frames never re-enter the template arm).
+/// - `Spawn` — run a program when the Profile settles. `minted_by` is the Sub-side provenance axis:
+///   `Some` iff a discovery reconcile minted this Sub. Living *inside* the variant, a minted
+///   template is unrepresentable, and the detach cascade is structurally depth-one (a minted Sub is
+///   always `Spawn`, so the cascade's recursive frames never re-enter the template arm).
 /// - `Mint` — attach a dynamic Sub per matched chain terminus. Coupled iff with the `MatchChain`
 ///   Profile shape (the engine's attach boundary asserts both directions: a mint reaction on a
-///   non-chain Profile and a spawn reaction on a chain Profile are equally unconstructable).
-///   `Arc`: every reconcile pass collects the Profile's template set before minting — a refcount
-///   bump per pass instead of re-borrowing the registry per mint, and `SubParams: Clone` stays
-///   cheap.
+///   non-chain Profile and a spawn reaction on a chain Profile are equally unconstructable). `Arc`:
+///   every reconcile pass collects the Profile's template set before minting — a refcount bump per
+///   pass instead of re-borrowing the registry per mint, and `SubParams: Clone` stays cheap.
 #[derive(Clone, Debug)]
 pub enum ReactionSpec {
     Spawn {
@@ -203,10 +200,9 @@ impl ReactionSpec {
 /// The per-Sub reaction declaration: everything that is *not* Profile identity or the anchor.
 ///
 /// `name` is `CompactString`, moved end to end: `SubSpec.name` (config) is already `CompactString`,
-/// so the attach request carries it without a `String` round-trip and [`Sub::from_request`] moves
-/// it into `Sub.name` unchanged. A `Spawn` reaction's program is `Arc<ActionProgram>` so the Arc
-/// minted by the config layer's `lower_to_program` flows through to the live Sub without a
-/// re-allocation.
+/// so the attach request carries it without a `String` round-trip and [`Sub::from_request`] moves it
+/// into `Sub.name` unchanged. A `Spawn` reaction's program is `Arc<ActionProgram>` so the Arc minted
+/// by the config layer's `lower_to_program` flows through to the live Sub without a re-allocation.
 ///
 /// Carries no Profile-identity field, so a Sub cannot express (or leak) a sibling Profile's
 /// config/mask — demonstrated unrepresentable:
@@ -249,9 +245,9 @@ impl SubParams {
     }
 
     /// Params for a discovery-minted Sub — [`Self::spawn`] plus the minting template's id. A
-    /// flat-argument ergonomic for tests injecting dynamic Subs; the production mint arm clones
-    /// the template's sealed [`SpawnSpec`] directly (one `needs_diff` derivation per template,
-    /// not one per mint).
+    /// flat-argument ergonomic for tests injecting dynamic Subs; the production mint arm clones the
+    /// template's sealed [`SpawnSpec`] directly (one `needs_diff` derivation per template, not one
+    /// per mint).
     #[must_use]
     pub fn minted(
         name: CompactString,
@@ -550,12 +546,11 @@ pub struct DiscoveryTemplate {
 /// A live Sub's reaction — the [`ReactionSpec`] intent enriched with per-Sub runtime state.
 ///
 /// [`Sub::from_request`] performs the enrichment: `Spawn` gains a fresh (never-fired)
-/// [`FireHistory`]; `Mint` wraps the template in its [`DiscoveryTemplate`] carrier with both
-/// warning latches open. The same idiom on both variants: frozen spec in,
-/// spec-plus-lifetime-state out.
+/// [`FireHistory`]; `Mint` wraps the template in its [`DiscoveryTemplate`] carrier with both warning
+/// latches open. The same idiom on both variants: frozen spec in, spec-plus-lifetime-state out.
 ///
-/// Every spawn-field consumer dispatches on this sum, so the template case cannot be forgotten —
-/// a `Mint` Sub has no `scope`, `program`, or fire history of its own (the minted Subs' reaction
+/// Every spawn-field consumer dispatches on this sum, so the template case cannot be forgotten — a
+/// `Mint` Sub has no `scope`, `program`, or fire history of its own (the minted Subs' reaction
 /// lives on its template; the mint never fires an Effect).
 #[derive(Debug)]
 pub enum Reaction {
@@ -585,22 +580,20 @@ pub struct Sub {
     /// identity (fold into `config_hash`, invariant for the Profile's lifetime); read them off the
     /// Profile.
     pub settle: Duration,
-    /// What this Sub does when its Profile settles. Module-private: external consumers read
-    /// through [`Self::reaction`] and the typed projections ([`Self::minted_by`] /
-    /// [`Self::is_template`] / [`Self::spawn_spec`] / [`Self::fire_history`]), and every mutation
-    /// flows through its registry edge (fire-history writes, warning latches, rebind — the
-    /// registry holds the sole `&mut Sub`). A `Mint`'s [`MintTemplate`] is never mutated
-    /// post-attach: a template change is an identity change at the config layer (reap + reattach),
-    /// never an in-place rebind — the minted Subs hold `Arc`s of the template's program, so a
-    /// rebind would strand them on stale reaction state.
+    /// What this Sub does when its Profile settles. Module-private: external consumers read through
+    /// [`Self::reaction`] and the typed projections ([`Self::minted_by`] / [`Self::is_template`] /
+    /// [`Self::spawn_spec`] / [`Self::fire_history`]), and every mutation flows through its registry
+    /// edge (fire-history writes, warning latches, rebind — the registry holds the sole `&mut Sub`).
+    /// A `Mint`'s [`MintTemplate`] is never mutated post-attach: a template change is an identity
+    /// change at the config layer (reap + reattach), never an in-place rebind — the minted Subs hold
+    /// `Arc`s of the template's program, so a rebind would strand them on stale reaction state.
     reaction: Reaction,
 }
 
 impl Sub {
-    /// Construct a Sub from its [`ProfileId`] and the per-Sub [`SubParams`], enriching the
-    /// reaction with its runtime state: a `Spawn` starts with a fresh (never-fired)
-    /// [`FireHistory`]; a `Mint` wraps the template in its [`DiscoveryTemplate`] carrier with both
-    /// warning latches open.
+    /// Construct a Sub from its [`ProfileId`] and the per-Sub [`SubParams`], enriching the reaction
+    /// with its runtime state: a `Spawn` starts with a fresh (never-fired) [`FireHistory`]; a `Mint`
+    /// wraps the template in its [`DiscoveryTemplate`] carrier with both warning latches open.
     ///
     /// The slotmap key is the Sub's identity authority — there is no `id` field. `params.name`
     /// (`CompactString`) and the spawn spec (with its program Arc) move through unchanged (no
@@ -634,20 +627,19 @@ impl Sub {
         self.profile
     }
 
-    /// This Sub's reaction — the variant dispatch every spawn-field consumer routes through, so
-    /// the `Mint` case cannot be silently misread as a firing Sub.
+    /// This Sub's reaction — the variant dispatch every spawn-field consumer routes through, so the
+    /// `Mint` case cannot be silently misread as a firing Sub.
     #[must_use]
     pub const fn reaction(&self) -> &Reaction {
         &self.reaction
     }
 
     /// Whether this Sub was minted by a discovery reconcile rather than declared by the operator.
-    /// Lifecycle is uniform across the split — anchor loss re-enters descent for every Profile,
-    /// and a minted Sub's removal authority is its source's reconcile, not its anchor — so the
-    /// predicate is purely operator-facing: the IPC enable/disable dispatcher refuses to detach a
-    /// minted Sub by name (the next reconcile would just re-mint it; disable the template
-    /// instead), and the `show` projection renders the origin. A discovery *template* is
-    /// operator-declared (`false`).
+    /// Lifecycle is uniform across the split — anchor loss re-enters descent for every Profile, and a
+    /// minted Sub's removal authority is its source's reconcile, not its anchor — so the predicate is
+    /// purely operator-facing: the IPC enable/disable dispatcher refuses to detach a minted Sub by
+    /// name (the next reconcile would just re-mint it; disable the template instead), and the `show`
+    /// projection renders the origin. A discovery *template* is operator-declared (`false`).
     #[must_use]
     pub const fn is_dynamic(&self) -> bool {
         self.minted_by().is_some()
@@ -855,10 +847,9 @@ impl SubRegistry {
     }
 
     /// Record `count` successful Effect emissions on `sub` at `now`. Bumps
-    /// [`FireHistory::fire_count`] by `count` (saturating) and writes
-    /// [`FireHistory::last_fired_at`] = `Some(now)`. Observational — [`Self::mark_fired`] is the
-    /// load-bearing B1-dedup edge; this one carries the per-Sub fire history the operator-facing
-    /// `list` projection renders.
+    /// [`FireHistory::fire_count`] by `count` (saturating) and writes [`FireHistory::last_fired_at`]
+    /// = `Some(now)`. Observational — [`Self::mark_fired`] is the load-bearing B1-dedup edge; this
+    /// one carries the per-Sub fire history the operator-facing `list` projection renders.
     ///
     /// Called at most once per Sub per `emit_effects` pass on the emit-side. `count` is `1` for a
     /// `SubtreeRoot` emission and the per-file count for a `PerStableFile` emission (aggregated so
@@ -871,8 +862,8 @@ impl SubRegistry {
         }
     }
 
-    /// Bump [`FireHistory::dedup_suppressed_count`] by one — written when `emit_effects` resolves
-    /// a `SubtreeRoot` Sub to `FireVerdict::SuppressDedup` (unchanged tree + already-fired + not
+    /// Bump [`FireHistory::dedup_suppressed_count`] by one — written when `emit_effects` resolves a
+    /// `SubtreeRoot` Sub to `FireVerdict::SuppressDedup` (unchanged tree + already-fired + not
     /// forced). Saturating add; observational only. A stale `SubId` is a silent no-op — same shape
     /// as [`Self::mark_fired`] and [`Self::record_fired`].
     pub fn record_dedup_suppressed(&mut self, sub: SubId) {
@@ -885,16 +876,15 @@ impl SubRegistry {
     /// hot-reload's [`SubRegistryDiff`] split. Variant-typed `Spawn↔Spawn`: a `Mint` rebinds on
     /// neither side.
     ///
-    /// **Preserves**: [`SubId`], `profile`, `name`, `minted_by`, and the whole [`FireHistory`].
-    /// The first two are structural (the slotmap key and the Profile join are invariants of this
-    /// Sub's lifetime); `name` and `minted_by` are pinned by the rebind invariant (callers route
-    /// through [`Self::find_by_name`], which keys on `name`, and a `minted_by` change would cross
-    /// the static↔dynamic boundary the diff already maps to add+remove). `has_fired` is preserved
-    /// because the B1 dedup floor reads it as "this Sub has already announced the current stable
-    /// tree state"; a program swap changes *what runs*, not *whether the tree changed*. The three
-    /// observational counters are preserved for the same reason — they record this Sub's history
-    /// under its operator-facing name, and a `modified_params` rebind leaves both identity and
-    /// history intact.
+    /// **Preserves**: [`SubId`], `profile`, `name`, `minted_by`, and the whole [`FireHistory`]. The
+    /// first two are structural (the slotmap key and the Profile join are invariants of this Sub's
+    /// lifetime); `name` and `minted_by` are pinned by the rebind invariant (callers route through
+    /// [`Self::find_by_name`], which keys on `name`, and a `minted_by` change would cross the
+    /// static↔dynamic boundary the diff already maps to add+remove). `has_fired` is preserved because
+    /// the B1 dedup floor reads it as "this Sub has already announced the current stable tree state";
+    /// a program swap changes *what runs*, not *whether the tree changed*. The three observational
+    /// counters are preserved for the same reason — they record this Sub's history under its
+    /// operator-facing name, and a `modified_params` rebind leaves both identity and history intact.
     ///
     /// **Replaces**: the sealed [`SpawnSpec`] wholesale (`program` / `scope` / `log_output` with
     /// `needs_diff` pre-derived at [`SpawnSpec::new`] — no recompute here to forget) and `settle`.
@@ -912,15 +902,15 @@ impl SubRegistry {
     /// unexpected; the caller surfaces it via [`crate::Diagnostic::RebindUnknownSub`].
     ///
     /// The `debug_assert!`s pin the `name` / `minted_by` invariants — a release-mode breach would
-    /// silently rewrite the identifying fields under the registry's `by_name` index; the
-    /// assertions catch the breach at the call site (release preserves the live `minted_by` and
-    /// rebinds the rest). The variant match is the `Mint` wall: any field change on a
-    /// template-bearing spec classifies as `modified_identity` (wholesale reap + reattach) at the
-    /// config diff, never an in-place rebind — the minted Subs hold `Arc`s of the template's
-    /// program, so a rebind would strand them on stale reaction state. The config-diff head guard
-    /// is the outer wall; the variant mismatch here is the inner one — loud in dev, and in release
-    /// it refuses the rebind (`None`, surfaced through the caller's `RebindUnknownSub` narration)
-    /// rather than silently clobbering a template.
+    /// silently rewrite the identifying fields under the registry's `by_name` index; the assertions
+    /// catch the breach at the call site (release preserves the live `minted_by` and rebinds the
+    /// rest). The variant match is the `Mint` wall: any field change on a template-bearing spec
+    /// classifies as `modified_identity` (wholesale reap + reattach) at the config diff, never an
+    /// in-place rebind — the minted Subs hold `Arc`s of the template's program, so a rebind would
+    /// strand them on stale reaction state. The config-diff head guard is the outer wall; the
+    /// variant mismatch here is the inner one — loud in dev, and in release it refuses the rebind
+    /// (`None`, surfaced through the caller's `RebindUnknownSub` narration) rather than silently
+    /// clobbering a template.
     pub fn rebind(&mut self, sub: SubId, new_params: SubParams) -> Option<(Duration, ProfileId)> {
         let s = self.subs.get_mut(sub)?;
         debug_assert_eq!(
@@ -977,8 +967,8 @@ impl SubRegistry {
             .any(|sid| self.subs.get(*sid).is_some_and(Sub::has_fired))
     }
 
-    /// The Subs on `profile` that have fired — the SeedDrift conservative-recovery fire-filter basis.
-    /// `Mint` Subs naturally never qualify ([`Sub::has_fired`] is structurally `false`).
+    /// The Subs on `profile` that have fired — the SeedDrift conservative-recovery fire-filter
+    /// basis. `Mint` Subs naturally never qualify ([`Sub::has_fired`] is structurally `false`).
     ///
     /// **Order is membership only.** The caller filters with `.contains`; the observable Effect order
     /// is established globally by [`crate::StepOutput::sort_for_emission`] (the load-bearing `(SubId,
@@ -999,9 +989,9 @@ impl SubRegistry {
     /// truth — no mirror to drift. Returns `Some(count)` the first time `count` exceeds `threshold`
     /// and latches [`DiscoveryTemplate::fanout_warned`] so later crossings return `None` — a
     /// pathological pattern warns once per template lifetime. The check-and-latch is atomic here,
-    /// so the one-shot property is structural rather than a caller convention. A stale `SubId` or
-    /// a non-template Sub is a silent `None` — the latch lives on the template carrier, so the
-    /// miss mirrors [`Self::mark_fired`]'s died-with-the-entry contract.
+    /// so the one-shot property is structural rather than a caller convention. A stale `SubId` or a
+    /// non-template Sub is a silent `None` — the latch lives on the template carrier, so the miss
+    /// mirrors [`Self::mark_fired`]'s died-with-the-entry contract.
     pub fn latch_fanout_warning(
         &mut self,
         sub: SubId,
@@ -1385,8 +1375,8 @@ mod tests {
         assert!(reg.find_by_name("build").is_none());
     }
 
-    /// `by_name` indexes every Sub regardless of provenance — both a static operator name and
-    /// a minted `<template_name>@<matched_path>` resolve through `find_by_name`. The two populations
+    /// `by_name` indexes every Sub regardless of provenance — both a static operator name and a
+    /// minted `<template_name>@<matched_path>` resolve through `find_by_name`. The two populations
     /// are disjoint by the config validator's `@`-byte reservation, so their indexed union is unique.
     #[test]
     fn by_name_indexes_static_and_dynamic_subs() {
@@ -1817,8 +1807,8 @@ mod tests {
         );
     }
 
-    /// Rebind tripwire: a `Mint` reaction never rebinds in place — minted Subs hold `Arc`s of
-    /// the template's program, so an in-place swap would strand them on stale reaction state. The
+    /// Rebind tripwire: a `Mint` reaction never rebinds in place — minted Subs hold `Arc`s of the
+    /// template's program, so an in-place swap would strand them on stale reaction state. The
     /// config diff classifies any template-spec change as `modified_identity` (reap + reattach);
     /// the variant mismatch here is the core-side floor under that rule.
     #[test]
@@ -1833,8 +1823,8 @@ mod tests {
     }
 
     /// A per-file scope on a template's *spawn* is minted-reaction payload, not this Profile's
-    /// reaction — a `Mint` Sub has no scope of its own and must not trip the per-file
-    /// recovery-drop predicate. A plain per-file Sub on the same Profile still does.
+    /// reaction — a `Mint` Sub has no scope of its own and must not trip the per-file recovery-drop
+    /// predicate. A plain per-file Sub on the same Profile still does.
     #[test]
     fn has_per_stable_file_sub_excludes_template_bearing_subs() {
         let mut reg = SubRegistry::new();

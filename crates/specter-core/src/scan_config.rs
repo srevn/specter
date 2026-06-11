@@ -2,10 +2,10 @@
 //!
 //! [`compute_config_hash`] is the canonical hash of `(ScanConfig, max_settle, events)`;
 //! [`ProfileIdentity`] is its reified preimage, sealed over the digest at construction —
-//! [`ProfileIdentity::config_hash`] is the sole public route and reads the sealed value. Equal
-//! hash ⇒ Subs share one Profile (snapshot, burst lifecycle). Both fold sites force completeness —
-//! the kernel's exhaustive destructure per scan shape, the constructor's exhaustive struct literal
-//! per identity axis — so a new identity-bearing field is a compile error until folded — the
+//! [`ProfileIdentity::config_hash`] is the sole public route and reads the sealed value. Equal hash
+//! ⇒ Subs share one Profile (snapshot, burst lifecycle). Both fold sites force completeness — the
+//! kernel's exhaustive destructure per scan shape, the constructor's exhaustive struct literal per
+//! identity axis — so a new identity-bearing field is a compile error until folded — the
 //! fold-completeness ratchet.
 //!
 //! `GlobPattern` carries the canonical `source` string alongside the compiled
@@ -462,8 +462,8 @@ fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
 }
 
 /// Canonical hash of `(ScanConfig, max_settle, events)` — the crate-internal hashing kernel.
-/// [`ProfileIdentity::new`] is the sole production caller: it seals the digest onto the identity
-/// at construction, and [`ProfileIdentity::config_hash`] reads that sealed value.
+/// [`ProfileIdentity::new`] is the sole production caller: it seals the digest onto the identity at
+/// construction, and [`ProfileIdentity::config_hash`] reads that sealed value.
 ///
 /// Inputs are folded in fixed order through [`crate::hash::hasher`]: a 1-byte scan-shape
 /// discriminant, the variant's own fields (for `Subtree`: `recursive`, `hidden`, `len(exclude)` as
@@ -605,9 +605,9 @@ impl ProfileIdentity {
         &self.config
     }
 
-    /// The same frozen [`ScanConfig`] behind its sharing handle — for carriers that ship the
-    /// config onward as a refcount bump (the Profile's `config_shared`, and through it the probe
-    /// wire). Every plain reader borrows through [`Self::config`] instead.
+    /// The same frozen [`ScanConfig`] behind its sharing handle — for carriers that ship the config
+    /// onward as a refcount bump (the Profile's `config_shared`, and through it the probe wire).
+    /// Every plain reader borrows through [`Self::config`] instead.
     #[must_use]
     pub const fn config_shared(&self) -> &Arc<ScanConfig> {
         &self.config

@@ -186,6 +186,14 @@ impl StepOutput {
 
     /// Record a [`ProbeOp`], replacing any prior op for the same owner (last-writer-wins — see
     /// [`ProbeOps`]). The `probe_ops` analogue of [`Self::push_effect`].
+    ///
+    /// The upsert silently swallows a `Cancel` when a `Probe` for the same owner lands in the same
+    /// step — the anchor-loss wrapper cancels a mid-Verifying walk and emits the descent probe in
+    /// one step, and the overflow reseed has the same shape. That is sound because probe submission
+    /// *is* displacement: `WorkerProber::submit` (specter-sensor) overwrites the owner's expected
+    /// correlation, so the superseded walk's late result drops at the pool exactly as an explicitly
+    /// cancelled one would. A prober that queued per-owner instead of displacing would need the
+    /// Cancel preserved — revisit this map's semantics before changing that contract.
     pub fn push_probe_op(&mut self, op: ProbeOp) {
         self.probe_ops.upsert(op);
     }

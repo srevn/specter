@@ -545,9 +545,9 @@ mod tests {
         assert!(s.ends_with('\n'), "newline-terminated: {s:?}");
     }
 
-    /// `SubAttached.minted_by = Some(_)` renders an extra `minted_by=N` field; `None`
-    /// omits it entirely. Operators distinguishing operator-declared vs discovery-minted Subs read
-    /// the presence/absence of the field.
+    /// `SubAttached.minted_by = Some(_)` renders an extra `minted_by=N` field; `None` omits it
+    /// entirely. Operators distinguishing operator-declared vs discovery-minted Subs read the
+    /// presence/absence of the field.
     #[test]
     fn render_sub_attached_discovery_field_optional() {
         let mut static_attach = String::new();

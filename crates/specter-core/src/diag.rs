@@ -119,12 +119,11 @@ pub enum SpliceFailureCause {
 /// - [`Self::IpcDisabled`]: an operator runtime-disabled the Sub via the bin's IPC `disable` verb;
 ///   the bin sends [`crate::Input::DetachSub`] carrying this reason verbatim.
 /// - [`Self::MatchVanished`]: a discovery reconcile's certified match set no longer contains the
-///   terminus this minted Sub anchors at, so the removal pass detached it — reconcile is the
-///   single lifecycle authority for minted Subs, both directions. Deliberately *not* an
-///   anchor-loss story: an atomic replace keeps the terminus in the set (slot identity is
-///   `(parent, segment)`), so the minted Sub survives replaces with its fire history intact and
-///   only a genuinely vanished match reaps. Pairs with [`Diagnostic::DiscoverySubReaped`]
-///   (source-keyed, path-carrying narration).
+///   terminus this minted Sub anchors at, so the removal pass detached it — reconcile is the single
+///   lifecycle authority for minted Subs, both directions. Deliberately *not* an anchor-loss story:
+///   an atomic replace keeps the terminus in the set (slot identity is `(parent, segment)`), so the
+///   minted Sub survives replaces with its fire history intact and only a genuinely vanished match
+///   reaps. Pairs with [`Diagnostic::DiscoverySubReaped`] (source-keyed, path-carrying narration).
 /// - [`Self::DiscoverySourceDetached`]: the discovery Sub that minted this Sub was detached, so the
 ///   cascade reaped the minted set — named for what actually happened to *this* Sub's source rather
 ///   than overloading the match story.
@@ -258,10 +257,10 @@ pub enum Diagnostic {
     /// Pending-path descent probe enumerated `prefix` successfully but the next awaited `segment`
     /// is not present in it yet — the descent parks until the next event at the prefix
     /// (`on_descent_event`). Emitted only for *witnessed* descents (an observed anchor loss
-    /// re-entering descent): there the park is a recovery in flight — typically a
-    /// delete-then-write save whose create hasn't landed — and silence would read as the recovery
-    /// vanishing in a debug tail. Attach-time descents park silently; awaiting a path that
-    /// doesn't exist yet is their steady state, and a per-probe emission would be noise.
+    /// re-entering descent): there the park is a recovery in flight — typically a delete-then-write
+    /// save whose create hasn't landed — and silence would read as the recovery vanishing in a
+    /// debug tail. Attach-time descents park silently; awaiting a path that doesn't exist yet is
+    /// their steady state, and a per-probe emission would be noise.
     PendingPathAwaitingSegment {
         profile: ProfileId,
         prefix: ResourceId,

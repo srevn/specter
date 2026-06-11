@@ -73,8 +73,8 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
     let anchor = profile
         .and_then(|p| engine.tree().path_of(p.resource()))
         .map(|arc| WirePath::from(&arc));
-    // Honest render across the reaction sum: a Mint Sub (discovery template) has no fire history
-    // — its stat columns stay `None`, attributed by the `reaction` discriminator.
+    // Honest render across the reaction sum: a Mint Sub (discovery template) has no fire history —
+    // its stat columns stay `None`, attributed by the `reaction` discriminator.
     let history = sub.fire_history();
     let last_fired_at = history
         .and_then(|h| h.last_fired_at)
@@ -337,10 +337,9 @@ mod tests {
         assert!(row.sub.is_some(), "attached ⇒ SubId present");
     }
 
-    /// A dynamic Sub (`minted_by: Some(_)`) projects with the discriminator populated.
-    /// Construct it by directly attaching a `SubAttachRequest` whose `minted_by` is
-    /// `Some(_)` — the engine's `attach_sub` does not require the source template to exist for this
-    /// projection-side test.
+    /// A dynamic Sub (`minted_by: Some(_)`) projects with the discriminator populated. Construct it
+    /// by directly attaching a `SubAttachRequest` whose `minted_by` is `Some(_)` — the engine's
+    /// `attach_sub` does not require the source template to exist for this projection-side test.
     #[test]
     fn list_dynamic_sub_carries_minted_by() {
         use specter_core::{ClassSet, ProfileIdentity};

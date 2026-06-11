@@ -1,6 +1,5 @@
 //! Render an [`ActionProgram`] to operator-readable lines for the
-//! [`crate::ipc::protocol::WireReaction`] payloads (`Spawn`'s `program`, `Mint`'s
-//! `minted_program`).
+//! [`crate::ipc::protocol::WireReaction`] payloads (`Spawn`'s `program`, `Mint`'s `minted_program`).
 //!
 //! One line per [`ProgramOp`]. The argv parts use the same `${specter.<name>}` / `${env.<NAME>}`
 //! vocabulary the source TOML uses, but the rendered form is **operator-readable, not

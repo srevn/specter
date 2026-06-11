@@ -109,8 +109,8 @@ fn project_details(
             mode: WireAbsorbMode::from(w.mode),
         });
     // Honest render across the reaction sum: a Spawn Sub reports its own payload and history; a
-    // Mint Sub (discovery template) reports the knobs its minted Subs inherit plus the live
-    // minted count — never fire stats, which a template has none of.
+    // Mint Sub (discovery template) reports the knobs its minted Subs inherit plus the live minted
+    // count — never fire stats, which a template has none of.
     let reaction = match sub.reaction() {
         Reaction::Spawn { spec, history, .. } => WireReaction::Spawn {
             scope: WireEffectScope::from(spec.scope()),

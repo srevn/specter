@@ -10,14 +10,14 @@
 //! test proves.
 
 use crate::Engine;
-use specter_core::testkit::{enumerated, proven};
+use specter_core::testkit::{anchor_ok, enumerated, file_leaf, proven};
 use specter_core::{
     ActiveBurst, ClassSet, DedupKey, DirSnapshot, EffectCompletion, EffectOutcome, EffectScope,
-    FS_ROOT_SEGMENT, FsEvent, Input, MintTemplate, PatternSpec, PostFireBurst, PostFirePhase,
-    PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId,
-    ProfileIdentity, ProfileState, ReactionSpec, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
-    TimerId, WatchFailure,
+    EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, MintTemplate, PatternSpec, PostFireBurst,
+    PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome,
+    ProbeResponse, ProfileId, ProfileIdentity, ProfileState, ReactionSpec, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor,
+    SubAttachRequest, SubId, SubParams, TimerId, WatchFailure,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -501,6 +501,63 @@ pub fn descent_advance(
     )
 }
 
+/// Answer `pid`'s single in-flight probe with `AnchorOk(file_leaf(File, inode))` at `at`.
+///
+/// The File-anchor sample primitive, sibling of [`verify_with`] minus the settle-window shift:
+/// replace/recovery fixtures pace their own instants across the loss → descent → Seed hops.
+#[must_use]
+pub fn respond_anchor_file(e: &mut Engine, pid: ProfileId, inode: u64, at: Instant) -> StepOutput {
+    let correlation = e.pending_probe_for(pid).expect("probe in flight");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation,
+            outcome: anchor_ok(file_leaf(EntryKind::File, inode)),
+        }),
+        at,
+    )
+}
+
+/// Drive one full Standard fire cycle on a File anchor.
+///
+/// `ContentChanged` at `anchor` → settle drain → the verify sample (`AnchorOk`, `inode`) fires
+/// exactly one Effect → `EffectComplete(Ok)` → the rebase sample (same `inode`) commits → Idle.
+/// Returns the instant the cycle rests at.
+///
+/// Single-sample shape: the Sub must attach with an events-witnessing mask (CONTENT present, e.g.
+/// [`DEFAULT_EVENTS`]) so both verdicts fold `EventsReliable`, and `inode` should differ from the
+/// baseline's so B1 dedup never suppresses the fire.
+#[must_use]
+pub fn fire_standard_once(
+    e: &mut Engine,
+    sid: SubId,
+    anchor: ResourceId,
+    inode: u64,
+    now: Instant,
+) -> Instant {
+    let pid = pid_of(e, sid);
+    let _ = e.step(
+        Input::FsEvent {
+            resource: anchor,
+            event: FsEvent::ContentChanged,
+        },
+        now,
+    );
+    let at = now + SETTLE * 2;
+    drain_due(e, at);
+    let out = respond_anchor_file(e, pid, inode, at);
+    assert_eq!(out.effects().len(), 1, "standard burst fires one effect");
+    let key = out.effects()[0].key();
+    let _ = complete_effect_to_rebasing(e, sid, key, at);
+    let out = respond_anchor_file(e, pid, inode, at);
+    assert!(out.effects().is_empty(), "rebase commits without re-firing");
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "fire cycle rests at Idle for {pid:?}",
+    );
+    at
+}
+
 /// Drive the burst's single completed Effect (`key`) into Rebasing.
 ///
 /// Steps `EffectComplete::Ok`; the burst advances `Awaiting → Rebasing` (probe-first) via
@@ -564,8 +621,8 @@ pub const fn watch_op_rejected_input(resource: ResourceId) -> Input {
 
 /// The fixture [`MintTemplate`] with the default `SubtreeRoot` minted-reaction scope.
 ///
-/// A `recursive` `Subtree` minted identity with `ClassSet::EMPTY` and `MAX_SETTLE`; minted
-/// debounce `SETTLE`; minted reaction `/bin/true`-shaped (`empty_program`, no log forwarding).
+/// A `recursive` `Subtree` minted identity with `ClassSet::EMPTY` and `MAX_SETTLE`; minted debounce
+/// `SETTLE`; minted reaction `/bin/true`-shaped (`empty_program`, no log forwarding).
 #[must_use]
 pub fn mint_template() -> Arc<MintTemplate> {
     mint_template_scoped(EffectScope::SubtreeRoot)

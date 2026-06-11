@@ -1474,8 +1474,8 @@ impl std::fmt::Display for WireEffectScope {
 /// describes, without the variant payload. Surfaces in `ListRow.reaction` so the table can
 /// attribute its n/a fire-stat cells (a `mint` row never fires) instead of leaving a bare `-`
 /// mysterious; the `show` detail block carries the full per-variant payload
-/// (`crate::ipc::protocol::WireReaction`) whose serde tag emits these same tokens — the lockstep
-/// is pinned by `protocol::tests::sub_details_flattens_reaction_variants`.
+/// (`crate::ipc::protocol::WireReaction`) whose serde tag emits these same tokens — the lockstep is
+/// pinned by `protocol::tests::sub_details_flattens_reaction_variants`.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireReactionKind {

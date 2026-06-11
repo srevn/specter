@@ -375,8 +375,8 @@ pub(crate) struct ListResponse {
 /// One row in [`ListResponse`]. Fields scoped per row type:
 ///
 /// - Attached `spawn` rows fill every field; `disabled` is `None`.
-/// - Attached `mint` rows (discovery templates) carry `None` fire stats — a template mints Subs
-///   and never fires an Effect, so there is no history to report; the `reaction` discriminator
+/// - Attached `mint` rows (discovery templates) carry `None` fire stats — a template mints Subs and
+///   never fires an Effect, so there is no history to report; the `reaction` discriminator
 ///   attributes the n/a.
 /// - Runtime-disabled rows fill `name` + `disabled = Some(Runtime)`; engine-derived fields are `None`
 ///   (the Sub is not in `engine.subs()`, so the Profile / state / anchor / counters do not exist).
@@ -394,8 +394,8 @@ pub(crate) struct ListRow {
     pub(crate) state: Option<WireStateLabel>,
     /// Anchor path. `None` for non-attached rows (no Profile, no resource).
     pub(crate) anchor: Option<WirePath>,
-    /// Wall-clock projection of the Sub's last Effect emission. `None` for never-fired Subs,
-    /// `mint` rows, and non-attached rows.
+    /// Wall-clock projection of the Sub's last Effect emission. `None` for never-fired Subs, `mint`
+    /// rows, and non-attached rows.
     pub(crate) last_fired_at: Option<WireTime>,
     /// Cumulative Effect emissions. `None` for `mint` rows and non-attached rows.
     pub(crate) fire_count: Option<u64>,
@@ -407,8 +407,8 @@ pub(crate) struct ListRow {
     /// for non-attached rows.
     pub(crate) settle_ms: Option<u64>,
     /// Which reaction kind this row's Sub carries — `spawn` (fires a program) or `mint` (a
-    /// discovery template; its row's fire-stat `None`s are structural, not "never fired").
-    /// `None` for non-attached rows.
+    /// discovery template; its row's fire-stat `None`s are structural, not "never fired"). `None`
+    /// for non-attached rows.
     pub(crate) reaction: Option<WireReactionKind>,
     /// Disable-source discriminator. `None` for attached rows.
     pub(crate) disabled: Option<DisabledSource>,
@@ -496,8 +496,8 @@ pub(crate) struct SubDetails {
     /// `spawn` payload's `fire_count`; per-Profile (a fold is per-Profile), projected here per-Sub.
     pub(crate) absorb_count: u64,
     /// `Sub.settle.as_millis()` — this Sub's own debounce. On a `mint` row this is the discovery
-    /// walk's debounce (a lowering constant), distinct from the template knob
-    /// `minted_settle_ms` the minted Subs inherit.
+    /// walk's debounce (a lowering constant), distinct from the template knob `minted_settle_ms`
+    /// the minted Subs inherit.
     pub(crate) settle_ms: u64,
     /// `Sub::minted_by()` projection — `Some(_)` iff the Sub was minted by a discovery template.
     /// Distinct from a TOML-declared Sub with the same anchor: the source id locates which template
@@ -509,19 +509,17 @@ pub(crate) struct SubDetails {
     pub(crate) reaction: WireReaction,
 }
 
-/// Per-reaction `show` payload — the wire projection of `specter_core::Reaction`, honest per
-/// variant: a `spawn` row reports its own program and fire history; a `mint` row (discovery
-/// template) reports the knobs its minted Subs inherit and the live minted count, and carries no
-/// fire stats at all — a template fires attachments, never Effects, so there is no history whose
-/// counters could ever move.
+/// Per-reaction `show` payload — the wire projection of `specter_core::Reaction`, honest per variant:
+/// a `spawn` row reports its own program and fire history; a `mint` row (discovery template) reports
+/// the knobs its minted Subs inherit and the live minted count, and carries no fire stats at all — a
+/// template fires attachments, never Effects, so there is no history whose counters could ever move.
 ///
 /// Internally tagged `reaction` and flattened into [`SubDetails`], so every payload key lands in
 /// the same flat JSON object as the rest of the detail block. The `spawn` keys are bare (they
 /// describe *this* Sub's reaction); every `mint` key carries the `minted_` prefix (they describe
 /// the *minted* Subs) — the prefix keeps each key self-describing and keeps the template knob
 /// `minted_settle_ms` from colliding with the top-level `settle_ms` in the flattened object. The
-/// tag tokens are [`WireReactionKind`]'s vocabulary; the lockstep is pinned in this module's
-/// tests.
+/// tag tokens are [`WireReactionKind`]'s vocabulary; the lockstep is pinned in this module's tests.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "reaction", rename_all = "snake_case")]
 pub(crate) enum WireReaction {
@@ -546,15 +544,14 @@ pub(crate) enum WireReaction {
         minted_scope: WireEffectScope,
         /// Minted Subs' program, rendered like the `spawn` payload's `program`.
         minted_program: Vec<String>,
-        /// Live minted-Sub count for this template, registry-derived at projection time — the
-        /// same scan the discovery fan-out warning runs; O(total Subs), fine at IPC cadence.
+        /// Live minted-Sub count for this template, registry-derived at projection time — the same
+        /// scan the discovery fan-out warning runs; O(total Subs), fine at IPC cadence.
         minted_live: usize,
     },
 }
 
-/// Discriminant projection — the `show -o human` renderer's `reaction` line reads its token
-/// through this, so the human vocabulary and the wire tag stay on [`WireReactionKind`]'s single
-/// source.
+/// Discriminant projection — the `show -o human` renderer's `reaction` line reads its token through
+/// this, so the human vocabulary and the wire tag stay on [`WireReactionKind`]'s single source.
 impl From<&WireReaction> for WireReactionKind {
     fn from(r: &WireReaction) -> Self {
         match r {
@@ -959,12 +956,11 @@ mod tests {
 
     /// `SubDetails.reaction` flattens onto the wire as an internally-tagged payload: the `reaction`
     /// key carries the variant token (lockstep with [`WireReactionKind`]'s vocabulary — the `list`
-    /// discriminator and the `show` tag must never drift apart), the `spawn` payload inlines its
-    /// bare keys, and the `mint` payload inlines `minted_*` keys — crucially `minted_settle_ms`
-    /// coexisting with the top-level `settle_ms` (the flatten would emit a duplicate JSON key if
-    /// the template knob ever lost its prefix). Both variants round-trip through [`parse_strict`],
-    /// pinning that serde's flatten + internal-tag machinery deserializes the shape the daemon
-    /// emits.
+    /// discriminator and the `show` tag must never drift apart), the `spawn` payload inlines its bare
+    /// keys, and the `mint` payload inlines `minted_*` keys — crucially `minted_settle_ms` coexisting
+    /// with the top-level `settle_ms` (the flatten would emit a duplicate JSON key if the template
+    /// knob ever lost its prefix). Both variants round-trip through [`parse_strict`], pinning that
+    /// serde's flatten + internal-tag machinery deserializes the shape the daemon emits.
     #[test]
     fn sub_details_flattens_reaction_variants() {
         let spawn = sample_details(WireReaction::Spawn {

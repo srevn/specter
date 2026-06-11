@@ -717,8 +717,8 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
 //
 // `dispatch_seed_vanished` releases the anchor's contribution (mirroring `dispatch_standard_*`)
 // inside `finalize_anchor_lost_and_descend`, *before* the same step re-enters `Pending` — a
-// still-Held claim would violate `reap_profile`'s `!(Pending && Held)` trichotomy invariant at
-// the descent flip. The watch is re-acquired via descent's anchor materialization on recovery.
+// still-Held claim would violate `reap_profile`'s `!(Pending && Held)` trichotomy invariant at the
+// descent flip. The watch is re-acquired via descent's anchor materialization on recovery.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -760,8 +760,8 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         at,
     );
 
-    // Anchor's contribution is released, and the loss step re-entered descent at the parent —
-    // the trichotomy invariant is exercised by the `Pending` flip in the same step.
+    // Anchor's contribution is released, and the loss step re-entered descent at the parent — the
+    // trichotomy invariant is exercised by the `Pending` flip in the same step.
     assert_eq!(
         e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::None,

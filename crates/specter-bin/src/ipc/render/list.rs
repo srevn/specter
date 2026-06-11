@@ -414,9 +414,9 @@ mod tests {
         }
     }
 
-    /// A template row attributes its structural blanks: REACTION renders `mint` while the
-    /// fire-stat cells render the shared `-` marker — the operator reads "cannot fire", not
-    /// "never fired" or "not attached".
+    /// A template row attributes its structural blanks: REACTION renders `mint` while the fire-stat
+    /// cells render the shared `-` marker — the operator reads "cannot fire", not "never fired" or
+    /// "not attached".
     #[test]
     fn list_table_mint_row_attributes_missing_fire_stats() {
         let resp = ListResponse {
@@ -461,8 +461,8 @@ mod tests {
         let header = lines.next().expect("header line");
         let separator = lines.next().expect("separator line");
         let dash_count = separator.chars().filter(|c| *c == '─').count();
-        // NAME (4) + STATE (5) + ANCHOR (6) + LAST_FIRED (10) + FIRES (5) + REACTION (8) +
-        // DISABLED (8) = 46 — header widths bound the separator from below.
+        // NAME (4) + STATE (5) + ANCHOR (6) + LAST_FIRED (10) + FIRES (5) + REACTION (8) + DISABLED
+        // (8) = 46 — header widths bound the separator from below.
         assert!(
             dash_count >= 46,
             "separator must repeat per-column-width; got {dash_count} dashes from {separator:?}",

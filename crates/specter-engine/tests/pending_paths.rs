@@ -1,18 +1,22 @@
 //! Pending-path descent end-to-end. Drives `Engine::attach_sub` with a path-based request, walks
-//! descent through scaffolds, and confirms anchor materialization triggers a Seed burst.
+//! descent through scaffolds, and confirms anchor materialization triggers a Seed burst. The
+//! witnessed-activity latch splits the materialization: a descent that saw kernel activity (an
+//! event reaching it live — even while its probe is in flight) opens a *triggered* Seed that owes a
+//! fire; an unwitnessed attach-over-existing stays cold and pins.
 
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
-    ActiveBurst, Diagnostic, EffectScope, EntryKind, FsEvent, Input, ProbeFailure, ProbeOp,
-    ProbeOutcome, ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig,
+    ActiveBurst, ClassSet, Diagnostic, EffectScope, EntryKind, FsEvent, Input, ProbeFailure,
+    ProbeOp, ProbeOutcome, ProbeResponse, ProfileState, ResourceKind, ResourceRole, ScanConfig,
     SubAttachAnchor, SubAttachRequest,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, first_probe_correlation, seed_to_idle,
+    MAX_SETTLE, NO_EVENTS, SETTLE, complete_effect_to_rebasing, descent_advance, drain_due,
+    fire_standard_once, first_probe_correlation, pre_place_dir, respond_anchor_file, seed_to_idle,
 };
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 #[test]
 fn attach_sub_path_pending_then_anchor_appears() {
@@ -115,6 +119,164 @@ fn attach_sub_path_pending_then_anchor_appears() {
     assert!(p.baseline().is_some());
 }
 
+/// The watched file APPEARS after attach, witnessed via the parent's STRUCTURE event reaching the
+/// live descent — the witnessed-activity latch — so materialization opens a triggered Seed
+/// (Batching-first) that FIRES once the settle window passes (`FreshSeedFire`). The witnessed
+/// counterpart of [`attach_sub_path_pending_then_anchor_appears`]'s cold pin.
+#[test]
+fn pending_path_witnessed_appearance_fires() {
+    let mut e = Engine::new();
+    let parent = pre_place_dir(&mut e, &["watch"]);
+    let now = Instant::now();
+
+    let req = SubAttachRequest::for_anchor(
+        "pending".into(),
+        SubAttachAnchor::Path(PathBuf::from("/watch/app.log")),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::DEFAULT_SUBTREE_ROOT,
+        false,
+    );
+    let out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
+    let pid = e.subs().get(sid).unwrap().profile();
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state(),
+        ProfileState::Pending(_)
+    ));
+
+    // First descent probe: file not there yet.
+    let out = descent_advance(&mut e, pid, &dir_snap(&[]), now);
+    assert!(out.effects().is_empty());
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state(),
+        ProfileState::Pending(_)
+    ));
+
+    // The file appears: the parent STRUCTURE event latches the live descent witnessed and
+    // re-probes; the response materializes the anchor into a TRIGGERED Seed — Batching-first, no
+    // probe until the settle window expires.
+    let t1 = now + Duration::from_millis(50);
+    let _ = e.step(
+        Input::FsEvent {
+            resource: parent,
+            event: FsEvent::StructureChanged,
+        },
+        t1,
+    );
+    let out = descent_advance(
+        &mut e,
+        pid,
+        &dir_snap(&[("app.log", EntryKind::File, 1)]),
+        t1,
+    );
+    assert!(
+        out.effects().is_empty(),
+        "materialization itself never fires"
+    );
+    assert!(
+        e.pending_probe_for(pid).is_none(),
+        "triggered Seed opens Batching-first — no cold walk in flight",
+    );
+
+    // Settle expiry -> Verifying -> the Authoritative sample classifies FreshSeedFire.
+    let t2 = t1 + SETTLE * 2;
+    drain_due(&mut e, t2);
+    let out = respond_anchor_file(&mut e, pid, 1, t2);
+    assert_eq!(
+        out.effects().len(),
+        1,
+        "the witnessed appearance fires once it settles",
+    );
+    assert!(e.subs().get(sid).unwrap().has_fired());
+
+    // Drain the fire cycle: effect Ok -> rebase -> Idle.
+    let key = out.effects()[0].key();
+    let _ = complete_effect_to_rebasing(&mut e, sid, key, t2);
+    let _ = respond_anchor_file(&mut e, pid, 1, t2);
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state(),
+        ProfileState::Idle
+    ));
+
+    // And the watch is healthy thereafter: an in-place change fires as Standard.
+    let anchor = e.profiles().get(pid).unwrap().resource();
+    let _ = fire_standard_once(&mut e, sid, anchor, 2, t2 + SETTLE);
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// The latch lands before the I5 in-flight gate: an event reaching a live descent whose attach-time
+/// probe is STILL in flight must latch the witness even though the re-probe is dropped — the
+/// in-flight response then materializes into a triggered Seed that fires. (The overflow variant of
+/// this ordering is pinned beside `on_sensor_overflow`'s tests; this is the plain-FsEvent variant.)
+#[test]
+fn event_during_in_flight_attach_descent_latches_and_fires() {
+    let mut e = Engine::new();
+    let parent = pre_place_dir(&mut e, &["watch"]);
+    let now = Instant::now();
+
+    let req = SubAttachRequest::for_anchor(
+        "latch-i5".into(),
+        SubAttachAnchor::Path(PathBuf::from("/watch/app.log")),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::DEFAULT_SUBTREE_ROOT,
+        false,
+    );
+    let out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
+    let pid = e.subs().get(sid).unwrap().profile();
+    assert!(
+        e.pending_probe_for(pid).is_some(),
+        "attach-time descent probe in flight",
+    );
+
+    // The file appears while the attach-time probe is in flight: the latch lands, the I5 gate drops
+    // the re-probe.
+    let t1 = now + Duration::from_millis(10);
+    let out = e.step(
+        Input::FsEvent {
+            resource: parent,
+            event: FsEvent::StructureChanged,
+        },
+        t1,
+    );
+    assert!(
+        out.probe_ops().is_empty(),
+        "I5: the in-flight probe absorbs the re-probe",
+    );
+
+    // The in-flight response finds the file — it must open a TRIGGERED Seed (the latch landed), not
+    // pin silently.
+    let out = descent_advance(
+        &mut e,
+        pid,
+        &dir_snap(&[("app.log", EntryKind::File, 1)]),
+        t1,
+    );
+    assert!(out.effects().is_empty());
+    assert!(
+        e.pending_probe_for(pid).is_none(),
+        "triggered Seed opens Batching-first",
+    );
+    let t2 = t1 + SETTLE * 2;
+    drain_due(&mut e, t2);
+    let out = respond_anchor_file(&mut e, pid, 1, t2);
+    assert_eq!(
+        out.effects().len(),
+        1,
+        "the latched appearance fires once it settles",
+    );
+    assert!(e.subs().get(sid).unwrap().has_fired());
+    let _ = e.cancel_all_in_flight_probes();
+}
+
 #[test]
 fn pending_path_failed_probe_retains_state() {
     let mut e = Engine::new();
@@ -191,14 +353,22 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     let pid = e.subs().get(sid).unwrap().profile();
     let corr = first_probe_correlation(&attach_out).expect("descent probe");
 
-    // No-progress response — descent stays pending.
-    let _ = e.step(
+    // No-progress response — descent stays pending. An attach-time (unwitnessed) park is silent:
+    // the `PendingPathAwaitingSegment` narration is gated to witnessed descents, where parking is a
+    // recovery anomaly rather than the steady state.
+    let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: corr,
             outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("other", EntryKind::File, 99)])),
         }),
         Instant::now(),
+    );
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::PendingPathAwaitingSegment { .. })),
+        "unwitnessed park narrates nothing",
     );
 
     // FsEvent at /var triggers a fresh descent probe.
@@ -220,9 +390,9 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
 
 #[test]
 fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
-    // "Watch root deletion": Sub at /src; / is the watch_root_parent. The anchor's Removed
-    // terminal re-enters pending descent at the parent inside the loss step itself — no later
-    // parent event is needed.
+    // "Watch root deletion": Sub at /src; / is the watch_root_parent. The anchor's Removed terminal
+    // re-enters pending descent at the parent inside the loss step itself — no later parent event
+    // is needed.
     let mut e = Engine::new();
     // Both / and /src exist; /src is the anchor.
     let root_dir = e.tree_mut().ensure_root("root", ResourceRole::User);
@@ -265,8 +435,8 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     // that follows.
     let after_seed = seed_done + SETTLE;
 
-    // Anchor gone (Removed event at /src): the loss step re-enters pending descent with
-    // prefix=/, remaining=[src], and emits the descent probe at the watch_root_parent.
+    // Anchor gone (Removed event at /src): the loss step re-enters pending descent with prefix=/,
+    // remaining=[src], and emits the descent probe at the watch_root_parent.
     let out = e.step(
         Input::FsEvent {
             resource: src,
@@ -528,10 +698,10 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Some(root_dir),
         "B watches its parent /root for anchor recovery",
     );
-    // B's loss arrives via probe-`Failed` — the path that parks Idle-anchorless awaiting
-    // event-scan recovery. (An observed loss — terminal / Vanished — re-enters descent inside the
-    // loss step and would join the *descents* class instead; `Failed` is how the recoveries class
-    // is populated.) Drive a Standard burst at the anchor, then fail its verify probe.
+    // B's loss arrives via probe-`Failed` — the path that parks Idle-anchorless awaiting event-scan
+    // recovery. (An observed loss — terminal / Vanished — re-enters descent inside the loss step
+    // and would join the *descents* class instead; `Failed` is how the recoveries class is
+    // populated.) Drive a Standard burst at the anchor, then fail its verify probe.
     let after_b_seed = b_seed_done + SETTLE;
     e.step(
         Input::FsEvent {

@@ -243,9 +243,9 @@ pub struct TemplateSpec {
 impl SubSpec {
     #[must_use]
     pub fn to_attach_request(&self) -> SubAttachRequest {
-        // The spec's flat program/scope/log_output seal into one SpawnSpec either way; the
-        // template fork decides whose reaction it is — the Sub's own (static) or the minted Subs'
-        // (the discovery Sub itself spawns nothing).
+        // The spec's flat program/scope/log_output seal into one SpawnSpec either way; the template
+        // fork decides whose reaction it is — the Sub's own (static) or the minted Subs' (the
+        // discovery Sub itself spawns nothing).
         let spawn = SpawnSpec::new(Arc::clone(&self.program), self.scope, self.log_output);
         SubAttachRequest::from_parts(
             SubAttachAnchor::Path(self.path.clone()),

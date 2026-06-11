@@ -37,8 +37,8 @@ pub(super) use status::status;
 use std::time::{Duration, Instant, SystemTime};
 
 /// Project a settle window onto its wire millisecond count. Shared by the `list` row, the `show`
-/// detail block's own `settle_ms`, and the mint payload's `minted_settle_ms`, so the
-/// fits-in-u64 expectation is stated once.
+/// detail block's own `settle_ms`, and the mint payload's `minted_settle_ms`, so the fits-in-u64
+/// expectation is stated once.
 pub(super) fn settle_ms(settle: Duration) -> u64 {
     u64::try_from(settle.as_millis())
         .expect("Duration::as_millis fits u64 for any operator-meaningful settle window")

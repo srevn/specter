@@ -68,9 +68,9 @@ const LABEL_WIDTH: usize = 16;
 ///   [1] exec /bin/notify  ok→escape fail→terminate
 /// ```
 ///
-/// A `mint` reaction (discovery template) swaps the spawn-only lines for the template's knobs —
-/// no `fires` / `last fired` (a template never fires, so there are no counters to report), and
-/// every minted-Sub value labelled as such:
+/// A `mint` reaction (discovery template) swaps the spawn-only lines for the template's knobs — no
+/// `fires` / `last fired` (a template never fires, so there are no counters to report), and every
+/// minted-Sub value labelled as such:
 ///
 /// ```text
 /// disc
@@ -196,8 +196,7 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         }
     };
     // Only an armed, live window renders — the projection drops an inert one, so a present `absorb`
-    // is always operator-meaningful (on a mint row it flags an arm the discovery shape makes
-    // inert).
+    // is always operator-meaningful (on a mint row it flags an arm the discovery shape makes inert).
     if let Some(w) = d.absorb.as_ref() {
         let _ = writeln!(
             out,
@@ -225,9 +224,8 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         d.profile.0,
     );
     out.push('\n');
-    // The program header is a section label, painted `LABEL` like the others; the lines below it
-    // stay plain — the daemon pre-renders each as an opaque string the renderer does not
-    // re-tokenize.
+    // The program header is a section label, painted `LABEL` like the others; the lines below it stay
+    // plain — the daemon pre-renders each as an opaque string the renderer does not re-tokenize.
     let _ = writeln!(
         out,
         "{}",
@@ -373,9 +371,9 @@ mod tests {
         );
     }
 
-    /// A `mint` reaction renders the template knobs under minted-prefixed labels and a
-    /// `minted program` header, with no `fires` / `last fired` lines — the honest swap for a Sub
-    /// that never fires an Effect.
+    /// A `mint` reaction renders the template knobs under minted-prefixed labels and a `minted
+    /// program` header, with no `fires` / `last fired` lines — the honest swap for a Sub that never
+    /// fires an Effect.
     #[test]
     fn show_human_mint_renders_template_block_without_fire_lines() {
         let d = mint_details(
