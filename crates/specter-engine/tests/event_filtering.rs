@@ -382,11 +382,11 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
 // A `events = ["content"]` Sub on a Dir anchor: `Removed` at the anchor folds to STRUCTURE per
 // `fs_event_to_class`'s identity-on-Dir rule. STRUCTURE is NOT in the Profile's mask. Without the
 // anchor-bypass, the class filter would drop the event and the anchor's contribution would leak —
-// `watch_root_parent → re-descent` recovery would never trigger.
+// the loss would never be observed and recovery would never start.
 //
 // With the anchor-bypass, the event routes to `on_anchor_terminal_event` regardless of mask:
-// `anchor_claim` clears to None, baseline/current drop, the Profile transitions Idle, ready for
-// recovery via watch_root_parent.
+// `anchor_claim` clears to None, baseline/current drop, and the Profile re-enters descent at
+// watch_root_parent in the same step.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -450,12 +450,17 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
         0,
         "anchor's watch_demand released",
     );
-    // watch_root_parent is intact for recovery.
+    // watch_root_parent is intact, and the loss step re-entered descent against it.
     assert_eq!(p.watch_root_parent(), Some(parent));
+    assert!(
+        matches!(p.state(), ProfileState::Pending(_)),
+        "observed loss re-enters descent in the loss step itself",
+    );
     assert!(
         e.tree().get(parent).unwrap().watch_demand() >= 1,
         "watch_root_parent contribution survives anchor terminal",
     );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -708,16 +713,12 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// Regression: Seed-Vanished + watch-root-parent recovery flow
+// Seed-Vanished releases the anchor claim before descent re-entry
 //
-// Bug: Before this fix, `dispatch_seed_vanished` left `anchor_claim == AnchorClaim::Held`. A
-// subsequent `StructureChanged` at `watch_root_parent` triggered `start_pending_recovery`, which
-// transitioned the Profile to `Pending` while the claim was still Held — violating `reap_profile`'s
-// `!(Pending && Held)` trichotomy invariant.
-//
-// Fix: `dispatch_seed_vanished` (and `dispatch_seed_failed`) now release the anchor's contribution,
-// mirroring `dispatch_standard_*`. The watch is re-acquired via descent's anchor materialization on
-// recovery.
+// `dispatch_seed_vanished` releases the anchor's contribution (mirroring `dispatch_standard_*`)
+// inside `finalize_anchor_lost_and_descend`, *before* the same step re-enters `Pending` — a
+// still-Held claim would violate `reap_profile`'s `!(Pending && Held)` trichotomy invariant at
+// the descent flip. The watch is re-acquired via descent's anchor materialization on recovery.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]
@@ -759,12 +760,12 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         at,
     );
 
-    // Anchor's contribution is released; Profile back to Idle ready for recovery via
-    // watch_root_parent.
+    // Anchor's contribution is released, and the loss step re-entered descent at the parent —
+    // the trichotomy invariant is exercised by the `Pending` flip in the same step.
     assert_eq!(
         e.profiles().get(pid).unwrap().anchor_claim(),
         AnchorClaim::None,
-        "Seed Vanished now releases anchor_claim (post-fix)",
+        "Seed Vanished releases anchor_claim",
     );
     assert_eq!(
         e.tree().get(anchor).unwrap().watch_demand(),
@@ -780,10 +781,11 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
     );
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle,
+        ProfileState::Pending(_),
     ));
-    // watch_root_parent kept for recovery.
+    // watch_root_parent kept; it is the descent prefix now.
     assert!(e.profiles().get(pid).unwrap().watch_root_parent() == Some(parent));
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]

@@ -19,17 +19,31 @@
 //!   in-flight probe is exactly an armed `DescentState.probe` slot — one slot per descent, so two
 //!   simultaneous descent probes are unconstructable.
 //!
+//! **Three entries, one machine.** Descent is entered from:
+//! - **Attach time** (`materialize_path_or_pending` → Pending): the requested path has scaffold
+//!   segments — the anchor doesn't exist yet. Unwitnessed: no kernel signal stands behind the
+//!   entry, so an anchor the entry probe finds pins silently (restart-safe doctrine).
+//! - **Observed anchor loss** (`Engine::finalize_anchor_lost_and_descend`): the anchor-terminal
+//!   event, a probe-`Vanished` dispatch, or a kind-mismatched response re-enters descent at
+//!   `watch_root_parent` *inside the loss step itself* — "anchor lost" and "anchor doesn't yet
+//!   exist" are the same state. Witnessed: the loss signal is the activity witness, so the
+//!   terminus Seed owes a fire.
+//! - **Event-scan fallback** (`Engine::start_pending_recovery`): a parent `StructureChanged`
+//!   re-enters a Profile that a probe-`Failed` discard or a watch-rejection purge left parked
+//!   Idle-anchorless. Unwitnessed: the entry event can be sibling churn out of the Sub's scope.
+//!
 //! **Lifecycle.**
-//! 1. `Engine::attach_sub` with a path-based request walks the path; if any non-leaf segment was
-//!    freshly created (`role = DescentScaffold`), the Profile transitions Idle → Pending. The deepest
-//!    existing ancestor is `current_prefix`; the remaining path components await materialization.
+//! 1. One of the three entries above flips the Profile to `Pending`. The deepest existing
+//!    ancestor is `current_prefix`; the remaining path components await materialization (a
+//!    recovery entry is the one-segment special case: prefix = the anchor's parent).
 //! 2. The engine bumps `current_prefix.watch_demand` and emits a `ProbeOp::Probe` at the prefix.
 //! 3. `dispatch_descent_probe` consumes the response:
 //!    - `Ok(snap)`: look for the next remaining component as a single-level child. Found and is the
 //!      anchor → materialize (promote to `User`, set kind, bump anchor's `watch_demand`, drop the
 //!      prefix's, transition Pending → Idle, start a Seed burst — cold, or Batching-first
 //!      triggered when the descent's witnessed-activity latch is set). Found but not the anchor →
-//!      advance descent one segment. Not found → await the next event.
+//!      advance descent one segment. Not found → park awaiting the next event (a witnessed park
+//!      narrates via `PendingPathAwaitingSegment` — the delete-then-write recovery shape).
 //!    - `Vanished`: the prefix itself is gone. Sub the prefix's contribution; vacate; rewind to the
 //!      next-existing ancestor; emit a fresh probe.
 //!    - `Failed { errno }`: retain Pending state; emit Diagnostic; await next event.
@@ -357,7 +371,18 @@ impl crate::Engine {
             None => {
                 // Next segment not yet present; await next event. v1 descent doesn't mtime-skip, so
                 // no need to retain the snapshot — the next probe will get a fresh `lstat`-walked
-                // DirSnapshot anyway.
+                // DirSnapshot anyway. A witnessed descent narrates the park: post-loss recovery
+                // flows through here when the replacement hasn't landed yet (delete-then-write
+                // saves), and a silent park would read as the recovery vanishing in a debug tail.
+                // Attach-time descents skip the narration — parking is their steady state.
+                if descent.witnessed() {
+                    out.diagnostics
+                        .push(Diagnostic::PendingPathAwaitingSegment {
+                            profile: owner,
+                            prefix,
+                            segment: next_segment,
+                        });
+                }
                 return;
             }
         };

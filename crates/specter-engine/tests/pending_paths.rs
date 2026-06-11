@@ -9,7 +9,7 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    MAX_SETTLE, NO_EVENTS, SETTLE, first_probe_correlation, seed_to_idle,
+    MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, first_probe_correlation, seed_to_idle,
 };
 use std::path::PathBuf;
 use std::time::Instant;
@@ -220,9 +220,9 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
 
 #[test]
 fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
-    // "Watch root deletion": Sub at /src; / is the watch_root_parent. Anchor is removed; Profile →
-    // Idle with current=None. Then a StructureChanged at / triggers the recovery path which
-    // re-enters pending descent.
+    // "Watch root deletion": Sub at /src; / is the watch_root_parent. The anchor's Removed
+    // terminal re-enters pending descent at the parent inside the loss step itself — no later
+    // parent event is needed.
     let mut e = Engine::new();
     // Both / and /src exist; /src is the anchor.
     let root_dir = e.tree_mut().ensure_root("root", ResourceRole::User);
@@ -265,35 +265,28 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     // that follows.
     let after_seed = seed_done + SETTLE;
 
-    // Anchor gone (Removed event at /src).
-    e.step(
+    // Anchor gone (Removed event at /src): the loss step re-enters pending descent with
+    // prefix=/, remaining=[src], and emits the descent probe at the watch_root_parent.
+    let out = e.step(
         Input::FsEvent {
             resource: src,
             event: FsEvent::Removed,
         },
         after_seed,
     );
-    // Profile is Idle with current=None now.
     let p = e.profiles().get(pid).unwrap();
-    assert!(matches!(p.state(), ProfileState::Idle));
-    assert!(p.current().is_none());
-
-    // StructureChanged at / triggers recovery: Profile re-enters pending descent with prefix=/,
-    // remaining=[src].
-    let out = e.step(
-        Input::FsEvent {
-            resource: root_dir,
-            event: FsEvent::StructureChanged,
-        },
-        after_seed,
+    assert!(
+        matches!(p.state(), ProfileState::Pending(_)),
+        "observed loss re-enters descent in the loss step itself",
     );
+    assert!(p.current().is_none());
     let recovery_probe = out
         .probe_ops()
         .iter()
         .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid));
     assert!(
         recovery_probe,
-        "recovery emits descent probe at watch_root_parent",
+        "loss step emits the descent probe at watch_root_parent",
     );
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -535,14 +528,30 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Some(root_dir),
         "B watches its parent /root for anchor recovery",
     );
-    // B's Seed consumed two settle windows; keep instants monotonic.
+    // B's loss arrives via probe-`Failed` — the path that parks Idle-anchorless awaiting
+    // event-scan recovery. (An observed loss — terminal / Vanished — re-enters descent inside the
+    // loss step and would join the *descents* class instead; `Failed` is how the recoveries class
+    // is populated.) Drive a Standard burst at the anchor, then fail its verify probe.
     let after_b_seed = b_seed_done + SETTLE;
     e.step(
         Input::FsEvent {
             resource: bar,
-            event: FsEvent::Removed,
+            event: FsEvent::ContentChanged,
         },
         after_b_seed,
+    );
+    let b_fail_at = after_b_seed + SETTLE * 2;
+    drain_due(&mut e, b_fail_at);
+    let b_corr = e
+        .pending_probe_for(pid_b)
+        .expect("B's verify probe in flight after settle expiry");
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid_b,
+            correlation: b_corr,
+            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+        }),
+        b_fail_at,
     );
     let p_b = e.profiles().get(pid_b).unwrap();
     assert!(matches!(p_b.state(), ProfileState::Idle));
@@ -561,8 +570,8 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         NO_EVENTS,
         false,
     );
-    // C attaches after B's Seed; keep instants strictly monotonic.
-    let c_attach = after_b_seed + SETTLE;
+    // C attaches after B's loss; keep instants strictly monotonic.
+    let c_attach = b_fail_at + SETTLE;
     let attach_c_out = e.step(Input::AttachSub(req_c), c_attach);
     let sid_c =
         specter_core::testkit::first_attached_sub(&attach_c_out).expect("attach_sub succeeded");

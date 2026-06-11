@@ -270,6 +270,16 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             errno = failure.errno(),
             "pending-path descent probe Failed",
         ),
+        Diagnostic::PendingPathAwaitingSegment {
+            profile,
+            prefix,
+            segment,
+        } => tracing::debug!(
+            ?profile,
+            ?prefix,
+            %segment,
+            "recovery descent parked: awaiting segment under prefix",
+        ),
         Diagnostic::ReapPendingCancelled { profile } => tracing::debug!(
             ?profile,
             "reap-pending Profile revived (fresh attach pre-empted deferred reap)",
@@ -562,6 +572,7 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::WatchOpRejected { .. }
         | D::PendingPathProbeVanished { .. }
         | D::PendingPathProbeFailed { .. }
+        | D::PendingPathAwaitingSegment { .. }
         | D::ReapPendingCancelled { .. }
         | D::ProfileReaped { .. }
         | D::ProfileClaimPurged { .. }

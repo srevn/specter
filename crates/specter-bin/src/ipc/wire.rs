@@ -287,6 +287,12 @@ pub(crate) enum WireDiagnostic {
         prefix: WireId,
         errno: i32,
     },
+    PendingPathAwaitingSegment {
+        at: WireTime,
+        profile: WireId,
+        prefix: WireId,
+        segment: CompactString,
+    },
     ReapPendingCancelled {
         at: WireTime,
         profile: WireId,
@@ -559,6 +565,16 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 prefix: WireId::from(*prefix),
                 errno: failure.errno(),
             },
+            Diagnostic::PendingPathAwaitingSegment {
+                profile,
+                prefix,
+                segment,
+            } => Self::PendingPathAwaitingSegment {
+                at: at.clone(),
+                profile: WireId::from(*profile),
+                prefix: WireId::from(*prefix),
+                segment: segment.clone(),
+            },
             Diagnostic::ReapPendingCancelled { profile } => Self::ReapPendingCancelled {
                 at: at.clone(),
                 profile: WireId::from(*profile),
@@ -809,6 +825,7 @@ impl WireDiagnostic {
             Self::WatchOpRejected { .. } => "watch_op_rejected",
             Self::PendingPathProbeVanished { .. } => "pending_path_probe_vanished",
             Self::PendingPathProbeFailed { .. } => "pending_path_probe_failed",
+            Self::PendingPathAwaitingSegment { .. } => "pending_path_awaiting_segment",
             Self::ReapPendingCancelled { .. } => "reap_pending_cancelled",
             Self::ProfileReaped { .. } => "profile_reaped",
             Self::ProfileClaimPurged { .. } => "profile_claim_purged",
@@ -879,6 +896,7 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "watch_op_rejected",
     "pending_path_probe_vanished",
     "pending_path_probe_failed",
+    "pending_path_awaiting_segment",
     "reap_pending_cancelled",
     "profile_reaped",
     "profile_claim_purged",
@@ -1797,6 +1815,12 @@ mod tests {
                 profile: WireId(52),
                 prefix: WireId(53),
                 errno: 13,
+            },
+            WireDiagnostic::PendingPathAwaitingSegment {
+                at: at(),
+                profile: WireId(54),
+                prefix: WireId(55),
+                segment: "app.log".into(),
             },
             WireDiagnostic::ReapPendingCancelled {
                 at: at(),

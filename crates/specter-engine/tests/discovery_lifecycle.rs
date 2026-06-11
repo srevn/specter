@@ -673,7 +673,11 @@ fn prefix_rm_rf_recovery_remints_without_per_file_warning() {
         &dir_snap(&[("data", EntryKind::Dir, 7)]),
         t2,
     ));
-    let recovered = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 9)]), t2);
+    // The witnessed loss re-entry materializes into a triggered Seed — Batching-first; drain the
+    // settle window to surface the verify probe.
+    let t3 = t2 + SETTLE * 2;
+    drain_due(&mut e, t3);
+    let recovered = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 9)]), t3);
     assert_eq!(
         minted_paths(&recovered).len(),
         1,
@@ -1505,7 +1509,6 @@ fn descent_vanish_preserves_co_resident_discovery_contribution() {
 fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     let mut e = Engine::new();
     let c = pre_place_dir(&mut e, &["a", "b", "c"]);
-    let b = e.tree().parent(c).expect("chain parent");
     let now = Instant::now();
     let (sid, pid) = attach_discovery(
         &mut e,
@@ -1530,7 +1533,7 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
         },
         t1,
     );
-    let _ = e.step(
+    let loss = e.step(
         Input::FsEvent {
             resource: c,
             event: FsEvent::Removed,
@@ -1539,16 +1542,10 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     );
     assert!(e.subs().get(old_mid).is_none(), "minted Sub reaped");
 
-    // Recovery enters descent at the watch_root_parent; /a/b and /a are gone too, so each probe
-    // answers Vanished and the descent rewinds one level, re-arming at the parent.
-    let entry = e.step(
-        Input::FsEvent {
-            resource: b,
-            event: FsEvent::StructureChanged,
-        },
-        t1,
-    );
-    assert_eq!(last_probe_path(&entry), Some("/a/b".into()));
+    // The loss step itself re-enters descent at the watch_root_parent — no entry event needed.
+    // /a/b and /a are gone too, so each probe answers Vanished and the descent rewinds one level,
+    // re-arming at the parent.
+    assert_eq!(last_probe_path(&loss), Some("/a/b".into()));
     let vanish = |e: &mut Engine, at| {
         let corr = e.pending_probe_for(pid).expect("descent probe in flight");
         e.step(
@@ -1578,10 +1575,32 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     let a3 = descent_advance(&mut e, pid, &dir_snap(&[("c", EntryKind::Dir, 4)]), t1);
     assert_eq!(
         last_probe_path(&a3),
+        None,
+        "anchor materialised into a triggered Seed — Batching-first, no cold walk",
+    );
+    // The ladder's last rung surfaces at settle expiry: the recovery Seed probes the subtree.
+    let t2 = t1 + SETTLE * 2;
+    let mut rung = None;
+    while let Some(en) = e.pop_expired(t2) {
+        let o = e.step(
+            Input::TimerExpired {
+                profile: en.profile,
+                kind: en.kind,
+                id: en.id,
+            },
+            t2,
+        );
+        if last_probe_path(&o).is_some() {
+            rung = Some(o);
+        }
+    }
+    let rung = rung.expect("recovery Seed probe after settle expiry");
+    assert_eq!(
+        last_probe_path(&rung),
         Some("/a/b/c".into()),
         "anchor materialised — recovery Seed probes the subtree",
     );
-    let recovered = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 5)]), t1);
+    let recovered = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 5)]), t2);
     assert_eq!(minted_paths(&recovered).len(), 1, "recovery re-mints");
     let new_mid = *discovery_subs_of(&e, sid).values().next().expect("re-mint");
     assert_ne!(new_mid, old_mid, "fresh SubId after the loss window");
@@ -1645,6 +1664,10 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
             &dir_snap(&[("data", EntryKind::Dir, 10 + cycle)]),
             at,
         );
+        // Witnessed loss re-entry ⇒ triggered Seed, Batching-first: drain the settle window to
+        // surface the verify probe.
+        at += SETTLE * 2;
+        drain_due(&mut e, at);
         let recovered = respond(
             &mut e,
             pid,

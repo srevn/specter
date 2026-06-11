@@ -253,6 +253,18 @@ pub enum Diagnostic {
         prefix: ResourceId,
         failure: ProbeFailure,
     },
+    /// Pending-path descent probe enumerated `prefix` successfully but the next awaited `segment`
+    /// is not present in it yet — the descent parks until the next event at the prefix
+    /// (`on_descent_event`). Emitted only for *witnessed* descents (an observed anchor loss
+    /// re-entering descent): there the park is a recovery in flight — typically a
+    /// delete-then-write save whose create hasn't landed — and silence would read as the recovery
+    /// vanishing in a debug tail. Attach-time descents park silently; awaiting a path that
+    /// doesn't exist yet is their steady state, and a per-probe emission would be noise.
+    PendingPathAwaitingSegment {
+        profile: ProfileId,
+        prefix: ResourceId,
+        segment: CompactString,
+    },
     /// A Profile's active burst carried [`crate::BurstFinish::Reap`] (the last Sub had detached
     /// mid-burst), then a fresh `attach_sub` arrived at the same `(resource, config_hash)` before
     /// the burst completed — the directive is flipped back to [`crate::BurstFinish::ReturnToIdle`]

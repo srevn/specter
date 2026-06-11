@@ -1038,20 +1038,20 @@ fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
     );
 }
 
-/// `enter_pending_descent` recovery-overlap invariant: when invoked from `start_pending_recovery`,
+/// `enter_pending_descent` recovery-overlap invariant: when re-entered at the recovery parent,
 /// the parent already carries `+1 STRUCTURE` from `Profile.watch_root_parent`. The helper bumps
-/// `+1` again for the descent contribution; refcount sums to `+2`. Verifies the helper's
-/// pre-condition assertion AND the documented post-condition.
+/// `+1` again for the descent contribution; refcount sums to `+2`. Exercised through the
+/// production observed-loss path — a Seed-Vanished routes through
+/// `finalize_anchor_lost_and_descend`, which re-enters descent in the same step.
 #[test]
 fn enter_pending_descent_recovery_overlap_invariant() {
     use specter_core::{ClassSet, ProfileState};
-    // Build the recovery scenario by hand:
+    // Build the recovery scenario:
     //   1. Attach a Sub at /foo/bar (Pending — bar doesn't exist yet).
     //   2. Materialize bar via descent, landing the Profile in Idle with Profile.watch_root_parent
     //      = Some(foo) and foo.watch_demand = +1.
-    //   3. Drop bar (anchor terminal) → Profile remains Idle, anchor contribution gone,
-    //      watch_root_parent contribution persists.
-    //   4. Call enter_pending_descent at foo with [bar] as remaining.
+    //   3. Drive the Seed verify to Vanished — the loss step releases the anchor contribution and
+    //      re-enters descent at foo with [bar] as remaining, all within the dispatch.
     let (mut e, _sid, pid) = setup_pending_one_level();
     let foo = lookup_foo(&e);
 
@@ -1097,7 +1097,7 @@ fn enter_pending_descent_recovery_overlap_invariant() {
     let seed_corr = e
         .pending_probe_for(pid)
         .expect("Seed verify probe in flight after settle expiry");
-    let _ = e.step(
+    let out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: seed_corr,
@@ -1105,50 +1105,25 @@ fn enter_pending_descent_recovery_overlap_invariant() {
         }),
         t_settle,
     );
-    // dispatch_seed_vanished routes to finalize_anchor_lost: anchor contribution released,
-    // baseline/current cleared, Profile lands Idle.
-    assert!(matches!(
-        e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle,
-    ));
-    assert!(
-        e.pending_probe_for(pid).is_none(),
-        "slot disarmed after Seed Vanished",
-    );
-    let foo_demand_pre = e.tree().get(foo).unwrap().watch_demand();
-    // Bar's anchor contribution was released; only watch_root_parent's STRUCTURE on foo remains.
-    assert_eq!(
-        foo_demand_pre, 1,
-        "foo.watch_demand() reflects only the watch_root_parent contribution",
-    );
-
-    // Step 4: Call enter_pending_descent directly to simulate the `start_pending_recovery` re-entry
-    // path. The helper's debug_assert pins Profile=Idle + closed-channel; both hold.
-    let mut out = specter_core::StepOutput::default();
-    e.enter_pending_descent(
-        pid,
-        foo,
-        specter_core::DescentRemaining::from_vec(vec![CompactString::from("bar")])
-            .expect("non-empty by test construction"),
-        /* witnessed: */ false,
-        &mut out,
-    );
-
-    // Recovery overlap: foo's watch_demand is now +2 (watch_root_parent STRUCTURE + descent
-    // STRUCTURE). The helper armed the descent slot and emitted a descent probe.
-    assert_eq!(
-        e.tree().get(foo).unwrap().watch_demand(),
-        foo_demand_pre + 1,
-        "recovery overlap: descent +1 on top of watch_root_parent +1",
-    );
-    assert!(
-        e.pending_probe_for(pid).is_some(),
-        "channel re-opened by enter_pending_descent",
-    );
+    // dispatch_seed_vanished routes through finalize_anchor_lost_and_descend: anchor contribution
+    // released, baseline/current cleared, and the same step re-enters pending descent at foo —
+    // the recovery overlap is established by the production loss path itself.
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_),
     ));
+    assert!(
+        e.pending_probe_for(pid).is_some(),
+        "descent probe re-armed by the loss step",
+    );
+
+    // Recovery overlap: foo's watch_demand is +2 (watch_root_parent STRUCTURE + descent
+    // STRUCTURE); bar's anchor contribution is gone.
+    assert_eq!(
+        e.tree().get(foo).unwrap().watch_demand(),
+        2,
+        "recovery overlap: descent +1 on top of watch_root_parent +1",
+    );
     // The descent probe was emitted at foo (the parent / new prefix). Descent variants carry
     // `target_path` but not `target_resource` (the walker resolves the path against the live
     // filesystem, not against an engine-side ResourceId). Cross-check by comparing the descent's

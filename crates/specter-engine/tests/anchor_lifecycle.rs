@@ -1,13 +1,14 @@
-//! Anchor-lifecycle integration tests. The fix-validation half pins that post-anchor-loss recovery
-//! routes through the kind-agnostic Subtree probe in both directions (File→Dir and Dir→File),
-//! bounding recovery to one round-trip; the regression-prevention half pins the same bound in the
-//! Dir→File direction, where the probe shape is Subtree both pre-fix and post-fix.
+//! Anchor-lifecycle integration tests: the post-loss recovery probe's shape. `discard_anchor_state`
+//! clears `Profile.kind` at every loss, so a stale kind cannot misroute the recovery probe
+//! (`Some(File)` against a recreated-as-Dir slot would emit a wasted `ProbeRequest::AnchorFile`).
+//! The two loss flavors then diverge:
 //!
-//! The bug surface: after anchor loss, `Profile.kind` was retained across the lost-recovered cycle.
-//! A subsequent `start_seed_burst` routed by stale `kind`, misrouting `Some(File)` against a
-//! recreated-as-Dir slot as a `ProbeRequest::AnchorFile` and wasting a round-trip. The fix clears
-//! `Profile.kind` inside `discard_anchor_state`; the Subtree fallback in the post-loss window is
-//! the new invariant.
+//! - **Observed loss** (probe `Vanished`): the loss step re-enters descent at the parent, and the
+//!   parent's directory listing re-classifies the anchor's kind *before* any anchor probe is
+//!   emitted — the recovery Seed probes with the freshly-observed shape in both flip directions
+//!   (File→Dir ⇒ Subtree; Dir→File ⇒ AnchorFile), one anchor probe per recovery.
+//! - **Probe `Failed`**: the Profile parks Idle-anchorless with `kind = None`; the event-driven
+//!   recovery Seed routes through the kind-agnostic Subtree arm.
 
 use specter_core::testkit::{anchor_ok, dir_snap, empty_program, file_leaf};
 use specter_core::{
@@ -17,7 +18,8 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    assert_seed_verifying, first_probe_correlation, seed_to_idle, seed_to_idle_with,
+    assert_seed_verifying, descent_advance, first_probe_correlation, seed_to_idle,
+    seed_to_idle_with,
 };
 use std::time::{Duration, Instant};
 
@@ -141,38 +143,39 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     assert!(p.current().is_none());
     assert!(p.baseline().is_none());
     assert_eq!(p.anchor_claim(), AnchorClaim::None);
-    assert!(matches!(p.state(), ProfileState::Idle));
+    assert!(
+        matches!(p.state(), ProfileState::Pending(_)),
+        "observed loss re-enters descent in the loss step itself",
+    );
     // Q's claim keeps the anchor alive.
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
-    // Inject FsEvent at the anchor — Q is alive so the kernel watch is still in place. drive_burst
-    // routes P (Idle, current=None) to start_seed_burst, which opens Batching-first: no probe at
-    // burst start.
-    let recovery_t0 = p_at + SETTLE;
-    let recovery_out = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::ContentChanged,
-        },
-        recovery_t0,
+    // Answer the loss step's descent probe: the parent listing re-classifies the anchor from the
+    // live filesystem — `log` is a Dir now. Materialization re-reads kind from the entry, so the
+    // stale `Some(File)` cannot leak into the recovery probe's shape; the witnessed descent opens
+    // a triggered Seed (Batching-first, no cold walk).
+    let mat_at = p_at + SETTLE;
+    let mat_out = descent_advance(
+        &mut e,
+        pid_p,
+        &dir_snap(&[("log", EntryKind::Dir, 7)]),
+        mat_at,
     );
     assert_eq!(
-        count_probes(&recovery_out),
-        0,
-        "Batching-first recovery Seed emits no probe at burst start",
+        e.profiles().get(pid_p).unwrap().kind(),
+        Some(ResourceKind::Dir),
+        "kind re-classified from the parent's directory listing",
     );
-    assert!(
-        matches!(
-            e.profiles().get(pid_p).unwrap().state(),
-            ProfileState::Active(_, _),
-        ),
-        "P re-entered an Active Seed burst on the recovery event",
+    assert_eq!(
+        count_probes(&mat_out),
+        0,
+        "witnessed descent materializes into a triggered Seed — Batching-first",
     );
 
-    // Expire the recovery Seed's first settle window → the recovery Seed probe materializes. With
-    // kind=None post-fix, start_seed_burst routes through the Subtree arm; pre-fix the cached
-    // `Some(File)` would have emitted a `ProbeRequest::AnchorFile`.
-    let probe_at = recovery_t0 + SETTLE;
+    // Expire the recovery Seed's settle window → the recovery Seed probe materializes. The
+    // freshly-observed Dir routes it through the Subtree arm; a stale `Some(File)` would have
+    // emitted a `ProbeRequest::AnchorFile`.
+    let probe_at = mat_at + SETTLE;
     let mut p_probe_out = None;
     while let Some(en) = e.pop_expired(probe_at) {
         let o = e.step(
@@ -198,17 +201,16 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         .expect("P emits a recovery Seed probe");
     assert!(
         matches!(p_probe, ProbeRequest::Subtree { .. }),
-        "post-fix: kind=None routes recovery through Subtree probe; got {p_probe:?}",
+        "freshly-observed Dir routes recovery through the Subtree probe; got {p_probe:?}",
     );
     let _ = e.cancel_all_in_flight_probes();
 }
 
 #[test]
 fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
-    // Regression-prevention: post-fix recovery in the Dir→File direction still bounds at one
-    // round-trip. Both pre-fix and post-fix ship Subtree (pre-fix kind=Some(Dir) → Subtree;
-    // post-fix kind=None → Subtree) so this test does NOT discriminate the fix; it pins the bound
-    // against future regressions where the recovery path could unintentionally multi-probe.
+    // The Dir→File flip direction: the loss step's descent re-classifies the anchor as a File
+    // from the parent listing, so the recovery Seed probes `AnchorFile` — the cheap lstat shape —
+    // and the recovery stays bounded at one anchor probe.
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
@@ -248,8 +250,8 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         Some(ResourceKind::Dir),
     );
 
-    // Expire P's first settle window → first Seed probe; drive it to Vanished (terminates the Seed
-    // on its first response).
+    // Expire P's first settle window → first Seed probe; drive it to Vanished. The loss step
+    // clears P.kind and re-enters descent at the parent.
     let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -260,25 +262,30 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         p_at,
     );
     assert!(e.profiles().get(pid_p).unwrap().kind().is_none());
+    assert!(matches!(
+        e.profiles().get(pid_p).unwrap().state(),
+        ProfileState::Pending(_),
+    ));
 
-    // Recovery FsEvent → Batching-first Seed (no probe at burst start).
-    let recovery_t0 = p_at + SETTLE;
-    let recovery_out = e.step(
-        Input::FsEvent {
-            resource: anchor,
-            event: FsEvent::ContentChanged,
-        },
-        recovery_t0,
+    // The parent listing re-classifies the anchor: `build` is a File now. Materialization opens
+    // the triggered Seed Batching-first.
+    let mat_at = p_at + SETTLE;
+    let mat_out = descent_advance(
+        &mut e,
+        pid_p,
+        &dir_snap(&[("build", EntryKind::File, 9)]),
+        mat_at,
     );
     assert_eq!(
-        count_probes(&recovery_out),
-        0,
-        "Batching-first recovery Seed emits no probe at burst start",
+        e.profiles().get(pid_p).unwrap().kind(),
+        Some(ResourceKind::File),
+        "kind re-classified from the parent's directory listing",
     );
+    assert_eq!(count_probes(&mat_out), 0, "triggered Seed: Batching-first");
 
-    // Expire the recovery Seed's first settle window. The bound: P's recovery emits at most one
-    // probe (across burst start + the settle expiry that surfaces it), and it is Subtree-shaped.
-    let probe_at = recovery_t0 + SETTLE;
+    // Expire the recovery Seed's settle window. The bound: P's recovery emits exactly one anchor
+    // probe, and the freshly-observed File routes it through the cheap `AnchorFile` lstat shape.
+    let probe_at = mat_at + SETTLE;
     let mut settle_out = None;
     while let Some(en) = e.pop_expired(probe_at) {
         let o = e.step(
@@ -294,20 +301,20 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         }
     }
     let settle_out = settle_out.expect("recovery Seed probe after settle expiry");
-    let p_probe_count = recovery_out
+    let p_probe_count = mat_out
         .probe_ops()
         .iter()
         .chain(settle_out.probe_ops().iter())
         .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid_p))
         .count();
-    assert!(
-        p_probe_count <= 1,
-        "post-fix: at most one probe emitted for P during recovery; got {p_probe_count}",
+    assert_eq!(
+        p_probe_count, 1,
+        "exactly one anchor probe emitted for P during recovery",
     );
     let p_probe = first_probe_request(&settle_out).expect("recovery probe emitted");
     assert!(
-        matches!(p_probe, ProbeRequest::Subtree { .. }),
-        "Dir→File direction emits Subtree both pre-fix and post-fix",
+        matches!(p_probe, ProbeRequest::AnchorFile { .. }),
+        "Dir→File recovery probes the freshly-observed File shape; got {p_probe:?}",
     );
     let _ = e.cancel_all_in_flight_probes();
 }

@@ -176,10 +176,13 @@ impl Engine {
     }
 
     /// Discard every anchor-derived state when the anchor is lost or kernel-rejected. The Profile
-    /// transitions to "Idle without anchor": no claim, no snapshot, no cached kind. Recovery flows
-    /// exclusively through [`specter_core::Profile::watch_root_parent`]'s next `StructureChanged` →
-    /// `Engine::start_pending_recovery` → descent → `Engine::dispatch_descent_ok` anchor branch
-    /// (which re-classifies `kind` from the parent's directory listing).
+    /// transitions to "Idle without anchor": no claim, no snapshot, no cached kind. Recovery is a
+    /// descent at [`specter_core::Profile::watch_root_parent`] ending in
+    /// `Engine::dispatch_descent_ok`'s anchor branch (which re-classifies `kind` from the parent's
+    /// directory listing) — entered immediately by the observed-loss coordinator's descend wrapper
+    /// (`Engine::finalize_anchor_lost_and_descend`), or, for the probe-`Failed` / watch-rejection
+    /// discards that leave the Profile parked here, by the parent's next `StructureChanged` →
+    /// `Engine::start_pending_recovery`.
     ///
     /// **Cleared.**
     /// - The anchor classification (kind ⊕ live snapshot ⊕ settled baseline) collapses to

@@ -68,6 +68,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::WatchOpRejected { at, .. }
         | WireDiagnostic::PendingPathProbeVanished { at, .. }
         | WireDiagnostic::PendingPathProbeFailed { at, .. }
+        | WireDiagnostic::PendingPathAwaitingSegment { at, .. }
         | WireDiagnostic::ReapPendingCancelled { at, .. }
         | WireDiagnostic::ProfileReaped { at, .. }
         | WireDiagnostic::ProfileClaimPurged { at, .. }
@@ -171,6 +172,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
 
         // `info!` / `debug!` / `trace!` — routine lifecycle, benign races, class / consumer drops.
         W::ConfigDiffUnknownSub { .. }
+        | W::PendingPathAwaitingSegment { .. }
         | W::ConfigDiffRebindFallbackAttach { .. }
         | W::EventClassDropped { .. }
         | W::EventNoConsumer { .. }
@@ -288,6 +290,16 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "profile", profile.0);
             field(out, sty, "prefix", prefix.0);
             field(out, sty, "errno", errno);
+        }
+        WireDiagnostic::PendingPathAwaitingSegment {
+            profile,
+            prefix,
+            segment,
+            ..
+        } => {
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "prefix", prefix.0);
+            field(out, sty, "segment", segment);
         }
         WireDiagnostic::ReapPendingCancelled { profile, .. }
         | WireDiagnostic::PerFileDriftDroppedOnRecovery { profile, .. }
@@ -734,6 +746,9 @@ mod tests {
             }
             "pending_path_probe_failed" => {
                 json!({"diag": tag, "at": at, "profile": id, "prefix": id, "errno": 0})
+            }
+            "pending_path_awaiting_segment" => {
+                json!({"diag": tag, "at": at, "profile": id, "prefix": id, "segment": "x"})
             }
             "reap_pending_cancelled"
             | "per_file_drift_dropped_on_recovery"
