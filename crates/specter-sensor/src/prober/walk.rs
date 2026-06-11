@@ -55,7 +55,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, LazyLock};
 use std::time::Duration;
 
 /// Recursion-invariant inputs shared across every frame of one subtree probe. Built once at probe
@@ -398,11 +398,14 @@ pub(super) fn probe_subtree(
 /// and dropped before any [`specter_core::DirSnapshot::dir_hash`] computation could fold it in), but
 /// the honest stamp means a future caller that pulls a descent snapshot through a `dir_hash`
 /// comparison can never collide with a live Profile's `config_hash` by accident — the hash route is
-/// the same one Profile partitioning uses, keyed on a shape no Profile carries. One sip128 per
-/// descent probe; descent is rare (one probe per missing path component during `Pending`).
-fn descent_captured_with() -> u64 {
+/// the same one Profile partitioning uses, keyed on a shape no Profile carries.
+///
+/// The digest is a pure constant of the descent shape (fixed inputs, no settle ceiling, no event
+/// classes), so it is folded once on first descent probe and reused for the process lifetime —
+/// one transient `ProfileIdentity` and one sip128 across the whole run rather than per probe.
+static DESCENT_CAPTURED_WITH: LazyLock<u64> = LazyLock::new(|| {
     ProfileIdentity::new(ScanConfig::Descent, Duration::ZERO, ClassSet::EMPTY).config_hash()
-}
+});
 
 /// Descent prefix probe. Single-level enumeration of `target_path` under the
 /// [`ScanConfig::Descent`] scan shape, whose predicate arms admit *every* dirent at one level —
@@ -417,7 +420,7 @@ fn descent_captured_with() -> u64 {
 /// here — the `Descent` shape never descends and `baseline=None` makes mtime-skip unreachable, so
 /// it never refuses a skip that could matter.
 ///
-/// `captured_with` carries the canonical hash of the descent identity ([`descent_captured_with`]),
+/// `captured_with` carries the canonical hash of the descent identity ([`DESCENT_CAPTURED_WITH`]),
 /// honest rather than sentinel-shaped — though descent dispatch never reads the field (the snapshot
 /// is consumed by the engine and dropped before any consumer compares hashes).
 pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
@@ -428,7 +431,7 @@ pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
         target_path,
         target_path,
         &ScanConfig::Descent,
-        descent_captured_with(),
+        *DESCENT_CAPTURED_WITH,
         None,
         &ProofObligation::WholeSubtree,
         false,

@@ -88,7 +88,8 @@ fn drain_raw_for(w: &mut InotifyWatcher, dur: Duration, out: &mut Vec<WatcherEve
 }
 
 /// E2E #3 closure: an in-place file edit (`>` redirect, no rename) fires `FsEvent::ContentChanged`
-/// on the per-file wd installed by the engine's `has_per_file_fds = true` walk_pair gating.
+/// on the per-file wd installed by the engine's `has_per_file_fds = true` reconciler gating
+/// (`apply_diff_to_tree`).
 ///
 /// The setup mirrors what the engine produces for a `subtree-root` Sub with default events
 /// (`STRUCTURE | CONTENT`):

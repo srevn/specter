@@ -27,7 +27,7 @@ use specter_core::{
     ClassSet, DedupKey, DescentRemaining, DetachReason, Diagnostic, Effect, EffectCommon,
     EffectOutcome, EffectScope, FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeFailure,
     ProbeResponse, Profile, ProfileId, ProfileState, ProofAuthority, QuiescenceVerdict,
-    QuiescenceWitness, Reaction, Resource, ResourceId, ResourceKind, StableReason, StepOutput,
+    QuiescenceWitness, Reaction, ResourceId, ResourceKind, StableReason, StepOutput,
     SubAttachRequest, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot, WatchFailure,
     quiescence_verdict,
 };
@@ -83,8 +83,14 @@ impl Engine {
             return;
         }
         // `Arc::clone` of the slot's materialised path — an O(1) refcount bump, total by
-        // construction (the slot is live).
+        // construction (the slot is live). The kind is captured in the same breath and for the same
+        // staleness reason: read off the proven-live `&Resource` now, so a later covering dispatch
+        // that reaps the slot can't turn the routing-time classification into a `None`-defaulted
+        // guess. Unprobed slots collapse to File-shape (`kind_or_file`) per the backend-mask
+        // convention — `fs_event_to_class` and the kqueue / inotify translators agree on this
+        // default.
         let event_path = Arc::clone(r.path());
+        let resource_kind = r.kind_or_file();
 
         // Single-pass classification of the event's carriers: Profiles that "carry" a dispatch
         // responsibility for this resource. Descent prefix and watch-root-parent watches both
@@ -120,16 +126,10 @@ impl Engine {
             return;
         }
 
-        // Class-aware routing. Compute the event's class once from the resource's kind; per-Profile
-        // dispatch consults the Profile's `events` (every Sub on a Profile shares the same mask, so
-        // the union is each Sub's mask).
-        //
-        // Unprobed slots collapse to File-shape per the backend-mask convention —
-        // `fs_event_to_class` and the kqueue / inotify translators agree on this default.
-        let resource_kind = self
-            .tree
-            .get(resource)
-            .map_or(ResourceKind::File, Resource::kind_or_file);
+        // Class-aware routing. The event's class folds once from the head-captured `resource_kind`
+        // (read off the proven-live slot above) and the event; per-Profile dispatch then consults
+        // the Profile's `events` (every Sub on a Profile shares the same mask, so the union is each
+        // Sub's mask).
         let event_class = fs_event_to_class(event, resource_kind);
         let is_identity = event.is_identity();
 
@@ -2617,7 +2617,9 @@ impl Engine {
         // returned — `dispatch_quiescence_ok`'s fallback writes the field on the next Seed-Ok.
         let anchor_kind = p.kind().unwrap_or(ResourceKind::Dir);
         // Substitution-side projection of `ScanConfig.exclude`. The resolver iterates source strings;
-        // the sensor consults compiled matchers. The projection is sorted at `Profile::new`.
+        // the sensor consults compiled matchers. The order is the exclude list's build-time
+        // canonical form — `ScanConfigBuilder::build` sorts and dedups — which `Profile::new` copies
+        // out verbatim, so the projection is already canonical without a re-sort here.
         let exclude_strings = Arc::clone(p.exclude_strings());
 
         let anchor_path: Arc<Path> = self.tree.path_of(resource).unwrap_or_else(empty_path);
@@ -2818,10 +2820,10 @@ impl Engine {
             ) {
                 continue;
             }
-            // `walk_pair`/`graft` runs before this and materialises every covered diff entry;
-            // lookup is the happy path. Fall back to `ensure_descendant` for defense — covers the
-            // rare case where reconcile filtered the entry (e.g., reconcile gates Watch on Dir, not
-            // on every leaf the Sub can fire against).
+            // `graft`'s `apply_diff_to_tree` runs before this and materialises every covered diff
+            // entry; lookup is the happy path. Fall back to `ensure_descendant` for defense — covers
+            // the rare case where reconcile filtered the entry (e.g., reconcile gates Watch on Dir,
+            // not on every leaf the Sub can fire against).
             let resource = match lookup_descendant(&self.tree, anchor, entry.segment.as_str()) {
                 Some(r) => r,
                 None => match ensure_descendant(

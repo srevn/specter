@@ -138,26 +138,29 @@ pub(crate) fn lookup_descendant(
 // reconcile: apply_diff_to_tree + graft + scoped purge
 // ---------------------------------------------------------------------------
 
-/// Predicate: this Profile holds a [`ContribKey::ProfileDescendant`] contribution at `r` that the
-/// entry's `kind` says should be released.
+/// Predicate: this Profile wants a [`ContribKey::ProfileDescendant`] watch contribution at `r` for
+/// an entry of `kind`.
 ///
-/// - **Dir**: covered Dirs always carry the contribution.
-/// - **Leaf** (File / Symlink / Other): covered Leaves carry the contribution iff
-///   `profile.has_per_file_fds()` is true.
+/// - **Dir**: covered Dirs always carry the contribution — a directory FD surfaces member churn.
+/// - **Leaf** (File / Symlink / Other): covered Leaves carry it iff `profile.has_per_file_fds()` is
+///   true, so in-place file edits surface as their own events.
 ///
-/// Mirrors the gating used by [`apply_diff_to_tree`]'s Phase 2 `add_watch` site, so a contribution
-/// installed during a prior probe response is released by the symmetric `sub_watch` on this one.
-fn releases_watch(
+/// The single source for both directions of [`apply_diff_to_tree`]: Phase 2 installs the
+/// contribution wherever this holds, and Phase 1 releases the contribution this same predicate would
+/// have installed on a prior probe response. Install and release stay in lockstep because they read
+/// one predicate, not two expressions that must be kept mirrored by hand.
+fn wants_descendant_watch(
     profile: &Profile,
     r: ResourceId,
     kind: EntryKind,
     tree: &Tree,
     scratch: &mut PathBuf,
 ) -> bool {
+    let covered = covers(profile, r, tree, scratch);
     match kind {
-        EntryKind::Dir => covers(profile, r, tree, scratch),
+        EntryKind::Dir => covered,
         EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
-            covers(profile, r, tree, scratch) && profile.has_per_file_fds()
+            covered && profile.has_per_file_fds()
         }
     }
 }
@@ -176,9 +179,9 @@ fn releases_watch(
 ///
 /// 1. **Phase 1 — deletes.** Iterates `diff.deleted` and `diff.renamed.from` in reverse (via
 ///    `DoubleEndedIterator::rev`). For each entry the helper looks up the slot under `base`,
-///    releases this Profile's [`ContribKey::ProfileDescendant`] if [`releases_watch`] says so, and
-///    — when the slot has no remaining anchors — vacates and reaps it. [`Tree::try_reap`] cascades
-///    up through any parent that loses its last anchor on the way; reverse iteration here is
+///    releases this Profile's [`ContribKey::ProfileDescendant`] if [`wants_descendant_watch`] says
+///    so, and — when the slot has no remaining anchors — vacates and reaps it. [`Tree::try_reap`]
+///    cascades up through any parent that loses its last anchor on the way; reverse iteration here is
 ///    performance / cleanliness (avoids the cascade work and the intermediate "parent holds reaped
 ///    child id" states), not a correctness requirement.
 ///
@@ -239,7 +242,7 @@ pub(crate) fn apply_diff_to_tree(
         };
         // Side-effecting; the `bool` (did-reap) return is unused (neither `try_reap` nor
         // `sub_watch_then_try_reap` is `#[must_use]`, so no `let _` ceremony).
-        if releases_watch(profile, resource, entry.kind, tree, scratch) {
+        if wants_descendant_watch(profile, resource, entry.kind, tree, scratch) {
             sub_watch_then_try_reap(tree, resource, key, out);
         } else {
             tree.try_reap(resource, out);
@@ -264,9 +267,7 @@ pub(crate) fn apply_diff_to_tree(
         else {
             continue;
         };
-        let want_watch = covers(profile, resource, tree, scratch)
-            && (matches!(entry.kind, EntryKind::Dir) || profile.has_per_file_fds());
-        if want_watch {
+        if wants_descendant_watch(profile, resource, entry.kind, tree, scratch) {
             add_watch(tree, resource, key, profile.events(), out);
         }
     }
@@ -892,8 +893,9 @@ mod tests {
         let response = dir_snap(200, vec![("foo", dir_covered(nested_subtree))]);
 
         // Sanity: prior and new "foo" entries share `(inode, device)` ⇒ this is the
-        // kind-flip-with-inode-reuse case that `walk_pair` mishandled. Confirms the regression's
-        // failing pre-condition.
+        // kind-flip-with-inode-reuse case where keying identity on `(inode, device)` alone would
+        // conclude "unchanged" and skip the reap+recreate. Confirms the regression's failing
+        // pre-condition.
         let prior_foo_child = prior_current.entries().get("foo").unwrap();
         let new_foo_child = response.entries().get("foo").unwrap();
         assert_eq!(

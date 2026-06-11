@@ -9,8 +9,9 @@
 //!    [`ContribKey::ProfileParent`] at `parent` with mask `STRUCTURE`.
 //! 3. **Descent prefix.** `Profile.state = Pending(d)` ⇒ the Profile contributes
 //!    [`ContribKey::ProfileDescent`] at `d.current_prefix` with mask `STRUCTURE`.
-//! 4. **Covered descendants.** Maintained per-slot inside `walk_pair` / `release_descendant_claim`;
-//!    each contribution is keyed by [`ContribKey::ProfileDescendant`].
+//! 4. **Covered descendants.** Maintained per-slot inside [`crate::reconcile::apply_diff_to_tree`]
+//!    (reached via `graft` on a probe response, or `release_descendant_claim` on teardown); each
+//!    contribution is keyed by [`ContribKey::ProfileDescendant`].
 //!
 //! The contribution map is the source of truth for refcounting; removal is by key, not by registry
 //! walk. The per-Profile state field (the matching flag from list above) can be cleared in either

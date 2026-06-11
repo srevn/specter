@@ -12,11 +12,11 @@
 use crate::Engine;
 use specter_core::testkit::{anchor_ok, enumerated, file_leaf, proven};
 use specter_core::{
-    ActiveBurst, ClassSet, DedupKey, DirSnapshot, EffectCompletion, EffectOutcome, EffectScope,
-    EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, MintTemplate, PatternSpec, PostFireBurst,
-    PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome,
-    ProbeResponse, ProfileId, ProfileIdentity, ProfileState, ReactionSpec, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor,
+    ActiveBurst, ClassSet, DedupKey, Diagnostic, DirSnapshot, EffectCompletion, EffectOutcome,
+    EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, MintTemplate, PatternSpec,
+    PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp,
+    ProbeOutcome, ProbeResponse, ProfileId, ProfileIdentity, ProfileState, ReactionSpec,
+    ResourceId, ResourceKind, ResourceRole, ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor,
     SubAttachRequest, SubId, SubParams, TimerId, WatchFailure,
 };
 use std::collections::BTreeMap;
@@ -42,13 +42,20 @@ pub const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 
 /// Blanket-drain every timer due at `at`, stepping each.
 ///
+/// Returns every [`Diagnostic`] the drained steps emit, in step order: most callers drive the
+/// engine for its side effects and drop the return, but a pin that must observe a diagnostic raised
+/// while a timer fires — a breach surfacing only on the timer-driven transition, say — binds it (and
+/// can assert its absence too). Not `#[must_use]`: the drain is the point, the diagnostics are a
+/// byproduct.
+///
 /// This is the *parked-siblings* drain discipline: correct when any co-Profile in flight holds no
 /// timer expirable at `at` (a Verifying Profile has no settle timer; a Draining one holds only its
 /// `MAX_SETTLE` deadline, far past a `start + SETTLE*2` confirm window). A Seed is driven by its
 /// own id ([`seed_to_idle`]) instead, precisely so a blanket drain here cannot disturb it.
-pub fn drain_due(e: &mut Engine, at: Instant) {
+pub fn drain_due(e: &mut Engine, at: Instant) -> Vec<Diagnostic> {
+    let mut diagnostics = Vec::new();
     while let Some(en) = e.pop_expired(at) {
-        e.step(
+        let out = e.step(
             Input::TimerExpired {
                 profile: en.profile,
                 kind: en.kind,
@@ -56,7 +63,9 @@ pub fn drain_due(e: &mut Engine, at: Instant) {
             },
             at,
         );
+        diagnostics.extend(out.diagnostics);
     }
+    diagnostics
 }
 
 /// `SubId` → its `ProfileId` via the public registry.

@@ -128,8 +128,11 @@ pub enum ScanConfig {
     MatchChain(Arc<PatternSpec>),
     /// Admit-every-dirent, single level — the descent probe's preset. Descent searches for the next
     /// path component of a not-yet-existing anchor, so the user-facing filters (which would mask
-    /// the very segment being searched for) deliberately collapse to no-ops. Prober-internal: never
-    /// wrapped in a `ProfileIdentity`, never on the wire, never partitions Profiles.
+    /// the very segment being searched for) deliberately collapse to no-ops. Prober-internal: it
+    /// anchors no Profile and never travels the wire. The sensor does wrap it in a transient
+    /// [`ProfileIdentity`] once per descent probe — purely to derive the snapshot's `captured_with`
+    /// stamp (the canonical descent-shape hash) — but that hash keys no Profile, so the partitioning
+    /// invariant holds.
     Descent,
 }
 
@@ -350,8 +353,10 @@ impl ScanConfig {
 /// Builder for [`ScanConfig::Subtree`] — the user-facing shape; the other variants are presets
 /// constructed directly.
 ///
-/// Sorts `exclude` by source on `build()` so equal logical configs are byte-equal —
-/// `compute_config_hash` reads in already-sorted order.
+/// Canonicalises `exclude` on `build()` — sort by source, then drop adjacent duplicates — so equal
+/// logical configs are byte-equal under `compute_config_hash`, which reads the list in that already
+/// sorted-and-deduped order. The builder is the sole production construction path for the `Subtree`
+/// shape, so this canonicalisation holds for every Profile-bearing config.
 #[derive(Debug, Default)]
 pub struct ScanConfigBuilder {
     recursive: bool,
@@ -400,7 +405,12 @@ impl ScanConfigBuilder {
 
     #[must_use]
     pub fn build(mut self) -> ScanConfig {
+        // Sort then collapse duplicates: `GlobPattern` equality is source-keyed, so after the sort
+        // every duplicate source is adjacent and `dedup` removes it exactly. This is the
+        // canonicalisation `compute_config_hash` relies on — a logically equal exclude set must
+        // produce one Profile, not fork on accidental repetition.
         self.exclude.sort();
+        self.exclude.dedup();
         ScanConfig::Subtree {
             recursive: self.recursive,
             hidden: self.hidden,
@@ -434,8 +444,9 @@ pub enum ConfigError {
 /// pattern, which is sometimes the intended shape (e.g. for the exclude list's "match everything
 /// below" form `<name>/**`).
 fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
-    // Bytes test on the tail-`/` arm: `ends_with(char)` is cheap, and the `!ends_with("**")` clause
-    // keeps `**` (universal-match) and `<name>/**` (a valid exclude shape) out of the rejection set.
+    // The tail-`/` arm rejects any glob whose last byte is `/`. `ends_with('/')` is a cheap
+    // single-byte test and needs no companion guard: `**` (universal-match) and `<name>/**` (the
+    // valid exclude shape) end in `*`, not `/`, so they can never reach this arm in the first place.
     let reason = match s {
         "" => Some("glob is empty — matches no entry"),
         "." | ".." => Some(
@@ -446,7 +457,7 @@ fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
             "leading `/` makes the glob absolute, but glob patterns are matched against \
              paths relative to the watch anchor — drop the `/` (e.g. `foo/**`, not `/foo/**`)",
         ),
-        s if s.ends_with('/') && !s.ends_with("**") => Some(
+        s if s.ends_with('/') => Some(
             "trailing `/` matches no entry — use `<name>/**` to exclude contents, or \
              `<name>` to match the directory itself (gitignore-style `target/` is not supported)",
         ),
@@ -500,9 +511,12 @@ pub(crate) fn compute_config_hash(
             h.put_u8(u8::from(*recursive));
             h.put_u8(u8::from(*hidden));
 
-            // Canonical width: u32 for the count. Saturate on the absurd overflow case — the
-            // alternative is an explicit panic, which buys nothing for a config layer that cannot
-            // realistically reach 2^32 globs.
+            // Canonical width: u32 for the count. The list arrives sorted *and* deduplicated from
+            // `ScanConfigBuilder::build`, so this count is over the canonical set — `["a", "a"]`
+            // and `["a"]` fold identically rather than forking two Profiles on a logically equal
+            // exclude set. Saturate on the absurd overflow case — the alternative is an explicit
+            // panic, which buys nothing for a config layer that cannot realistically reach 2^32
+            // globs.
             let exclude_count = u32::try_from(exclude.len()).unwrap_or(u32::MAX);
             h.put_u32(exclude_count);
             for g in exclude {
@@ -529,9 +543,11 @@ pub(crate) fn compute_config_hash(
                 }
             }
         }
-        // Never hashed in production — a `Descent` is prober-internal and anchors no Profile. The
-        // arm is total rather than `unreachable!` so a future caller hashing one gets a stable
-        // digest, not a panic.
+        // Hashed once per descent probe by the sensor, which stamps the resulting digest onto every
+        // descent snapshot's `captured_with`. A `Descent` anchors no Profile, so this stamp keys no
+        // partition — and because it folds through the same kernel on a shape no Profile carries, it
+        // can never collide with a live Profile's `config_hash`. The arm carries its own
+        // discriminant byte (not `unreachable!`) precisely because this is a real path.
         ScanConfig::Descent => {
             h.put_u8(1);
         }
@@ -741,6 +757,36 @@ mod tests {
         assert_eq!(
             compute_config_hash(&a, SETTLE, NO_EVENTS),
             compute_config_hash(&b, SETTLE, NO_EVENTS),
+        );
+    }
+
+    /// Duplicate excludes collapse at `build()`: `["a", "a", "z"]` and `["a", "z"]` are the same
+    /// logical config, so they must share one Profile. Without the `dedup()`, `compute_config_hash`
+    /// folds the count (`3` vs `2`) and each source, forking two Profiles on a logically equal set.
+    /// Pins both the canonical list shape and the hash equality.
+    #[test]
+    fn build_collapses_duplicate_excludes() {
+        let with_dup = ScanConfig::builder()
+            .exclude(glob("a"))
+            .exclude(glob("a"))
+            .exclude(glob("z"))
+            .build();
+        let without_dup = ScanConfig::builder()
+            .exclude(glob("a"))
+            .exclude(glob("z"))
+            .build();
+
+        let sources: Vec<&str> = with_dup
+            .exclude_globs()
+            .iter()
+            .map(GlobPattern::source)
+            .collect();
+        assert_eq!(sources, vec!["a", "z"], "duplicate dropped at build");
+
+        assert_eq!(
+            compute_config_hash(&with_dup, SETTLE, NO_EVENTS),
+            compute_config_hash(&without_dup, SETTLE, NO_EVENTS),
+            "a duplicated exclude must not fork a second Profile",
         );
     }
 

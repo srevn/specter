@@ -4045,8 +4045,8 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
 
 #[test]
 fn structure_only_profile_has_per_file_fds_false() {
-    // Inverse case: a STRUCTURE-only mask leaves `has_per_file_fds` false. walk_pair then doesn't
-    // bump per-leaf watch_demand for covered files.
+    // Inverse case: a STRUCTURE-only mask leaves `has_per_file_fds` false. The reconciler
+    // (`apply_diff_to_tree`) then doesn't bump per-leaf watch_demand for covered files.
     let mut e = Engine::new();
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
