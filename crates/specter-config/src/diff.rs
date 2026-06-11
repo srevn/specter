@@ -323,7 +323,7 @@ mod tests {
         assert_eq!(d.modified_identity.len(), 1);
         assert_eq!(d.modified_identity[0].params.name, "a");
         assert_eq!(
-            d.modified_identity[0].identity.events,
+            d.modified_identity[0].identity.events(),
             specter_core::ClassSet::CONTENT
         );
     }
@@ -470,7 +470,7 @@ mod tests {
 
         let d = diff(&old, &new);
         assert_eq!(d.modified_identity.len(), 1);
-        let ScanConfig::MatchChain(spec) = d.modified_identity[0].identity.config.as_ref() else {
+        let ScanConfig::MatchChain(spec) = d.modified_identity[0].identity.config() else {
             panic!("discovery request carries MatchChain");
         };
         assert_eq!(spec.source(), "/var/log/*.json");

@@ -1,9 +1,11 @@
 //! Scan configuration.
 //!
 //! [`compute_config_hash`] is the canonical hash of `(ScanConfig, max_settle, events)`;
-//! [`ProfileIdentity`] is its reified preimage and [`ProfileIdentity::config_hash`] the sole public
-//! route. Equal hash ⇒ Subs share one Profile (snapshot, burst lifecycle). Both fold sites
-//! destructure exhaustively, so a new identity-bearing field is a compile error until folded — the
+//! [`ProfileIdentity`] is its reified preimage, sealed over the digest at construction —
+//! [`ProfileIdentity::config_hash`] is the sole public route and reads the sealed value. Equal
+//! hash ⇒ Subs share one Profile (snapshot, burst lifecycle). Both fold sites force completeness —
+//! the kernel's exhaustive destructure per scan shape, the constructor's exhaustive struct literal
+//! per identity axis — so a new identity-bearing field is a compile error until folded — the
 //! fold-completeness ratchet.
 //!
 //! `GlobPattern` carries the canonical `source` string alongside the compiled
@@ -460,8 +462,8 @@ fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
 }
 
 /// Canonical hash of `(ScanConfig, max_settle, events)` — the crate-internal hashing kernel.
-/// [`ProfileIdentity::config_hash`] is the sole public route; production threads a
-/// `ProfileIdentity` through that rather than calling this directly.
+/// [`ProfileIdentity::new`] is the sole production caller: it seals the digest onto the identity
+/// at construction, and [`ProfileIdentity::config_hash`] reads that sealed value.
 ///
 /// Inputs are folded in fixed order through [`crate::hash::hasher`]: a 1-byte scan-shape
 /// discriminant, the variant's own fields (for `Subtree`: `recursive`, `hidden`, `len(exclude)` as
@@ -555,43 +557,79 @@ pub(crate) fn compute_config_hash(
 /// the sole identity operation — a structural derive would be a second identity route that could
 /// diverge from the hash the partition actually keys on.
 ///
+/// Sealed: private fields, a sole constructor, and the hash computed once inside it. "The hash
+/// agrees with its preimage" is thereby a structural property, not a documented convention — no
+/// construction or mutation path can produce an identity whose `hash` disagrees with its axes, so
+/// every downstream carrier (the Profile, each `MintTemplate` identity clone, the reconcile
+/// capture, the descent stamp) reads the same precomputed key instead of re-deriving it.
+///
 /// `config` sits behind an `Arc`: an identity is frozen at construction and then travels — onto the
 /// Profile, into every `MintTemplate` identity clone at mint time, and (the config half alone) onto
 /// each `ProbeRequest::Subtree` wire — so each of those is a refcount bump, never a `ScanConfig`
-/// deep-copy. [`Self::new`] is the sole minting point of the handle; the other two fields are
-/// `Copy`, so `ProfileIdentity: Clone` is cheap by construction.
+/// deep-copy. [`Self::new`] is the sole minting point of the handle; the other fields are `Copy`,
+/// so `ProfileIdentity: Clone` is cheap by construction.
 #[derive(Clone, Debug)]
 pub struct ProfileIdentity {
-    pub config: Arc<ScanConfig>,
-    pub max_settle: Duration,
-    pub events: ClassSet,
+    config: Arc<ScanConfig>,
+    max_settle: Duration,
+    events: ClassSet,
+    /// The Profile partition key itself — [`compute_config_hash`] over the three axes above.
+    hash: u64,
 }
 
 impl ProfileIdentity {
-    /// Wrap `config` behind its sharing handle once. Every producer holds a plain [`ScanConfig`]
-    /// (builder output, config lowering, the descent stamp); the single wrap here keeps `Arc::new`
-    /// out of the call sites.
+    /// Freeze the three identity axes and seal their canonical hash in one step. Every producer
+    /// holds a plain [`ScanConfig`] (builder output, config lowering, the descent stamp); the
+    /// single wrap here keeps `Arc::new` out of the call sites.
     #[must_use]
     pub fn new(config: ScanConfig, max_settle: Duration, events: ClassSet) -> Self {
+        // Fold-completeness ratchet, identity tier: a new axis on `ProfileIdentity` is a compile
+        // error at this literal until it is given a field here — and it must also be threaded into
+        // the canonical hash above, or the axis silently merges Profiles (the `ScanConfig` ratchet
+        // inside `compute_config_hash` does not cover an axis that is neither scan-config,
+        // max_settle, nor events).
+        let hash = compute_config_hash(&config, max_settle, events);
         Self {
             config: Arc::new(config),
             max_settle,
             events,
+            hash,
         }
     }
 
-    /// Canonical hash of this identity — the single public hashing route for Profile partitioning.
+    /// The frozen [`ScanConfig`] axis. Borrow for the shape predicates (`match_chain`,
+    /// `exclude_globs`, the witness classes); consumers never take ownership through this. Not
+    /// `const`: the read derefs through the `Arc`.
     #[must_use]
-    pub fn config_hash(&self) -> u64 {
-        // Fold-completeness ratchet, identity tier: a new axis on `ProfileIdentity` is a compile
-        // error here until it is threaded into the canonical hash below (the `ScanConfig` ratchet
-        // does not cover an axis that is neither scan-config, max_settle, nor events).
-        let Self {
-            config,
-            max_settle,
-            events,
-        } = self;
-        compute_config_hash(config, *max_settle, *events)
+    pub fn config(&self) -> &ScanConfig {
+        &self.config
+    }
+
+    /// The same frozen [`ScanConfig`] behind its sharing handle — for carriers that ship the
+    /// config onward as a refcount bump (the Profile's `config_shared`, and through it the probe
+    /// wire). Every plain reader borrows through [`Self::config`] instead.
+    #[must_use]
+    pub const fn config_shared(&self) -> &Arc<ScanConfig> {
+        &self.config
+    }
+
+    /// The settle-deadline ceiling axis (folds into [`Self::config_hash`]).
+    #[must_use]
+    pub const fn max_settle(&self) -> Duration {
+        self.max_settle
+    }
+
+    /// The user-declared event-class mask axis (folds into [`Self::config_hash`]).
+    #[must_use]
+    pub const fn events(&self) -> ClassSet {
+        self.events
+    }
+
+    /// Canonical hash of this identity — the single public hashing route for Profile partitioning.
+    /// A field read: the fold ran once at [`Self::new`].
+    #[must_use]
+    pub const fn config_hash(&self) -> u64 {
+        self.hash
     }
 }
 
@@ -807,47 +845,50 @@ mod tests {
         );
     }
 
-    /// Discrimination complement to the fold-completeness destructure: the exhaustive pattern makes
-    /// a new field a *compile error* until folded; this test makes the fold *distinguish*, so the
+    /// Discrimination complement to the fold-completeness ratchets: the compile errors at the fold
+    /// sites force a new field into the fold; this test makes the fold *distinguish*, so the
     /// ratchet cannot be satisfied by folding a new field as a constant.
     ///
     /// The base is fully-populated and non-default: toggling any single field must move the hash.
     /// (`hash_known_good` pins a *default* config, where a new field left at its default would
     /// never shift the digest — this is the structural complement that closes that gap.)
     ///
+    /// Each variation builds a fresh identity from mutated *inputs* — the hash seals at
+    /// construction, so every probe runs the same public route production uses
+    /// (`ProfileIdentity::new` → `config_hash`).
+    ///
     /// Not itself ratcheted: a new field still needs a new `assert_ne!` line here. The compile
-    /// error from the destructure is the forcing function that drives the author to add it; this
+    /// error from the fold sites is the forcing function that drives the author to add it; this
     /// test then guards that the fold actually discriminates.
     #[test]
     fn hash_discriminates_every_populated_field() {
-        fn populated() -> ProfileIdentity {
-            ProfileIdentity::new(
-                ScanConfig::builder()
-                    .recursive(true)
-                    .hidden(true)
-                    .exclude(glob("a"))
-                    .exclude(glob("b"))
-                    .pattern(glob("*.rs"))
-                    .max_depth(Some(7))
-                    .build(),
-                Duration::from_secs(7),
-                ClassSet::CONTENT | ClassSet::METADATA,
-            )
+        const BASE_MAX_SETTLE: Duration = Duration::from_secs(7);
+        fn base_events() -> ClassSet {
+            ClassSet::CONTENT | ClassSet::METADATA
+        }
+        fn populated_scan() -> ScanConfig {
+            ScanConfig::builder()
+                .recursive(true)
+                .hidden(true)
+                .exclude(glob("a"))
+                .exclude(glob("b"))
+                .pattern(glob("*.rs"))
+                .max_depth(Some(7))
+                .build()
+        }
+        fn rehash_scan(mutate: impl FnOnce(&mut ScanConfig)) -> u64 {
+            let mut scan = populated_scan();
+            mutate(&mut scan);
+            ProfileIdentity::new(scan, BASE_MAX_SETTLE, base_events()).config_hash()
         }
 
-        fn rehash(base: &ProfileIdentity, mutate: impl FnOnce(&mut ProfileIdentity)) -> u64 {
-            let mut id = base.clone();
-            mutate(&mut id);
-            id.config_hash()
-        }
-
-        let base = populated();
-        let h0 = base.config_hash();
+        let h0 =
+            ProfileIdentity::new(populated_scan(), BASE_MAX_SETTLE, base_events()).config_hash();
 
         assert_ne!(
             h0,
-            rehash(&base, |id| {
-                let ScanConfig::Subtree { recursive, .. } = Arc::make_mut(&mut id.config) else {
+            rehash_scan(|scan| {
+                let ScanConfig::Subtree { recursive, .. } = scan else {
                     unreachable!("builder builds Subtree")
                 };
                 *recursive = false;
@@ -856,8 +897,8 @@ mod tests {
         );
         assert_ne!(
             h0,
-            rehash(&base, |id| {
-                let ScanConfig::Subtree { hidden, .. } = Arc::make_mut(&mut id.config) else {
+            rehash_scan(|scan| {
+                let ScanConfig::Subtree { hidden, .. } = scan else {
                     unreachable!("builder builds Subtree")
                 };
                 *hidden = false;
@@ -866,8 +907,8 @@ mod tests {
         );
         assert_ne!(
             h0,
-            rehash(&base, |id| {
-                let ScanConfig::Subtree { exclude, .. } = Arc::make_mut(&mut id.config) else {
+            rehash_scan(|scan| {
+                let ScanConfig::Subtree { exclude, .. } = scan else {
                     unreachable!("builder builds Subtree")
                 };
                 exclude.push(glob("c"));
@@ -876,8 +917,8 @@ mod tests {
         );
         assert_ne!(
             h0,
-            rehash(&base, |id| {
-                let ScanConfig::Subtree { pattern, .. } = Arc::make_mut(&mut id.config) else {
+            rehash_scan(|scan| {
+                let ScanConfig::Subtree { pattern, .. } = scan else {
                     unreachable!("builder builds Subtree")
                 };
                 *pattern = None;
@@ -886,8 +927,8 @@ mod tests {
         );
         assert_ne!(
             h0,
-            rehash(&base, |id| {
-                let ScanConfig::Subtree { max_depth, .. } = Arc::make_mut(&mut id.config) else {
+            rehash_scan(|scan| {
+                let ScanConfig::Subtree { max_depth, .. } = scan else {
                     unreachable!("builder builds Subtree")
                 };
                 *max_depth = Some(8);
@@ -896,12 +937,14 @@ mod tests {
         );
         assert_ne!(
             h0,
-            rehash(&base, |id| id.max_settle = Duration::from_secs(8)),
+            ProfileIdentity::new(populated_scan(), Duration::from_secs(8), base_events())
+                .config_hash(),
             "max_settle must discriminate"
         );
         assert_ne!(
             h0,
-            rehash(&base, |id| id.events = ClassSet::CONTENT),
+            ProfileIdentity::new(populated_scan(), BASE_MAX_SETTLE, ClassSet::CONTENT)
+                .config_hash(),
             "events must discriminate"
         );
     }

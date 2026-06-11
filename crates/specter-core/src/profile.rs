@@ -1,9 +1,9 @@
 //! `Profile`, `ProfileMap`, and burst types.
 //!
-//! `Profile.config_hash` is computed at construction from `(config, max_settle)` and is the
-//! lifetime-stable identity of the Profile. `ProfileMap` keeps `(resource, config_hash) →
-//! ProfileId` and updates `Resource.profiles` in lockstep — `attach`/`detach` are the only mutators
-//! of either index.
+//! `Profile.config_hash` is sealed onto the [`ProfileIdentity`] at its construction (one fold over
+//! `(config, max_settle, events)`) and is the lifetime-stable identity of the Profile.
+//! `ProfileMap` keeps `(resource, config_hash) → ProfileId` and updates `Resource.profiles` in
+//! lockstep — `attach`/`detach` are the only mutators of either index.
 
 use crate::ids::{ProbeCorrelation, ProfileId, ResourceId, TimerId};
 use crate::op::ProofAuthority;
@@ -2074,43 +2074,40 @@ enum AnchorClassification {
     },
 }
 
-/// Frozen config identity plus the three caches that are *total functions* of it. Private fields
+/// Frozen config identity plus the two caches that are *total functions* of it. Private fields
 /// and a sole constructor make "derived once from a frozen identity, never independently writable"
-/// a structural property rather than a documented convention: there is no path to a `ProfileConfig`
-/// whose `config_hash` disagrees with its `identity`.
+/// a structural property rather than a documented convention. The partition hash is not cached
+/// here: the identity arrives already sealed over it ([`ProfileIdentity::config_hash`] is a field
+/// read), so a Profile-side mirror would be a second copy of the same key.
 ///
-/// `identity` ([`ProfileIdentity`] = `{config, max_settle, events}`) is the Profile partition key's
-/// config half; `config_hash`, `exclude_strings`, and `has_per_file_fds` are each a pure projection
-/// of it, materialised once at [`Self::new`].
+/// `identity` ([`ProfileIdentity`] = `{config, max_settle, events, hash}`) is the Profile
+/// partition key's config half; `exclude_strings` and `has_per_file_fds` are each a pure
+/// projection of it, materialised once at [`Self::new`].
 #[derive(Debug)]
 struct ProfileConfig {
     identity: ProfileIdentity,
-    config_hash: u64,
     exclude_strings: Arc<[CompactString]>,
     has_per_file_fds: bool,
 }
 
 impl ProfileConfig {
-    /// Derive all three caches from a frozen [`ProfileIdentity`]. The canonical hash route is
-    /// [`ProfileIdentity::config_hash`]; `exclude_strings` projects
+    /// Derive both caches from a frozen [`ProfileIdentity`]: `exclude_strings` projects
     /// [`ScanConfig::exclude_globs`](crate::ScanConfig::exclude_globs) in the builder-canonical
     /// order (already sorted by source, so no re-sort; the empty slice for shapes that carry no
     /// excludes); `has_per_file_fds` is true iff the event mask carries CONTENT or METADATA
     /// (covered Leaves then need their own FDs).
     fn new(identity: ProfileIdentity) -> Self {
-        let config_hash = identity.config_hash();
         let has_per_file_fds = identity
-            .events
+            .events()
             .intersects(ClassSet::CONTENT | ClassSet::METADATA);
         let exclude_strings: Arc<[CompactString]> = identity
-            .config
+            .config()
             .exclude_globs()
             .iter()
             .map(|g| CompactString::from(g.source()))
             .collect();
         Self {
             identity,
-            config_hash,
             exclude_strings,
             has_per_file_fds,
         }
@@ -2270,12 +2267,12 @@ impl Profile {
     /// baseline/current, no watch-root parent. (Effect fire history is per-Sub —
     /// [`crate::Sub::has_fired`] — not a Profile concern.)
     ///
-    /// `identity` ([`ProfileIdentity`] = `{config, max_settle, events}`) is the Profile partition
-    /// key's config half, taken by value: `ProfileConfig::new` folds it once into the lifetime-
-    /// stable `config_hash` plus the `exclude_strings` / `has_per_file_fds` projections. There is
-    /// no path to a Profile with an unset or stale hash. The sole production caller
-    /// (`find_or_create_profile`) already holds the `ProfileIdentity` and moves it straight in — no
-    /// field unpack, no clone.
+    /// `identity` ([`ProfileIdentity`] = `{config, max_settle, events, hash}`) is the Profile
+    /// partition key's config half, taken by value: it arrives already sealed over its canonical
+    /// hash, and `ProfileConfig::new` derives the `exclude_strings` / `has_per_file_fds`
+    /// projections from it. There is no path to a Profile with an unset or stale hash. The sole
+    /// production caller (`find_or_create_profile`) already holds the `ProfileIdentity` and moves
+    /// it straight in — no field unpack, no clone.
     ///
     /// `settle` is the per-Profile mutable debounce interval (recomputed by the engine as
     /// `min(remaining_subs.settles)`), distinct from the identity's `max_settle`. The `settle <=
@@ -2300,11 +2297,11 @@ impl Profile {
         kind: Option<ResourceKind>,
     ) -> Self {
         debug_assert!(
-            settle <= identity.max_settle,
+            settle <= identity.max_settle(),
             "Profile::new: settle ({settle:?}) must not exceed max_settle ({:?}) — \
              config-layer validate_settle enforces max_settle >= 4 × settle; a \
              breach here means a caller bypassed config validation",
-            identity.max_settle,
+            identity.max_settle(),
         );
         let anchor = match kind {
             None => AnchorClassification::Unclassified { witness: None },
@@ -2681,7 +2678,7 @@ impl Profile {
     /// into `config_hash`). Stable read seam over the frozen identity.
     #[must_use]
     pub const fn events(&self) -> ClassSet {
-        self.cfg.identity.events
+        self.cfg.identity.events()
     }
 
     /// The frozen [`ScanConfig`] half of the Profile identity. Borrow for the named scope
@@ -2690,7 +2687,7 @@ impl Profile {
     /// `Arc`. The probe wire takes the sharing handle via [`Self::config_shared`] instead.
     #[must_use]
     pub fn config(&self) -> &ScanConfig {
-        &self.cfg.identity.config
+        self.cfg.identity.config()
     }
 
     /// The same frozen [`ScanConfig`] behind its sharing handle — for the probe-emission choke,
@@ -2698,7 +2695,7 @@ impl Profile {
     /// in-engine reader borrows through [`Self::config`] instead.
     #[must_use]
     pub const fn config_shared(&self) -> &Arc<ScanConfig> {
-        &self.cfg.identity.config
+        self.cfg.identity.config_shared()
     }
 
     /// The Tree slot this Profile anchors at — the slot axis of the `(resource, config_hash)`
@@ -2710,11 +2707,11 @@ impl Profile {
     }
 
     /// The lifetime-stable canonical config hash — the config axis of the `(resource, config_hash)`
-    /// partition key. Bit-identical to `ProfileIdentity::config_hash()` of the identity passed to
-    /// [`Self::new`] (it *is* that value, cached once).
+    /// partition key. A read through the frozen identity, which seals the hash at its own
+    /// construction ([`ProfileIdentity::new`]).
     #[must_use]
     pub const fn config_hash(&self) -> u64 {
-        self.cfg.config_hash
+        self.cfg.identity.config_hash()
     }
 
     /// The settle-deadline ceiling — the identity half of the burst timings (folds into
@@ -2722,7 +2719,7 @@ impl Profile {
     /// `settle`).
     #[must_use]
     pub const fn max_settle(&self) -> Duration {
-        self.cfg.identity.max_settle
+        self.cfg.identity.max_settle()
     }
 
     /// True iff covered Leaves need their own FDs (the event mask carries CONTENT or METADATA).

@@ -258,7 +258,7 @@ impl Engine {
         // on a chain Profile and trip this same assert at mint time).
         debug_assert_eq!(
             req.params.is_template(),
-            req.identity.config.match_chain().is_some(),
+            req.identity.config().match_chain().is_some(),
             "attach_sub_inner: SubParams::template ⟺ ScanConfig::MatchChain \
              (a template mints; a chain Profile reconciles — neither exists without the other)",
         );

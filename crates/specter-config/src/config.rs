@@ -2082,7 +2082,7 @@ mod tests {
             "request carries the same path stored in SubSpec"
         );
         assert_eq!(
-            req.identity.events,
+            req.identity.events(),
             ClassSet::DEFAULT_SUBTREE_ROOT,
             "to_attach_request threads the parsed events ClassSet through \
              into the engine surface",
@@ -2542,8 +2542,8 @@ mod tests {
         let hand_built = ProfileIdentity::new(t.scan.clone(), t.max_settle, t.events);
         assert_eq!(minted.identity.config_hash(), hand_built.config_hash());
         // The discovery Sub's own request identity is the constant shape.
-        assert_eq!(req.identity.max_settle, Duration::from_secs(2));
-        assert_eq!(req.identity.events, ClassSet::STRUCTURE);
+        assert_eq!(req.identity.max_settle(), Duration::from_secs(2));
+        assert_eq!(req.identity.events(), ClassSet::STRUCTURE);
     }
 
     /// Dynamic watches accept `pattern` (per-Sub include filter) and `exclude` (per-Sub exclude

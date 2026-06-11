@@ -752,9 +752,9 @@ impl SubRegistry {
     /// silently rewrite the identifying fields under the registry's `by_name` index, leaving the
     /// index pointing at the wrong [`SubId`]; the assertions catch the breach at the call site. The
     /// template assertion is both-`None`, not equality (`ProfileIdentity` deliberately has no `Eq`):
-    /// any field change on a template-bearing spec classifies as `modified_identity` (wholesale reap
-    /// + reattach) at the config diff, never an in-place rebind — the minted Subs hold `Arc`s of the
-    /// template's program, so a rebind would strand them on stale reaction state.
+    /// any field change on a template-bearing spec classifies as `modified_identity` (wholesale
+    /// reap + reattach) at the config diff, never an in-place rebind — the minted Subs hold `Arc`s
+    /// of the template's program, so a rebind would strand them on stale reaction state.
     pub fn rebind(&mut self, sub: SubId, new_params: SubParams) -> Option<(Duration, ProfileId)> {
         let s = self.subs.get_mut(sub)?;
         debug_assert_eq!(
