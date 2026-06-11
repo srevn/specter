@@ -389,12 +389,7 @@ pub(super) fn probe_subtree(
 /// the same one Profile partitioning uses, keyed on a shape no Profile carries. One sip128 per
 /// descent probe; descent is rare (one probe per missing path component during `Pending`).
 fn descent_captured_with() -> u64 {
-    ProfileIdentity {
-        config: ScanConfig::Descent,
-        max_settle: Duration::ZERO,
-        events: ClassSet::EMPTY,
-    }
-    .config_hash()
+    ProfileIdentity::new(ScanConfig::Descent, Duration::ZERO, ClassSet::EMPTY).config_hash()
 }
 
 /// Descent prefix probe. Single-level enumeration of `target_path` under the

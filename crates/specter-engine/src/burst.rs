@@ -1549,11 +1549,11 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 r,
-                ProfileIdentity {
-                    config: ScanConfig::builder().recursive(true).build(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
+                ProfileIdentity::new(
+                    ScanConfig::builder().recursive(true).build(),
+                    MAX_SETTLE,
+                    NO_EVENTS,
+                ),
                 SETTLE,
                 None,
             ),
@@ -2155,11 +2155,11 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 root,
-                ProfileIdentity {
-                    config: ScanConfig::builder().recursive(true).build(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
+                ProfileIdentity::new(
+                    ScanConfig::builder().recursive(true).build(),
+                    MAX_SETTLE,
+                    NO_EVENTS,
+                ),
                 SETTLE,
                 None,
             ),
@@ -2245,11 +2245,11 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 root,
-                ProfileIdentity {
-                    config: ScanConfig::builder().recursive(true).build(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
+                ProfileIdentity::new(
+                    ScanConfig::builder().recursive(true).build(),
+                    MAX_SETTLE,
+                    NO_EVENTS,
+                ),
                 SETTLE,
                 None,
             ),
@@ -2317,11 +2317,11 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 l0,
-                ProfileIdentity {
-                    config: ScanConfig::builder().recursive(true).build(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
+                ProfileIdentity::new(
+                    ScanConfig::builder().recursive(true).build(),
+                    MAX_SETTLE,
+                    NO_EVENTS,
+                ),
                 SETTLE,
                 None,
             ),
@@ -2429,11 +2429,11 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 file_anchor,
-                ProfileIdentity {
-                    config: ScanConfig::builder().recursive(false).build(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
+                ProfileIdentity::new(
+                    ScanConfig::builder().recursive(false).build(),
+                    MAX_SETTLE,
+                    NO_EVENTS,
+                ),
                 SETTLE,
                 Some(ResourceKind::File),
             ),
@@ -2597,11 +2597,11 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 root,
-                ProfileIdentity {
-                    config: ScanConfig::builder().recursive(true).build(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
+                ProfileIdentity::new(
+                    ScanConfig::builder().recursive(true).build(),
+                    MAX_SETTLE,
+                    NO_EVENTS,
+                ),
                 SETTLE,
                 None,
             ),

@@ -111,7 +111,6 @@ pub enum ProofObligation {
 /// dominant payload. The enclosing `ProbeOp` lives in a `StepOutput::probe_ops` `BTreeMap` node —
 /// heap-allocated on insert regardless of variant width — so the variant width never rides an
 /// inline slot.
-#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ProbeRequest {
     /// File-anchor verify / Seed / Rebase. The walker runs a single `lstat` and returns
@@ -165,9 +164,10 @@ pub enum ProbeRequest {
         /// not unsound: the per-dirent `strip_prefix` fails, drops the dirent, and degrades the
         /// level ⇒ the proof refuses to fire.
         anchor_path: Arc<Path>,
-        /// `ScanConfig` to honour (recursive, hidden, exclude, pattern, `max_depth`). Cloned at
-        /// emit time.
-        scan_config: ScanConfig,
+        /// `ScanConfig` to honour (recursive, hidden, exclude, pattern, `max_depth`). The
+        /// Profile's frozen config behind its sharing handle — a refcount bump at emit time;
+        /// workers read the same allocation concurrently across probes.
+        scan_config: Arc<ScanConfig>,
         /// `Profile.config_hash` at emission time. Walker stamps every `DirSnapshot.captured_with`
         /// so two Profiles sharing a Resource with different filters cannot produce identical
         /// `dir_hash` for divergent in-scope content.

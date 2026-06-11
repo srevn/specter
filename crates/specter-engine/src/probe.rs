@@ -412,9 +412,9 @@ impl Engine {
     /// empty/absent (⇒ no probe). The emission-side twin of the response gate
     /// ([`Self::profile_probe_gate`]): the same one-resolution shape, the disjoint concern. The
     /// gates yield the `Copy` route the *response* demuxes on; this yields the owned `ProbeRequest`
-    /// the *request* carries — heavier (`ScanConfig`, baseline `Arc`, the proof obligation), so it
-    /// is deliberately a separate function rather than a gate caller; emission never depends on the
-    /// response-shaped route enums.
+    /// the *request* carries — heavier (the scan-config handle, baseline `Arc`, the proof
+    /// obligation), so it is deliberately a separate function rather than a gate caller; emission
+    /// never depends on the response-shaped route enums.
     ///
     /// A pure `&self` state→wire projection — like Descent, no accumulator drain. The post-fire
     /// fire-tail residual reset is owned by `transition_to_rebasing` (the category-(a) phase
@@ -532,7 +532,7 @@ impl Engine {
                 // `Vanished` on a kind mismatch and the engine recovers via descent. The proof
                 // obligation is materialized here — lazily (never for a File anchor) and per carrier.
                 _ => {
-                    let scan_config = p.config().clone();
+                    let scan_config = Arc::clone(p.config_shared());
                     let captured_with = p.config_hash();
                     let baseline_subtree = p
                         .current_dir()

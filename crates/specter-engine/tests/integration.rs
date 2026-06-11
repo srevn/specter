@@ -70,14 +70,14 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
         &mut tree,
         Profile::new(
             root,
-            ProfileIdentity {
-                config: ScanConfig::builder()
+            ProfileIdentity::new(
+                ScanConfig::builder()
                     .recursive(true)
                     .pattern(specter_core::GlobPattern::compile("*.rs").unwrap())
                     .build(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
+                MAX_SETTLE,
+                NO_EVENTS,
+            ),
             SETTLE,
             None,
         ),

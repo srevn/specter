@@ -566,11 +566,11 @@ pub const fn watch_op_rejected_input(resource: ResourceId) -> Input {
 #[must_use]
 pub fn mint_template() -> Arc<MintTemplate> {
     Arc::new(MintTemplate {
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::EMPTY,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            ClassSet::EMPTY,
+        ),
         settle: SETTLE,
     })
 }
@@ -596,11 +596,11 @@ pub fn discovery_req(
     let spec = Arc::new(PatternSpec::parse(pattern).expect("valid test pattern"));
     SubAttachRequest::from_parts(
         anchor,
-        ProfileIdentity {
-            config: ScanConfig::MatchChain(spec),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::STRUCTURE,
-        },
+        ProfileIdentity::new(
+            ScanConfig::MatchChain(spec),
+            MAX_SETTLE,
+            ClassSet::STRUCTURE,
+        ),
         SubParams {
             name: name.into(),
             program: specter_core::testkit::empty_program(),

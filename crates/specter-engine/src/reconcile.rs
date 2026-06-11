@@ -464,11 +464,11 @@ mod tests {
             &mut tree,
             Profile::new(
                 r,
-                ProfileIdentity {
-                    config: ScanConfig::builder().recursive(true).build(),
-                    max_settle: MAX_SETTLE,
+                ProfileIdentity::new(
+                    ScanConfig::builder().recursive(true).build(),
+                    MAX_SETTLE,
                     events,
-                },
+                ),
                 SETTLE,
                 None,
             ),

@@ -95,11 +95,11 @@ fn template_on_non_chain_profile_is_unconstructable() {
     let _ = e.step(
         Input::AttachSub(SubAttachRequest::from_parts(
             SubAttachAnchor::Resource(srv),
-            ProfileIdentity {
-                config: ScanConfig::builder().build(),
-                max_settle: MAX_SETTLE,
-                events: ClassSet::STRUCTURE,
-            },
+            ProfileIdentity::new(
+                ScanConfig::builder().build(),
+                MAX_SETTLE,
+                ClassSet::STRUCTURE,
+            ),
             SubParams {
                 name: "disc".into(),
                 program: empty_program(),
@@ -125,13 +125,13 @@ fn plain_sub_on_chain_profile_is_unconstructable() {
     let _ = e.step(
         Input::AttachSub(SubAttachRequest::from_parts(
             SubAttachAnchor::Resource(srv),
-            ProfileIdentity {
-                config: ScanConfig::MatchChain(Arc::new(
+            ProfileIdentity::new(
+                ScanConfig::MatchChain(Arc::new(
                     PatternSpec::parse("/srv/*").expect("valid pattern"),
                 )),
-                max_settle: MAX_SETTLE,
-                events: ClassSet::STRUCTURE,
-            },
+                MAX_SETTLE,
+                ClassSet::STRUCTURE,
+            ),
             SubParams {
                 name: "plain".into(),
                 program: empty_program(),

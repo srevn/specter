@@ -696,11 +696,7 @@ fn profile_state_default_is_idle() {
     let r = e.tree_mut().ensure_root("anchor", ResourceRole::User);
     let p = Profile::new(
         r,
-        ProfileIdentity {
-            config: ScanConfig::builder().build(),
-            max_settle: MAX_SETTLE,
-            events: NO_EVENTS,
-        },
+        ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
         SETTLE,
         None,
     );

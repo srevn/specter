@@ -88,7 +88,8 @@ pub struct SubParams {
     /// transitive discovery.
     ///
     /// `Arc`: every reconcile pass collects the Profile's template set before minting — a refcount
-    /// bump per pass instead of a `ScanConfig` deep-clone, and `SubParams: Clone` stays cheap.
+    /// bump per pass instead of re-borrowing the registry per mint, and `SubParams: Clone` stays
+    /// cheap.
     pub template: Option<Arc<MintTemplate>>,
     /// Discovery Sub that minted this Sub — `None` for operator-declared Subs. Read at the engine's
     /// recovery fan-out ([`Sub::is_dynamic`]) and by the detach cascade (`source_discovery ==
@@ -132,9 +133,9 @@ impl SubAttachRequest {
 
     /// Build a static (operator-declared) attach request — `template` and `source_discovery` are
     /// both `None`. Discovery templates and their minted Subs carry their extra fields through
-    /// [`Self::from_parts`] directly.
+    /// [`Self::from_parts`] directly. Not `const`: minting the identity's config handle allocates.
     #[must_use]
-    pub const fn for_anchor(
+    pub fn for_anchor(
         name: CompactString,
         anchor: SubAttachAnchor,
         config: ScanConfig,
@@ -147,11 +148,7 @@ impl SubAttachRequest {
     ) -> Self {
         Self::from_parts(
             anchor,
-            ProfileIdentity {
-                config,
-                max_settle,
-                events,
-            },
+            ProfileIdentity::new(config, max_settle, events),
             SubParams {
                 name,
                 program,
@@ -672,9 +669,9 @@ impl SubRegistry {
     /// silently rewrite the identifying fields under the registry's `by_name` index, leaving the
     /// index pointing at the wrong [`SubId`]; the assertions catch the breach at the call site. The
     /// template assertion is both-`None`, not equality (`ProfileIdentity` deliberately has no `Eq`):
-    /// any field change on a template-bearing spec classifies as `modified_identity` (wholesale reap
-    /// + reattach) at the config diff, never an in-place rebind — the minted Subs hold `Arc`s of the
-    /// template's program, so a rebind would strand them on stale reaction state.
+    /// any field change on a template-bearing spec classifies as `modified_identity` (wholesale
+    /// reap + reattach) at the config diff, never an in-place rebind — the minted Subs hold `Arc`s
+    /// of the template's program, so a rebind would strand them on stale reaction state.
     pub fn rebind(&mut self, sub: SubId, new_params: SubParams) -> Option<(Duration, ProfileId)> {
         let s = self.subs.get_mut(sub)?;
         debug_assert_eq!(
@@ -1501,11 +1498,11 @@ mod tests {
             settle: SETTLE,
             log_output: false,
             template: Some(Arc::new(MintTemplate {
-                identity: ProfileIdentity {
-                    config: ScanConfig::builder().build(),
-                    max_settle: SETTLE * 4,
-                    events: ClassSet::EMPTY,
-                },
+                identity: ProfileIdentity::new(
+                    ScanConfig::builder().build(),
+                    SETTLE * 4,
+                    ClassSet::EMPTY,
+                ),
                 settle: SETTLE,
             })),
             source_discovery: None,

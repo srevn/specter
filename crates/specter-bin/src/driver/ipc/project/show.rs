@@ -425,11 +425,11 @@ mod tests {
     fn show_dynamic_sub_name_resolves_unknown() {
         let req = SubAttachRequest::from_parts(
             SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
-            ProfileIdentity {
-                config: ScanConfig::builder().build(),
-                max_settle: Duration::from_hours(1),
-                events: ClassSet::DEFAULT_SUBTREE_ROOT,
-            },
+            ProfileIdentity::new(
+                ScanConfig::builder().build(),
+                Duration::from_hours(1),
+                ClassSet::DEFAULT_SUBTREE_ROOT,
+            ),
             SubParams {
                 name: CompactString::const_new("template@/tmp/dyn_anchor"),
                 program: trivial_program(),

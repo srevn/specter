@@ -2406,7 +2406,7 @@ fn deep_tree_walks_on_worker_without_stack_overflow() {
         correlation: ProbeCorrelation::from(1),
         target_path: Arc::clone(&root),
         anchor_path: root,
-        scan_config: ScanConfig::builder().recursive(true).build(),
+        scan_config: Arc::new(ScanConfig::builder().recursive(true).build()),
         captured_with: 0,
         baseline_subtree: None,
         obligation: ProofObligation::WholeSubtree,

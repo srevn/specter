@@ -71,11 +71,11 @@ fn engine_with_attached_sub() -> (
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: DEFAULT_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            DEFAULT_EVENTS,
+        ),
         params: SubParams {
             name: "test-sub".into(),
             program: empty_program(),
@@ -233,11 +233,11 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: NO_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            NO_EVENTS,
+        ),
         params: SubParams {
             name: "test-sub".into(),
             program: empty_program(),
@@ -300,11 +300,11 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
     // so Profile.kind starts as None.
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: NO_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            NO_EVENTS,
+        ),
         params: SubParams {
             name: "test-sub".into(),
             program: empty_program(),
@@ -364,11 +364,11 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
     // out correctly if it ever does (defense-in-depth + symmetry with the SubtreeProven arm).
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: NO_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            NO_EVENTS,
+        ),
         params: SubParams {
             name: "test-sub".into(),
             program: empty_program(),
@@ -535,11 +535,11 @@ fn kind_mismatched_response_routes_through_finalize_anchor_lost_debug() {
     e.tree.set_kind(r, ResourceKind::File);
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: NO_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            NO_EVENTS,
+        ),
         params: SubParams {
             name: "test-sub".into(),
             program: empty_program(),
@@ -627,11 +627,11 @@ fn attach_sub_existing_profile_bumps_refcount() {
     // `events` folds into `config_hash`.
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: DEFAULT_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            DEFAULT_EVENTS,
+        ),
         params: SubParams {
             name: "second".into(),
             program: empty_program(),
@@ -999,11 +999,11 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(file_anchor),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(false).build(),
-            max_settle: MAX_SETTLE,
-            events: DEFAULT_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(false).build(),
+            MAX_SETTLE,
+            DEFAULT_EVENTS,
+        ),
         params: SubParams {
             name: "build".into(),
             program: empty_program(),
@@ -1095,11 +1095,11 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(file_anchor),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(false).build(),
-            max_settle: MAX_SETTLE,
-            events: DEFAULT_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(false).build(),
+            MAX_SETTLE,
+            DEFAULT_EVENTS,
+        ),
         params: SubParams {
             name: "build".into(),
             program: empty_program(),
@@ -1638,11 +1638,11 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::STRUCTURE,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            ClassSet::STRUCTURE,
+        ),
         params: SubParams {
             name: "test-sub".into(),
             program: empty_program(),
@@ -2232,11 +2232,11 @@ fn effect_emission_carries_diff_when_needs_diff() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: NO_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            NO_EVENTS,
+        ),
         params: SubParams {
             name: "fmt".into(),
             program: diff_program(), // references ${specter.created}
@@ -2365,11 +2365,7 @@ fn probe_op_for_file_anchor_is_file_kind() {
     e.tree.set_kind(r, ResourceKind::File);
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().build(),
-            max_settle: MAX_SETTLE,
-            events: NO_EVENTS,
-        },
+        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
         params: SubParams {
             name: "file-sub".into(),
             program: empty_program(),
@@ -3127,11 +3123,11 @@ fn sensor_overflow_resource_scope_filters_profiles() {
     let now = Instant::now();
     let req_a = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(a),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: NO_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            NO_EVENTS,
+        ),
         params: SubParams {
             name: "sub-a".into(),
             program: empty_program(),
@@ -3395,11 +3391,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
     let attach_out = e.step(
         Input::AttachSub(SubAttachRequest {
             anchor: SubAttachAnchor::Resource(r),
-            identity: ProfileIdentity {
-                config: cfg.clone(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
+            identity: ProfileIdentity::new(cfg.clone(), MAX_SETTLE, NO_EVENTS),
             params: SubParams {
                 name: "fast".into(),
                 program: empty_program(),
@@ -3418,11 +3410,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
     let _ = e.step(
         Input::AttachSub(SubAttachRequest {
             anchor: SubAttachAnchor::Resource(r),
-            identity: ProfileIdentity {
-                config: cfg,
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
+            identity: ProfileIdentity::new(cfg, MAX_SETTLE, NO_EVENTS),
             params: SubParams {
                 name: "slow".into(),
                 program: empty_program(),
@@ -3460,11 +3448,7 @@ fn config_diff_added_only_attaches_subs() {
 
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().build(),
-            max_settle: MAX_SETTLE,
-            events: NO_EVENTS,
-        },
+        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
         params: SubParams {
             name: "added".into(),
             program: empty_program(),
@@ -3620,11 +3604,11 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::DEFAULT_PER_FILE,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            ClassSet::DEFAULT_PER_FILE,
+        ),
         params: SubParams {
             name: "fmt".into(),
             program: diff_program(),
@@ -3732,11 +3716,11 @@ fn per_stable_file_skips_dir_entries() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::DEFAULT_PER_FILE,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            ClassSet::DEFAULT_PER_FILE,
+        ),
         params: SubParams {
             name: "fmt".into(),
             program: diff_program(),
@@ -3973,11 +3957,11 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::CONTENT,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            ClassSet::CONTENT,
+        ),
         params: SubParams {
             name: "fmt".into(),
             program: empty_program(),
@@ -4055,11 +4039,11 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     e.tree.set_kind(r, ResourceKind::Dir);
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::CONTENT,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            ClassSet::CONTENT,
+        ),
         params: SubParams {
             name: "formatter".into(),
             program: empty_program(),
@@ -4082,11 +4066,11 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     // flag stays true.
     let req2 = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::CONTENT,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            ClassSet::CONTENT,
+        ),
         params: SubParams {
             name: "formatter-2".into(),
             program: empty_program(),
@@ -4116,11 +4100,11 @@ fn structure_only_profile_has_per_file_fds_false() {
     e.tree.set_kind(r, ResourceKind::Dir);
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::STRUCTURE,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            ClassSet::STRUCTURE,
+        ),
         params: SubParams {
             name: "ls-only".into(),
             program: empty_program(),
@@ -4438,11 +4422,11 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(root),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::CONTENT,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            ClassSet::CONTENT,
+        ),
         params: SubParams {
             name: "test-sub".into(),
             program: empty_program(),
@@ -4625,11 +4609,11 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
     e.tree.set_kind(root, ResourceKind::Dir);
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(root),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: ClassSet::CONTENT,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            ClassSet::CONTENT,
+        ),
         params: SubParams {
             name: "test-sub".into(),
             program: empty_program(),
@@ -6339,11 +6323,11 @@ fn attach_per_stable_file_sibling(
 ) -> specter_core::SubId {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(anchor),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: DEFAULT_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            DEFAULT_EVENTS,
+        ),
         params: SubParams {
             name: "per-file-sibling".into(),
             program: empty_program(),
@@ -6686,11 +6670,11 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
     // the Profile alive across sid_a's detach below. Identical request shape ⇒ same ProfileId.
     let req_b = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(anchor),
-        identity: ProfileIdentity {
-            config: ScanConfig::builder().recursive(true).build(),
-            max_settle: MAX_SETTLE,
-            events: DEFAULT_EVENTS,
-        },
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(true).build(),
+            MAX_SETTLE,
+            DEFAULT_EVENTS,
+        ),
         params: SubParams {
             name: "sibling".into(),
             program: empty_program(),
@@ -7557,11 +7541,11 @@ mod props {
         let now = Instant::now();
         let req = SubAttachRequest {
             anchor: SubAttachAnchor::Resource(r),
-            identity: ProfileIdentity {
-                config: ScanConfig::builder().recursive(true).build(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
+            identity: ProfileIdentity::new(
+                ScanConfig::builder().recursive(true).build(),
+                MAX_SETTLE,
+                NO_EVENTS,
+            ),
             params: SubParams {
                 name: "test".into(),
                 program: empty_program(),

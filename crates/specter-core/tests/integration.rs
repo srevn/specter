@@ -43,12 +43,7 @@ fn shared_profile_via_config_hash() {
 
     let r = tree.ensure_root("/anchor", ResourceRole::User);
     let cfg = bare_cfg();
-    let hash = ProfileIdentity {
-        config: cfg.clone(),
-        max_settle: MAX_SETTLE,
-        events: NO_EVENTS,
-    }
-    .config_hash();
+    let hash = ProfileIdentity::new(cfg.clone(), MAX_SETTLE, NO_EVENTS).config_hash();
 
     // Sub A: creates the Profile (find = None).
     let pid_a = profiles.find(r, hash).unwrap_or_else(|| {
@@ -56,11 +51,7 @@ fn shared_profile_via_config_hash() {
             &mut tree,
             Profile::new(
                 r,
-                ProfileIdentity {
-                    config: cfg.clone(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                },
+                ProfileIdentity::new(cfg.clone(), MAX_SETTLE, NO_EVENTS),
                 SETTLE,
                 None,
             ),
@@ -100,11 +91,7 @@ fn distinct_profile_for_distinct_max_settle() {
         &mut tree,
         Profile::new(
             r,
-            ProfileIdentity {
-                config: bare_cfg(),
-                max_settle: Duration::from_secs(6),
-                events: NO_EVENTS,
-            },
+            ProfileIdentity::new(bare_cfg(), Duration::from_secs(6), NO_EVENTS),
             SETTLE,
             None,
         ),
@@ -113,11 +100,7 @@ fn distinct_profile_for_distinct_max_settle() {
         &mut tree,
         Profile::new(
             r,
-            ProfileIdentity {
-                config: bare_cfg(),
-                max_settle: Duration::from_secs(12),
-                events: NO_EVENTS,
-            },
+            ProfileIdentity::new(bare_cfg(), Duration::from_secs(12), NO_EVENTS),
             SETTLE,
             None,
         ),
@@ -146,11 +129,7 @@ fn distinct_profile_for_distinct_pattern() {
         &mut tree,
         Profile::new(
             r,
-            ProfileIdentity {
-                config: cfg_rs,
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
+            ProfileIdentity::new(cfg_rs, MAX_SETTLE, NO_EVENTS),
             SETTLE,
             None,
         ),
@@ -159,11 +138,7 @@ fn distinct_profile_for_distinct_pattern() {
         &mut tree,
         Profile::new(
             r,
-            ProfileIdentity {
-                config: cfg_txt,
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
+            ProfileIdentity::new(cfg_txt, MAX_SETTLE, NO_EVENTS),
             SETTLE,
             None,
         ),
@@ -182,11 +157,7 @@ fn detach_clears_back_references_on_both_sides() {
         &mut tree,
         Profile::new(
             r,
-            ProfileIdentity {
-                config: bare_cfg(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
+            ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS),
             SETTLE,
             None,
         ),
@@ -199,12 +170,7 @@ fn detach_clears_back_references_on_both_sides() {
         profiles
             .find(
                 r,
-                ProfileIdentity {
-                    config: bare_cfg(),
-                    max_settle: MAX_SETTLE,
-                    events: NO_EVENTS,
-                }
-                .config_hash()
+                ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS).config_hash()
             )
             .is_none()
     );
@@ -228,11 +194,7 @@ fn rename_after_detach_yields_fresh_id() {
         &mut tree,
         Profile::new(
             id_old,
-            ProfileIdentity {
-                config: bare_cfg(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
+            ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS),
             SETTLE,
             None,
         ),
@@ -272,11 +234,7 @@ fn recreate_at_anchored_slot_keeps_id() {
         &mut tree,
         Profile::new(
             id,
-            ProfileIdentity {
-                config: bare_cfg(),
-                max_settle: MAX_SETTLE,
-                events: NO_EVENTS,
-            },
+            ProfileIdentity::new(bare_cfg(), MAX_SETTLE, NO_EVENTS),
             SETTLE,
             None,
         ),

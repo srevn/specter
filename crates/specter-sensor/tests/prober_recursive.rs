@@ -58,7 +58,7 @@ fn segments(
         correlation: ProbeCorrelation::from(1),
         target_path,
         anchor_path,
-        scan_config: cfg,
+        scan_config: Arc::new(cfg),
         captured_with: 0,
         baseline_subtree: None,
         obligation: ProofObligation::WholeSubtree,

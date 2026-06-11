@@ -2685,10 +2685,19 @@ impl Profile {
     }
 
     /// The frozen [`ScanConfig`] half of the Profile identity. Borrow for the named scope
-    /// predicates (`accepts*` / `descends_into` coverage reads, the witness-class requirement) and
-    /// the probe-request config clone — consumers never destructure the shape.
+    /// predicates (`accepts*` / `descends_into` coverage reads, the witness-class requirement) —
+    /// consumers never destructure the shape. Not `const`: the read derefs through the identity's
+    /// `Arc`. The probe wire takes the sharing handle via [`Self::config_shared`] instead.
     #[must_use]
-    pub const fn config(&self) -> &ScanConfig {
+    pub fn config(&self) -> &ScanConfig {
+        &self.cfg.identity.config
+    }
+
+    /// The same frozen [`ScanConfig`] behind its sharing handle — for the probe-emission choke,
+    /// which ships the config cross-thread on `ProbeRequest::Subtree` as a refcount bump. Every
+    /// in-engine reader borrows through [`Self::config`] instead.
+    #[must_use]
+    pub const fn config_shared(&self) -> &Arc<ScanConfig> {
         &self.cfg.identity.config
     }
 
@@ -2738,8 +2747,9 @@ impl Profile {
     ///
     /// See also `Engine::owes_proof_from` — the orthogonal predicate selecting *which* bursts owe a
     /// proof. The two compose at the witness-selection join inside `Engine::certify_probe_response`.
+    /// Not `const`: reads the shape through [`Self::config`]'s `Arc` deref.
     #[must_use]
-    pub const fn events_witness_quiescence(&self) -> bool {
+    pub fn events_witness_quiescence(&self) -> bool {
         self.events()
             .contains(self.config().quiescence_witness_classes())
     }
@@ -3369,11 +3379,7 @@ mod tests {
     ) -> Profile {
         Profile::new(
             resource,
-            ProfileIdentity {
-                config,
-                max_settle,
-                events,
-            },
+            ProfileIdentity::new(config, max_settle, events),
             settle,
             kind,
         )

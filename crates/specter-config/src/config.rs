@@ -243,11 +243,7 @@ impl SubSpec {
     pub fn to_attach_request(&self) -> SubAttachRequest {
         SubAttachRequest::from_parts(
             SubAttachAnchor::Path(self.path.clone()),
-            ProfileIdentity {
-                config: self.scan.clone(),
-                max_settle: self.max_settle,
-                events: self.events,
-            },
+            ProfileIdentity::new(self.scan.clone(), self.max_settle, self.events),
             SubParams {
                 name: self.name.clone(),
                 program: Arc::clone(&self.program),
@@ -259,11 +255,7 @@ impl SubSpec {
                 // same user fields.
                 template: self.template.as_ref().map(|t| {
                     Arc::new(MintTemplate {
-                        identity: ProfileIdentity {
-                            config: t.scan.clone(),
-                            max_settle: t.max_settle,
-                            events: t.events,
-                        },
+                        identity: ProfileIdentity::new(t.scan.clone(), t.max_settle, t.events),
                         settle: t.settle,
                     })
                 }),
@@ -2547,11 +2539,7 @@ mod tests {
             .as_ref()
             .expect("request carries MintTemplate");
         assert_eq!(minted.settle, Duration::from_millis(300));
-        let hand_built = ProfileIdentity {
-            config: t.scan.clone(),
-            max_settle: t.max_settle,
-            events: t.events,
-        };
+        let hand_built = ProfileIdentity::new(t.scan.clone(), t.max_settle, t.events);
         assert_eq!(minted.identity.config_hash(), hand_built.config_hash());
         // The discovery Sub's own request identity is the constant shape.
         assert_eq!(req.identity.max_settle, Duration::from_secs(2));

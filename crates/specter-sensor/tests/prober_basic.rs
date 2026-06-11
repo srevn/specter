@@ -59,7 +59,7 @@ fn subtree_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -
         correlation: ProbeCorrelation::from(correlation),
         target_path,
         anchor_path,
-        scan_config: ScanConfig::builder().recursive(true).build(),
+        scan_config: Arc::new(ScanConfig::builder().recursive(true).build()),
         captured_with: 0,
         baseline_subtree: None,
         obligation: ProofObligation::WholeSubtree,

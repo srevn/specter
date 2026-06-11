@@ -120,8 +120,9 @@ pub enum ScanConfig {
     /// (`DirChild::Uncovered`) and matched files are ordinary leaves — the pruned walk observes
     /// chain membership, not subtree content.
     ///
-    /// `Arc`: `ProbeRequest::Subtree` clones the config per probe emission; sharing the parsed spec
-    /// makes that clone a refcount bump instead of recompiling per-segment matchers.
+    /// `Arc`: the discovery reconcile lifts the spec out of the Profile borrow
+    /// (`match_chain().map(Arc::clone)`) and walks termini while mutating the engine — a refcount
+    /// bump per pass instead of re-cloning the parsed components and their compiled matchers.
     MatchChain(Arc<PatternSpec>),
     /// Admit-every-dirent, single level — the descent probe's preset. Descent searches for the next
     /// path component of a not-yet-existing anchor, so the user-facing filters (which would mask
@@ -553,14 +554,32 @@ pub(crate) fn compute_config_hash(
 /// Profile/snapshot/burst). Deliberately neither `Hash` nor `Eq`/`Ord`: [`Self::config_hash`] is
 /// the sole identity operation — a structural derive would be a second identity route that could
 /// diverge from the hash the partition actually keys on.
+///
+/// `config` sits behind an `Arc`: an identity is frozen at construction and then travels — onto
+/// the Profile, into every `MintTemplate` identity clone at mint time, and (the config half alone)
+/// onto each `ProbeRequest::Subtree` wire — so each of those is a refcount bump, never a
+/// `ScanConfig` deep-copy. [`Self::new`] is the sole minting point of the handle; the other two
+/// fields are `Copy`, so `ProfileIdentity: Clone` is cheap by construction.
 #[derive(Clone, Debug)]
 pub struct ProfileIdentity {
-    pub config: ScanConfig,
+    pub config: Arc<ScanConfig>,
     pub max_settle: Duration,
     pub events: ClassSet,
 }
 
 impl ProfileIdentity {
+    /// Wrap `config` behind its sharing handle once. Every producer holds a plain [`ScanConfig`]
+    /// (builder output, config lowering, the descent stamp); the single wrap here keeps `Arc::new`
+    /// out of the call sites.
+    #[must_use]
+    pub fn new(config: ScanConfig, max_settle: Duration, events: ClassSet) -> Self {
+        Self {
+            config: Arc::new(config),
+            max_settle,
+            events,
+        }
+    }
+
     /// Canonical hash of this identity — the single public hashing route for Profile partitioning.
     #[must_use]
     pub fn config_hash(&self) -> u64 {
@@ -802,8 +821,8 @@ mod tests {
     #[test]
     fn hash_discriminates_every_populated_field() {
         fn populated() -> ProfileIdentity {
-            ProfileIdentity {
-                config: ScanConfig::builder()
+            ProfileIdentity::new(
+                ScanConfig::builder()
                     .recursive(true)
                     .hidden(true)
                     .exclude(glob("a"))
@@ -811,9 +830,9 @@ mod tests {
                     .pattern(glob("*.rs"))
                     .max_depth(Some(7))
                     .build(),
-                max_settle: Duration::from_secs(7),
-                events: ClassSet::CONTENT | ClassSet::METADATA,
-            }
+                Duration::from_secs(7),
+                ClassSet::CONTENT | ClassSet::METADATA,
+            )
         }
 
         fn rehash(base: &ProfileIdentity, mutate: impl FnOnce(&mut ProfileIdentity)) -> u64 {
@@ -828,7 +847,7 @@ mod tests {
         assert_ne!(
             h0,
             rehash(&base, |id| {
-                let ScanConfig::Subtree { recursive, .. } = &mut id.config else {
+                let ScanConfig::Subtree { recursive, .. } = Arc::make_mut(&mut id.config) else {
                     unreachable!("builder builds Subtree")
                 };
                 *recursive = false;
@@ -838,7 +857,7 @@ mod tests {
         assert_ne!(
             h0,
             rehash(&base, |id| {
-                let ScanConfig::Subtree { hidden, .. } = &mut id.config else {
+                let ScanConfig::Subtree { hidden, .. } = Arc::make_mut(&mut id.config) else {
                     unreachable!("builder builds Subtree")
                 };
                 *hidden = false;
@@ -848,7 +867,7 @@ mod tests {
         assert_ne!(
             h0,
             rehash(&base, |id| {
-                let ScanConfig::Subtree { exclude, .. } = &mut id.config else {
+                let ScanConfig::Subtree { exclude, .. } = Arc::make_mut(&mut id.config) else {
                     unreachable!("builder builds Subtree")
                 };
                 exclude.push(glob("c"));
@@ -858,7 +877,7 @@ mod tests {
         assert_ne!(
             h0,
             rehash(&base, |id| {
-                let ScanConfig::Subtree { pattern, .. } = &mut id.config else {
+                let ScanConfig::Subtree { pattern, .. } = Arc::make_mut(&mut id.config) else {
                     unreachable!("builder builds Subtree")
                 };
                 *pattern = None;
@@ -868,7 +887,7 @@ mod tests {
         assert_ne!(
             h0,
             rehash(&base, |id| {
-                let ScanConfig::Subtree { max_depth, .. } = &mut id.config else {
+                let ScanConfig::Subtree { max_depth, .. } = Arc::make_mut(&mut id.config) else {
                     unreachable!("builder builds Subtree")
                 };
                 *max_depth = Some(8);
@@ -982,11 +1001,11 @@ mod tests {
     /// the golden preimage — sealing the kernel did not perturb the canonical encoding.
     #[test]
     fn profile_identity_config_hash_matches_golden() {
-        let identity = ProfileIdentity {
-            config: ScanConfig::builder().build(),
-            max_settle: Duration::from_secs(1),
-            events: ClassSet::EMPTY,
-        };
+        let identity = ProfileIdentity::new(
+            ScanConfig::builder().build(),
+            Duration::from_secs(1),
+            ClassSet::EMPTY,
+        );
         assert_eq!(identity.config_hash(), GOLDEN_HASH);
     }
 

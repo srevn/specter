@@ -301,11 +301,7 @@ mod tests {
     fn profile_with(r: ResourceId, config: ScanConfig, max_settle: Duration) -> Profile {
         Profile::new(
             r,
-            ProfileIdentity {
-                config,
-                max_settle,
-                events: NO_EVENTS,
-            },
+            ProfileIdentity::new(config, max_settle, NO_EVENTS),
             SETTLE,
             None,
         )

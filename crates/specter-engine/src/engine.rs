@@ -1683,11 +1683,11 @@ mod tests {
             .expect("test live parent");
         let profile = specter_core::Profile::new(
             anchor,
-            ProfileIdentity {
-                config: ScanConfig::builder().build(),
-                max_settle: Duration::from_secs(1),
-                events: specter_core::ClassSet::EMPTY,
-            },
+            ProfileIdentity::new(
+                ScanConfig::builder().build(),
+                Duration::from_secs(1),
+                specter_core::ClassSet::EMPTY,
+            ),
             Duration::from_millis(50),
             None,
         );
