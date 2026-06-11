@@ -1,7 +1,7 @@
 //! `specter list -o human` renderer — column-padded table.
 //!
-//! Default columns: `NAME STATE ANCHOR LAST_FIRED FIRES DISABLED`. `--wide` adds: `PROFILE_ID
-//! SUB_ID DEDUP_SUPPRESSED SETTLE`.
+//! Default columns: `NAME STATE ANCHOR LAST_FIRED FIRES REACTION DISABLED`. `--wide` adds:
+//! `PROFILE_ID SUB_ID DEDUP_SUPPRESSED SETTLE`.
 //!
 //! `&[Column]` of `fn` pointers is the dispatch — no trait, no generics, no `Box`. Adding a column
 //! is one `Column { header, render }` literal. The two column sets are `const &[Column]` so the
@@ -130,6 +130,10 @@ const DEFAULT_COLUMNS: &[Column] = &[
         render: col_fires,
     },
     Column {
+        header: "REACTION",
+        render: col_reaction,
+    },
+    Column {
         header: "DISABLED",
         render: col_disabled,
     },
@@ -155,6 +159,10 @@ const ALL_COLUMNS: &[Column] = &[
     Column {
         header: "FIRES",
         render: col_fires,
+    },
+    Column {
+        header: "REACTION",
+        render: col_reaction,
     },
     Column {
         header: "DISABLED",
@@ -244,6 +252,12 @@ fn col_fires(row: &ListRow) -> Cell {
     present_or_missing(row.fire_count, |n| Cell::data(n.to_string()))
 }
 
+/// `spawn` / `mint` — attributes the fire-stat `-`s on a template row (a `mint` never fires), so
+/// the blank cells read as structural rather than mysterious. `-` only on non-attached rows.
+fn col_reaction(row: &ListRow) -> Cell {
+    present_or_missing(row.reaction, |k| Cell::data(k.to_string()))
+}
+
 fn col_disabled(row: &ListRow) -> Cell {
     present_or_missing(row.disabled, |src| {
         Cell::styled(src.to_string(), style::OFF)
@@ -275,7 +289,7 @@ mod tests {
     use super::render;
     use crate::ipc::protocol::{DisabledSource, ListResponse, ListRow};
     use crate::ipc::render::style::Styler;
-    use crate::ipc::wire::{WirePath, WireStateLabel};
+    use crate::ipc::wire::{WirePath, WireReactionKind, WireStateLabel};
     use std::path::Path;
 
     fn attached_row(name: &str) -> ListRow {
@@ -287,9 +301,28 @@ mod tests {
             fire_count: Some(0),
             dedup_suppressed_count: Some(0),
             settle_ms: Some(500),
+            reaction: Some(WireReactionKind::Spawn),
             disabled: None,
             sub: Some(crate::ipc::protocol::WireId(11)),
             profile: Some(crate::ipc::protocol::WireId(22)),
+            minted_by: None,
+        }
+    }
+
+    /// A discovery-template row — `mint` reaction, structurally absent fire stats.
+    fn mint_row(name: &str) -> ListRow {
+        ListRow {
+            name: name.to_string(),
+            state: Some(WireStateLabel::Idle),
+            anchor: Some(WirePath::from(Path::new("/tmp/anchor"))),
+            last_fired_at: None,
+            fire_count: None,
+            dedup_suppressed_count: None,
+            settle_ms: Some(150),
+            reaction: Some(WireReactionKind::Mint),
+            disabled: None,
+            sub: Some(crate::ipc::protocol::WireId(33)),
+            profile: Some(crate::ipc::protocol::WireId(44)),
             minted_by: None,
         }
     }
@@ -303,6 +336,7 @@ mod tests {
             fire_count: None,
             dedup_suppressed_count: None,
             settle_ms: None,
+            reaction: None,
             disabled: Some(source),
             sub: None,
             profile: None,
@@ -326,8 +360,8 @@ mod tests {
         );
     }
 
-    /// Default columns include NAME / STATE / ANCHOR / LAST_FIRED / FIRES / DISABLED, and NOT the
-    /// four wide-only columns (PROFILE_ID / SUB_ID / DEDUP_SUPPRESSED / SETTLE).
+    /// Default columns include NAME / STATE / ANCHOR / LAST_FIRED / FIRES / REACTION / DISABLED,
+    /// and NOT the four wide-only columns (PROFILE_ID / SUB_ID / DEDUP_SUPPRESSED / SETTLE).
     #[test]
     fn list_table_default_columns_excludes_wide_only() {
         let resp = ListResponse {
@@ -335,7 +369,15 @@ mod tests {
         };
         let mut out = String::new();
         render(&mut out, &resp, false, Styler::Plain);
-        for label in ["NAME", "STATE", "ANCHOR", "LAST_FIRED", "FIRES", "DISABLED"] {
+        for label in [
+            "NAME",
+            "STATE",
+            "ANCHOR",
+            "LAST_FIRED",
+            "FIRES",
+            "REACTION",
+            "DISABLED",
+        ] {
             assert!(out.contains(label), "missing column {label}: {out}");
         }
         for wide in ["PROFILE_ID", "SUB_ID", "DEDUP_SUPPRESSED", "SETTLE"] {
@@ -361,6 +403,7 @@ mod tests {
             "ANCHOR",
             "LAST_FIRED",
             "FIRES",
+            "REACTION",
             "DISABLED",
             "PROFILE_ID",
             "SUB_ID",
@@ -369,6 +412,38 @@ mod tests {
         ] {
             assert!(out.contains(label), "missing column {label}: {out}");
         }
+    }
+
+    /// A template row attributes its structural blanks: REACTION renders `mint` while the
+    /// fire-stat cells render the shared `-` marker — the operator reads "cannot fire", not
+    /// "never fired" or "not attached".
+    #[test]
+    fn list_table_mint_row_attributes_missing_fire_stats() {
+        let resp = ListResponse {
+            rows: vec![mint_row("disc"), attached_row("plain")],
+        };
+        let mut out = String::new();
+        render(&mut out, &resp, false, Styler::Plain);
+        let disc = out
+            .lines()
+            .find(|l| l.starts_with("disc"))
+            .expect("template row present");
+        assert!(
+            disc.contains("mint"),
+            "REACTION cell carries mint: {disc:?}"
+        );
+        assert!(
+            disc.contains('-'),
+            "fire-stat cells render the `-` marker: {disc:?}",
+        );
+        let plain = out
+            .lines()
+            .find(|l| l.starts_with("plain"))
+            .expect("spawn row present");
+        assert!(
+            plain.contains("spawn"),
+            "REACTION cell carries spawn: {plain:?}",
+        );
     }
 
     /// The separator row spans each column's width with the box- drawing dash. The separator is at
@@ -386,10 +461,10 @@ mod tests {
         let header = lines.next().expect("header line");
         let separator = lines.next().expect("separator line");
         let dash_count = separator.chars().filter(|c| *c == '─').count();
-        // NAME (4) + STATE (5) + ANCHOR (6) + LAST_FIRED (10) + FIRES (5) + DISABLED (8) = 38 —
-        // header widths bound the separator from below.
+        // NAME (4) + STATE (5) + ANCHOR (6) + LAST_FIRED (10) + FIRES (5) + REACTION (8) +
+        // DISABLED (8) = 46 — header widths bound the separator from below.
         assert!(
-            dash_count >= 38,
+            dash_count >= 46,
             "separator must repeat per-column-width; got {dash_count} dashes from {separator:?}",
         );
         assert!(

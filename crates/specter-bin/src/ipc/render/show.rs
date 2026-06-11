@@ -14,10 +14,10 @@
 
 use std::fmt::Write as _;
 
-use crate::ipc::protocol::{ShowResponse, SubDetails};
+use crate::ipc::protocol::{ShowResponse, SubDetails, WireReaction};
 use crate::ipc::render::label_cell;
 use crate::ipc::render::style::{self, Rule, Styler};
-use crate::ipc::wire::{WireAbsorbMode, WireEffectScope};
+use crate::ipc::wire::{WireAbsorbMode, WireEffectScope, WireReactionKind};
 
 /// Render the response as one operator-readable block into the caller's buffer. `sty` gates ANSI
 /// styling on the resolved stdout stream.
@@ -47,13 +47,14 @@ pub(crate) fn render(out: &mut String, resp: &ShowResponse, sty: Styler) {
 /// convention.
 const LABEL_WIDTH: usize = 16;
 
-/// Layout for `Active`:
+/// Layout for `Active`, `spawn` reaction:
 ///
 /// ```text
 /// foo
 /// ────────────────────────────────────────
 /// state           idle
 /// anchor          /etc/specter
+/// reaction        spawn
 /// scope           subtree-root
 /// settle          500ms
 /// fires           7 (suppressed: 2, absorbed: 1)
@@ -66,6 +67,27 @@ const LABEL_WIDTH: usize = 16;
 ///   [0] exec /bin/build  ok→#1 fail→terminate
 ///   [1] exec /bin/notify  ok→escape fail→terminate
 /// ```
+///
+/// A `mint` reaction (discovery template) swaps the spawn-only lines for the template's knobs —
+/// no `fires` / `last fired` (a template never fires, so there are no counters to report), and
+/// every minted-Sub value labelled as such:
+///
+/// ```text
+/// disc
+/// ────────────────────────────────────────
+/// state           idle
+/// anchor          /srv/logs
+/// reaction        mint
+/// settle          150ms
+/// minted live     3
+/// minted settle   500ms
+/// minted scope    subtree-root
+/// sub_id          1234
+/// profile_id      4321
+///
+/// minted program (1 ops):
+///   [0] exec /bin/rotate  ok→escape fail→terminate
+/// ```
 fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
     out.reserve(512);
     let _ = writeln!(out, "{}", sty.paint(style::LABEL, d.name.as_str()));
@@ -74,7 +96,7 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         "{}",
         sty.paint(style::DELIM, Rule(d.name.len().max(40)))
     );
-    // `state: None` mirrors `anchor: None` / `last_fired_at: None`: the projection surfaces a
+    // `state: None` mirrors `anchor: None` / `last fired`'s absent arm: the projection surfaces a
     // missing Profile lookup rather than panicking the daemon. `-` (painted [`style::MISSING`]) is
     // the operator-visible "missing" marker shared with `list`'s `col_state`.
     match d.state {
@@ -94,34 +116,88 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         }
         None => missing_line(out, sty, "anchor"),
     }
+    // The reaction token shares `WireReactionKind`'s wire vocabulary, so the human view and
+    // `list`'s REACTION column read identically.
     let _ = writeln!(
         out,
         "{}{}",
-        label_cell(sty, "scope", LABEL_WIDTH),
-        effect_scope_str(d.scope),
+        label_cell(sty, "reaction", LABEL_WIDTH),
+        WireReactionKind::from(&d.reaction),
     );
-    let _ = writeln!(
-        out,
-        "{}{}ms",
-        label_cell(sty, "settle", LABEL_WIDTH),
-        d.settle_ms,
-    );
-    let _ = writeln!(
-        out,
-        "{}{} (suppressed: {}, absorbed: {})",
-        label_cell(sty, "fires", LABEL_WIDTH),
-        d.fire_count,
-        d.dedup_suppressed_count,
-        d.absorb_count,
-    );
-    match d.last_fired_at.as_ref() {
-        Some(t) => {
-            let _ = writeln!(out, "{}{}", label_cell(sty, "last fired", LABEL_WIDTH), t);
+    // Per-variant block, then the shared tail; the program section renders last under a
+    // variant-attributed header.
+    let (program, program_header) = match &d.reaction {
+        WireReaction::Spawn {
+            scope,
+            program,
+            last_fired_at,
+            fire_count,
+            dedup_suppressed_count,
+        } => {
+            let _ = writeln!(
+                out,
+                "{}{}",
+                label_cell(sty, "scope", LABEL_WIDTH),
+                effect_scope_str(*scope),
+            );
+            let _ = writeln!(
+                out,
+                "{}{}ms",
+                label_cell(sty, "settle", LABEL_WIDTH),
+                d.settle_ms,
+            );
+            let _ = writeln!(
+                out,
+                "{}{} (suppressed: {}, absorbed: {})",
+                label_cell(sty, "fires", LABEL_WIDTH),
+                fire_count,
+                dedup_suppressed_count,
+                d.absorb_count,
+            );
+            match last_fired_at.as_ref() {
+                Some(t) => {
+                    let _ = writeln!(out, "{}{}", label_cell(sty, "last fired", LABEL_WIDTH), t);
+                }
+                None => missing_line(out, sty, "last fired"),
+            }
+            (program, "program")
         }
-        None => missing_line(out, sty, "last fired"),
-    }
+        WireReaction::Mint {
+            minted_settle_ms,
+            minted_scope,
+            minted_program,
+            minted_live,
+        } => {
+            let _ = writeln!(
+                out,
+                "{}{}ms",
+                label_cell(sty, "settle", LABEL_WIDTH),
+                d.settle_ms,
+            );
+            let _ = writeln!(
+                out,
+                "{}{}",
+                label_cell(sty, "minted live", LABEL_WIDTH),
+                minted_live,
+            );
+            let _ = writeln!(
+                out,
+                "{}{}ms",
+                label_cell(sty, "minted settle", LABEL_WIDTH),
+                minted_settle_ms,
+            );
+            let _ = writeln!(
+                out,
+                "{}{}",
+                label_cell(sty, "minted scope", LABEL_WIDTH),
+                effect_scope_str(*minted_scope),
+            );
+            (minted_program, "minted program")
+        }
+    };
     // Only an armed, live window renders — the projection drops an inert one, so a present `absorb`
-    // is always operator-meaningful.
+    // is always operator-meaningful (on a mint row it flags an arm the discovery shape makes
+    // inert).
     if let Some(w) = d.absorb.as_ref() {
         let _ = writeln!(
             out,
@@ -131,12 +207,14 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
             absorb_mode_str(w.mode),
         );
     }
+    // Label matches the wire key, so an operator correlating `-o human` with `-o json` reads one
+    // vocabulary.
     if let Some(src) = d.minted_by {
         let _ = writeln!(
             out,
-            "{}discovery {}",
-            label_cell(sty, "source", LABEL_WIDTH),
-            src.0,
+            "{}{}",
+            label_cell(sty, "minted_by", LABEL_WIDTH),
+            src.0
         );
     }
     let _ = writeln!(out, "{}{}", label_cell(sty, "sub_id", LABEL_WIDTH), d.sub.0);
@@ -147,18 +225,18 @@ fn render_active(out: &mut String, d: &SubDetails, sty: Styler) {
         d.profile.0,
     );
     out.push('\n');
-    // The `program (N ops):` header is a section label, painted `LABEL` like the others; the lines
-    // below it stay plain — the daemon pre-renders each as an opaque string the renderer does not
+    // The program header is a section label, painted `LABEL` like the others; the lines below it
+    // stay plain — the daemon pre-renders each as an opaque string the renderer does not
     // re-tokenize.
     let _ = writeln!(
         out,
         "{}",
         sty.paint(
             style::LABEL,
-            format_args!("program ({} ops):", d.program.len())
+            format_args!("{program_header} ({} ops):", program.len())
         ),
     );
-    for line in &d.program {
+    for line in program {
         let _ = writeln!(out, "  {line}");
     }
 }
@@ -199,7 +277,7 @@ const fn absorb_mode_str(m: WireAbsorbMode) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::render;
-    use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId};
+    use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId, WireReaction};
     use crate::ipc::render::style::Styler;
     use crate::ipc::wire::{
         WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WirePath, WireStateLabel, WireTime,
@@ -212,6 +290,8 @@ mod tests {
 
     /// `details` with explicit `absorb` window + `absorb_count` — the fold-surface fields the
     /// absorb-render tests exercise; the zero-arg `details` threads `None, 0` for every other test.
+    /// The reaction is a never-fired `Spawn`; mint-arm tests build their payload through
+    /// [`mint_details`].
     fn details_full(
         name: &str,
         anchor: Option<WirePath>,
@@ -225,15 +305,38 @@ mod tests {
             profile: WireId(2),
             state: Some(WireStateLabel::Idle),
             anchor,
-            last_fired_at: None,
-            fire_count: 0,
-            dedup_suppressed_count: 0,
             absorb,
             absorb_count,
             settle_ms: 500,
             minted_by: None,
-            scope: WireEffectScope::SubtreeRoot,
-            program,
+            reaction: WireReaction::Spawn {
+                scope: WireEffectScope::SubtreeRoot,
+                program,
+                last_fired_at: None,
+                fire_count: 0,
+                dedup_suppressed_count: 0,
+            },
+        }
+    }
+
+    /// A discovery template's detail block — the `mint` payload the honest-render test reads.
+    fn mint_details(name: &str, minted_program: Vec<String>) -> SubDetails {
+        SubDetails {
+            name: name.to_string(),
+            sub: WireId(1),
+            profile: WireId(2),
+            state: Some(WireStateLabel::Idle),
+            anchor: None,
+            absorb: None,
+            absorb_count: 0,
+            settle_ms: 150,
+            minted_by: None,
+            reaction: WireReaction::Mint {
+                minted_settle_ms: 500,
+                minted_scope: WireEffectScope::SubtreeRoot,
+                minted_program,
+                minted_live: 3,
+            },
         }
     }
 
@@ -262,6 +365,53 @@ mod tests {
         assert!(
             out.contains("\n  [1] exec /bin/notify"),
             "second program line not two-space indented: {out}",
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("reaction") && l.ends_with("spawn")),
+            "spawn arm carries the reaction line: {out}",
+        );
+    }
+
+    /// A `mint` reaction renders the template knobs under minted-prefixed labels and a
+    /// `minted program` header, with no `fires` / `last fired` lines — the honest swap for a Sub
+    /// that never fires an Effect.
+    #[test]
+    fn show_human_mint_renders_template_block_without_fire_lines() {
+        let d = mint_details(
+            "disc",
+            vec!["[0] exec /bin/rotate  ok→escape fail→terminate".to_string()],
+        );
+        let mut out = String::new();
+        render(&mut out, &ShowResponse::Active(d), Styler::Plain);
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("reaction") && l.ends_with("mint")),
+            "mint arm carries the reaction line: {out}",
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("minted live") && l.ends_with('3')),
+            "minted live count renders: {out}",
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("minted settle") && l.ends_with("500ms")),
+            "template settle knob renders under the minted label: {out}",
+        );
+        assert!(
+            out.lines()
+                .any(|l| l.starts_with("minted scope") && l.ends_with("subtree-root")),
+            "minted scope renders hyphenated like the spawn arm's: {out}",
+        );
+        assert!(
+            out.contains("minted program (1 ops):"),
+            "program header attributes the minted program: {out}",
+        );
+        assert!(
+            !out.lines()
+                .any(|l| l.starts_with("fires") || l.starts_with("last fired")),
+            "a template renders no fire lines at all: {out}",
         );
     }
 
@@ -424,6 +574,10 @@ mod tests {
             Some(WirePath::from(std::path::Path::new("/etc/specter"))),
             vec!["[0] exec /bin/build  ok→#1 fail→terminate".to_string()],
         ));
+        let mint_arm = ShowResponse::Active(mint_details(
+            "disc",
+            vec!["[0] exec /bin/rotate  ok→escape fail→terminate".to_string()],
+        ));
         let disabled_arm = ShowResponse::Disabled {
             name: "paused".into(),
             source: DisabledSource::Runtime,
@@ -431,7 +585,7 @@ mod tests {
         let unknown_arm = ShowResponse::Unknown {
             name: "ghost".into(),
         };
-        for resp in [&active_arm, &disabled_arm, &unknown_arm] {
+        for resp in [&active_arm, &mint_arm, &disabled_arm, &unknown_arm] {
             let mut active = String::new();
             render(&mut active, resp, Styler::Active);
             let mut plain = String::new();

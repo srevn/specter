@@ -15,9 +15,9 @@ use specter_engine::Engine;
 
 use crate::driver::DriverState;
 use crate::ipc::protocol::{DisabledSource, ListResponse, ListRow, WireId};
-use crate::ipc::wire::{WirePath, WireStateLabel, WireTime};
+use crate::ipc::wire::{WirePath, WireReactionKind, WireStateLabel, WireTime};
 
-use super::project_wall;
+use super::{project_wall, settle_ms};
 
 /// Project the three populations into a [`ListResponse`].
 ///
@@ -73,23 +73,21 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
     let anchor = profile
         .and_then(|p| engine.tree().path_of(p.resource()))
         .map(|arc| WirePath::from(&arc));
-    // Faithful render across the reaction sum: a Mint Sub (discovery template) never fires, so
-    // its row reports the stats a never-firing Sub holds forever.
-    let history = sub.fire_history().copied().unwrap_or_default();
+    // Honest render across the reaction sum: a Mint Sub (discovery template) has no fire history
+    // — its stat columns stay `None`, attributed by the `reaction` discriminator.
+    let history = sub.fire_history();
     let last_fired_at = history
-        .last_fired_at
+        .and_then(|h| h.last_fired_at)
         .map(|t| WireTime::from(project_wall(ds.start_wall, ds.start_instant, t)));
     ListRow {
         name: sub.name.to_string(),
         state,
         anchor,
         last_fired_at,
-        fire_count: Some(history.fire_count),
-        dedup_suppressed_count: Some(history.dedup_suppressed_count),
-        settle_ms: Some(
-            u64::try_from(sub.settle.as_millis())
-                .expect("Duration::as_millis fits u64 for any operator-meaningful settle window"),
-        ),
+        fire_count: history.map(|h| h.fire_count),
+        dedup_suppressed_count: history.map(|h| h.dedup_suppressed_count),
+        settle_ms: Some(settle_ms(sub.settle)),
+        reaction: Some(WireReactionKind::from(sub.reaction())),
         disabled: None,
         sub: Some(WireId::from(sid)),
         profile: Some(WireId::from(sub.profile())),
@@ -108,6 +106,7 @@ fn disabled_row(name: &str, source: DisabledSource) -> ListRow {
         fire_count: None,
         dedup_suppressed_count: None,
         settle_ms: None,
+        reaction: None,
         disabled: Some(source),
         sub: None,
         profile: None,
@@ -120,6 +119,7 @@ mod tests {
     use super::list;
     use crate::driver::DriverState;
     use crate::ipc::protocol::DisabledSource;
+    use crate::ipc::wire::WireReactionKind;
     use compact_str::CompactString;
     use specter_config::Config;
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
@@ -306,8 +306,35 @@ mod tests {
         );
         assert_eq!(row.dedup_suppressed_count, Some(0));
         assert!(row.settle_ms.is_some(), "attached row carries settle_ms");
+        assert_eq!(
+            row.reaction,
+            Some(WireReactionKind::Spawn),
+            "static Sub discriminates as spawn",
+        );
         assert!(row.minted_by.is_none(), "static Sub has no minted_by");
         assert!(row.disabled.is_none(), "attached row's disabled is None");
+    }
+
+    /// A discovery template's row discriminates as `mint` and carries `None` fire stats — a
+    /// template never fires, so there is no history whose counters could move; the `reaction`
+    /// column attributes the n/a (distinguishing it from a non-attached row's `None`s).
+    #[test]
+    fn list_template_row_discriminates_mint_with_no_fire_stats() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pattern = format!("{}/{{a,b}}/access.log", tmp.path().display());
+        let config = config_from_watches(&[("disc", &pattern, true)]);
+        let guard = EngineGuard::wrap(engine_with(&config));
+
+        let resp = list(guard.engine(), &fresh_state(), &BTreeSet::new(), &config);
+        assert_eq!(resp.rows.len(), 1);
+        let row = &resp.rows[0];
+        assert_eq!(row.name, "disc");
+        assert_eq!(row.reaction, Some(WireReactionKind::Mint));
+        assert_eq!(row.fire_count, None, "a template has no fire count");
+        assert_eq!(row.dedup_suppressed_count, None);
+        assert!(row.last_fired_at.is_none());
+        assert!(row.state.is_some(), "the template row is attached");
+        assert!(row.sub.is_some(), "attached ⇒ SubId present");
     }
 
     /// A dynamic Sub (`minted_by: Some(_)`) projects with the discriminator populated.

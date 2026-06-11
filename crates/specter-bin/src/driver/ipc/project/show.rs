@@ -12,16 +12,16 @@ use std::time::Instant;
 
 use compact_str::CompactString;
 use specter_config::Config;
-use specter_core::{FireHistory, Profile, Reaction, Sub, SubId};
+use specter_core::{Profile, Reaction, Sub, SubId};
 use specter_engine::Engine;
 
 use crate::driver::DriverState;
-use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId};
+use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId, WireReaction};
 use crate::ipc::wire::{
     WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WirePath, WireStateLabel, WireTime,
 };
 
-use super::{program, project_wall};
+use super::{program, project_wall, settle_ms};
 
 /// Resolve `name` and emit the matching [`ShowResponse`] arm.
 ///
@@ -108,12 +108,30 @@ fn project_details(
             expiry: WireTime::from(project_wall(ds.start_wall, ds.start_instant, w.expiry)),
             mode: WireAbsorbMode::from(w.mode),
         });
-    // Faithful render across the reaction sum: a Spawn Sub reads its own payload; a Mint Sub
-    // (discovery template) reaches through its template's spawn for scope/program — the values
-    // the minted Subs run under — and reports the fire stats a never-firing Sub holds forever.
-    let (spawn, history) = match sub.reaction() {
-        Reaction::Spawn { spec, history, .. } => (spec, *history),
-        Reaction::Mint(t) => (&t.spec.spawn, FireHistory::default()),
+    // Honest render across the reaction sum: a Spawn Sub reports its own payload and history; a
+    // Mint Sub (discovery template) reports the knobs its minted Subs inherit plus the live
+    // minted count — never fire stats, which a template has none of.
+    let reaction = match sub.reaction() {
+        Reaction::Spawn { spec, history, .. } => WireReaction::Spawn {
+            scope: WireEffectScope::from(spec.scope()),
+            program: program::render(spec.program()),
+            last_fired_at: history
+                .last_fired_at
+                .map(|t| WireTime::from(project_wall(ds.start_wall, ds.start_instant, t))),
+            fire_count: history.fire_count,
+            dedup_suppressed_count: history.dedup_suppressed_count,
+        },
+        Reaction::Mint(t) => WireReaction::Mint {
+            minted_settle_ms: settle_ms(t.spec.settle),
+            minted_scope: WireEffectScope::from(t.spec.spawn.scope()),
+            minted_program: program::render(t.spec.spawn.program()),
+            // The discovery fan-out warning's scan, run at IPC cadence: O(total Subs).
+            minted_live: engine
+                .subs()
+                .iter()
+                .filter(|(_, s)| s.minted_by() == Some(sid))
+                .count(),
+        },
     };
     SubDetails {
         name: sub.name.to_string(),
@@ -121,18 +139,11 @@ fn project_details(
         profile: WireId::from(sub.profile()),
         state,
         anchor,
-        last_fired_at: history
-            .last_fired_at
-            .map(|t| WireTime::from(project_wall(ds.start_wall, ds.start_instant, t))),
-        fire_count: history.fire_count,
-        dedup_suppressed_count: history.dedup_suppressed_count,
         absorb,
         absorb_count: profile.map_or(0, Profile::absorb_count),
-        settle_ms: u64::try_from(sub.settle.as_millis())
-            .expect("Duration::as_millis fits u64 for any operator-meaningful settle window"),
+        settle_ms: settle_ms(sub.settle),
         minted_by: sub.minted_by().map(WireId::from),
-        scope: WireEffectScope::from(spawn.scope()),
-        program: program::render(spawn.program()),
+        reaction,
     }
 }
 
@@ -140,7 +151,7 @@ fn project_details(
 mod tests {
     use super::show;
     use crate::driver::DriverState;
-    use crate::ipc::protocol::{DisabledSource, ShowResponse};
+    use crate::ipc::protocol::{DisabledSource, ShowResponse, WireReaction};
     use compact_str::CompactString;
     use specter_config::Config;
     use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
@@ -249,10 +260,22 @@ mod tests {
                     "attached Sub's Profile lookup populates state",
                 );
                 assert!(d.anchor.is_some(), "attached Sub has resolved anchor path");
-                assert_eq!(d.fire_count, 0, "never fired");
-                assert!(d.last_fired_at.is_none(), "never fired ⇒ None");
-                assert!(!d.program.is_empty(), "program renders ≥1 line");
                 assert!(d.minted_by.is_none(), "static Sub has no minted_by");
+                match d.reaction {
+                    WireReaction::Spawn {
+                        program,
+                        last_fired_at,
+                        fire_count,
+                        ..
+                    } => {
+                        assert_eq!(fire_count, 0, "never fired");
+                        assert!(last_fired_at.is_none(), "never fired ⇒ None");
+                        assert!(!program.is_empty(), "program renders ≥1 line");
+                    }
+                    other @ WireReaction::Mint { .. } => {
+                        panic!("static watch projects Spawn, got {other:?}")
+                    }
+                }
             }
             other => panic!("expected Active, got {other:?}"),
         }
@@ -512,7 +535,77 @@ mod tests {
                     d.minted_by.is_none(),
                     "a template is operator-declared, not minted",
                 );
+                match d.reaction {
+                    WireReaction::Mint {
+                        minted_live,
+                        minted_program,
+                        ..
+                    } => {
+                        assert_eq!(minted_live, 0, "nothing minted yet");
+                        assert!(
+                            !minted_program.is_empty(),
+                            "template's minted program renders ≥1 line",
+                        );
+                    }
+                    other @ WireReaction::Spawn { .. } => {
+                        panic!("template projects Mint, got {other:?}")
+                    }
+                }
             }
+            other => panic!("expected Active for a discovery template, got {other:?}"),
+        }
+    }
+
+    /// `minted_live` counts the template's live minted Subs — the registry scan keyed on
+    /// `minted_by`, so a hand-attached minted Sub (the projection-side stand-in for a discovery
+    /// reconcile's mint) moves the counter while an unrelated template stays at zero.
+    #[test]
+    fn show_template_minted_live_counts_its_minted_subs() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let pattern = format!("{}/{{a,b}}/access.log", tmp.path().display());
+        let config = config_from_watches(&[("disc", &pattern, true)]);
+        let mut engine = engine_with(&config);
+        let template_sid = engine
+            .subs()
+            .find_by_name("disc")
+            .expect("template attached");
+
+        let req = SubAttachRequest::from_parts(
+            SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
+            ProfileIdentity::new(
+                ScanConfig::builder().build(),
+                Duration::from_hours(1),
+                ClassSet::DEFAULT_SUBTREE_ROOT,
+            ),
+            SubParams::minted(
+                CompactString::const_new("disc@/tmp/dyn_anchor"),
+                trivial_program(),
+                EffectScope::SubtreeRoot,
+                Duration::from_millis(100),
+                false,
+                template_sid,
+            ),
+        );
+        let _ = engine.step(Input::AttachSub(req), Instant::now());
+        let guard = EngineGuard::wrap(engine);
+
+        let r = show(
+            guard.engine(),
+            &fresh_state(),
+            &BTreeSet::new(),
+            &config,
+            "disc",
+            Instant::now(),
+        );
+        match r {
+            ShowResponse::Active(d) => match d.reaction {
+                WireReaction::Mint { minted_live, .. } => {
+                    assert_eq!(minted_live, 1, "one live minted Sub attributes to disc");
+                }
+                other @ WireReaction::Spawn { .. } => {
+                    panic!("template projects Mint, got {other:?}")
+                }
+            },
             other => panic!("expected Active for a discovery template, got {other:?}"),
         }
     }

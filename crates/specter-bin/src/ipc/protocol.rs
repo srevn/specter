@@ -33,7 +33,8 @@ use specter_core::{ProfileId, ResourceId, SubId};
 
 use super::framing::InfallibleSerialize;
 use super::wire::{
-    WireAbsorbWindow, WireEffectScope, WirePath, WireReloadTrigger, WireStateLabel, WireTime,
+    WireAbsorbWindow, WireEffectScope, WirePath, WireReactionKind, WireReloadTrigger,
+    WireStateLabel, WireTime,
 };
 
 /// Operator-facing wire request — the shape the daemon parses from the socket and the client
@@ -373,13 +374,17 @@ pub(crate) struct ListResponse {
 
 /// One row in [`ListResponse`]. Fields scoped per row type:
 ///
-/// - Attached rows fill every field; `disabled` is `None`.
+/// - Attached `spawn` rows fill every field; `disabled` is `None`.
+/// - Attached `mint` rows (discovery templates) carry `None` fire stats — a template mints Subs
+///   and never fires an Effect, so there is no history to report; the `reaction` discriminator
+///   attributes the n/a.
 /// - Runtime-disabled rows fill `name` + `disabled = Some(Runtime)`; engine-derived fields are `None`
 ///   (the Sub is not in `engine.subs()`, so the Profile / state / anchor / counters do not exist).
 /// - TOML-disabled rows fill `name` + `disabled = Some(Toml)`; same reason.
 ///
 /// `Option<u64>` on the counter columns over plain `u64 = 0` for missing rows makes "field doesn't
-/// apply" structural — JSON-schema generators distinguish "never fired" from "not attached".
+/// apply" structural — JSON-schema generators distinguish "never fired" (`Some(0)`) from "cannot
+/// fire" / "not attached" (`None`, split by `reaction` / `disabled`).
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ListRow {
     /// Operator-facing name. Static Subs: `[[watch]].name`. Minted Subs:
@@ -389,18 +394,22 @@ pub(crate) struct ListRow {
     pub(crate) state: Option<WireStateLabel>,
     /// Anchor path. `None` for non-attached rows (no Profile, no resource).
     pub(crate) anchor: Option<WirePath>,
-    /// Wall-clock projection of `Sub.last_fired_at`. `None` for never-fired Subs and non-attached
-    /// rows.
+    /// Wall-clock projection of the Sub's last Effect emission. `None` for never-fired Subs,
+    /// `mint` rows, and non-attached rows.
     pub(crate) last_fired_at: Option<WireTime>,
-    /// `Sub.fire_count`. `None` for non-attached rows.
+    /// Cumulative Effect emissions. `None` for `mint` rows and non-attached rows.
     pub(crate) fire_count: Option<u64>,
-    /// `Sub.dedup_suppressed_count`. `None` for non-attached rows.
+    /// Cumulative B1-dedup suppressions. `None` for `mint` rows and non-attached rows.
     pub(crate) dedup_suppressed_count: Option<u64>,
     /// `Sub.settle.as_millis()` — the per-Sub debounce floor. Distinct from `Profile.settle`
     /// (engine-recomputed as `min(remaining_subs.settles)` across the Profile's attached Subs); the
     /// wire field is the per-Sub value the operator declared, not the Profile-level fold. `None`
     /// for non-attached rows.
     pub(crate) settle_ms: Option<u64>,
+    /// Which reaction kind this row's Sub carries — `spawn` (fires a program) or `mint` (a
+    /// discovery template; its row's fire-stat `None`s are structural, not "never fired").
+    /// `None` for non-attached rows.
+    pub(crate) reaction: Option<WireReactionKind>,
     /// Disable-source discriminator. `None` for attached rows.
     pub(crate) disabled: Option<DisabledSource>,
     /// `SubId` projection. `None` for non-attached rows.
@@ -443,12 +452,20 @@ impl InfallibleSerialize for WireRequest {}
 /// structs ([`StatusResponse`], [`ListResponse`], [`ShowResponse`], [`SubDetails`]) whose fields
 /// are primitives, [`String`], [`Option`], [`Vec`], [`WireId`], [`WireTime`] (manual
 /// `serialize_str` over an invariant-by- construction RFC-3339 token), [`WirePath`] (transparent
-/// `String`), or other `Wire*` enums (closed-set derives). Marks the daemon-side response paths
+/// `String`), or other `Wire*` enums (closed-set derives). [`SubDetails`]'s flattened
+/// [`WireReaction`] keeps the property: internally-tagged serialization can fail only for variant
+/// payloads that cannot carry an inline tag (newtype/tuple variants), and both its variants are
+/// struct-shaped over the same plain-data field set. Marks the daemon-side response paths
 /// ([`crate::driver::Hub::enqueue_response`] + [`crate::driver::Hub::drain_accept`]'s cap-arm
 /// best-effort Busy write) safe for the wrapper.
 impl InfallibleSerialize for ResponsePayload {}
 
 /// `specter show <name>` detail block for an attached Sub.
+///
+/// The per-reaction payload (`scope` / `program` / fire stats, or the mint knobs) lives on the
+/// flattened [`WireReaction`], internally tagged `reaction` — a third inline tag alongside `kind`
+/// and `status`, same one-flat-object discipline. The top-level fields are exactly the ones that
+/// hold for *any* attached Sub.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct SubDetails {
     /// Operator-facing name.
@@ -468,42 +485,95 @@ pub(crate) struct SubDetails {
     /// not yet resolved" — symmetric with [`ListRow::anchor`], so operators reading `list -o json`
     /// and `show -o json` decode vanish identically (`null`).
     pub(crate) anchor: Option<WirePath>,
-    /// Wall-clock projection of `Sub.last_fired_at`. `None` until the first successful fire.
-    pub(crate) last_fired_at: Option<WireTime>,
-    /// Cumulative fires — per-leaf for `PerStableFile`, per-burst for `SubtreeRoot`.
-    pub(crate) fire_count: u64,
-    /// Cumulative B1-dedup suppressions.
-    pub(crate) dedup_suppressed_count: u64,
     /// Armed `absorb` window, live-gated: `Some` iff a window is armed AND not yet inert (`expiry >
     /// now`) at projection time. The engine's lazy expiry leaves an inert window resident in
     /// Profile state; this projection hides it (renders absent) rather than surfacing a stale
-    /// `Some`. Per-Profile by construction — every Sub on the Profile shares one window.
+    /// `Some`. Per-Profile by construction — every Sub on the Profile shares one window. Truthful
+    /// on a `mint` row too: the window is genuinely armed even though a discovery Profile's
+    /// reconcile consequence makes the fold structurally unreachable.
     pub(crate) absorb: Option<WireAbsorbWindow>,
-    /// `Profile.absorb_count` — folds this Profile has absorbed. The fold counterpart of
-    /// `fire_count`; per-Profile (a fold is per-Profile), projected here per-Sub alongside the
-    /// per-Sub fire counters.
+    /// `Profile.absorb_count` — folds this Profile has absorbed. The fold counterpart of the
+    /// `spawn` payload's `fire_count`; per-Profile (a fold is per-Profile), projected here per-Sub.
     pub(crate) absorb_count: u64,
-    /// `Sub.settle.as_millis()`.
+    /// `Sub.settle.as_millis()` — this Sub's own debounce. On a `mint` row this is the discovery
+    /// walk's debounce (a lowering constant), distinct from the template knob
+    /// `minted_settle_ms` the minted Subs inherit.
     pub(crate) settle_ms: u64,
     /// `Sub::minted_by()` projection — `Some(_)` iff the Sub was minted by a discovery template.
     /// Distinct from a TOML-declared Sub with the same anchor: the source id locates which template
-    /// produced the entry.
+    /// produced the entry. Top-level rather than `spawn` payload: it is Sub identity, not reaction
+    /// state.
     pub(crate) minted_by: Option<WireId>,
-    /// `Sub.scope` projection.
-    pub(crate) scope: WireEffectScope,
-    /// One line per `ActionProgram` instruction. Rendering rules live with the projection helper
-    /// (`specter-bin`'s `ipc::project::program`); this field pins only the shape.
-    pub(crate) program: Vec<String>,
+    /// Per-reaction payload, flattened — see [`WireReaction`].
+    #[serde(flatten)]
+    pub(crate) reaction: WireReaction,
+}
+
+/// Per-reaction `show` payload — the wire projection of `specter_core::Reaction`, honest per
+/// variant: a `spawn` row reports its own program and fire history; a `mint` row (discovery
+/// template) reports the knobs its minted Subs inherit and the live minted count, and carries no
+/// fire stats at all — a template fires attachments, never Effects, so there is no history whose
+/// counters could ever move.
+///
+/// Internally tagged `reaction` and flattened into [`SubDetails`], so every payload key lands in
+/// the same flat JSON object as the rest of the detail block. The `spawn` keys are bare (they
+/// describe *this* Sub's reaction); every `mint` key carries the `minted_` prefix (they describe
+/// the *minted* Subs) — the prefix keeps each key self-describing and keeps the template knob
+/// `minted_settle_ms` from colliding with the top-level `settle_ms` in the flattened object. The
+/// tag tokens are [`WireReactionKind`]'s vocabulary; the lockstep is pinned in this module's
+/// tests.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "reaction", rename_all = "snake_case")]
+pub(crate) enum WireReaction {
+    Spawn {
+        /// `SpawnSpec.scope` projection.
+        scope: WireEffectScope,
+        /// One line per `ActionProgram` instruction. Rendering rules live with the projection
+        /// helper (`specter-bin`'s `ipc::project::program`); this field pins only the shape.
+        program: Vec<String>,
+        /// Wall-clock projection of the last Effect emission. `None` until the first fire.
+        last_fired_at: Option<WireTime>,
+        /// Cumulative fires — per-leaf for `PerStableFile`, per-burst for `SubtreeRoot`.
+        fire_count: u64,
+        /// Cumulative B1-dedup suppressions.
+        dedup_suppressed_count: u64,
+    },
+    Mint {
+        /// Minted Subs' debounce — the template's `settle` knob (the `[[watch]].settle` the
+        /// operator declared; the discovery Sub's own debounce is the top-level `settle_ms`).
+        minted_settle_ms: u64,
+        /// Minted Subs' effect scope.
+        minted_scope: WireEffectScope,
+        /// Minted Subs' program, rendered like the `spawn` payload's `program`.
+        minted_program: Vec<String>,
+        /// Live minted-Sub count for this template, registry-derived at projection time — the
+        /// same scan the discovery fan-out warning runs; O(total Subs), fine at IPC cadence.
+        minted_live: usize,
+    },
+}
+
+/// Discriminant projection — the `show -o human` renderer's `reaction` line reads its token
+/// through this, so the human vocabulary and the wire tag stay on [`WireReactionKind`]'s single
+/// source.
+impl From<&WireReaction> for WireReactionKind {
+    fn from(r: &WireReaction) -> Self {
+        match r {
+            WireReaction::Spawn { .. } => Self::Spawn,
+            WireReaction::Mint { .. } => Self::Mint,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        DisabledSource, ResponsePayload, StatusResponse, WireErrorCode, WireId, WireLastReload,
-        WireRequest,
+        DisabledSource, ResponsePayload, StatusResponse, SubDetails, WireErrorCode, WireId,
+        WireLastReload, WireReaction, WireRequest,
     };
     use crate::ipc::framing::parse_strict;
-    use crate::ipc::wire::{WirePath, WireReloadTrigger, WireTime};
+    use crate::ipc::wire::{
+        WireEffectScope, WirePath, WireReactionKind, WireReloadTrigger, WireTime,
+    };
     use compact_str::CompactString;
     use slotmap::KeyData;
     use specter_core::{ProfileId, ResourceId, SubId};
@@ -885,6 +955,125 @@ mod tests {
             err.to_string().contains("last_reload_via"),
             "rejection names the orphan key; got {err}",
         );
+    }
+
+    /// `SubDetails.reaction` flattens onto the wire as an internally-tagged payload: the `reaction`
+    /// key carries the variant token (lockstep with [`WireReactionKind`]'s vocabulary — the `list`
+    /// discriminator and the `show` tag must never drift apart), the `spawn` payload inlines its
+    /// bare keys, and the `mint` payload inlines `minted_*` keys — crucially `minted_settle_ms`
+    /// coexisting with the top-level `settle_ms` (the flatten would emit a duplicate JSON key if
+    /// the template knob ever lost its prefix). Both variants round-trip through [`parse_strict`],
+    /// pinning that serde's flatten + internal-tag machinery deserializes the shape the daemon
+    /// emits.
+    #[test]
+    fn sub_details_flattens_reaction_variants() {
+        let spawn = sample_details(WireReaction::Spawn {
+            scope: WireEffectScope::SubtreeRoot,
+            program: vec!["[0] exec /bin/true".to_string()],
+            last_fired_at: None,
+            fire_count: 3,
+            dedup_suppressed_count: 1,
+        });
+        let json = serde_json::to_value(&spawn).expect("serialize");
+        assert_eq!(
+            json.get("reaction").and_then(|v| v.as_str()),
+            Some(WireReactionKind::Spawn.as_str()),
+            "flatten tag carries the spawn token: {json}",
+        );
+        assert_eq!(
+            json.get("fire_count").and_then(serde_json::Value::as_u64),
+            Some(3),
+            "spawn payload inlines its bare keys: {json}",
+        );
+        assert!(
+            json.get("minted_live").is_none(),
+            "spawn carries no mint keys: {json}",
+        );
+        let bytes = serde_json::to_vec(&spawn).expect("serialize");
+        let back: SubDetails = parse_strict(&bytes).expect("flattened spawn round-trips");
+        assert!(matches!(
+            back.reaction,
+            WireReaction::Spawn { fire_count: 3, .. }
+        ));
+
+        let mint = sample_details(WireReaction::Mint {
+            minted_settle_ms: 500,
+            minted_scope: WireEffectScope::PerStableFile,
+            minted_program: vec!["[0] exec /bin/true".to_string()],
+            minted_live: 2,
+        });
+        let json = serde_json::to_value(&mint).expect("serialize");
+        assert_eq!(
+            json.get("reaction").and_then(|v| v.as_str()),
+            Some(WireReactionKind::Mint.as_str()),
+            "flatten tag carries the mint token: {json}",
+        );
+        assert_eq!(
+            json.get("settle_ms").and_then(serde_json::Value::as_u64),
+            Some(150),
+            "the Sub's own settle stays top-level: {json}",
+        );
+        assert_eq!(
+            json.get("minted_settle_ms")
+                .and_then(serde_json::Value::as_u64),
+            Some(500),
+            "the template knob lands prefixed beside it: {json}",
+        );
+        assert!(
+            json.get("fire_count").is_none() && json.get("last_fired_at").is_none(),
+            "a mint row carries no fire stats at all: {json}",
+        );
+        let bytes = serde_json::to_vec(&mint).expect("serialize");
+        let back: SubDetails = parse_strict(&bytes).expect("flattened mint round-trips");
+        assert!(matches!(
+            back.reaction,
+            WireReaction::Mint { minted_live: 2, .. }
+        ));
+    }
+
+    /// A cross-variant stray key — a `mint` payload key on a `spawn` row — fails the strict
+    /// boundary parse. Serde's flatten machinery silently ignores keys the matched variant doesn't
+    /// consume (the deny-unknown-fields gap `parse_strict` exists to close), so the round-trip walk
+    /// is the only wall against a daemon emitting, or an operator script forging, a chimera row.
+    #[test]
+    fn sub_details_cross_variant_key_caught_at_boundary() {
+        let spawn = sample_details(WireReaction::Spawn {
+            scope: WireEffectScope::SubtreeRoot,
+            program: vec![],
+            last_fired_at: None,
+            fire_count: 0,
+            dedup_suppressed_count: 0,
+        });
+        let mut value = serde_json::to_value(&spawn).expect("serialize");
+        value
+            .as_object_mut()
+            .expect("SubDetails serializes as a JSON object")
+            .insert("minted_live".to_string(), serde_json::Value::from(3));
+        let bytes = serde_json::to_vec(&value).expect("re-serialize");
+        let err =
+            parse_strict::<SubDetails>(&bytes).expect_err("strict parse rejects cross-variant key");
+        assert!(
+            err.to_string().contains("unknown field `minted_live`"),
+            "rejection names the stray key; got {err}",
+        );
+    }
+
+    /// Construct a [`SubDetails`] with constant scaffolding so the flatten tests focus on the
+    /// reaction payload. `settle_ms = 150` is the value the mint test asserts stays distinct from
+    /// the prefixed template knob.
+    fn sample_details(reaction: WireReaction) -> SubDetails {
+        SubDetails {
+            name: "foo".to_string(),
+            sub: WireId(1),
+            profile: WireId(2),
+            state: None,
+            anchor: None,
+            absorb: None,
+            absorb_count: 0,
+            settle_ms: 150,
+            minted_by: None,
+            reaction,
+        }
     }
 
     /// Construct a [`StatusResponse`] with constant scaffolding so the flatten / round-trip /

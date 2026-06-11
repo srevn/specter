@@ -55,8 +55,8 @@ use compact_str::CompactString;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use specter_core::{
     AbsorbMode, BurstHelper, BurstIntent, ClaimKind, DetachReason, Diagnostic, EffectScope,
-    EntryKind, FsEvent, OverflowScope, ProfileStateDiscriminant, ReapTrigger, ResourceKind,
-    SpliceFailureCause, StateLabel, WatchFailure,
+    EntryKind, FsEvent, OverflowScope, ProfileStateDiscriminant, Reaction, ReapTrigger,
+    ResourceKind, SpliceFailureCause, StateLabel, WatchFailure,
 };
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -1414,8 +1414,9 @@ impl std::fmt::Display for WireStateLabel {
     }
 }
 
-/// Sub effect-scope projection. Mirrors `specter_core::EffectScope` verbatim; surfaces in
-/// `SubDetails.scope`.
+/// Sub effect-scope projection. Mirrors `specter_core::EffectScope` verbatim; surfaces in the
+/// `show` reaction payload (`crate::ipc::protocol::WireReaction` — `Spawn`'s `scope`, `Mint`'s
+/// `minted_scope`).
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireEffectScope {
@@ -1446,6 +1447,45 @@ impl WireEffectScope {
 }
 
 impl std::fmt::Display for WireEffectScope {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Reaction-discriminant projection of [`specter_core::Reaction`] — which kind of Sub a row
+/// describes, without the variant payload. Surfaces in `ListRow.reaction` so the table can
+/// attribute its n/a fire-stat cells (a `mint` row never fires) instead of leaving a bare `-`
+/// mysterious; the `show` detail block carries the full per-variant payload
+/// (`crate::ipc::protocol::WireReaction`) whose serde tag emits these same tokens — the lockstep
+/// is pinned by `protocol::tests::sub_details_flattens_reaction_variants`.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum WireReactionKind {
+    Spawn,
+    Mint,
+}
+
+impl From<&Reaction> for WireReactionKind {
+    fn from(r: &Reaction) -> Self {
+        match r {
+            Reaction::Spawn { .. } => Self::Spawn,
+            Reaction::Mint(_) => Self::Mint,
+        }
+    }
+}
+
+impl WireReactionKind {
+    /// Wire-form token — snake_case, mirroring the serde rename. The `list -o human` REACTION
+    /// column renders it verbatim through `Display`.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Spawn => "spawn",
+            Self::Mint => "mint",
+        }
+    }
+}
+
+impl std::fmt::Display for WireReactionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
     }
@@ -1548,9 +1588,9 @@ mod tests {
     use super::{
         KNOWN_WIRE_VARIANTS, WireAbsorbMode, WireBurstHelper, WireBurstIntent, WireClaimKind,
         WireDetachReason, WireDiagnostic, WireEffectScope, WireEntryKind, WireFsEvent,
-        WireOverflowScope, WirePath, WireProfileStateDiscriminant, WireReapTrigger,
-        WireReloadTrigger, WireResourceKind, WireSpliceFailureCause, WireStateLabel, WireTime,
-        WireWatchFailure,
+        WireOverflowScope, WirePath, WireProfileStateDiscriminant, WireReactionKind,
+        WireReapTrigger, WireReloadTrigger, WireResourceKind, WireSpliceFailureCause,
+        WireStateLabel, WireTime, WireWatchFailure,
     };
     use crate::ipc::protocol::WireId;
     use std::collections::BTreeSet;
@@ -2136,6 +2176,14 @@ mod tests {
         assert_snake_round_trip(
             &[WireAbsorbMode::ConsumeOnFirst, WireAbsorbMode::PersistUntil],
             WireAbsorbMode::as_str,
+        );
+    }
+
+    #[test]
+    fn wire_reaction_kind_round_trips_every_variant() {
+        assert_snake_round_trip(
+            &[WireReactionKind::Spawn, WireReactionKind::Mint],
+            WireReactionKind::as_str,
         );
     }
 

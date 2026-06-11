@@ -1,5 +1,6 @@
-//! Render an [`ActionProgram`] to operator-readable lines for
-//! [`crate::ipc::protocol::SubDetails::program`].
+//! Render an [`ActionProgram`] to operator-readable lines for the
+//! [`crate::ipc::protocol::WireReaction`] payloads (`Spawn`'s `program`, `Mint`'s
+//! `minted_program`).
 //!
 //! One line per [`ProgramOp`]. The argv parts use the same `${specter.<name>}` / `${env.<NAME>}`
 //! vocabulary the source TOML uses, but the rendered form is **operator-readable, not
@@ -15,8 +16,8 @@ use std::fmt::Write as _;
 use specter_core::program::{BranchTarget, ProgramOp, SpawnBody};
 use specter_core::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 
-/// Render every op in the program as one line. Caller threads the returned slice into
-/// [`crate::ipc::protocol::SubDetails::program`].
+/// Render every op in the program as one line. Caller threads the returned lines into its
+/// [`crate::ipc::protocol::WireReaction`] payload.
 pub(crate) fn render(program: &ActionProgram) -> Vec<String> {
     program
         .ops()
