@@ -2,20 +2,19 @@
 //!
 //! [`classify`] walks the segment chain from `profile.resource` (the anchor) down to the candidate
 //! `target`, delegating each prefix's in-scope test to [`specter_core::ScanConfig::accepts`] — the
-//! single source of the scope predicate, shared with the walker — then refines the admitted case
-//! by the shape's recursion edge ([`specter_core::ScanConfig::descends_into`], via [`descends_at`])
+//! single source of the scope predicate, shared with the walker — then refines the admitted case by
+//! the shape's recursion edge ([`specter_core::ScanConfig::descends_into`], via [`descends_at`])
 //! into [`CoverageClass`]. The classification gates three things in the engine: whether an
 //! `FsEvent` at `R` should drive `P`'s burst, whether `R` contributes to `P`'s `watch_demand`, and
 //! how deep a pre-fire probe target may sit. [`covers`] is the boolean projection (`!= Outside`)
 //! the chain queries and external consumers keep.
 //!
 //! [`nearest_covering_ancestor`] is the transitive derivation of [`covers`], and
-//! [`has_active_standard_descendant`] (via [`chain_reaches`]) is the pure query that replaced the
-//! old `dirty_descendants` refcount: it answers, fresh at each consult point, "is some
-//! Active-Standard strict-descendant Profile still covering this ancestor?" — the `Draining →
-//! Verifying` reconfirm condition. Evaluating it as a query rather than maintaining it as a counter
-//! is what makes it robust to mid-burst topology moves; the rationale lives on
-//! [`has_active_standard_descendant`].
+//! [`has_active_standard_descendant`] (via [`chain_reaches`]) is the pure query that replaced the old
+//! `dirty_descendants` refcount: it answers, fresh at each consult point, "is some Active-Standard
+//! strict-descendant Profile still covering this ancestor?" — the `Draining → Verifying` reconfirm
+//! condition. Evaluating it as a query rather than maintaining it as a counter is what makes it
+//! robust to mid-burst topology moves; the rationale lives on [`has_active_standard_descendant`].
 
 use smallvec::SmallVec;
 use specter_core::{
@@ -24,13 +23,12 @@ use specter_core::{
 };
 use std::path::PathBuf;
 
-/// Where `target` sits relative to `profile`'s **proof object** — the `(path, attribute)` cells
-/// that actually fold into `dir_hash` / `leaf_hash` — not merely whether the scope predicate
-/// admits it.
+/// Where `target` sits relative to `profile`'s **proof object** — the `(path, attribute)` cells that
+/// actually fold into `dir_hash` / `leaf_hash` — not merely whether the scope predicate admits it.
 ///
 /// - [`Self::Outside`] — some prefix on the anchor → target chain fails
-///   [`specter_core::ScanConfig::accepts`] (or the chain is stale / doesn't reach the anchor).
-///   The target contributes nothing to this Profile.
+///   [`specter_core::ScanConfig::accepts`] (or the chain is stale / doesn't reach the anchor). The
+///   target contributes nothing to this Profile.
 /// - [`Self::Boundary`] — admitted at every prefix, but the scan shape does not descend below it.
 ///   **Dir-only by construction**: a covered Dir at depth `d` with `descends_into(d)` false. The
 ///   walker records such a Dir as `DirChild::Uncovered(fs_id)`, so the proof object folds only its
@@ -47,8 +45,8 @@ use std::path::PathBuf;
 /// ([`nearest_covering_ancestor`] / [`chain_reaches`]) deliberately stay on boolean [`covers`]: a
 /// minted Profile's anchor sits on the discovery Profile's terminus slot — `Boundary` for the
 /// discovery Profile — and minted bursts gate outer Profiles *through* the discovery Profile by
-/// resolving their chain across exactly that boundary coverage. Lifting the classification into
-/// the chain queries would sever the gate.
+/// resolving their chain across exactly that boundary coverage. Lifting the classification into the
+/// chain queries would sever the gate.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum CoverageClass {
     Outside,
@@ -92,15 +90,15 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut 
 /// every call site states which authority it classifies under:
 ///
 /// - **Live observation** ([`Resource::kind_or_file`], unprobed collapsed to File-shape per the
-///   backend-mask convention shared with `fs_event_to_class` and the kqueue / inotify
-///   translators): [`covers`] and [`covering_profiles`] classify the slot as it is now — the File
-///   collapse lands unprobed slots on `Interior`, deliberately conservative-toward-driving (the
-///   probe and the target clamp sort out what the slot really is).
+///   backend-mask convention shared with `fs_event_to_class` and the kqueue / inotify translators):
+///   [`covers`] and [`covering_profiles`] classify the slot as it is now — the File collapse lands
+///   unprobed slots on `Interior`, deliberately conservative-toward-driving (the probe and the
+///   target clamp sort out what the slot really is).
 /// - **The installed-under record** (a diff entry's baseline-side kind):
 ///   `reconcile::wants_descendant_watch`'s release direction must read the kind the contribution
-///   was installed under — a co-covering Profile's graft may have re-stamped the shared slot's
-///   kind between this Profile's install and its release, and at a boundary-capable depth the
-///   re-stamp would otherwise flip the classification and strand the contribution.
+///   was installed under — a co-covering Profile's graft may have re-stamped the shared slot's kind
+///   between this Profile's install and its release, and at a boundary-capable depth the re-stamp
+///   would otherwise flip the classification and strand the contribution.
 ///
 /// **Depth-0 (`target == profile.resource`).** Always [`CoverageClass::Interior`]. The anchor is
 /// part of the Profile's scope by construction — `FsEvent`s at the anchor must drive the anchor's
@@ -269,9 +267,9 @@ pub(crate) fn covering_profiles(
     resource: ResourceId,
     scratch: &mut PathBuf,
 ) -> SmallVec<[(ProfileId, CoverageClass); 2]> {
-    // One live kind read hoisted out of the per-Profile loop — routing classifies the slot as it
-    // is now (the same `kind_or_file` value the caller's head capture reads, so the routing
-    // guard's kind arm and the classification cannot diverge within the step).
+    // One live kind read hoisted out of the per-Profile loop — routing classifies the slot as it is
+    // now (the same `kind_or_file` value the caller's head capture reads, so the routing guard's
+    // kind arm and the classification cannot diverge within the step).
     let target_kind = tree
         .get(resource)
         .map_or(ResourceKind::File, Resource::kind_or_file);
@@ -814,12 +812,11 @@ mod tests {
     // ===== classify (CoverageClass) =====
     //
     // The three-way proof-object refinement consumed by event routing, watch installation, and the
-    // pre-fire clamp. These pin the classification's load-bearing distinctions: Boundary is
-    // Dir-only (a covered Leaf at the same depth is Interior — its `leaf_hash` is in the proof
-    // object), the anchor is Interior unconditionally, and the unprobed File-shape collapse lands
-    // on Interior. The admission walk itself (pattern / exclude / hidden / depth arms) is pinned by
-    // the `covers` grid above — `covers` is `classify != Outside`, so those tests already exercise
-    // the shared body.
+    // pre-fire clamp. These pin the classification's load-bearing distinctions: Boundary is Dir-only
+    // (a covered Leaf at the same depth is Interior — its `leaf_hash` is in the proof object), the
+    // anchor is Interior unconditionally, and the unprobed File-shape collapse lands on Interior. The
+    // admission walk itself (pattern / exclude / hidden / depth arms) is pinned by the `covers` grid
+    // above — `covers` is `classify != Outside`, so those tests already exercise the shared body.
 
     #[test]
     fn classify_recursive_false_forks_boundary_dir_from_interior_leaf_at_depth_one() {

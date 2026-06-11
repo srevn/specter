@@ -1557,10 +1557,9 @@ fn depth_is_anchor_relative_when_rooted_below_anchor() {
 // anchor basis — name + depth against frozen config). Feeding the nested-secret fixture with
 // `anchor_path == target` sets the scope basis to the LCA instead of the true anchor, so the
 // start-anchored `secret/**` matches the LCA-relative `secret/a` and drops the on-chain leaf at the
-// structural (exclude) gate. The walker refuses to certify it: loud in dev, degrade to
-// `Undischarged` in release. The kinded gate carries no such tripwire (its drop is a legitimate
-// atomic-replace identity change) — `on_chain_kinded_drop_omits_and_stays_authoritative` pins that
-// distinction.
+// structural (exclude) gate. The walker refuses to certify it: loud in dev, degrade to `Undischarged`
+// in release. The kinded gate carries no such tripwire (its drop is a legitimate atomic-replace
+// identity change) — `on_chain_kinded_drop_omits_and_stays_authoritative` pins that distinction.
 
 #[cfg(debug_assertions)]
 #[test]
@@ -1602,8 +1601,8 @@ fn on_chain_filter_drop_degrades_to_undischarged_in_release() {
 #[test]
 fn on_chain_kinded_drop_omits_and_stays_authoritative() {
     let tmp = TempDir::new().unwrap();
-    // A regular file where the engine had chained a Dir of the same name. Under `pattern = *.log`
-    // a non-`.log` file fails the kinded gate, while the structural gate (recursive, no
+    // A regular file where the engine had chained a Dir of the same name. Under `pattern = *.log` a
+    // non-`.log` file fails the kinded gate, while the structural gate (recursive, no
     // exclude/hidden/depth bound) admits it — so the drop lands on the kinded gate alone, the path
     // the previous two tests cannot reach.
     std::fs::write(tmp.path().join("build"), b"").unwrap();

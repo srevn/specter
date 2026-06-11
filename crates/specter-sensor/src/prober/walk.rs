@@ -40,10 +40,10 @@
 //! engine in lockstep across the *structural* scope axes (name + depth + frozen config);
 //! [`WalkContext::note_structural_filter_drop`] is the runtime witness of that lockstep — an
 //! obligation-chain leaf the structural gate nonetheless filters degrades the frame to
-//! `Undischarged` rather than silently dropping it. The kinded gate ([`ScanConfig::accepts_kinded`])
-//! is exempt: kind is time-varying (an atomic replace can flip a chained Dir to a pattern-failing
-//! file between event capture and probe), so its drop is a legitimate identity change the walker
-//! omits as observed-absent-from-scope.
+//! `Undischarged` rather than silently dropping it. The kinded gate
+//! ([`ScanConfig::accepts_kinded`]) is exempt: kind is time-varying (an atomic replace can flip a
+//! chained Dir to a pattern-failing file between event capture and probe), so its drop is a
+//! legitimate identity change the walker omits as observed-absent-from-scope.
 
 use crate::ProbeFailureExt;
 use compact_str::CompactString;
@@ -71,9 +71,8 @@ use std::time::Duration;
 /// (the `Covered`/`Uncovered(fs_id)` gate at the dirent) and
 /// [`try_mtime_skip`](Self::try_mtime_skip) (the no-op-when-unchanged primitive). The two
 /// obligation-sensitive decisions — [`obligation_at_or_under`](Self::obligation_at_or_under) (the
-/// mtime-skip refusal) and
-/// [`note_structural_filter_drop`](Self::note_structural_filter_drop) (the structural on-chain
-/// filter-drop tripwire) — both project the obligation through the single
+/// mtime-skip refusal) and [`note_structural_filter_drop`](Self::note_structural_filter_drop) (the
+/// structural on-chain filter-drop tripwire) — both project the obligation through the single
 /// [`chain_through`](Self::chain_through) query, so the chain structure is read one way.
 ///
 /// `anchor_path` is the **scope basis** — the Profile anchor the per-dirent `rel` is measured from
@@ -244,10 +243,10 @@ impl WalkContext<'_> {
     /// nothing but the dirent's name and depth against the frozen config (exclude / hidden / depth
     /// bound / positional segment) — all time-invariant for a chained slot. The walker measures
     /// scope from the anchor on the wire, the same basis the engine's `covers` uses, so every
-    /// obligation-chain leaf the engine tracks is structurally in scope for the walker too. A rename
-    /// drops the old chained name from `read_dir` entirely (observed-absent, never reaching a filter
-    /// arm), so a structural filter dropping a *present* on-chain dirent can only mean the scope
-    /// basis desynced — a regression, never a legitimate exclusion.
+    /// obligation-chain leaf the engine tracks is structurally in scope for the walker too. A
+    /// rename drops the old chained name from `read_dir` entirely (observed-absent, never reaching
+    /// a filter arm), so a structural filter dropping a *present* on-chain dirent can only mean the
+    /// scope basis desynced — a regression, never a legitimate exclusion.
     ///
     /// The kinded gate ([`ScanConfig::accepts_kinded`]) carries no such tripwire: it reads the
     /// dirent's current `is_dir`, which an atomic replace can flip between the chaining event and
@@ -401,8 +400,8 @@ pub(super) fn probe_subtree(
 /// the same one Profile partitioning uses, keyed on a shape no Profile carries.
 ///
 /// The digest is a pure constant of the descent shape (fixed inputs, no settle ceiling, no event
-/// classes), so it is folded once on first descent probe and reused for the process lifetime —
-/// one transient `ProfileIdentity` and one sip128 across the whole run rather than per probe.
+/// classes), so it is folded once on first descent probe and reused for the process lifetime — one
+/// transient `ProfileIdentity` and one sip128 across the whole run rather than per probe.
 static DESCENT_CAPTURED_WITH: LazyLock<u64> = LazyLock::new(|| {
     ProfileIdentity::new(ScanConfig::Descent, Duration::ZERO, ClassSet::EMPTY).config_hash()
 });
@@ -600,8 +599,8 @@ fn enumerate_dir(
         // `rel`, so the positional gates cannot desync.
         //
         // A drop here carries no scope-regression tripwire: `accepts_kinded` reads the dirent's
-        // *current* kind, which can flip between the event that chained this path and this probe (an
-        // atomic replace — a same-named pattern-failing file swapped over a chained Dir, or a
+        // *current* kind, which can flip between the event that chained this path and this probe
+        // (an atomic replace — a same-named pattern-failing file swapped over a chained Dir, or a
         // mid-chain position turned non-dir). The engine chained the path against its prior kind;
         // the walker observes the new one. That divergence is a legitimate identity change, not a
         // basis desync, so the entry is observed-absent-from-scope: omit it and leave the level

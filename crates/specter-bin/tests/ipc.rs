@@ -62,33 +62,77 @@ impl Sandbox {
             socket,
         }
     }
+
+    /// Full daemon log contents, for failure messages. A timeline-bearing assert that dumps the
+    /// daemon's own log at panic time turns a flaky CI line into a self-contained diagnosis —
+    /// re-running rarely reproduces what the log already recorded.
+    fn log_contents(&self) -> String {
+        fs::read_to_string(&self.log).unwrap_or_default()
+    }
+}
+
+/// Kill-on-drop guard for a spawned daemon. A failing assert unwinds the test before its
+/// `terminate(...)` call, and `std::process::Child` does nothing on drop — the unwind would orphan
+/// a live daemon on the machine. The guard SIGKILLs and reaps the child on drop instead; the
+/// orderly paths defuse it by taking the child out ([`Self::take`], `terminate`'s entry) or by
+/// observing the exit first ([`Self::child_mut`] + `await_exit`, after which the drop's `try_wait`
+/// sees a reaped child and skips the kill).
+struct Daemon(Option<Child>);
+
+impl Daemon {
+    /// The live child, for tests that drive the daemon's lifecycle directly (manual signals,
+    /// natural-exit observation). The guard stays armed.
+    const fn child_mut(&mut self) -> &mut Child {
+        self.0.as_mut().expect("daemon child already taken")
+    }
+
+    /// Defuse the guard and hand the child to the caller.
+    fn take(mut self) -> Child {
+        self.0.take().expect("daemon child already taken")
+    }
+}
+
+impl Drop for Daemon {
+    fn drop(&mut self) {
+        let Some(mut child) = self.0.take() else {
+            return;
+        };
+        // Kill only a still-running child: after a reap the pid may be recycled, and SIGKILLing a
+        // recycled pid would hit an unrelated process.
+        if matches!(child.try_wait(), Ok(None)) {
+            let _ = kill(Pid::from_raw(child.id().cast_signed()), Signal::SIGKILL);
+        }
+        let _ = child.wait();
+    }
 }
 
 /// Spawn the workspace's `specter` binary against `sb`. `--socket sb.socket` pins the daemon's bind
 /// path inside the per-test sandbox, so concurrent nextest runs never collide on the shared
 /// per-platform convention path.
-fn spawn_specter<I, S>(sb: &Sandbox, extra: I) -> Child
+fn spawn_specter<I, S>(sb: &Sandbox, extra: I) -> Daemon
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
     let bin = env!("CARGO_BIN_EXE_specter");
-    Command::new(bin)
-        .arg("run")
-        .arg("--config")
-        .arg(&sb.cfg)
-        .arg("--socket")
-        .arg(&sb.socket)
-        .args(["--log-destination", "file"])
-        .arg("--log-path")
-        .arg(&sb.log)
-        .args(["--log-level", "info"])
-        .args(extra)
-        .env_remove("SPECTER_NO_CONFIG_WATCH")
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()
-        .unwrap_or_else(|e| panic!("spawn specter: {e}"))
+    Daemon(Some(
+        Command::new(bin)
+            .arg("run")
+            .arg("--config")
+            .arg(&sb.cfg)
+            .arg("--socket")
+            .arg(&sb.socket)
+            .args(["--log-destination", "file"])
+            .arg("--log-path")
+            .arg(&sb.log)
+            .args(["--log-level", "info"])
+            .args(extra)
+            .env_remove("SPECTER_NO_CONFIG_WATCH")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap_or_else(|e| panic!("spawn specter: {e}")),
+    ))
 }
 
 /// Wait until the daemon's socket file appears on disk. The bin's init order guarantees the socket
@@ -142,8 +186,10 @@ fn await_exit(child: &mut Child) -> io::Result<std::process::ExitStatus> {
     ))
 }
 
-/// SIGTERM the daemon and await clean exit.
-fn terminate(mut child: Child) -> std::process::ExitStatus {
+/// SIGTERM the daemon and await clean exit. Defuses the kill-on-drop guard: from here the child is
+/// either reaped by `await_exit`'s happy path or SIGKILL-reaped by its timeout path.
+fn terminate(daemon: Daemon) -> std::process::ExitStatus {
+    let mut child = daemon.take();
     let pid = Pid::from_raw(child.id().cast_signed());
     kill(pid, Signal::SIGTERM).expect("SIGTERM");
     await_exit(&mut child).expect("clean exit on SIGTERM")
@@ -364,7 +410,7 @@ fn live_socket_conflict() {
     // Spawn a second daemon on the same sandbox (same --socket ⇒ same socket path). It must exit
     // non-zero.
     let mut second = spawn_specter(&sb, std::iter::empty::<&str>());
-    let second_exit = await_exit(&mut second).expect("second daemon exited");
+    let second_exit = await_exit(second.child_mut()).expect("second daemon exited");
     assert!(
         !second_exit.success(),
         "second daemon must NOT have succeeded; got {second_exit:?}",
@@ -1287,10 +1333,13 @@ fn wait_fire_observing_detach_exits_two() {
 
     let exit = await_client_exit(&mut wait_child, Duration::from_secs(5))
         .expect("wait must exit on detach");
+    // Exit 0 here means the client observed a fire before the detach — the daemon log's timeline
+    // (attach → fire → detach timestamps) is the diagnosis, so dump it with the failure.
     assert_eq!(
         exit.code(),
         Some(2),
-        "wait --kind fire on SubDetached must exit 2; got {exit:?}",
+        "wait --kind fire on SubDetached must exit 2; got {exit:?}\n--- daemon log ---\n{}",
+        sb.log_contents(),
     );
 
     let daemon_exit = terminate(daemon);
@@ -1427,16 +1476,20 @@ fn disable_suppresses_fires_enable_restores_them() {
     touch_unique(&anchor, "while-disabled");
     // Settle window is 50ms; a fire — were one to occur — would surface well inside one second. The
     // deadline is the upper bound on "we waited long enough for a real fire to land", not a tight
-    // latency claim.
-    assert!(
-        wait_for_line(
-            &rx,
-            |l| l.contains(r#""diag":"sub_fired""#),
-            Duration::from_secs(1),
-        )
-        .is_none(),
-        "disabled Sub must not emit SubFired on a touch",
-    );
+    // latency claim. On failure, the offending line plus the daemon's own log pin down WHEN the
+    // fire happened — a `sub_fired` queued on the stream before the disable is a pre-existing fire
+    // (e.g. a spurious one at attach), not a disable-suppression breach.
+    if let Some(line) = wait_for_line(
+        &rx,
+        |l| l.contains(r#""diag":"sub_fired""#),
+        Duration::from_secs(1),
+    ) {
+        panic!(
+            "disabled Sub must not emit SubFired on a touch\noffending line: {line}\n\
+             --- daemon log ---\n{}",
+            sb.log_contents(),
+        );
+    }
 
     // Enable. The re-attach drives a fresh `Input::AttachSub` through the engine; the new Sub
     // starts with `has_fired = false` and a fresh seed baseline.
@@ -1900,7 +1953,7 @@ fn shutdown_with_wedged_subscribers_is_bounded() {
     const SHUTDOWN_BUDGET: Duration = Duration::from_secs(8 * 2 + 4);
 
     let sb = Sandbox::new();
-    let mut child = spawn_specter(&sb, std::iter::empty::<&str>());
+    let mut daemon = spawn_specter(&sb, std::iter::empty::<&str>());
     assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE));
 
     // Saturate the connection cap with subscribers that finish their handshake and then stop
@@ -1933,6 +1986,7 @@ fn shutdown_with_wedged_subscribers_is_bounded() {
         wedged.push(stream);
     }
 
+    let child = daemon.child_mut();
     let pid = Pid::from_raw(child.id().cast_signed());
     let start = Instant::now();
     kill(pid, Signal::SIGTERM).expect("SIGTERM");

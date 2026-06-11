@@ -637,10 +637,10 @@ fn it_ef_7_dir_metadata_drops_outside_proof_object() {
 #[test]
 fn it_ef_7_boundary_dir_structure_drops_for_outer_profile_via_co_located_demand() {
     // The static co-location twin of a minted Profile on a discovery terminus: the boundary Dir
-    // holds no FD from the outer Profile (watch installation is interior-gated), so the only way
-    // an event surfaces there is a second Profile's own anchor demand. The event must then route
-    // by class per Profile: the anchor Profile drives its own burst; the outer Profile — for whom
-    // the slot is a boundary — drops it.
+    // holds no FD from the outer Profile (watch installation is interior-gated), so the only way an
+    // event surfaces there is a second Profile's own anchor demand. The event must then route by
+    // class per Profile: the anchor Profile drives its own burst; the outer Profile — for whom the
+    // slot is a boundary — drops it.
     let mut e = Engine::new();
     let x = pre_place_dir(&mut e, &["x"]);
     let now = Instant::now();
@@ -701,8 +701,8 @@ fn it_ef_7_boundary_dir_structure_drops_for_outer_profile_via_co_located_demand(
 
 #[test]
 fn it_ef_7_boundary_dir_holds_no_fd_and_events_drop_at_head_guard() {
-    // The static arm: a lone `recursive=false` Profile's seed materializes the boundary Dir's
-    // slot without any watch contribution, so the kernel FD never exists and boundary events are
+    // The static arm: a lone `recursive=false` Profile's seed materializes the boundary Dir's slot
+    // without any watch contribution, so the kernel FD never exists and boundary events are
     // structurally undeliverable. An injected event drops at the head guard
     // (`EventOnUnwatchedResource`) — the routing guard is only reachable via co-located demand.
     let mut e = Engine::new();

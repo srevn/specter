@@ -260,15 +260,14 @@ impl Engine {
                 continue;
             }
 
-            // Slot dance, get-or-create per segment: `ensure_child` is idempotent over the
-            // chain-dir slots the post-graft reconciler already created (role `User`) and creates
-            // only the terminus slots. A terminus is the discovery shape's boundary — its interior
-            // is no part of the proof object — so the reconciler installs no descendant watch
-            // there (`wants_descendant_watch` is interior-gated) and leaves anchor demand at the
-            // slot entirely to the minted Profile. Stamping the observed kind — only `File | Dir`
-            // reaches here, so the `EntryKind → ResourceKind` projection is faithful — lets
-            // `Profile.kind` cache at attach instead of waiting for the minted Profile's first
-            // Seed probe.
+            // Slot dance, get-or-create per segment: `ensure_child` is idempotent over the chain-dir
+            // slots the post-graft reconciler already created (role `User`) and creates only the
+            // terminus slots. A terminus is the discovery shape's boundary — its interior is no part
+            // of the proof object — so the reconciler installs no descendant watch there
+            // (`wants_descendant_watch` is interior-gated) and leaves anchor demand at the slot
+            // entirely to the minted Profile. Stamping the observed kind — only `File | Dir` reaches
+            // here, so the `EntryKind → ResourceKind` projection is faithful — lets `Profile.kind`
+            // cache at attach instead of waiting for the minted Profile's first Seed probe.
             let mut slot = anchor;
             for seg in &terminus.segments {
                 slot = self
@@ -380,9 +379,9 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    //! Unit pins for the discovery reconcile building blocks: the pure terminus collector, the template
-    //! ⟺ `MatchChain` attach boundary, and the reconcile's non-Dir-anchor totality arm. The end-to-end
-    //! reconcile lifecycle lives in `tests/discovery_lifecycle.rs`.
+    //! Unit pins for the discovery reconcile building blocks: the pure terminus collector, the
+    //! template ⟺ `MatchChain` attach boundary, and the reconcile's non-Dir-anchor totality arm.
+    //! The end-to-end reconcile lifecycle lives in `tests/discovery_lifecycle.rs`.
 
     use super::{ChainTerminus, collect_chain_termini};
     use crate::Engine;
@@ -407,8 +406,8 @@ mod tests {
     }
 
     /// td = 1: every root entry is a terminus, whatever its kind — Dir, File, and Symlink all mint
-    /// (`EntryKind → ResourceKind` folds non-dirs to `File` downstream, but the collector reports the
-    /// snapshot's own kind). Order is the `BTreeMap`'s lexicographic walk.
+    /// (`EntryKind → ResourceKind` folds non-dirs to `File` downstream, but the collector reports
+    /// the snapshot's own kind). Order is the `BTreeMap`'s lexicographic walk.
     #[test]
     fn termini_at_depth_one_collect_every_entry_kind_in_lexicographic_order() {
         let root = dir_snap(&[
@@ -426,9 +425,9 @@ mod tests {
         );
     }
 
-    /// td = 3: the collector descends `Covered` chain dirs only, and a terminus-level `Covered` dir (a
-    /// shape the walker never emits — `descends_into` refuses at td) still collects as a Dir terminus
-    /// rather than being descended past the chain bound.
+    /// td = 3: the collector descends `Covered` chain dirs only, and a terminus-level `Covered` dir
+    /// (a shape the walker never emits — `descends_into` refuses at td) still collects as a Dir
+    /// terminus rather than being descended past the chain bound.
     #[test]
     fn termini_at_depth_three_walk_covered_chains_to_the_bound() {
         let root = dir_snap_nested(&[(
@@ -453,8 +452,8 @@ mod tests {
     }
 
     /// Adversarial snapshot: a `Leaf` and an `Uncovered` Dir strictly above the terminus depth are
-    /// skipped (totality, not policy — the pruned walk never emits them); only the `Covered` chain's
-    /// entries at the bound collect. An empty root collects nothing.
+    /// skipped (totality, not policy — the pruned walk never emits them); only the `Covered`
+    /// chain's entries at the bound collect. An empty root collects nothing.
     #[test]
     fn entries_above_the_terminus_that_cannot_recurse_are_skipped() {
         let root = dir_snap_nested(&[
@@ -469,8 +468,8 @@ mod tests {
         assert!(collect_chain_termini(&dir_snap(&[]), 1).is_empty());
     }
 
-    /// The ⟺ attach boundary, template direction: a template on a non-chain Profile is unconstructable
-    /// — its Profile would classify a firing consequence it can never use.
+    /// The ⟺ attach boundary, template direction: a template on a non-chain Profile is
+    /// unconstructable — its Profile would classify a firing consequence it can never use.
     #[test]
     #[should_panic(expected = "ReactionSpec::Mint ⟺ ScanConfig::MatchChain")]
     fn template_on_non_chain_profile_is_unconstructable() {
@@ -525,8 +524,8 @@ mod tests {
     }
 
     /// The reconcile's non-Dir-anchor totality arm: with no Dir `current` (the cold probe hasn't
-    /// answered yet — the same shape as an anchor replaced by a file), reconcile walks no termini and
-    /// mints nothing; the recovery machinery owns whatever replaced the anchor.
+    /// answered yet — the same shape as an anchor replaced by a file), reconcile walks no termini
+    /// and mints nothing; the recovery machinery owns whatever replaced the anchor.
     #[test]
     fn reconcile_without_dir_current_mints_nothing() {
         let mut e = Engine::new();

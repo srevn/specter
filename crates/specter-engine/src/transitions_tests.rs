@@ -2990,10 +2990,10 @@ fn sensor_overflow_pending_profile_with_in_flight_probe_not_duplicated() {
         "descent position preserved across overflow",
     );
     assert!(
-        descent.witnessed(),
-        "overflow latches witnessed activity even when the in-flight probe absorbs the \
-         re-probe — the overflow window proves dropped events, so a materialization off \
-         that probe's response owes a fire",
+        !descent.witnessed(),
+        "overflow never writes the appearance witness — dropped events prove churn \
+         somewhere in scope, not that the awaited segment appeared; the in-flight \
+         probe's own observations carry whatever witness is due",
     );
     assert!(
         !out.probe_ops()
@@ -4075,9 +4075,9 @@ fn structure_only_profile_has_per_file_fds_false() {
 // ---------- Anchor-loss kind-cache invalidation ----------
 //
 // Per-site assertions that every dispatch path through `Engine::discard_anchor_state` clears the
-// cached `Profile.kind`. The helper unit tests in `claims.rs` pin the contract in isolation;
-// these tests pin the integration at the seven production call sites so the kind-clear cannot
-// regress at any one of them without a test failure.
+// cached `Profile.kind`. The helper unit tests in `claims.rs` pin the contract in isolation; these
+// tests pin the integration at the seven production call sites so the kind-clear cannot regress at
+// any one of them without a test failure.
 
 /// Drive a Profile from fresh-attach into `Active(Standard, Verifying)` with
 /// `pending_probe.is_some()`. Returns the live correlation.

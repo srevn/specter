@@ -85,13 +85,12 @@ impl Engine {
                 .push(Diagnostic::EventOnUnwatchedResource { resource });
             return;
         }
-        // `Arc::clone` of the slot's materialised path — an O(1) refcount bump, total by
-        // construction (the slot is live). The kind is captured in the same breath and for the same
-        // staleness reason: read off the proven-live `&Resource` now, so a later covering dispatch
-        // that reaps the slot can't turn the routing-time classification into a `None`-defaulted
-        // guess. Unprobed slots collapse to File-shape (`kind_or_file`) per the backend-mask
-        // convention — `fs_event_to_class` and the kqueue / inotify translators agree on this
-        // default.
+        // `Arc::clone` of the slot's materialised path — an O(1) refcount bump, total by construction
+        // (the slot is live). The kind is captured in the same breath and for the same staleness
+        // reason: read off the proven-live `&Resource` now, so a later covering dispatch that reaps
+        // the slot can't turn the routing-time classification into a `None`-defaulted guess. Unprobed
+        // slots collapse to File-shape (`kind_or_file`) per the backend-mask convention —
+        // `fs_event_to_class` and the kqueue / inotify translators agree on this default.
         let event_path = Arc::clone(r.path());
         let resource_kind = r.kind_or_file();
 
@@ -173,12 +172,11 @@ impl Engine {
             //   classes mkdir/rmdir backrefs (`NOTE_LINK`) as STRUCTURE, so dropping Dir-METADATA
             //   loses no structural signal.
             //
-            // Identity events are exempt: a deleted terminus folds to STRUCTURE at the boundary
-            // slot and must drive the discovery reconcile's reap. Driving a burst on a
-            // proof-irrelevant event could only end in a `nothing_changed` verdict — which a
-            // never-fired Sub converts into a spurious first fire — and the guard sits before
-            // `drive_burst`, so post-fire absorbs are equally stopped (a proof-irrelevant event
-            // must not extend a settle loop).
+            // Identity events are exempt: a deleted terminus folds to STRUCTURE at the boundary slot
+            // and must drive the discovery reconcile's reap. Driving a burst on a proof-irrelevant
+            // event could only end in a `nothing_changed` verdict — which a never-fired Sub converts
+            // into a spurious first fire — and the guard sits before `drive_burst`, so post-fire
+            // absorbs are equally stopped (a proof-irrelevant event must not extend a settle loop).
             if !is_anchor && !is_identity {
                 let dir_kinded = matches!(resource_kind, ResourceKind::Dir);
                 if matches!(class, crate::coverage::CoverageClass::Boundary)
@@ -218,14 +216,16 @@ impl Engine {
     /// watch-rejection anchor purge (the kernel refused the watch; descending would loop
     /// materialize → watch → reject).
     ///
-    /// **The entry event does not latch the descent's activity witness.** The event that selected
+    /// **The entry event does not latch the descent's appearance witness.** The event that selected
     /// this Profile into the recoveries arm is a `StructureChanged` at the *parent* — it can be
     /// sibling churn entirely out of the Sub's scope, and latching it would false-first-fire a
     /// never-fired Sub whose anchor the entry probe then finds unchanged on disk (the transient
     /// probe-`Failed` discard is the canonical shape: the anchor typically never left). Fired Subs
-    /// are protected by witness-drift either way. Accepted narrow miss: when the entry event was
-    /// itself the replacement *and* the entry probe finds it, a never-fired Sub misses that one
-    /// fire. Later events at the prefix latch via `on_descent_event`.
+    /// are protected by witness-drift either way. A genuine replacement is witnessed by the probes
+    /// themselves: an entry probe finding the anchor absent records the absence half, and the later
+    /// probe that finds it completes the appearance — descent-wide semantics, not a recovery
+    /// special case. Accepted narrow miss: when the entry probe finds the replacement already
+    /// present (no absence half ever observed), a never-fired Sub misses that one fire.
     ///
     /// **Recovery overlap.** The parent already holds `+1 STRUCTURE` from
     /// `Profile.watch_root_parent` (set at the original anchor materialization, never cleared on
@@ -2655,9 +2655,9 @@ impl Engine {
         // returned — `dispatch_quiescence_ok`'s fallback writes the field on the next Seed-Ok.
         let anchor_kind = p.kind().unwrap_or(ResourceKind::Dir);
         // Substitution-side projection of `ScanConfig.exclude`. The resolver iterates source strings;
-        // the sensor consults compiled matchers. The order is the exclude list's build-time
-        // canonical form — `ScanConfigBuilder::build` sorts and dedups — which `Profile::new` copies
-        // out verbatim, so the projection is already canonical without a re-sort here.
+        // the sensor consults compiled matchers. The order is the exclude list's build-time canonical
+        // form — `ScanConfigBuilder::build` sorts and dedups — which `Profile::new` copies out
+        // verbatim, so the projection is already canonical without a re-sort here.
         let exclude_strings = Arc::clone(p.exclude_strings());
 
         let anchor_path: Arc<Path> = self.tree.path_of(resource).unwrap_or_else(empty_path);
@@ -2859,9 +2859,9 @@ impl Engine {
                 continue;
             }
             // `graft`'s `apply_diff_to_tree` runs before this and materialises every covered diff
-            // entry; lookup is the happy path. Fall back to `ensure_descendant` for defense — covers
-            // the rare case where reconcile filtered the entry (e.g., reconcile gates Watch on Dir,
-            // not on every leaf the Sub can fire against).
+            // entry; lookup is the happy path. Fall back to `ensure_descendant` for defense —
+            // covers the rare case where reconcile filtered the entry (e.g., reconcile gates Watch
+            // on Dir, not on every leaf the Sub can fire against).
             let resource = match lookup_descendant(&self.tree, anchor, entry.segment.as_str()) {
                 Some(r) => r,
                 None => match ensure_descendant(

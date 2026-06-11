@@ -44,9 +44,9 @@ pub const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 ///
 /// Returns every [`Diagnostic`] the drained steps emit, in step order: most callers drive the
 /// engine for its side effects and drop the return, but a pin that must observe a diagnostic raised
-/// while a timer fires — a breach surfacing only on the timer-driven transition, say — binds it (and
-/// can assert its absence too). Not `#[must_use]`: the drain is the point, the diagnostics are a
-/// byproduct.
+/// while a timer fires — a breach surfacing only on the timer-driven transition, say — binds it
+/// (and can assert its absence too). Not `#[must_use]`: the drain is the point, the diagnostics are
+/// a byproduct.
 ///
 /// This is the *parked-siblings* drain discipline: correct when any co-Profile in flight holds no
 /// timer expirable at `at` (a Verifying Profile has no settle timer; a Draining one holds only its

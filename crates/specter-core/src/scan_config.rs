@@ -131,8 +131,8 @@ pub enum ScanConfig {
     /// the very segment being searched for) deliberately collapse to no-ops. Prober-internal: it
     /// anchors no Profile and never travels the wire. The sensor does wrap it in a transient
     /// [`ProfileIdentity`] once per descent probe — purely to derive the snapshot's `captured_with`
-    /// stamp (the canonical descent-shape hash) — but that hash keys no Profile, so the partitioning
-    /// invariant holds.
+    /// stamp (the canonical descent-shape hash) — but that hash keys no Profile, so the
+    /// partitioning invariant holds.
     Descent,
 }
 
@@ -512,11 +512,10 @@ pub(crate) fn compute_config_hash(
             h.put_u8(u8::from(*hidden));
 
             // Canonical width: u32 for the count. The list arrives sorted *and* deduplicated from
-            // `ScanConfigBuilder::build`, so this count is over the canonical set — `["a", "a"]`
-            // and `["a"]` fold identically rather than forking two Profiles on a logically equal
-            // exclude set. Saturate on the absurd overflow case — the alternative is an explicit
-            // panic, which buys nothing for a config layer that cannot realistically reach 2^32
-            // globs.
+            // `ScanConfigBuilder::build`, so this count is over the canonical set — `["a", "a"]` and
+            // `["a"]` fold identically rather than forking two Profiles on a logically equal exclude
+            // set. Saturate on the absurd overflow case — the alternative is an explicit panic, which
+            // buys nothing for a config layer that cannot realistically reach 2^32 globs.
             let exclude_count = u32::try_from(exclude.len()).unwrap_or(u32::MAX);
             h.put_u32(exclude_count);
             for g in exclude {
@@ -545,8 +544,8 @@ pub(crate) fn compute_config_hash(
         }
         // Hashed once per descent probe by the sensor, which stamps the resulting digest onto every
         // descent snapshot's `captured_with`. A `Descent` anchors no Profile, so this stamp keys no
-        // partition — and because it folds through the same kernel on a shape no Profile carries, it
-        // can never collide with a live Profile's `config_hash`. The arm carries its own
+        // partition — and because it folds through the same kernel on a shape no Profile carries,
+        // it can never collide with a live Profile's `config_hash`. The arm carries its own
         // discriminant byte (not `unreachable!`) precisely because this is a real path.
         ScanConfig::Descent => {
             h.put_u8(1);

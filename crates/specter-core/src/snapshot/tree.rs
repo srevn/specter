@@ -793,8 +793,8 @@ pub enum SpliceResult {
 ///
 /// Only the cross-fs subset of [`SpliceFailureCause::IntermediateUncovered`] is reachable through
 /// legitimate filesystem state (the engine clamps probe targets to descend-chain nodes but is
-/// device-blind); the other two remain v1-unreachable. The caller's prior handle stays alive
-/// across the breach (it's an independent Arc clone), so no integration occurs; the caller emits a
+/// device-blind); the other two remain v1-unreachable. The caller's prior handle stays alive across
+/// the breach (it's an independent Arc clone), so no integration occurs; the caller emits a
 /// Diagnostic so the contract breach is observable.
 #[must_use]
 pub fn splice(

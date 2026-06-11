@@ -1,8 +1,10 @@
 //! Pending-path descent end-to-end. Drives `Engine::attach_sub` with a path-based request, walks
 //! descent through scaffolds, and confirms anchor materialization triggers a Seed burst. The
-//! witnessed-activity latch splits the materialization: a descent that saw kernel activity (an
-//! event reaching it live — even while its probe is in flight) opens a *triggered* Seed that owes a
-//! fire; an unwitnessed attach-over-existing stays cold and pins.
+//! witnessed-appearance latch splits the materialization: a descent whose probes observed the
+//! awaited segment absent and then present (an absence→presence pair) opens a *triggered* Seed that
+//! owes a fire; a descent that found every segment on first observation stays cold and pins —
+//! prefix events drive re-probes but never write the witness, so sibling churn at a shared prefix
+//! can't fire a Sub whose anchor sat unchanged on disk.
 
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
@@ -119,10 +121,11 @@ fn attach_sub_path_pending_then_anchor_appears() {
     assert!(p.baseline().is_some());
 }
 
-/// The watched file APPEARS after attach, witnessed via the parent's STRUCTURE event reaching the
-/// live descent — the witnessed-activity latch — so materialization opens a triggered Seed
-/// (Batching-first) that FIRES once the settle window passes (`FreshSeedFire`). The witnessed
-/// counterpart of [`attach_sub_path_pending_then_anchor_appears`]'s cold pin.
+/// The watched file APPEARS after attach: the first descent probe observes the awaited segment absent
+/// (the standing absence half), the parent's STRUCTURE event drives a re-probe, and the response that
+/// finds the segment completes the absence→presence appearance witness — so materialization opens a
+/// triggered Seed (Batching-first) that FIRES once the settle window passes (`FreshSeedFire`). The
+/// witnessed counterpart of [`attach_sub_path_pending_then_anchor_appears`]'s cold pin.
 #[test]
 fn pending_path_witnessed_appearance_fires() {
     let mut e = Engine::new();
@@ -156,9 +159,9 @@ fn pending_path_witnessed_appearance_fires() {
         ProfileState::Pending(_)
     ));
 
-    // The file appears: the parent STRUCTURE event latches the live descent witnessed and
-    // re-probes; the response materializes the anchor into a TRIGGERED Seed — Batching-first, no
-    // probe until the settle window expires.
+    // The file appears: the parent STRUCTURE event re-probes; the response finds the segment the
+    // prior probe observed absent — the appearance witness — and materializes the anchor into a
+    // TRIGGERED Seed: Batching-first, no probe until the settle window expires.
     let t1 = now + Duration::from_millis(50);
     let _ = e.step(
         Input::FsEvent {
@@ -208,19 +211,27 @@ fn pending_path_witnessed_appearance_fires() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// The latch lands before the I5 in-flight gate: an event reaching a live descent whose attach-time
-/// probe is STILL in flight must latch the witness even though the re-probe is dropped — the
-/// in-flight response then materializes into a triggered Seed that fires. (The overflow variant of
-/// this ordering is pinned beside `on_sensor_overflow`'s tests; this is the plain-FsEvent variant.)
+/// Sibling churn at a descent prefix during an attach over an existing tree pins silently — zero
+/// effects. The flake shape this pins against: a daemon whose attach path crosses a busy shared
+/// directory (`/tmp`, `$TMPDIR`, `/var/log`) receives STRUCTURE events at the live descent prefix
+/// from churn entirely outside the Sub's scope; a directory event names no segment on either backend,
+/// so treating it as a witness would false-first-fire a never-fired Sub whose anchor sat unchanged on
+/// disk the whole descent. Every probe here finds its segment on first observation — no absence half
+/// is ever observed — so the terminus Seed stays cold no matter how much churn the prefixes saw.
+///
+/// Accepted narrow miss (uniform with the recovery arm's): an anchor created between attach and the
+/// first probe's response is found on first observation and is indistinguishable from having
+/// existed all along — it pins. The window is one probe round-trip; the restart-safe doctrine
+/// already pins the attach-over-existing side of that ambiguity.
 #[test]
-fn event_during_in_flight_attach_descent_latches_and_fires() {
+fn sibling_churn_during_attach_descent_pins_silently() {
     let mut e = Engine::new();
     let parent = pre_place_dir(&mut e, &["watch"]);
     let now = Instant::now();
 
     let req = SubAttachRequest::for_anchor(
-        "latch-i5".into(),
-        SubAttachAnchor::Path(PathBuf::from("/watch/app.log")),
+        "churn".into(),
+        SubAttachAnchor::Path(PathBuf::from("/watch/a/b")),
         ScanConfig::builder().recursive(true).build(),
         MAX_SETTLE,
         SETTLE,
@@ -237,8 +248,8 @@ fn event_during_in_flight_attach_descent_latches_and_fires() {
         "attach-time descent probe in flight",
     );
 
-    // The file appears while the attach-time probe is in flight: the latch lands, the I5 gate drops
-    // the re-probe.
+    // Sibling churn at /watch while the attach-time probe is in flight: the I5 gate drops the
+    // re-probe and nothing latches — the in-flight response already reflects the change.
     let t1 = now + Duration::from_millis(10);
     let out = e.step(
         Input::FsEvent {
@@ -252,26 +263,127 @@ fn event_during_in_flight_attach_descent_latches_and_fires() {
         "I5: the in-flight probe absorbs the re-probe",
     );
 
-    // The in-flight response finds the file — it must open a TRIGGERED Seed (the latch landed), not
-    // pin silently.
+    // The response finds `a` present (alongside the churned sibling) — first observation, no
+    // absence half — and advances; the descent's fresh probe at /watch/a is immediately in flight.
     let out = descent_advance(
         &mut e,
         pid,
-        &dir_snap(&[("app.log", EntryKind::File, 1)]),
+        &dir_snap(&[
+            ("a", EntryKind::Dir, 1),
+            ("churn-junk", EntryKind::File, 99),
+        ]),
         t1,
     );
     assert!(out.effects().is_empty());
+    let a = e
+        .tree()
+        .lookup(Some(parent), "a")
+        .expect("descent advanced into /watch/a");
+    assert!(e.pending_probe_for(pid).is_some());
+
+    // More sibling churn, now at the advanced prefix — same drop, same silence.
+    let out = e.step(
+        Input::FsEvent {
+            resource: a,
+            event: FsEvent::StructureChanged,
+        },
+        t1,
+    );
+    assert!(out.probe_ops().is_empty(), "I5 again at the deeper prefix");
+
+    // The terminus finds `b` present on first observation: a COLD Seed — Verifying-first, the probe
+    // emitted at burst construction — that pins silently.
+    let out = descent_advance(&mut e, pid, &dir_snap(&[("b", EntryKind::Dir, 2)]), t1);
+    assert!(
+        out.effects().is_empty(),
+        "materialization itself never fires"
+    );
+    assert!(
+        e.pending_probe_for(pid).is_some(),
+        "cold Seed opens Verifying-first — attach-over-existing, not an appearance",
+    );
+    let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), t1);
+
+    assert!(matches!(
+        e.profiles().get(pid).unwrap().state(),
+        ProfileState::Idle
+    ));
+    assert!(
+        !e.subs().get(sid).unwrap().has_fired(),
+        "sibling churn at descent prefixes must not fire an attach over an existing tree",
+    );
+}
+
+/// A descent prefix that VANISHES mid-descent is a first-hand absence observation for the whole
+/// remaining chain — a path cannot complete through a vanished directory — so the rewound descent's
+/// eventual re-completion is a witnessed appearance: the terminus opens a triggered Seed that
+/// fires. The Vanished-arm counterpart of [`pending_path_witnessed_appearance_fires`]'s
+/// park-observed absence (the two writers of the absence half).
+#[test]
+fn prefix_vanished_rewind_then_recompletion_fires() {
+    let mut e = Engine::new();
+    let _parent = pre_place_dir(&mut e, &["watch"]);
+    let now = Instant::now();
+
+    let req = SubAttachRequest::for_anchor(
+        "vanish".into(),
+        SubAttachAnchor::Path(PathBuf::from("/watch/a/b")),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::DEFAULT_SUBTREE_ROOT,
+        false,
+    );
+    let out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
+    let pid = e.subs().get(sid).unwrap().profile();
+
+    // First probe finds `a` — first observation, descent advances to /watch/a.
+    let _ = descent_advance(&mut e, pid, &dir_snap(&[("a", EntryKind::Dir, 1)]), now);
+
+    // The advanced prefix vanishes out from under the descent (`rm -rf /watch/a` mid-attach): the
+    // rewind re-injects `a` as the head and records the absence observation.
+    let t1 = now + Duration::from_millis(10);
+    let corr = e
+        .pending_probe_for(pid)
+        .expect("probe at /watch/a in flight");
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: corr,
+            outcome: ProbeOutcome::Vanished,
+        }),
+        t1,
+    );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::PendingPathProbeVanished { .. })),
+        "rewind narrated",
+    );
+
+    // The path re-completes: `a` recreated (fresh identity), then `b` lands. The found-after-absent
+    // pair latches the appearance witness, so the terminus opens a TRIGGERED Seed — Batching-first.
+    let _ = descent_advance(&mut e, pid, &dir_snap(&[("a", EntryKind::Dir, 3)]), t1);
+    let out = descent_advance(&mut e, pid, &dir_snap(&[("b", EntryKind::File, 4)]), t1);
+    assert!(
+        out.effects().is_empty(),
+        "materialization itself never fires"
+    );
     assert!(
         e.pending_probe_for(pid).is_none(),
         "triggered Seed opens Batching-first",
     );
+
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
-    let out = respond_anchor_file(&mut e, pid, 1, t2);
+    let out = respond_anchor_file(&mut e, pid, 4, t2);
     assert_eq!(
         out.effects().len(),
         1,
-        "the latched appearance fires once it settles",
+        "the observed delete-then-recreate of the anchor's path fires once it settles",
     );
     assert!(e.subs().get(sid).unwrap().has_fired());
     let _ = e.cancel_all_in_flight_probes();

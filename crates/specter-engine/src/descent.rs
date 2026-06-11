@@ -26,8 +26,8 @@
 //! - **Observed anchor loss** (`Engine::finalize_anchor_lost_and_descend`): the anchor-terminal
 //!   event, a probe-`Vanished` dispatch, or a kind-mismatched response re-enters descent at
 //!   `watch_root_parent` *inside the loss step itself* — "anchor lost" and "anchor doesn't yet
-//!   exist" are the same state. Witnessed: the loss signal is the activity witness, so the terminus
-//!   Seed owes a fire.
+//!   exist" are the same state. Witnessed: the loss signal is the absence half of the appearance
+//!   witness, so the terminus Seed owes a fire.
 //! - **Event-scan fallback** (`Engine::start_pending_recovery`): a parent `StructureChanged`
 //!   re-enters a Profile that a probe-`Failed` discard or a watch-rejection purge left parked
 //!   Idle-anchorless. Unwitnessed: the entry event can be sibling churn out of the Sub's scope.
@@ -37,19 +37,26 @@
 //!    is `current_prefix`; the remaining path components await materialization (a recovery entry is
 //!    the one-segment special case: prefix = the anchor's parent).
 //! 2. The engine bumps `current_prefix.watch_demand` and emits a `ProbeOp::Probe` at the prefix.
-//! 3. `dispatch_descent_probe` consumes the response:
+//! 3. `dispatch_descent_probe` consumes the response. The responses also carry the descent's
+//!    **appearance witness**: a probe observing the awaited segment absent (or the prefix vanished)
+//!    records a standing absence observation, and a later probe finding the segment present
+//!    completes the absence→presence pair, latching `DescentState::witnessed`. Probes are the only
+//!    witness writers — a prefix event names no segment on either backend, so sibling churn at a
+//!    shared prefix can never masquerade as the anchor appearing.
 //!    - `Ok(snap)`: look for the next remaining component as a single-level child. Found and is the
 //!      anchor → materialize (promote to `User`, set kind, bump anchor's `watch_demand`, drop the
 //!      prefix's, transition Pending → Idle, start a Seed burst — cold, or Batching-first triggered
-//!      when the descent's witnessed-activity latch is set). Found but not the anchor → advance
-//!      descent one segment. Not found → park awaiting the next event (a witnessed park narrates
-//!      via `PendingPathAwaitingSegment` — the delete-then-write recovery shape).
-//!    - `Vanished`: the prefix itself is gone. Sub the prefix's contribution; vacate; rewind to the
-//!      next-existing ancestor; emit a fresh probe.
+//!      when the descent's witnessed-appearance latch is set). Found but not the anchor → advance
+//!      descent one segment. Not found → record the absence observation and park awaiting the next
+//!      event (a witnessed park narrates via `PendingPathAwaitingSegment` — the delete-then-write
+//!      recovery shape).
+//!    - `Vanished`: the prefix itself is gone — an absence observation for the whole remaining
+//!      chain. Sub the prefix's contribution; vacate; rewind to the next-existing ancestor; emit a
+//!      fresh probe.
 //!    - `Failed { errno }`: retain Pending state; emit Diagnostic; await next event.
-//! 4. `on_descent_event` latches the descent's witnessed-activity bit, then triggers a fresh probe
-//!    (no settle) on `StructureChanged` at `current_prefix`. I5: drops the re-probe if a probe is
-//!    already in flight (the latch still lands — the in-flight response reflects the change).
+//! 4. `on_descent_event` triggers a fresh probe (no settle) on `StructureChanged` at
+//!    `current_prefix` — pure mechanism, no witness write. I5: drops the re-probe if a probe is
+//!    already in flight (the in-flight response reflects the change).
 
 use crate::path::empty_path;
 use crate::probe::DescentOutcome;
@@ -196,12 +203,15 @@ impl crate::Engine {
     /// `Pending`, bumps the prefix's `STRUCTURE` `watch_demand` contribution, and emits the descent
     /// probe — the four-step Idle → Pending entry sequence as a single helper.
     ///
-    /// `witnessed` is the descent's activity-latch birth value ([`DescentState::new`]): `true` when
-    /// the entry itself was driven by an observed anchor loss (the loss event is the witness),
-    /// `false` when no kernel signal vouches for the anchor having changed — the attach-time entry
-    /// (no event at all) and the event-scan recovery (whose entry event can be sibling churn at the
-    /// parent, out of the Sub's scope). Later events reaching the live descent latch via
-    /// [`Self::on_descent_event`] regardless of the birth value.
+    /// `witnessed` is the descent's appearance-latch birth value ([`DescentState::new`]): `true`
+    /// when the entry itself was driven by an observed anchor loss (the loss signal is the absence
+    /// half of the witness; materialization supplies the presence half), `false` when no first-hand
+    /// observation vouches for the anchor having been absent — the attach-time entry (no
+    /// observation at all) and the event-scan recovery (whose entry event can be sibling churn at
+    /// the parent, out of the Sub's scope). After entry the latch moves only on the descent's own
+    /// probe observations: an absent-then-present pair across responses latches it
+    /// ([`DescentState::note_observed_absent`] / [`DescentState::note_observed_present`]); events
+    /// never write it.
     ///
     /// **Ordering: mint → state-flip → add_watch → emit.** Symmetric with
     /// [`Self::materialize_profile_anchor`]'s state-before-refcount pattern. The mint runs *first*
@@ -369,13 +379,24 @@ impl crate::Engine {
         let entry_kind = match snapshot.entries().get(next_segment.as_str()) {
             Some(child) => child.kind(),
             None => {
-                // Next segment not yet present; await next event. v1 descent doesn't mtime-skip, so
-                // no need to retain the snapshot — the next probe will get a fresh `lstat`-walked
-                // DirSnapshot anyway. A witnessed descent narrates the park: post-loss recovery
-                // flows through here when the replacement hasn't landed yet (delete-then-write
-                // saves), and a silent park would read as the recovery vanishing in a debug tail.
-                // Attach-time descents skip the narration — parking is their steady state.
-                if descent.witnessed() {
+                // Next segment not yet present: record the absence observation — the standing half
+                // of the appearance witness a later found-response completes — then await the next
+                // event. v1 descent doesn't mtime-skip, so no need to retain the snapshot — the
+                // next probe will get a fresh `lstat`-walked DirSnapshot anyway. A witnessed
+                // descent narrates the park: post-loss recovery flows through here when the
+                // replacement hasn't landed yet (delete-then-write saves), and a silent park would
+                // read as the recovery vanishing in a debug tail. Unwitnessed descents skip the
+                // narration — parking is their steady state. Loud arm: the entry resolution above
+                // proved the owner in descent and nothing in between mutated it, so a `None` here
+                // is a state-machine breach, not a benign race.
+                let Some(d) = self.descent_state_mut(owner) else {
+                    unreachable!(
+                        "dispatch_descent_ok: owner {owner:?} left descent between \
+                         the entry resolution and the park"
+                    );
+                };
+                d.note_observed_absent();
+                if d.witnessed() {
                     out.diagnostics
                         .push(Diagnostic::PendingPathAwaitingSegment {
                             profile: owner,
@@ -386,6 +407,18 @@ impl crate::Engine {
                 return;
             }
         };
+
+        // The awaited segment is present. Under a standing absence observation this completes the
+        // absence→presence appearance witness — latched here, before the terminal arm reads it for
+        // the cold/triggered Seed split (the intermediate arm carries it forward unchanged). Loud
+        // arm for the same reason as the park above.
+        let Some(d) = self.descent_state_mut(owner) else {
+            unreachable!(
+                "dispatch_descent_ok: owner {owner:?} left descent between \
+                 the entry resolution and the found-segment latch"
+            );
+        };
+        d.note_observed_present();
 
         // Materialize the next segment as a Tree slot. Look it up first; if absent, ensure as
         // DescentScaffold (the terminal arms may promote it to User via `promote_scaffold`).
@@ -463,9 +496,9 @@ impl crate::Engine {
     /// remaining segment and the Profile is about to leave `Pending` for `Idle → Active(Seed)`.
     ///
     /// Sequence (load-bearing):
-    /// 1. Read the witnessed-activity latch off the descent state — it must happen before step 3's
-    ///    `Pending → Idle` flip destroys the [`DescentState`] carrying it (the descent's probe slot
-    ///    is already disarmed at this depth, so the drop is tripwire-safe).
+    /// 1. Read the witnessed-appearance latch off the descent state — it must happen before step
+    ///    3's `Pending → Idle` flip destroys the [`DescentState`] carrying it (the descent's probe
+    ///    slot is already disarmed at this depth, so the drop is tripwire-safe).
     /// 2. Promote the slot's role to `User` via [`specter_core::Tree::promote_scaffold`] — a no-op
     ///    if a co-resident peer already gave the slot a real role (`WatchRootParent` / `User`), so
     ///    materialization never clobbers a peer's claim.
@@ -536,10 +569,10 @@ impl crate::Engine {
 
         self.set_watch_root_parent(profile_id, out);
 
-        // A witnessed descent owes its terminus Seed the activity provenance: the anchor threads in
-        // as the trigger, so the Seed opens Batching-first and classifies
-        // `Consequence::FreshSeedFire` / drift on the stable verdict. An unwitnessed descent (the
-        // attach-time entry probe found the anchor without any kernel event) stays cold —
+        // A witnessed descent owes its terminus Seed the appearance provenance: the anchor threads
+        // in as the trigger, so the Seed opens Batching-first and classifies
+        // `Consequence::FreshSeedFire` / drift on the stable verdict. An unwitnessed descent (every
+        // segment found on first observation — no absence half was ever observed) stays cold —
         // attach-over-existing pins silently, the restart-safe doctrine.
         let trigger = witnessed.then(|| {
             // The anchor slot is live by construction (ensured by the caller this step; its claim
@@ -587,9 +620,16 @@ impl crate::Engine {
         _now: Instant,
         out: &mut StepOutput,
     ) {
-        let Some(descent) = self.descent_state(owner) else {
+        let Some(descent) = self.descent_state_mut(owner) else {
             return;
         };
+        // The prefix itself is gone, so a fortiori the anchor's path is incomplete — a first-hand
+        // absence observation (a path cannot complete through a vanished directory). Recording it
+        // here makes the eventual re-completion a witnessed appearance: an ancestor deleted and
+        // recreated under a parked attach is a genuine delete-then-recreate of the anchor's path,
+        // not an attach-over-existing. Moot on the root-prefix arm below (the release helper tears
+        // the descent down), so the uniform entry write costs nothing there.
+        descent.note_observed_absent();
         let prefix = descent.current_prefix();
 
         out.diagnostics.push(Diagnostic::PendingPathProbeVanished {
@@ -669,21 +709,24 @@ impl crate::Engine {
         // Retain in-descent state; await next event at the prefix.
     }
 
-    /// Handler for `FsEvent` arriving at a descent's `current_prefix`. Latches the descent's
-    /// witnessed-activity bit, then triggers a fresh probe (no settle wait — descent is
-    /// event-driven). I5: drops the event if a probe is already in flight (the in-flight probe will
-    /// pick up the change in its response). The "in flight" signal is an armed descent probe slot
-    /// for this Profile.
+    /// Handler for `FsEvent` arriving at a descent's `current_prefix`: triggers a fresh probe (no
+    /// settle wait — descent is event-driven). I5: drops the event if a probe is already in flight
+    /// (the in-flight probe will pick up the change in its response). The "in flight" signal is an
+    /// armed descent probe slot for this Profile.
     ///
-    /// **The latch precedes the I5 gate — load-bearing.** With the gate first, an event arriving
-    /// while the attach-time cold probe is in flight would drop unlatched: the in-flight response
-    /// then finds the anchor and the terminus Seed pins silently, while the same creation one
-    /// millisecond later (post-response) would fire. The latch is a side effect on the descent
-    /// state; the bool return contract ("re-armed and emitted") is unchanged by it.
+    /// **Pure mechanism — no witness write.** A directory event at the prefix names no segment on
+    /// either backend, so it cannot distinguish the awaited segment appearing from sibling churn
+    /// entirely outside the Sub's scope — a daemon whose attach path crosses a busy directory
+    /// (`/tmp`, `/var/log`, a shared tempdir) sees such churn constantly. The appearance witness
+    /// lives in the probe observations themselves ([`Self::dispatch_descent_ok`] /
+    /// [`Self::dispatch_descent_vanished`]): an absent-then-present pair latches
+    /// `DescentState::witnessed`; a response that finds every segment on first observation leaves
+    /// the terminus cold. The probe this handler triggers is how an appearance gets observed at all
+    /// — the event's only role.
     ///
-    /// The overflow reseed path (`on_sensor_overflow`'s Pending arm) calls this directly, so an
-    /// overflow latches too — deliberate: overflow proves events were dropped, and an appearance
-    /// inside an overflow window is real witnessed appearance.
+    /// The overflow reseed path (`on_sensor_overflow`'s Pending arm) calls this directly. Overflow
+    /// proves events were dropped somewhere in scope, not that the awaited segment appeared — the
+    /// re-probe reads the post-overflow tree, and its observations carry whatever witness is due.
     ///
     /// Returns `true` iff it re-armed the descent slot and emitted a fresh probe; `false` when a
     /// gate skipped (probe already in flight, or the Profile is no longer descending). The overflow
@@ -696,12 +739,11 @@ impl crate::Engine {
         _now: Instant,
         out: &mut StepOutput,
     ) -> bool {
-        // Liveness gate and latch in one resolution: an `FsEvent` for an owner no longer descending
-        // is a benign post-transition race — nothing to latch, nothing to re-probe.
-        let Some(d) = self.descent_state_mut(owner) else {
+        // Liveness gate: an `FsEvent` for an owner no longer descending is a benign post-transition
+        // race — nothing to re-probe.
+        if self.descent_state(owner).is_none() {
             return false;
-        };
-        d.note_witnessed_activity();
+        }
         if self.pending_probe_for(owner).is_some() {
             return false;
         }
@@ -725,9 +767,8 @@ impl crate::Engine {
 
 #[cfg(test)]
 mod tests {
-    //! Tests for `engine::descent` — pending-path scenarios that exercise `DescentState`
-    //! lifecycle in isolation. Tests compose `Engine` with `MockSensor`-style direct ProbeResponse
-    //! injection.
+    //! Tests for `engine::descent` — pending-path scenarios that exercise `DescentState` lifecycle
+    //! in isolation. Tests compose `Engine` with `MockSensor`-style direct ProbeResponse injection.
 
     #![allow(
         clippy::items_after_statements,
@@ -769,11 +810,12 @@ mod tests {
         ])])
     }
 
-    /// Build an `Arc<DirSnapshot>` carrying the supplied single-component children. Descent probes walk
-    /// a single level, so every descent test response is a single-level `DirSnapshot`; this helper
-    /// matches that shape exactly. Recursive uses are out of scope for the descent test surface
-    /// (recursive walks live in burst tests). The typed `ProbeOutcome::DirEnumerated` variant takes
-    /// `Arc<DirSnapshot>` directly — no `TreeSnapshot::Dir` wrap is needed at the wire boundary.
+    /// Build an `Arc<DirSnapshot>` carrying the supplied single-component children. Descent probes
+    /// walk a single level, so every descent test response is a single-level `DirSnapshot`; this
+    /// helper matches that shape exactly. Recursive uses are out of scope for the descent test
+    /// surface (recursive walks live in burst tests). The typed `ProbeOutcome::DirEnumerated`
+    /// variant takes `Arc<DirSnapshot>` directly — no `TreeSnapshot::Dir` wrap is needed at the
+    /// wire boundary.
     fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
         let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
         for (name, kind, inode) in children {
@@ -797,8 +839,8 @@ mod tests {
         ))
     }
 
-    /// Set up an Engine with `/foo` as a Dir; attach a Sub at path `/foo/bar`. Bar doesn't exist yet —
-    /// descent registers.
+    /// Set up an Engine with `/foo` as a Dir; attach a Sub at path `/foo/bar`. Bar doesn't exist
+    /// yet — descent registers.
     fn setup_pending_one_level() -> (Engine, specter_core::SubId, specter_core::ProfileId) {
         let mut e = Engine::new();
         // /foo exists as a Dir with no role-anchor — represents a real directory the engine has
@@ -863,8 +905,8 @@ mod tests {
             Instant::now(),
         );
 
-        // Anchor materialized: descent state cleared; the Seed burst is cold-arm Verifying-first — a
-        // probe is emitted at burst construction (the same step as materialization).
+        // Anchor materialized: descent state cleared; the Seed burst is cold-arm Verifying-first —
+        // a probe is emitted at burst construction (the same step as materialization).
         assert!(e.descent_state(pid).is_none());
         assert!(
             matches!(
@@ -1111,11 +1153,11 @@ mod tests {
         let _ = e.cancel_all_in_flight_probes();
     }
 
-    /// Companion to `descent_anchor_kind_set_from_entry`: descent materialisation must also cache the
-    /// kind on the Profile itself, not just the Tree slot. The cached `Profile.kind` is the read path
-    /// for `transition_to_verifying`'s probe-target dispatch — without it, a File-anchored Profile
-    /// materialised from descent would fall through to the `unwrap_or(File)` default by accident rather
-    /// than by knowledge.
+    /// Companion to `descent_anchor_kind_set_from_entry`: descent materialisation must also cache
+    /// the kind on the Profile itself, not just the Tree slot. The cached `Profile.kind` is the
+    /// read path for `transition_to_verifying`'s probe-target dispatch — without it, a
+    /// File-anchored Profile materialised from descent would fall through to the `unwrap_or(File)`
+    /// default by accident rather than by knowledge.
     #[test]
     fn descent_materialization_caches_profile_kind() {
         let (mut e, _sid, pid) = setup_pending_one_level();
@@ -1126,8 +1168,9 @@ mod tests {
         );
 
         let corr = e.pending_probe_for(pid).unwrap();
-        // Inject as a regular File. This pins the `Profile.kind` cache so a File-anchored materialisation
-        // can never re-introduce the descendant-observation dispatch path by an unprobed-anchor accident.
+        // Inject as a regular File. This pins the `Profile.kind` cache so a File-anchored
+        // materialisation can never re-introduce the descendant-observation dispatch path by an
+        // unprobed-anchor accident.
         let _foo = lookup_foo(&e);
         let snap = dir_snap_with(vec![("bar", EntryKind::File, 1)]);
         let _ = e.step(
@@ -1198,8 +1241,8 @@ mod tests {
         assert_eq!(e.tree().get(root).unwrap().watch_demand(), 1);
         assert_eq!(e.tree().get(tmp).unwrap().watch_demand(), 0);
 
-        // The emitted Watch op carries an *absolute* path — `Tree::path_of` reconstructs `/` because
-        // `PathBuf::push("/")` resets to absolute.
+        // The emitted Watch op carries an *absolute* path — `Tree::path_of` reconstructs `/`
+        // because `PathBuf::push("/")` resets to absolute.
         let watch_for_root = out.watch_ops.iter().find_map(|op| match op {
             specter_core::WatchOp::Watch { resource, path, .. } if *resource == root => {
                 Some(path.as_ref())
@@ -1268,8 +1311,8 @@ mod tests {
         let _ = e.cancel_all_in_flight_probes();
     }
 
-    /// Deep absolute paths walk one segment at a time: the descent's `remaining_components` reflects
-    /// the unmaterialized tail.
+    /// Deep absolute paths walk one segment at a time: the descent's `remaining_components`
+    /// reflects the unmaterialized tail.
     #[test]
     fn deep_absolute_attach_decomposes_to_one_remaining_per_segment() {
         let mut e = Engine::new();
@@ -1306,10 +1349,11 @@ mod tests {
         let _ = e.cancel_all_in_flight_probes();
     }
 
-    /// Descent probes ride a dedicated `ProbeRequest::Descent` variant — the engine ships only `(profile,
-    /// correlation, target_path)`, leaving the admit-all single-level scan shape (`ScanConfig::Descent`)
-    /// entirely to the walker. Since the engine carries no scan-config on the wire, the shape's
-    /// correctness lives in the sensor's walker tests; this engine test pins the variant choice.
+    /// Descent probes ride a dedicated `ProbeRequest::Descent` variant — the engine ships only
+    /// `(profile, correlation, target_path)`, leaving the admit-all single-level scan shape
+    /// (`ScanConfig::Descent`) entirely to the walker. Since the engine carries no scan-config on
+    /// the wire, the shape's correctness lives in the sensor's walker tests; this engine test pins
+    /// the variant choice.
     #[test]
     fn descent_probe_uses_descent_variant() {
         let mut e = Engine::new();
@@ -1353,8 +1397,8 @@ mod tests {
         let _ = e.cancel_all_in_flight_probes();
     }
 
-    /// Materialization at descent's anchor branch sets `Profile.anchor_claim = AnchorClaim::Held` so a
-    /// later reap correctly releases the anchor's `watch_demand`.
+    /// Materialization at descent's anchor branch sets `Profile.anchor_claim = AnchorClaim::Held`
+    /// so a later reap correctly releases the anchor's `watch_demand`.
     #[test]
     fn descent_materialization_sets_anchor_claim_held() {
         let (mut e, _sid, pid) = setup_pending_one_level();
@@ -1399,8 +1443,8 @@ mod tests {
         // burst that would resolve a deferred reap).
         let out = e.step(Input::DetachSub(sid), Instant::now());
 
-        // `bar`'s slot is reaped (no other anchors), `foo` still has its pre-existing User Resource —
-        // only the descent's contribution is released.
+        // `bar`'s slot is reaped (no other anchors), `foo` still has its pre-existing User Resource
+        // — only the descent's contribution is released.
         assert_eq!(
             e.tree()
                 .get(foo)
@@ -1416,9 +1460,9 @@ mod tests {
         );
     }
 
-    /// A fresh `Profile::new` defaults to `ProfileState::Idle`, not Pending. Pending is reachable only
-    /// through the descent registry paths (`attach_sub_inner` Pending branch, `start_pending_recovery`,
-    /// `dispatch_descent_vanished` rewind).
+    /// A fresh `Profile::new` defaults to `ProfileState::Idle`, not Pending. Pending is reachable
+    /// only through the descent registry paths (`attach_sub_inner` Pending branch,
+    /// `start_pending_recovery`, `dispatch_descent_vanished` rewind).
     #[test]
     fn profile_state_default_is_idle() {
         use specter_core::{Profile, ProfileState, ScanConfig};
@@ -1433,8 +1477,8 @@ mod tests {
         assert!(matches!(p.state(), ProfileState::Idle));
     }
 
-    /// `Engine::descent_state` returns `None` for an Idle Profile. The accessor's reader contract is
-    /// "Some iff state is Pending."
+    /// `Engine::descent_state` returns `None` for an Idle Profile. The accessor's reader contract
+    /// is "Some iff state is Pending."
     #[test]
     fn descent_state_helper_returns_none_for_idle() {
         let mut e = Engine::new();
@@ -1454,8 +1498,8 @@ mod tests {
         let out = e.step(Input::AttachSub(req), Instant::now());
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
         let pid = e.subs().get(sid).unwrap().profile();
-        // Materialized Profile starts a Seed burst — Active, not Idle. Drive it to completion to land
-        // in Idle.
+        // Materialized Profile starts a Seed burst — Active, not Idle. Drive it to completion to
+        // land in Idle.
         let probe = e
             .step(
                 Input::ProbeResponse(ProbeResponse {
@@ -1470,8 +1514,8 @@ mod tests {
         assert!(e.descent_state(pid).is_none());
     }
 
-    /// `Engine::descent_state` returns `None` for an Active Profile (a burst is in flight; the descent
-    /// slot is not used).
+    /// `Engine::descent_state` returns `None` for an Active Profile (a burst is in flight; the
+    /// descent slot is not used).
     #[test]
     fn descent_state_helper_returns_none_for_active() {
         let mut e = Engine::new();
@@ -1561,22 +1605,22 @@ mod tests {
         let _ = e.cancel_all_in_flight_probes();
     }
 
-    /// `reap_profile`'s trichotomy `debug_assert!` is reachable from the Pending lifecycle (descent in
-    /// flight, then Sub detaches) and does not fire — the assertion pins the invariant in code, not
-    /// just prose.
+    /// `reap_profile`'s trichotomy `debug_assert!` is reachable from the Pending lifecycle (descent
+    /// in flight, then Sub detaches) and does not fire — the assertion pins the invariant in code,
+    /// not just prose.
     #[test]
     fn reap_profile_trichotomy_debug_assert_holds_for_pending() {
         let (mut e, sid, pid) = setup_pending_one_level();
-        // Pending Profile reap path: descent_prefix.is_some() && anchor_claim == None. Predicate `(some
-        // && Held)` matches false → assertion holds.
+        // Pending Profile reap path: descent_prefix.is_some() && anchor_claim == None. Predicate
+        // `(some && Held)` matches false → assertion holds.
         let _ = e.step(Input::DetachSub(sid), Instant::now());
         assert!(e.profiles().get(pid).is_none(), "Profile reaped");
     }
 
     #[test]
     fn reap_profile_trichotomy_debug_assert_holds_for_materialized() {
-        // Materialized Profile reap path: descent_prefix.is_none() && anchor_claim == Held. Predicate
-        // `(none && Held)` matches false → assertion holds.
+        // Materialized Profile reap path: descent_prefix.is_none() && anchor_claim == Held.
+        // Predicate `(none && Held)` matches false → assertion holds.
         let mut e = Engine::new();
         let foo = e.tree_mut().ensure_root("foo", ResourceRole::User);
         e.tree_mut().set_kind(foo, ResourceKind::Dir);
@@ -1598,8 +1642,8 @@ mod tests {
             e.profiles().get(pid).unwrap().anchor_claim(),
             AnchorClaim::Held,
         );
-        // Drain Seed via Vanished so the Profile lands Idle with the anchor's contribution still held.
-        // Then detach.
+        // Drain Seed via Vanished so the Profile lands Idle with the anchor's contribution still
+        // held. Then detach.
         let Some(corr) = e.pending_probe_for(pid) else {
             return;
         };
@@ -1618,8 +1662,9 @@ mod tests {
         assert!(e.profiles().get(pid).is_none(), "Profile reaped");
     }
 
-    /// Detaching the last Sub on a Pending Profile reaps immediately rather than setting `reap_pending =
-    /// true`. Pending Profiles have no burst whose `finish_burst_to_idle` would resolve a deferred reap.
+    /// Detaching the last Sub on a Pending Profile reaps immediately rather than setting
+    /// `reap_pending = true`. Pending Profiles have no burst whose `finish_burst_to_idle` would
+    /// resolve a deferred reap.
     #[test]
     fn detach_sub_pending_profile_reaps_immediately() {
         let (mut e, sid, pid) = setup_pending_one_level();
@@ -1653,8 +1698,8 @@ mod tests {
     }
 
     /// `on_probe_response`'s unified routing dispatches a Pending Profile's response to the descent
-    /// path via `match &p.state`. This test asserts the routing by exercising a descent probe response
-    /// and verifying the descent advances.
+    /// path via `match &p.state`. This test asserts the routing by exercising a descent probe
+    /// response and verifying the descent advances.
     #[test]
     fn on_probe_response_routes_descent_via_state_match() {
         let (mut e, _sid, pid) = setup_pending_one_level();
@@ -1714,14 +1759,15 @@ mod tests {
     // ───────────────────────────────────────────────────────────────────────
     // Probe-channel discipline (post-refactor invariants)
     //
-    // I5 ("at most one outstanding probe per Profile") is enforced structurally by the owner state's
-    // single `ProbeSlot` (one owner ⇒ one state variant ⇒ one slot). The tests below pin the
-    // surrounding behaviour: clear-on-cancel, recovery-overlap accounting, and the cancel-first
+    // I5 ("at most one outstanding probe per Profile") is enforced structurally by the owner
+    // state's single `ProbeSlot` (one owner ⇒ one state variant ⇒ one slot). The tests below pin
+    // the surrounding behaviour: clear-on-cancel, recovery-overlap accounting, and the cancel-first
     // contract on `release_descent_prefix_claim`.
     // ───────────────────────────────────────────────────────────────────────
 
-    /// `on_watch_op_rejected` descent purge: cancel-then-release ordering disarms the descent slot and
-    /// emits exactly one `ProbeOp::Cancel`. The Profile transitions Pending → Idle in the same step.
+    /// `on_watch_op_rejected` descent purge: cancel-then-release ordering disarms the descent slot
+    /// and emits exactly one `ProbeOp::Cancel`. The Profile transitions Pending → Idle in the same
+    /// step.
     #[test]
     fn on_watch_op_rejected_descent_purge_clears_pending_probe_and_emits_cancel() {
         use specter_core::ProfileState;
@@ -1768,20 +1814,20 @@ mod tests {
         );
     }
 
-    /// `enter_pending_descent` recovery-overlap invariant: when re-entered at the recovery parent, the
-    /// parent already carries `+1 STRUCTURE` from `Profile.watch_root_parent`. The helper bumps `+1`
-    /// again for the descent contribution; refcount sums to `+2`. Exercised through the production
-    /// observed-loss path — a Seed-Vanished routes through `finalize_anchor_lost_and_descend`, which
-    /// re-enters descent in the same step.
+    /// `enter_pending_descent` recovery-overlap invariant: when re-entered at the recovery parent,
+    /// the parent already carries `+1 STRUCTURE` from `Profile.watch_root_parent`. The helper bumps
+    /// `+1` again for the descent contribution; refcount sums to `+2`. Exercised through the
+    /// production observed-loss path — a Seed-Vanished routes through
+    /// `finalize_anchor_lost_and_descend`, which re-enters descent in the same step.
     #[test]
     fn enter_pending_descent_recovery_overlap_invariant() {
         use specter_core::{ClassSet, ProfileState};
         // Build the recovery scenario:
         //   1. Attach a Sub at /foo/bar (Pending — bar doesn't exist yet).
-        //   2. Materialize bar via descent, landing the Profile in Idle with Profile.watch_root_parent
-        //      = Some(foo) and foo.watch_demand = +1.
-        //   3. Drive the Seed verify to Vanished — the loss step releases the anchor contribution and
-        //      re-enters descent at foo with [bar] as remaining, all within the dispatch.
+        //   2. Materialize bar via descent, landing the Profile in Idle with
+        //      Profile.watch_root_parent = Some(foo) and foo.watch_demand = +1.
+        //   3. Drive the Seed verify to Vanished — the loss step releases the anchor contribution
+        //      and re-enters descent at foo with [bar] as remaining, all within the dispatch.
         let (mut e, _sid, pid) = setup_pending_one_level();
         let foo = lookup_foo(&e);
 
@@ -1811,8 +1857,8 @@ mod tests {
             "foo carries STRUCTURE from watch_root_parent",
         );
 
-        // The materialized Seed burst is Batching-first; expire its settle timer so a verify probe is
-        // in flight, then close it with Vanished (no Effect — fresh Seed).
+        // The materialized Seed burst is Batching-first; expire its settle timer so a verify probe
+        // is in flight, then close it with Vanished (no Effect — fresh Seed).
         let t_settle = t_mat + SETTLE;
         while let Some(entry) = e.pop_expired(t_settle) {
             e.step(
@@ -1835,9 +1881,9 @@ mod tests {
             }),
             t_settle,
         );
-        // dispatch_seed_vanished routes through finalize_anchor_lost_and_descend: anchor contribution
-        // released, baseline/current cleared, and the same step re-enters pending descent at foo — the
-        // recovery overlap is established by the production loss path itself.
+        // dispatch_seed_vanished routes through finalize_anchor_lost_and_descend: anchor
+        // contribution released, baseline/current cleared, and the same step re-enters pending
+        // descent at foo — the recovery overlap is established by the production loss path itself.
         assert!(matches!(
             e.profiles().get(pid).unwrap().state(),
             ProfileState::Pending(_),
@@ -1847,8 +1893,8 @@ mod tests {
             "descent probe re-armed by the loss step",
         );
 
-        // Recovery overlap: foo's watch_demand is +2 (watch_root_parent STRUCTURE + descent STRUCTURE);
-        // bar's anchor contribution is gone.
+        // Recovery overlap: foo's watch_demand is +2 (watch_root_parent STRUCTURE + descent
+        // STRUCTURE); bar's anchor contribution is gone.
         assert_eq!(
             e.tree().get(foo).unwrap().watch_demand(),
             2,
@@ -1856,8 +1902,8 @@ mod tests {
         );
         // The descent probe was emitted at foo (the parent / new prefix). Descent variants carry
         // `target_path` but not `target_resource` (the walker resolves the path against the live
-        // filesystem, not against an engine-side ResourceId). Cross-check by comparing the descent's
-        // path-of(foo) against the request's `target_path`.
+        // filesystem, not against an engine-side ResourceId). Cross-check by comparing the
+        // descent's path-of(foo) against the request's `target_path`.
         let foo_path = e.tree().path_of(foo).expect("foo path resolves");
         assert!(
             out.probe_ops().iter().any(|op| matches!(op,
@@ -1872,11 +1918,12 @@ mod tests {
     }
 
     /// Cancel-first contract on `release_descent_prefix_claim`: invoked without a prior
-    /// `cancel_owner_probe`, on a Pending Profile whose descent probe is still in flight, the helper's
-    /// `transition_state(ProfileState::Idle)` discard drops the armed `Pending(DescentState)`, tripping
-    /// `ProbeSlot`'s Drop tripwire. The tripwire is unconditional (fires in debug AND release), so the
-    /// test runs in every build profile. The four production cancel-paths each call `cancel_owner_probe`
-    /// first — this guards against future regressions that bypass the cancel-first order.
+    /// `cancel_owner_probe`, on a Pending Profile whose descent probe is still in flight, the
+    /// helper's `transition_state(ProfileState::Idle)` discard drops the armed
+    /// `Pending(DescentState)`, tripping `ProbeSlot`'s Drop tripwire. The tripwire is unconditional
+    /// (fires in debug AND release), so the test runs in every build profile. The four production
+    /// cancel-paths each call `cancel_owner_probe` first — this guards against future regressions
+    /// that bypass the cancel-first order.
     #[test]
     #[should_panic(expected = "ProbeSlot dropped while armed")]
     fn release_descent_prefix_claim_without_cancel_trips_probeslot_drop() {

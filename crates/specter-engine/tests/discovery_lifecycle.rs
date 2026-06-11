@@ -2,9 +2,9 @@
 //!
 //! Drives one `Engine` per scenario through attach → cold-Seed reconcile (mint per terminus ×
 //! template) → Standard re-reconcile → vanish/recovery/overflow/cascade with synthetic
-//! [`ProbeResponse`] injections. The inline tests (`src/discovery.rs`) pin the pure collector
-//! and the attach-boundary asserts; this file pins the composed behaviour: consequence routing,
-//! dedup convergence, lifecycle diagnostics, and the Draining-gate shape filter.
+//! [`ProbeResponse`] injections. The inline tests (`src/discovery.rs`) pin the pure collector and
+//! the attach-boundary asserts; this file pins the composed behaviour: consequence routing, dedup
+//! convergence, lifecycle diagnostics, and the Draining-gate shape filter.
 //!
 //! Assertions are **converged-state** (the minted registry after quiescence), never step traces —
 //! probe cadence is an implementation detail; only the resulting registry is the contract.
@@ -393,9 +393,9 @@ fn terminus_churn_drops_for_discovery_and_drives_only_the_minted_profile() {
 /// A terminus **delete** is an identity event at the chain's boundary slot — exempt from the
 /// proof-relevance drop (it folds to STRUCTURE at a Dir slot and *is* a membership change), so it
 /// must drive the discovery reconcile. The pre-fire target clamps to the mid-chain parent (the
-/// deepest descend-chain node — probing the vanished terminus itself could not graft), the graft
-/// at that parent is clean, and the reconcile reaps the minted Sub whose terminus left the
-/// certified set.
+/// deepest descend-chain node — probing the vanished terminus itself could not graft), the graft at
+/// that parent is clean, and the reconcile reaps the minted Sub whose terminus left the certified
+/// set.
 #[test]
 fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     let mut e = Engine::new();
@@ -420,8 +420,8 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
         .expect("one mint");
     let minted_pid = pid_of(&e, mid);
 
-    // `rmdir` of the Dir terminus: `Removed` on the minted Profile's anchor FD. Anchor-terminal
-    // for the minted Profile (loss-step descent); identity-at-boundary for the discovery Profile
+    // `rmdir` of the Dir terminus: `Removed` on the minted Profile's anchor FD. Anchor-terminal for
+    // the minted Profile (loss-step descent); identity-at-boundary for the discovery Profile
     // (drives the reconcile — removal authority stays with the reconcile, not the terminal).
     let t1 = now + Duration::from_millis(10);
     let _ = e.step(

@@ -552,10 +552,11 @@ impl Engine {
     /// the four-step `mint correlation → state-flip → add_watch on prefix → emit probe` sequence);
     /// the named arm is retained for dispatch symmetry with [`Self::bootstrap_immediate`].
     ///
-    /// Unwitnessed entry: no kernel event drove the attach, so if the entry probe finds the anchor
-    /// already on disk the terminus Seed stays cold and pins silently — attach-over-existing must
-    /// not fire (restart-safe doctrine). An appearance *after* attach reaches the live descent as a
-    /// `StructureChanged` and latches via `on_descent_event`, so it fires.
+    /// Unwitnessed entry: no observation stands behind the attach, so a descent that finds every
+    /// segment on first observation stays cold and pins silently — attach-over-existing must not fire
+    /// (restart-safe doctrine). An appearance *after* attach is witnessed by the probes themselves: a
+    /// response observing the awaited segment absent records the absence half, and the later response
+    /// that finds it completes the appearance, so the terminus Seed opens triggered and fires.
     fn bootstrap_pending(
         &mut self,
         profile_id: ProfileId,

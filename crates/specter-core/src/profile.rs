@@ -1650,18 +1650,32 @@ pub struct DescentState {
     /// path — [`Self::arm_probe`] (mint), [`Self::probe_correlation`] (read),
     /// [`Self::disarm_probe`] (consume). It cannot be cloned, so it is consumed where it lives.
     probe: ProbeSlot,
-    /// Witnessed-activity latch: kernel activity was observed that could have changed the anchor's
-    /// proof object since the last settled observation. Set at construction (a descent entered from
-    /// an observed anchor loss) or by [`Self::note_witnessed_activity`] (any event reaching a live
-    /// descent); never reset — the latch persists through rewinds and forward advances, which
-    /// mutate the sibling fields in place. The terminus consumes it: a witnessed descent's anchor
-    /// materialization opens a *triggered* Seed (the witness lands in `dirty`, so
+    /// Witnessed-appearance latch: the anchor's absence at this path was observed first-hand and the
+    /// path later completed — an absence→presence pair, both halves probe observations (or, at
+    /// construction, the anchor-loss signal that entered the descent: the loss *is* the absence half,
+    /// so the latch is born set). Never reset — the latch persists through rewinds and forward
+    /// advances, which mutate the sibling fields in place. The terminus consumes it: a witnessed
+    /// descent's anchor materialization opens a *triggered* Seed (the witness lands in `dirty`, so
     /// `seed_owes_first_fire` sees the activity), an unwitnessed one stays cold and pins silently.
+    ///
+    /// Kernel events never write this latch. A directory event at a descent prefix carries no
+    /// segment name on either backend, so event adjacency cannot distinguish the awaited segment
+    /// from sibling churn entirely outside the Sub's scope — latching on it would false-first-fire
+    /// a never-fired Sub whose anchor sat unchanged on disk the whole time. Events drive re-probes
+    /// (mechanism); only the probes' own observations move the witness (verdict).
     ///
     /// An explicit field, not inferred: `watch_root_parent.is_some()` happens to distinguish
     /// re-entered from attach-time descents today, but that is incidental — the latch states the
     /// semantics.
     witnessed: bool,
+    /// Standing absence observation — the pending half of the absence→presence appearance witness.
+    /// Set by [`Self::note_observed_absent`] when a probe observes the anchor's path incomplete
+    /// (the awaited segment missing from the prefix enumeration, or the prefix itself vanished);
+    /// consumed by [`Self::note_observed_present`] when a later probe finds the awaited segment —
+    /// the pair latches `witnessed`. A descent that only ever finds its segments present (an attach
+    /// over an existing tree) never sets this bit, so its terminus stays cold no matter how much
+    /// sibling churn reached the prefix watches.
+    observed_absent: bool,
 }
 
 impl DescentState {
@@ -1677,10 +1691,11 @@ impl DescentState {
     /// correlation. The engine's refcount setup runs around this constructor (the contribution at
     /// `current_prefix` is installed by `add_watch` separately).
     ///
-    /// `witnessed` is the activity latch's birth value: `true` only for a descent entered from an
-    /// observed anchor loss (the loss event *is* the witness); attach-time entries and the
-    /// event-scan recovery construct `false` — see the field doc and the engine call sites for the
-    /// per-entry rationale.
+    /// `witnessed` is the appearance latch's birth value: `true` only for a descent entered from an
+    /// observed anchor loss (the loss signal *is* the absence half of the witness, and the
+    /// materialization that ends the descent supplies the presence half); attach-time entries and
+    /// the event-scan recovery construct `false` — see the field doc and the engine call sites for
+    /// the per-entry rationale.
     #[must_use]
     pub const fn new(
         current_prefix: ResourceId,
@@ -1693,6 +1708,7 @@ impl DescentState {
             remaining_components,
             probe,
             witnessed,
+            observed_absent: false,
         }
     }
 
@@ -1717,19 +1733,37 @@ impl DescentState {
         &mut self.remaining_components
     }
 
-    /// Whether the descent has witnessed kernel activity that could have changed the anchor's proof
-    /// object — the latch the terminus Seed's cold/triggered split reads. See the field doc for the
-    /// full semantics.
+    /// Whether the descent has witnessed the anchor's appearance first-hand (an absence→presence
+    /// observation pair, or a loss-born entry) — the latch the terminus Seed's cold/triggered split
+    /// reads. See the field doc for the full semantics.
     #[must_use]
     pub const fn witnessed(&self) -> bool {
         self.witnessed
     }
 
-    /// Set the witnessed-activity latch — the sole writer after construction. One-way: there is no
-    /// reset, so the latch survives every in-place descent mutation (advance, rewind, re-arm) until
-    /// the terminus consumes it at anchor materialization.
-    pub const fn note_witnessed_activity(&mut self) {
-        self.witnessed = true;
+    /// Record a first-hand observation that the anchor's path is incomplete — a probe enumerated
+    /// the prefix and the awaited segment was absent, or the prefix itself vanished. An absent
+    /// intermediate segment implies the anchor absent (a path cannot complete through a missing
+    /// directory), so one bit serves every descent depth. The standing observation is consumed by
+    /// [`Self::note_observed_present`]; the pair is the only writer of the `witnessed` latch after
+    /// construction.
+    pub const fn note_observed_absent(&mut self) {
+        self.observed_absent = true;
+    }
+
+    /// Record that a probe found the awaited segment present. Under a standing absence observation
+    /// this completes the absence→presence pair and latches `witnessed` — the descent saw the
+    /// anchor's path go from broken to complete, which is an appearance no matter which event (or
+    /// overflow reseed) triggered the probe. Without a standing observation it is a no-op: a first
+    /// observation finding the segment present is indistinguishable from the segment having existed
+    /// all along, and claiming appearance there would fire on attach-over-existing (restart-safe
+    /// doctrine). One-way once latched: `witnessed` survives every in-place descent mutation
+    /// (advance, rewind, re-arm) until the terminus consumes it at anchor materialization.
+    pub const fn note_observed_present(&mut self) {
+        if self.observed_absent {
+            self.witnessed = true;
+            self.observed_absent = false;
+        }
     }
 
     /// Rewrite the descent's current prefix. Used by the engine's descent dispatcher on forward

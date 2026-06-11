@@ -142,11 +142,11 @@ pub(crate) fn lookup_descendant(
 /// Predicate: this Profile wants a [`ContribKey::ProfileDescendant`] watch contribution at `r` for
 /// an entry of `kind`.
 ///
-/// Keyed on the proof object ([`CoverageClass`]), not bare coverage — an FD is installed only
-/// where its deliverable events can move what a verdict observes:
+/// Keyed on the proof object ([`CoverageClass`]), not bare coverage — an FD is installed only where
+/// its deliverable events can move what a verdict observes:
 ///
-/// - **Interior Dir**: always — the directory FD surfaces member churn, and the proof object
-///   folds those members (the walker recursed into the Dir).
+/// - **Interior Dir**: always — the directory FD surfaces member churn, and the proof object folds
+///   those members (the walker recursed into the Dir).
 /// - **Interior Leaf** (File / Symlink / Other): iff `profile.has_per_file_fds()` is true, so
 ///   in-place file edits surface as their own events (they move `leaf_hash`).
 /// - **Boundary Dir**: never. The shape does not descend into it, so the proof object folds only
@@ -155,18 +155,18 @@ pub(crate) fn lookup_descendant(
 ///   observable at the parent's FD.
 ///
 /// The single source for both directions of [`apply_diff_to_tree`]: Phase 2 installs the
-/// contribution wherever this holds, and Phase 1 releases the contribution this same predicate would
-/// have installed on a prior probe response. Install and release stay in lockstep because they read
-/// one predicate, not two expressions that must be kept mirrored by hand.
+/// contribution wherever this holds, and Phase 1 releases the contribution this same predicate
+/// would have installed on a prior probe response. Install and release stay in lockstep because
+/// they read one predicate, not two expressions that must be kept mirrored by hand.
 ///
-/// Classification runs on the diff **entry's** kind, never the Tree slot's
-/// current kind. The two agree on install (Phase 2 stamps the slot from the entry first) but can
-/// diverge on release: a co-covering Profile's graft may have re-stamped a shared slot's kind
-/// between this Profile's install and its Phase-1 delete, and at a boundary-capable depth (the
-/// `max_depth` rim, depth 1 under `recursive=false`) a File→Dir re-stamp would flip the
-/// classification to `Boundary` and strand the per-file contribution on the slot forever. The
-/// delete entry carries the baseline-side kind — exactly the kind the contribution was installed
-/// under — so keying on it makes release read what install read.
+/// Classification runs on the diff **entry's** kind, never the Tree slot's current kind. The two
+/// agree on install (Phase 2 stamps the slot from the entry first) but can diverge on release: a
+/// co-covering Profile's graft may have re-stamped a shared slot's kind between this Profile's
+/// install and its Phase-1 delete, and at a boundary-capable depth (the `max_depth` rim, depth 1
+/// under `recursive=false`) a File→Dir re-stamp would flip the classification to `Boundary` and
+/// strand the per-file contribution on the slot forever. The delete entry carries the baseline-side
+/// kind — exactly the kind the contribution was installed under — so keying on it makes release
+/// read what install read.
 fn wants_descendant_watch(
     profile: &Profile,
     r: ResourceId,
@@ -199,9 +199,9 @@ fn wants_descendant_watch(
 ///    `DoubleEndedIterator::rev`). For each entry the helper looks up the slot under `base`,
 ///    releases this Profile's [`ContribKey::ProfileDescendant`] if [`wants_descendant_watch`] says
 ///    so, and — when the slot has no remaining anchors — vacates and reaps it. [`Tree::try_reap`]
-///    cascades up through any parent that loses its last anchor on the way; reverse iteration here is
-///    performance / cleanliness (avoids the cascade work and the intermediate "parent holds reaped
-///    child id" states), not a correctness requirement.
+///    cascades up through any parent that loses its last anchor on the way; reverse iteration here
+///    is performance / cleanliness (avoids the cascade work and the intermediate "parent holds
+///    reaped child id" states), not a correctness requirement.
 ///
 /// 2. **Phase 2 — creates.** Iterates `diff.created` and `diff.renamed.to` forward. For each entry
 ///    the helper ensures the slot under `base` (creating intermediate components as needed), sets
@@ -307,8 +307,8 @@ pub(crate) fn apply_diff_to_tree(
 ///
 /// **Splice-first ordering.** The splice runs *before* any Tree mutation. A
 /// [`SpliceResult::CrossedUncovered`] verdict surfaces a [`Diagnostic`] and short-circuits without
-/// touching Tree state — the pre-fire clamp keeps Standard targets on the shape's descend chain,
-/// so the only legitimately reachable cause is a cross-device intermediate the device-blind clamp
+/// touching Tree state — the pre-fire clamp keeps Standard targets on the shape's descend chain, so
+/// the only legitimately reachable cause is a cross-device intermediate the device-blind clamp
 /// cannot see. `Profile.current` is untouched across the breach: the `prior` arg was an Arc clone
 /// the caller (`apply_snapshot`) made from `Profile.current`'s handle, so dropping it on the
 /// failure path leaves the Profile's own handle alive at its pre-call shape.

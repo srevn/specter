@@ -1,10 +1,10 @@
-//! In-place file edit (`echo 'test' > file.txt`) inside a subtree-root watched directory does **not**
-//! bump the parent directory's mtime on APFS / HFS+, so a `STRUCTURE`-only watch on the parent emits
-//! no event. The fix: when the user's events mask includes `CONTENT`, the engine sets
+//! In-place file edit (`echo 'test' > file.txt`) inside a subtree-root watched directory does
+//! **not** bump the parent directory's mtime on APFS / HFS+, so a `STRUCTURE`-only watch on the
+//! parent emits no event. The fix: when the user's events mask includes `CONTENT`, the engine sets
 //! `has_per_file_fds = true` and registers a per-file FD on every covered Leaf (driven by
 //! `apply_diff_to_tree` / `ensure_descendant` in `crates/specter-engine/src/reconcile.rs`). The
-//! kernel then emits `NOTE_WRITE`
-//! plus `NOTE_EXTEND` on the file's own FD; the watcher normalizes that to `FsEvent::ContentChanged`.
+//! kernel then emits `NOTE_WRITE` plus `NOTE_EXTEND` on the file's own FD; the watcher normalizes
+//! that to `FsEvent::ContentChanged`.
 //!
 //! This test pins the **kernel + watcher + translator** half of the closure: when the watcher
 //! installs both a Dir watch (STRUCTURE) and a per-file watch (CONTENT), an in-place edit fires

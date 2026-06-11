@@ -90,13 +90,12 @@ pub enum BurstHelper {
 ///   snapshot. The walker recorded the slot's identity but did not recurse, so the splice path
 ///   cannot navigate through it.
 ///
-/// [`Self::IntermediateUncovered`] is the only variant reachable through legitimate filesystem
-/// state — and only via cross-filesystem boundaries, where the walker stores an intermediate as
-/// `Uncovered` because its `cmeta.dev()` differs from the anchor's `root_dev`. The engine's
-/// pre-fire clamp keeps Standard probe targets on the shape's descend chain but is device-blind
-/// (Tree slots carry no device), so a mount below the anchor is exactly the coverage gap it cannot
-/// see. The other two remain v1-unreachable; reaching them signals an upstream LCA / Tree
-/// lifecycle regression.
+/// [`Self::IntermediateUncovered`] is the only variant reachable through legitimate filesystem state
+/// — and only via cross-filesystem boundaries, where the walker stores an intermediate as `Uncovered`
+/// because its `cmeta.dev()` differs from the anchor's `root_dev`. The engine's pre-fire clamp keeps
+/// Standard probe targets on the shape's descend chain but is device-blind (Tree slots carry no
+/// device), so a mount below the anchor is exactly the coverage gap it cannot see. The other two
+/// remain v1-unreachable; reaching them signals an upstream LCA / Tree lifecycle regression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpliceFailureCause {
     TargetOutsideAnchorSubtree,
@@ -223,13 +222,13 @@ pub enum Diagnostic {
         profile: ProfileId,
     },
     /// `FsEvent` arrived for a covered, mask-admitted descendant whose change cannot move the
-    /// Profile's **proof object** — the `(path, attribute)` cells that fold into
-    /// `dir_hash` / `leaf_hash`. One fact on two axes:
+    /// Profile's **proof object** — the `(path, attribute)` cells that fold into `dir_hash` /
+    /// `leaf_hash`. One fact on two axes:
     ///
     /// - the resource is a **boundary Dir** — covered, but the scan shape does not descend into it
     ///   (`recursive=false` depth-1 Dirs, `max_depth`-bound Dirs, `MatchChain` terminus Dirs). The
-    ///   snapshot folds only its identity where the parent enumerated it, so member churn inside
-    ///   is invisible to every verdict; or
+    ///   snapshot folds only its identity where the parent enumerated it, so member churn inside is
+    ///   invisible to every verdict; or
     /// - the event is **directory METADATA** (chmod / chown / touch) — directory metadata folds
     ///   into no proof object (`dir_hash` deliberately excludes `root_meta.mtime`).
     ///
@@ -240,10 +239,9 @@ pub enum Diagnostic {
     /// discovery reconcile's reap.
     ///
     /// Distinct from [`Self::EventClassDropped`]: there the *user's mask* opted out of the class;
-    /// here the mask admits it but the proof object cannot see it. The Profile's own FDs never
-    /// exist at boundary Dirs (watch installation is interior-gated), so the boundary arm is
-    /// reached only via co-located demand — e.g. a minted Profile's anchor FD on the discovery
-    /// terminus slot.
+    /// here the mask admits it but the proof object cannot see it. The Profile's own FDs never exist
+    /// at boundary Dirs (watch installation is interior-gated), so the boundary arm is reached only
+    /// via co-located demand — e.g. a minted Profile's anchor FD on the discovery terminus slot.
     EventOutsideProofObject {
         resource: ResourceId,
         event: FsEvent,

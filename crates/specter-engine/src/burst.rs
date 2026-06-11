@@ -1410,28 +1410,26 @@ impl Engine {
 
 /// Resolve a path to the live engine slot that should root the Standard pre-fire probe — and, read
 /// back, the response graft — at it. Descends the live `Tree` from the always-live `anchor` by
-/// `path`'s anchor-relative components (`Tree::lookup` per segment), clamped to the shape's
-/// descend chain.
+/// `path`'s anchor-relative components (`Tree::lookup` per segment), clamped to the shape's descend
+/// chain.
 ///
 /// **The clamp.** The walk stops *above* the first depth the shape does not descend into
-/// ([`coverage::descends_at`]), returning the deepest graftable prefix. Graftability of a target
-/// at depth `d` requires a `Covered` snapshot entry at every hop `1..=d` (`splice_dir` looks up a
+/// ([`coverage::descends_at`]), returning the deepest graftable prefix. Graftability of a target at
+/// depth `d` requires a `Covered` snapshot entry at every hop `1..=d` (`splice_dir` looks up a
 /// covered Dir at each hop, the target included), and an entry at depth `k` is `Covered` exactly
 /// when the walker recursed into it — `descends_into(k)`. Both production shapes are
-/// downward-closed in depth (`Subtree`: `recursive ∧ k < max_depth`; `MatchChain`:
-/// `k < terminus_depth`), so the first non-descend depth bounds every deeper one and
-/// `descends_at(d)` alone decides graftability. Without the clamp a boundary Dir — a `MatchChain`
-/// terminus driven by an identity event, or a dirty-LCA on a `max_depth` rim — would root the
-/// probe, and the commit's splice would refuse with `SpliceCrossedUncovered` on a healthy tree.
-/// Depth 0 (the anchor) is the wholesale-replace arm that always grafts, so the clamp's fallback
-/// terminates structurally.
+/// downward-closed in depth (`Subtree`: `recursive ∧ k < max_depth`; `MatchChain`: `k <
+/// terminus_depth`), so the first non-descend depth bounds every deeper one and `descends_at(d)`
+/// alone decides graftability. Without the clamp a boundary Dir — a `MatchChain` terminus driven by
+/// an identity event, or a dirty-LCA on a `max_depth` rim — would root the probe, and the commit's
+/// splice would refuse with `SpliceCrossedUncovered` on a healthy tree. Depth 0 (the anchor) is the
+/// wholesale-replace arm that always grafts, so the clamp's fallback terminates structurally.
 ///
-/// Any lookup miss — `path` not under the anchor, a non-UTF-8 component, or a
-/// reaped-not-recreated intermediate — falls back to the anchor. Both the clamp and the fallback
-/// only ever move the root *up*: the result stays an ancestor-or-equal of every captured path
-/// (`coverage` routes events only at-or-under the anchor), so neither can clip an obligation
-/// chain. The result is always a live `ResourceId` (the anchor at minimum); the caller promotes a
-/// non-Dir result to its parent Dir.
+/// Any lookup miss — `path` not under the anchor, a non-UTF-8 component, or a reaped-not-recreated
+/// intermediate — falls back to the anchor. Both the clamp and the fallback only ever move the root
+/// *up*: the result stays an ancestor-or-equal of every captured path (`coverage` routes events only
+/// at-or-under the anchor), so neither can clip an obligation chain. The result is always a live
+/// `ResourceId` (the anchor at minimum); the caller promotes a non-Dir result to its parent Dir.
 fn resolve_under_anchor(
     anchor: ResourceId,
     config: &ScanConfig,
@@ -1506,15 +1504,14 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 ///   rather than against a stable subtree verdict, so they probe at the anchor unconditionally.
 /// - Standard intent (Dir / unclassified anchor) → the live slot at the component-LCA of `dirty`'s
 ///   captured paths, clamped to the shape's descend chain ([`resolve_under_anchor`]), a File leaf
-///   promoted to its parent Dir ([`promote_to_dir`] — the parent of a graftable node is graftable
-///   by the descend chain's downward closure, so promotion cannot re-enter a boundary). The LCA is
+///   promoted to its parent Dir ([`promote_to_dir`] — the parent of a graftable node is graftable by
+///   the descend chain's downward closure, so promotion cannot re-enter a boundary). The LCA is
 ///   computed over *captured paths* (history), not surviving slot ids, so a slot reaped mid-burst
 ///   cannot collapse the scope below where an event landed; only the live-id *resolution* may fall
-///   back to the anchor (strictly wider, never chain-clipping).
-///   An empty `dirty` is a should-never this arm `debug_assert!`s against (a Standard burst always
-///   notes its trigger); it then degrades to the anchor, which the emission choke pairs with a
-///   `WholeSubtree` obligation under its own `debug_assert`, so the degrade proves the whole
-///   subtree rather than silently skipping it.
+///   back to the anchor (strictly wider, never chain-clipping). An empty `dirty` is a should-never
+///   this arm `debug_assert!`s against (a Standard burst always notes its trigger); it then degrades
+///   to the anchor, which the emission choke pairs with a `WholeSubtree` obligation under its own
+///   `debug_assert`, so the degrade proves the whole subtree rather than silently skipping it.
 ///
 /// **Draining-reconfirm coverage.** The Draining → Verifying reconfirm folds into the Standard case
 /// because `dirty` is preserved across the burst's whole pre-fire lifetime (only `note`d into), so
