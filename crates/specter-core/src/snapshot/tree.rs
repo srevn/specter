@@ -747,9 +747,12 @@ pub enum SpliceResult {
     /// [`crate::Diagnostic::SpliceCrossedUncovered`] carrying the cause so the contract violation
     /// is visible in operator logs with the failure mode pre-classified.
     ///
-    /// Engine contract is "graft only into observed subtrees". After the walker-race fix, only
-    /// [`SpliceFailureCause::IntermediateUncovered`] remains reachable through legitimate filesystem
-    /// state, and only via cross-filesystem boundaries. The other two are v1-unreachable.
+    /// Engine contract is "graft only into observed subtrees": the pre-fire target rule clamps
+    /// every Standard probe target to a descend-chain node, so the splice path crosses only
+    /// `Covered` entries. The clamp is device-blind (engine Tree slots carry no device), which
+    /// leaves the cross-device subset of [`SpliceFailureCause::IntermediateUncovered`] — a mount
+    /// below the anchor the walker stored `Uncovered`-by-device — as the one cause reachable
+    /// through legitimate filesystem state. The other two are v1-unreachable.
     CrossedUncovered(SpliceFailureCause),
 }
 
@@ -788,11 +791,11 @@ pub enum SpliceResult {
 ///   [`DirChild::Uncovered`] intermediate (snapshot coverage gap), a missing entry, or a `Leaf` at
 ///   an interior segment.
 ///
-/// After the walker-race fix, only the cross-fs subset of
-/// [`SpliceFailureCause::IntermediateUncovered`] is reachable through legitimate filesystem state;
-/// the other two remain v1-unreachable. The caller's prior handle stays alive across the breach
-/// (it's an independent Arc clone), so no integration occurs; the caller emits a Diagnostic so the
-/// contract breach is observable.
+/// Only the cross-fs subset of [`SpliceFailureCause::IntermediateUncovered`] is reachable through
+/// legitimate filesystem state (the engine clamps probe targets to descend-chain nodes but is
+/// device-blind); the other two remain v1-unreachable. The caller's prior handle stays alive
+/// across the breach (it's an independent Arc clone), so no integration occurs; the caller emits a
+/// Diagnostic so the contract breach is observable.
 #[must_use]
 pub fn splice(
     prior: Option<Arc<DirSnapshot>>,

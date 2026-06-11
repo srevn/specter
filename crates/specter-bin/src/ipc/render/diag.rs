@@ -63,6 +63,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::ProbeVanished { at, .. }
         | WireDiagnostic::ProbeFailed { at, .. }
         | WireDiagnostic::EventClassDropped { at, .. }
+        | WireDiagnostic::EventOutsideProofObject { at, .. }
         | WireDiagnostic::EventOnUnwatchedResource { at, .. }
         | WireDiagnostic::EventNoConsumer { at, .. }
         | WireDiagnostic::WatchOpRejected { at, .. }
@@ -175,6 +176,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::PendingPathAwaitingSegment { .. }
         | W::ConfigDiffRebindFallbackAttach { .. }
         | W::EventClassDropped { .. }
+        | W::EventOutsideProofObject { .. }
         | W::EventNoConsumer { .. }
         | W::ReapPendingCancelled { .. }
         | W::ProfileReaped { .. }
@@ -255,6 +257,12 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "errno", errno);
         }
         WireDiagnostic::EventClassDropped {
+            resource,
+            event,
+            profile,
+            ..
+        }
+        | WireDiagnostic::EventOutsideProofObject {
             resource,
             event,
             profile,
@@ -732,7 +740,7 @@ mod tests {
             "probe_failed" => {
                 json!({"diag": tag, "at": at, "profile": id, "intent": "standard", "errno": 0})
             }
-            "event_class_dropped" => {
+            "event_class_dropped" | "event_outside_proof_object" => {
                 json!({"diag": tag, "at": at, "resource": id, "event": "content_changed", "profile": id})
             }
             "event_on_unwatched_resource" | "event_no_consumer" | "attach_resource_stale" => {

@@ -55,6 +55,9 @@ impl Engine {
     ///    - Descendant events whose class (per [`fs_event_to_class`]) is not in the Profile's
     ///      `events` drop with `EventClassDropped` BEFORE driving the burst — the class filter sits
     ///      before dirty-set bumps.
+    ///    - Mask-admitted descendant events that cannot move the Profile's proof object — boundary
+    ///      Dirs and Dir-METADATA — drop with `EventOutsideProofObject`, identity events exempted
+    ///      (the proof-relevance guard below).
     ///    - Terminal-on-anchor → [`Self::finalize_anchor_lost_and_descend`] — anchor loss is
     ///      uniform across static, mixed, and minted Profiles. Anything else that passes the filter
     ///      → `drive_burst`.
@@ -133,7 +136,7 @@ impl Engine {
         let event_class = fs_event_to_class(event, resource_kind);
         let is_identity = event.is_identity();
 
-        for profile_id in covering {
+        for (profile_id, class) in covering {
             let Some((is_anchor, profile_events)) = self
                 .profiles
                 .get(profile_id)
@@ -153,6 +156,41 @@ impl Engine {
                     profile: profile_id,
                 });
                 continue;
+            }
+
+            // Proof-relevance guard: a mask-admitted descendant event still drops when nothing it
+            // signals can move this Profile's proof object — one fact on two axes:
+            //
+            // - **Boundary Dir** (path axis): the shape doesn't descend into the slot, so only its
+            //   identity in the parent's enumeration folds; member churn inside it is invisible to
+            //   every verdict. The Profile's own FDs no longer exist at boundary Dirs (watch
+            //   installation is Interior-gated), so this arm is reached via co-located demand — a
+            //   minted Profile's anchor FD sits exactly on the discovery terminus slot, and the
+            //   event must drop *for the discovery Profile* while the minted Profile sees it as an
+            //   anchor event and correctly drives its own burst.
+            // - **Dir-METADATA** (attribute axis): chmod / chown / touch on a directory folds into
+            //   no proof object (`dir_hash` deliberately excludes `root_meta.mtime`). kqueue
+            //   classes mkdir/rmdir backrefs (`NOTE_LINK`) as STRUCTURE, so dropping Dir-METADATA
+            //   loses no structural signal.
+            //
+            // Identity events are exempt: a deleted terminus folds to STRUCTURE at the boundary
+            // slot and must drive the discovery reconcile's reap. Driving a burst on a
+            // proof-irrelevant event could only end in a `nothing_changed` verdict — which a
+            // never-fired Sub converts into a spurious first fire — and the guard sits before
+            // `drive_burst`, so post-fire absorbs are equally stopped (a proof-irrelevant event
+            // must not extend a settle loop).
+            if !is_anchor && !is_identity {
+                let dir_kinded = matches!(resource_kind, ResourceKind::Dir);
+                if matches!(class, crate::coverage::CoverageClass::Boundary)
+                    || (dir_kinded && event_class == ClassSet::METADATA)
+                {
+                    out.diagnostics.push(Diagnostic::EventOutsideProofObject {
+                        resource,
+                        event,
+                        profile: profile_id,
+                    });
+                    continue;
+                }
             }
 
             if is_identity && is_anchor {

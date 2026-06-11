@@ -8,18 +8,19 @@
 //!
 //! For each delta entry, [`apply_diff_to_tree`] ensures (or releases) the Tree slot, sets its kind,
 //! and installs or releases the per-Resource [`ContribKey::ProfileDescendant`] contribution via
-//! [`add_watch`] / [`crate::refcounts::sub_watch`] for covered Dirs (always) and covered Leaves
-//! under `Profile.has_per_file_fds`. The Watch ops appear in `StepOutput.watch_ops`, resealed by
-//! `ResourceId` at emission.
+//! [`add_watch`] / [`crate::refcounts::sub_watch`] for *interior* Dirs (always) and interior Leaves
+//! under `Profile.has_per_file_fds` — never for boundary Dirs, whose member churn no verdict can
+//! observe (see [`wants_descendant_watch`]). The Watch ops appear in `StepOutput.watch_ops`,
+//! resealed by `ResourceId` at emission.
 //!
 //! **Empty-prior path.** When `Profile.current` is `None` — the Seed burst's first probe —
 //! [`graft`] synthesises the Diff via [`Diff::all_created`](specter_core::Diff::all_created) on the
 //! response. Equivalent to diffing against an empty `DirSnapshot`, no empty-snapshot allocation.
 //!
 //! **Splice-first ordering.** [`graft`] runs `splice` *before* any Tree mutation.
-//! [`SpliceResult::CrossedUncovered`] (a contract breach in v1) surfaces a [`Diagnostic`] and
-//! short-circuits without touching Tree state — `Profile.current` and `Tree` stay coherent across
-//! the breach.
+//! [`SpliceResult::CrossedUncovered`] (reachable only via a cross-device intermediate — see
+//! [`graft`]) surfaces a [`Diagnostic`] and short-circuits without touching Tree state —
+//! `Profile.current` and `Tree` stay coherent across the breach.
 //!
 //! **Two-phase reaping and ordering.** [`apply_diff_to_tree`] runs:
 //! 1. Phase 1 — `diff.deleted` and `diff.renamed.from`, in reverse iteration. Releases this
@@ -43,10 +44,10 @@
 //! **File materialization vs Watch.** Every covered diff entry gets a Tree slot —
 //! [`ensure_descendant`] runs unconditionally — so a `PerStableFile` Effect always resolves its
 //! diff entry to a real `ResourceId` (`emit_effects_per_stable_file` walks the same Diff at burst
-//! end). The Watch op (`add_watch`) is gated independently: covered Dirs always; covered Leaves
-//! only when `Profile.has_per_file_fds == true`.
+//! end). The Watch op (`add_watch`) is gated independently by [`wants_descendant_watch`]: interior
+//! Dirs always; interior Leaves only when `Profile.has_per_file_fds == true`; boundary Dirs never.
 
-use crate::coverage::covers;
+use crate::coverage::{CoverageClass, classify};
 use crate::refcounts::{add_watch, sub_watch_then_try_reap};
 use specter_core::{
     ContribKey, Diagnostic, Diff, DirSnapshot, EntryKind, Profile, ProfileId, ProfileMap,
@@ -141,9 +142,17 @@ pub(crate) fn lookup_descendant(
 /// Predicate: this Profile wants a [`ContribKey::ProfileDescendant`] watch contribution at `r` for
 /// an entry of `kind`.
 ///
-/// - **Dir**: covered Dirs always carry the contribution — a directory FD surfaces member churn.
-/// - **Leaf** (File / Symlink / Other): covered Leaves carry it iff `profile.has_per_file_fds()` is
-///   true, so in-place file edits surface as their own events.
+/// Keyed on the proof object ([`CoverageClass`]), not bare coverage — an FD is installed only
+/// where its deliverable events can move what a verdict observes:
+///
+/// - **Interior Dir**: always — the directory FD surfaces member churn, and the proof object
+///   folds those members (the walker recursed into the Dir).
+/// - **Interior Leaf** (File / Symlink / Other): iff `profile.has_per_file_fds()` is true, so
+///   in-place file edits surface as their own events (they move `leaf_hash`).
+/// - **Boundary Dir**: never. The shape does not descend into it, so the proof object folds only
+///   its identity (`fs_id`) where the parent enumerated it — a kernel FD there could deliver only
+///   proof-irrelevant member churn. The Dir's own identity changes (delete / rename) remain fully
+///   observable at the parent's FD.
 ///
 /// The single source for both directions of [`apply_diff_to_tree`]: Phase 2 installs the
 /// contribution wherever this holds, and Phase 1 releases the contribution this same predicate would
@@ -156,12 +165,12 @@ fn wants_descendant_watch(
     tree: &Tree,
     scratch: &mut PathBuf,
 ) -> bool {
-    let covered = covers(profile, r, tree, scratch);
-    match kind {
-        EntryKind::Dir => covered,
-        EntryKind::File | EntryKind::Symlink | EntryKind::Other => {
-            covered && profile.has_per_file_fds()
+    match (classify(profile, r, tree, scratch), kind) {
+        (CoverageClass::Interior, EntryKind::Dir) => true,
+        (CoverageClass::Interior, EntryKind::File | EntryKind::Symlink | EntryKind::Other) => {
+            profile.has_per_file_fds()
         }
+        (CoverageClass::Boundary | CoverageClass::Outside, _) => false,
     }
 }
 
@@ -188,7 +197,8 @@ fn wants_descendant_watch(
 /// 2. **Phase 2 — creates.** Iterates `diff.created` and `diff.renamed.to` forward. For each entry
 ///    the helper ensures the slot under `base` (creating intermediate components as needed), sets
 ///    its kind, and installs the per-Resource [`ContribKey::ProfileDescendant`] contribution via
-///    [`add_watch`] for covered Dirs (always) and covered Leaves under `Profile.has_per_file_fds`.
+///    [`add_watch`] wherever [`wants_descendant_watch`] holds (interior Dirs always; interior
+///    Leaves under `Profile.has_per_file_fds`; boundary Dirs never).
 ///
 /// `diff.modified` entries are Tree-side no-ops — the slot exists and kind is unchanged. Per-file
 /// Effect dispatch (`emit_effects_per_stable_file`) consumes them via the same Diff.
@@ -219,14 +229,14 @@ pub(crate) fn apply_diff_to_tree(
     //
     // Two paths converge on the slot lifecycle terminus, [`Tree::try_reap`]:
     //
-    // - When this Profile contributes a watch at the slot — covered Dir under any events mask, or
-    //   covered Leaf under `has_per_file_fds` — [`sub_watch_then_try_reap`] removes the
+    // - When this Profile contributes a watch at the slot — interior Dir under any events mask, or
+    //   interior Leaf under `has_per_file_fds` — [`sub_watch_then_try_reap`] removes the
     //   contribution by key and try-reaps. The multi-Profile case (another Profile still
     //   contributes) short-circuits inside `try_reap` via `has_anchors()`.
-    // - When this Profile contributes nothing at the slot — uncovered Leaf under a STRUCTURE-only
-    //   Profile, where Phase 2's `ensure_descendant` materialised the slot without an `add_watch` —
-    //   we still want to free a now-orphaned Tree slot that this delete reaches. Call `try_reap`
-    //   directly so the Tree doesn't leak a never-watched slot.
+    // - When this Profile contributes nothing at the slot — a boundary Dir, or an interior Leaf
+    //   under a STRUCTURE-only Profile, where Phase 2's `ensure_descendant` materialised the slot
+    //   without an `add_watch` — we still want to free a now-orphaned Tree slot that this delete
+    //   reaches. Call `try_reap` directly so the Tree doesn't leak a never-watched slot.
     //
     // `try_reap` folds in `Tree::vacate` as the closing-emission step, so the kernel-watch protocol
     // owed at reap time (the closing `Unwatch`, if a contribution were ever stranded at the slot)
@@ -287,11 +297,12 @@ pub(crate) fn apply_diff_to_tree(
 /// this call site.
 ///
 /// **Splice-first ordering.** The splice runs *before* any Tree mutation. A
-/// [`SpliceResult::CrossedUncovered`] verdict (a v1-unreachable contract breach) surfaces a
-/// [`Diagnostic`] and short-circuits without touching Tree state. `Profile.current` is untouched
-/// across the breach: the `prior` arg was an Arc clone the caller (`apply_snapshot`) made from
-/// `Profile.current`'s handle, so dropping it on the failure path leaves the Profile's own handle
-/// alive at its pre-call shape.
+/// [`SpliceResult::CrossedUncovered`] verdict surfaces a [`Diagnostic`] and short-circuits without
+/// touching Tree state — the pre-fire clamp keeps Standard targets on the shape's descend chain,
+/// so the only legitimately reachable cause is a cross-device intermediate the device-blind clamp
+/// cannot see. `Profile.current` is untouched across the breach: the `prior` arg was an Arc clone
+/// the caller (`apply_snapshot`) made from `Profile.current`'s handle, so dropping it on the
+/// failure path leaves the Profile's own handle alive at its pre-call shape.
 ///
 /// **Diff at TARGET.** The Diff is built between `prior_at_target` (descended from `prior` via
 /// [`subtree_at_dir`]) and `response_arc`, so its rel-paths are relative to `target` —

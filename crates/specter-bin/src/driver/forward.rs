@@ -237,6 +237,16 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?profile,
             "fs event dropped (class not in profile.events)",
         ),
+        Diagnostic::EventOutsideProofObject {
+            resource,
+            event,
+            profile,
+        } => tracing::trace!(
+            ?resource,
+            ?event,
+            ?profile,
+            "fs event dropped (cannot move the profile's proof object)",
+        ),
         Diagnostic::EventOnUnwatchedResource { resource } => {
             tracing::warn!(?resource, "FsEvent on unwatched resource (race; dropped)");
         }
@@ -567,6 +577,7 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::ProbeVanished { .. }
         | D::ProbeFailed { .. }
         | D::EventClassDropped { .. }
+        | D::EventOutsideProofObject { .. }
         | D::EventOnUnwatchedResource { .. }
         | D::EventNoConsumer { .. }
         | D::WatchOpRejected { .. }

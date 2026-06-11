@@ -8,7 +8,7 @@
 //! counterpart — exercising whole-Engine flows (attach → Seed-Ok → FsEvent → optional Effect)
 //! rather than dispatch handlers in isolation.
 
-use specter_core::testkit::{dir_snap, proven};
+use specter_core::testkit::{covered, dir_snap, dir_snap_nested, proven};
 use specter_core::{
     AnchorClaim, BurstFinish, ClassSet, DedupKey, Diagnostic, DirMeta, DirSnapshot, EntryKind,
     FsEvent, FsIdentity, Input, ProbeFailure, ProbeOutcome, ProbeResponse, ProfileId, ProfileState,
@@ -574,6 +574,184 @@ fn it_ef_6_descendant_content_changed_drives_burst_on_content_sub() {
             ProfileState::Active(_, _),
         ),
         "ContentChanged on a CONTENT-class child drives a burst",
+    );
+}
+
+// ───────────────────────────────────────────────────────────────────────
+// IT-EF-7 — proof-object routing guard (`EventOutsideProofObject`)
+//
+// The mask filter admits these events; the proof object cannot see them. Directory metadata folds
+// into no proof object (`dir_hash` deliberately excludes `root_meta.mtime`), and a boundary Dir's
+// member churn folds nowhere (the shape doesn't descend into it — only the Dir's identity in the
+// parent's enumeration is observed). Both drop at routing, before `drive_burst`, so a never-fired
+// Sub cannot convert the inevitable `nothing_changed` verdict into a spurious first fire.
+// ───────────────────────────────────────────────────────────────────────
+
+#[test]
+fn it_ef_7_dir_metadata_drops_outside_proof_object() {
+    let mut e = Engine::new();
+    let x = pre_place_dir(&mut e, &["x"]);
+    let now = Instant::now();
+    let (_sid, pid) = attach(
+        &mut e,
+        "w",
+        SubAttachAnchor::Resource(x),
+        ScanConfig::builder().recursive(true).build(),
+        ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA,
+        MAX_SETTLE,
+        now,
+    );
+    let seed = dir_snap_nested(&[("sub", covered(dir_snap(&[])))]);
+    let seeded_at = seed_to_idle(&mut e, pid, &seed, now);
+    let sub = e.tree().lookup(Some(x), "sub").expect("covered dir slot");
+
+    // `chmod` on the covered, descended-into directory: METADATA at sub's own FD (an Interior Dir
+    // keeps its watch). The mask admits METADATA, but no proof object folds directory metadata.
+    let out = e.step(
+        Input::FsEvent {
+            resource: sub,
+            event: FsEvent::MetadataChanged,
+        },
+        seeded_at + SETTLE,
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::EventOutsideProofObject {
+                resource,
+                event: FsEvent::MetadataChanged,
+                profile,
+            } if *resource == sub && *profile == pid,
+        )),
+        "Dir METADATA must drop with EventOutsideProofObject; got {:?}",
+        out.diagnostics,
+    );
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "drop happens before drive_burst — Profile stays Idle",
+    );
+    assert!(out.probe_ops().is_empty(), "no probe queued");
+    assert!(out.effects().is_empty(), "no effects emitted");
+}
+
+#[test]
+fn it_ef_7_boundary_dir_structure_drops_for_outer_profile_via_co_located_demand() {
+    // The static co-location twin of a minted Profile on a discovery terminus: the boundary Dir
+    // holds no FD from the outer Profile (watch installation is interior-gated), so the only way
+    // an event surfaces there is a second Profile's own anchor demand. The event must then route
+    // by class per Profile: the anchor Profile drives its own burst; the outer Profile — for whom
+    // the slot is a boundary — drops it.
+    let mut e = Engine::new();
+    let x = pre_place_dir(&mut e, &["x"]);
+    let now = Instant::now();
+    let (_outer_sid, outer) = attach(
+        &mut e,
+        "outer",
+        SubAttachAnchor::Resource(x),
+        ScanConfig::builder().recursive(false).build(),
+        ClassSet::STRUCTURE | ClassSet::CONTENT,
+        MAX_SETTLE,
+        now,
+    );
+    let seed = dir_snap(&[("sub", EntryKind::Dir, 10)]);
+    let outer_seeded = seed_to_idle(&mut e, outer, &seed, now);
+    let sub = e
+        .tree()
+        .lookup(Some(x), "sub")
+        .expect("boundary slot staged by the seed graft");
+
+    let (_inner_sid, inner) = attach(
+        &mut e,
+        "inner",
+        SubAttachAnchor::Resource(sub),
+        ScanConfig::builder().recursive(true).build(),
+        ClassSet::STRUCTURE | ClassSet::CONTENT,
+        MAX_SETTLE,
+        outer_seeded,
+    );
+    let inner_seeded = seed_to_idle(&mut e, inner, &dir_snap(&[]), outer_seeded);
+
+    let out = e.step(
+        Input::FsEvent {
+            resource: sub,
+            event: FsEvent::StructureChanged,
+        },
+        inner_seeded + SETTLE,
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::EventOutsideProofObject { profile, .. } if *profile == outer,
+        )),
+        "the outer Profile's boundary view drops the event; got {:?}",
+        out.diagnostics,
+    );
+    assert!(
+        matches!(e.profiles().get(outer).unwrap().state(), ProfileState::Idle),
+        "boundary churn never drives the outer Profile",
+    );
+    assert!(
+        matches!(
+            e.profiles().get(inner).unwrap().state(),
+            ProfileState::Active(_, _),
+        ),
+        "the co-located anchor Profile drives its own burst from the same event",
+    );
+}
+
+#[test]
+fn it_ef_7_boundary_dir_holds_no_fd_and_events_drop_at_head_guard() {
+    // The static arm: a lone `recursive=false` Profile's seed materializes the boundary Dir's
+    // slot without any watch contribution, so the kernel FD never exists and boundary events are
+    // structurally undeliverable. An injected event drops at the head guard
+    // (`EventOnUnwatchedResource`) — the routing guard is only reachable via co-located demand.
+    let mut e = Engine::new();
+    let x = pre_place_dir(&mut e, &["x"]);
+    let now = Instant::now();
+    let (_sid, pid) = attach(
+        &mut e,
+        "w",
+        SubAttachAnchor::Resource(x),
+        ScanConfig::builder().recursive(false).build(),
+        ClassSet::STRUCTURE | ClassSet::CONTENT,
+        MAX_SETTLE,
+        now,
+    );
+    let seed = dir_snap(&[("sub", EntryKind::Dir, 10)]);
+    let seeded_at = seed_to_idle(&mut e, pid, &seed, now);
+    let sub = e
+        .tree()
+        .lookup(Some(x), "sub")
+        .expect("slot materialized by the seed graft");
+    assert_eq!(
+        e.tree().get(sub).unwrap().watch_demand(),
+        0,
+        "covered-but-undescended Dir gets no watch contribution",
+    );
+
+    let out = e.step(
+        Input::FsEvent {
+            resource: sub,
+            event: FsEvent::StructureChanged,
+        },
+        seeded_at + SETTLE,
+    );
+    assert!(
+        out.diagnostics.iter().any(
+            |d| matches!(d, Diagnostic::EventOnUnwatchedResource { resource } if *resource == sub)
+        ),
+        "the head guard drops the event — there is no FD to deliver it in production",
+    );
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "no burst",
+    );
+    assert!(out.effects().is_empty(), "no effects");
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::SpliceCrossedUncovered { .. })),
+        "no splice breach on a healthy system",
     );
 }
 

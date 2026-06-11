@@ -1,37 +1,102 @@
-//! The coverage relation and the reconfirm query derived from it.
+//! The coverage relation, its proof-object refinement, and the reconfirm query derived from it.
 //!
-//! [`covers`] walks the segment chain from `profile.resource` (the anchor) down to the candidate
+//! [`classify`] walks the segment chain from `profile.resource` (the anchor) down to the candidate
 //! `target`, delegating each prefix's in-scope test to [`specter_core::ScanConfig::accepts`] — the
-//! single source of the scope predicate, shared with the walker. It is the gate for two things in
-//! the engine: whether an `FsEvent` at `R` should drive `P`'s burst, and whether `R` contributes to
-//! `P`'s `watch_demand`.
+//! single source of the scope predicate, shared with the walker — then refines the admitted case
+//! by the shape's recursion edge ([`specter_core::ScanConfig::descends_into`], via [`descends_at`])
+//! into [`CoverageClass`]. The classification gates three things in the engine: whether an
+//! `FsEvent` at `R` should drive `P`'s burst, whether `R` contributes to `P`'s `watch_demand`, and
+//! how deep a pre-fire probe target may sit. [`covers`] is the boolean projection (`!= Outside`)
+//! the chain queries and external consumers keep.
 //!
-//! [`nearest_covering_ancestor`] is its transitive derivation, and [`has_active_standard_descendant`]
-//! (via [`chain_reaches`]) is the pure query that replaced the old `dirty_descendants` refcount: it
-//! answers, fresh at each consult point, "is some Active-Standard strict-descendant Profile still
-//! covering this ancestor?" — the `Draining → Verifying` reconfirm condition. Evaluating it as a
-//! query rather than maintaining it as a counter is what makes it robust to mid-burst topology moves;
-//! the rationale lives on [`has_active_standard_descendant`].
+//! [`nearest_covering_ancestor`] is the transitive derivation of [`covers`], and
+//! [`has_active_standard_descendant`] (via [`chain_reaches`]) is the pure query that replaced the
+//! old `dirty_descendants` refcount: it answers, fresh at each consult point, "is some
+//! Active-Standard strict-descendant Profile still covering this ancestor?" — the `Draining →
+//! Verifying` reconfirm condition. Evaluating it as a query rather than maintaining it as a counter
+//! is what makes it robust to mid-burst topology moves; the rationale lives on
+//! [`has_active_standard_descendant`].
 
 use smallvec::SmallVec;
 use specter_core::{
-    Profile, ProfileId, ProfileMap, ProfileState, Resource, ResourceId, ResourceKind, Tree,
+    Profile, ProfileId, ProfileMap, ProfileState, Resource, ResourceId, ResourceKind, ScanConfig,
+    Tree,
 };
 use std::path::PathBuf;
 
-/// True iff `profile` would scan `target` given its `ScanConfig`.
+/// Where `target` sits relative to `profile`'s **proof object** — the `(path, attribute)` cells
+/// that actually fold into `dir_hash` / `leaf_hash` — not merely whether the scope predicate
+/// admits it.
 ///
-/// **Depth-0 (`target == profile.resource`).** Always `true`. The anchor is part of the Profile's
-/// scope by construction — `FsEvent`s at the anchor must drive the anchor's burst, so coverage at
-/// the anchor is unconditional. [`specter_core::ScanConfig::accepts`] bypasses every filter at
-/// depth 0 by the same rule.
+/// - [`Self::Outside`] — some prefix on the anchor → target chain fails
+///   [`specter_core::ScanConfig::accepts`] (or the chain is stale / doesn't reach the anchor).
+///   The target contributes nothing to this Profile.
+/// - [`Self::Boundary`] — admitted at every prefix, but the scan shape does not descend below it.
+///   **Dir-only by construction**: a covered Dir at depth `d` with `descends_into(d)` false. The
+///   walker records such a Dir as `DirChild::Uncovered(fs_id)`, so the proof object folds only its
+///   *identity* where the parent enumerated it — member churn inside it is invisible to every
+///   verdict. `recursive=false` depth-1 Dirs, `max_depth`-bound Dirs, and every `MatchChain`
+///   terminus Dir land here.
+/// - [`Self::Interior`] — the proof object observes the node's content: the anchor (depth 0,
+///   unconditionally), every covered Leaf (`leaf_hash` folds where the parent enumerated it — a
+///   leaf's interior *is* its content), and every covered Dir the shape descends into.
 ///
-/// **Descendants.** Build the cumulative relative path segment-by-segment from `profile.resource` to
-/// `target`, calling `accepts` at each prefix. Intermediate prefixes are typed [`ResourceKind::Dir`]
-/// (the Tree invariant: a non-Dir parent can't have children); the final prefix's kind is `target`'s
-/// own kind, collapsed to `File` for unprobed slots ([`Resource::kind_or_file`], matching the
-/// backend- mask convention shared with `fs_event_to_class` and the kqueue / inotify translators). A
-/// failure at any prefix short-circuits.
+/// Consumers are exactly three: event routing (`on_fs_event`'s proof-relevance guard), watch
+/// installation (`reconcile::wants_descendant_watch`), and the pre-fire target clamp
+/// (`burst::resolve_under_anchor`, via [`descends_at`]). The chain queries
+/// ([`nearest_covering_ancestor`] / [`chain_reaches`]) deliberately stay on boolean [`covers`]: a
+/// minted Profile's anchor sits on the discovery Profile's terminus slot — `Boundary` for the
+/// discovery Profile — and minted bursts gate outer Profiles *through* the discovery Profile by
+/// resolving their chain across exactly that boundary coverage. Lifting the classification into
+/// the chain queries would sever the gate.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum CoverageClass {
+    Outside,
+    Boundary,
+    Interior,
+}
+
+/// The shape's recursion edge as the engine consults it: does coverage extend *below* a Dir at
+/// `depth`? Pins `same_device = true` — the engine's `Tree` slots carry no device, so every
+/// engine-side consumer is device-blind by construction. A mount below the anchor is therefore
+/// classified `Interior` here while the snapshot stores it `Uncovered`-by-device; a graft path
+/// crossing one surfaces as `SpliceCrossedUncovered`, the one legitimately reachable residue of
+/// that blindness.
+#[must_use]
+pub(crate) fn descends_at(config: &ScanConfig, depth: u32) -> bool {
+    config.descends_into(depth, true)
+}
+
+/// True iff `profile` would scan `target` given its `ScanConfig` — the boolean projection of
+/// [`classify`] (`!= Outside`).
+///
+/// The chain queries ([`nearest_covering_ancestor`] / [`chain_reaches`]) and cross-crate consumers
+/// read coverage at this granularity; the three proof-object consumers read [`classify`] directly.
+#[must_use]
+pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut PathBuf) -> bool {
+    !matches!(
+        classify(profile, target, tree, scratch),
+        CoverageClass::Outside
+    )
+}
+
+/// Classify `target` against `profile`'s proof object — see [`CoverageClass`] for the vocabulary.
+///
+/// **Depth-0 (`target == profile.resource`).** Always [`CoverageClass::Interior`]. The anchor is
+/// part of the Profile's scope by construction — `FsEvent`s at the anchor must drive the anchor's
+/// burst, so coverage at the anchor is unconditional. [`specter_core::ScanConfig::accepts`]
+/// bypasses every filter at depth 0 by the same rule.
+///
+/// **Descendants.** Build the cumulative relative path segment-by-segment from `profile.resource`
+/// to `target`, calling `accepts` at each prefix. Intermediate prefixes are typed
+/// [`ResourceKind::Dir`] (the Tree invariant: a non-Dir parent can't have children); the final
+/// prefix's kind is `target`'s own kind, collapsed to `File` for unprobed slots
+/// ([`Resource::kind_or_file`], matching the backend-mask convention shared with
+/// `fs_event_to_class` and the kqueue / inotify translators — the File collapse also lands
+/// unprobed slots on `Interior`, deliberately conservative-toward-driving: the probe and the
+/// target clamp sort out what the slot really is). A failure at any prefix short-circuits to
+/// [`CoverageClass::Outside`]; an admitted Dir target then forks `Interior` / `Boundary` on the
+/// recursion edge at its own depth ([`descends_at`]).
 ///
 /// Per-prefix evaluation through the same predicate the walker consumes is what makes
 /// pattern/exclude/depth/recursive/hidden semantics co-evolve across the two callers. Drift is
@@ -40,15 +105,20 @@ use std::path::PathBuf;
 /// `ProbeRequest::Subtree`'s `anchor_path` — same predicate body, same basis. A walker measuring
 /// `rel` from a deeper recursion root would silently diverge here.
 ///
-/// Returns `false` if `target` is not on the descendant chain of `profile.resource` (sibling,
-/// ancestor, or unrelated subtree), or if any node along the chain is stale (its `ResourceId` no
-/// longer names a live slot).
+/// Returns [`CoverageClass::Outside`] if `target` is not on the descendant chain of
+/// `profile.resource` (sibling, ancestor, or unrelated subtree), or if any node along the chain is
+/// stale (its `ResourceId` no longer names a live slot).
 #[must_use]
-pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut PathBuf) -> bool {
+pub(crate) fn classify(
+    profile: &Profile,
+    target: ResourceId,
+    tree: &Tree,
+    scratch: &mut PathBuf,
+) -> CoverageClass {
     let anchor = profile.resource();
 
     if target == anchor {
-        return true;
+        return CoverageClass::Interior;
     }
 
     // Walk target → ancestor chain to anchor; collect segments in reverse (target-to-root), then
@@ -64,16 +134,16 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut 
     let mut cur = target;
     loop {
         let Some(resource) = tree.get(cur) else {
-            return false;
+            return CoverageClass::Outside;
         };
         let Some(segment_str) = tree.name(cur) else {
-            return false;
+            return CoverageClass::Outside;
         };
         rev.push(segment_str);
         match resource.parent() {
             Some(p) if p == anchor => break,
             Some(p) => cur = p,
-            None => return false,
+            None => return CoverageClass::Outside,
         }
     }
     rev.reverse();
@@ -105,10 +175,19 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut 
             ResourceKind::Dir
         };
         if !config.accepts(scratch.as_path(), kind, depth) {
-            return false;
+            return CoverageClass::Outside;
         }
     }
-    true
+
+    // Every prefix admitted. A non-Dir target is its own proof object (`leaf_hash` folds where the
+    // parent enumerated it); an admitted Dir forks on the recursion edge at its own depth — the
+    // shape descends into it (its entries fold) or it is a boundary (only its `fs_id` folds).
+    let target_depth = u32::try_from(total).unwrap_or(u32::MAX);
+    if !matches!(target_kind, ResourceKind::Dir) || descends_at(config, target_depth) {
+        CoverageClass::Interior
+    } else {
+        CoverageClass::Boundary
+    }
 }
 
 /// Resolve the nearest covering ancestor Profile of `child` — the derivation companion to
@@ -161,10 +240,12 @@ pub(crate) fn nearest_covering_ancestor(
     None
 }
 
-/// Walk `resource` and its strict ancestors looking for Profiles whose [`covers`] predicate accepts
-/// `resource`. Returns the matching Profiles in encounter order. P4 single-Profile resolves to 0 or 1.
-/// `pub(crate)` — the sole caller is `Engine::on_fs_event`; a coverage derivation co-located
-/// with [`covers`] / [`nearest_covering_ancestor`].
+/// Walk `resource` and its strict ancestors looking for Profiles whose [`classify`] is not
+/// `Outside` for `resource`, pairing each with its [`CoverageClass`] — the per-Profile class feeds
+/// the routing guard's proof-relevance fork (the same slot can be `Interior` for one Profile and
+/// `Boundary` for a co-located other). Returns matches in encounter order. P4 single-Profile
+/// resolves to 0 or 1. `pub(crate)` — the sole caller is `Engine::on_fs_event`; a coverage
+/// derivation co-located with [`covers`] / [`nearest_covering_ancestor`].
 ///
 /// **Pending Profiles are filtered at the source.** A Pending Profile carries no anchor-side
 /// `watch_demand` from this Profile — the descent prefix carries it instead (via
@@ -180,8 +261,8 @@ pub(crate) fn covering_profiles(
     profiles: &ProfileMap,
     resource: ResourceId,
     scratch: &mut PathBuf,
-) -> SmallVec<[ProfileId; 2]> {
-    let mut out: SmallVec<[ProfileId; 2]> = SmallVec::new();
+) -> SmallVec<[(ProfileId, CoverageClass); 2]> {
+    let mut out: SmallVec<[(ProfileId, CoverageClass); 2]> = SmallVec::new();
     let mut cur = Some(resource);
     while let Some(rid) = cur {
         for pid in profiles.at(rid) {
@@ -191,8 +272,9 @@ pub(crate) fn covering_profiles(
             if matches!(p.state(), ProfileState::Pending(_)) {
                 continue;
             }
-            if covers(p, resource, tree, scratch) && !out.contains(&pid) {
-                out.push(pid);
+            let class = classify(p, resource, tree, scratch);
+            if !matches!(class, CoverageClass::Outside) && !out.iter().any(|&(q, _)| q == pid) {
+                out.push((pid, class));
             }
         }
         cur = tree.parent(rid);
@@ -716,6 +798,123 @@ mod tests {
         );
     }
 
+    // ===== classify (CoverageClass) =====
+    //
+    // The three-way proof-object refinement consumed by event routing, watch installation, and the
+    // pre-fire clamp. These pin the classification's load-bearing distinctions: Boundary is
+    // Dir-only (a covered Leaf at the same depth is Interior — its `leaf_hash` is in the proof
+    // object), the anchor is Interior unconditionally, and the unprobed File-shape collapse lands
+    // on Interior. The admission walk itself (pattern / exclude / hidden / depth arms) is pinned by
+    // the `covers` grid above — `covers` is `classify != Outside`, so those tests already exercise
+    // the shared body.
+
+    #[test]
+    fn classify_recursive_false_forks_boundary_dir_from_interior_leaf_at_depth_one() {
+        let mut tree = Tree::new();
+        let (root, profile) = anchor(&mut tree, "root", ScanConfig::builder().recursive(false));
+        let dir = tree
+            .ensure_child(root, "sub", ResourceRole::User)
+            .expect("test live parent");
+        mark(&mut tree, dir, ResourceKind::Dir);
+        let file = tree
+            .ensure_child(root, "f.rs", ResourceRole::User)
+            .expect("test live parent");
+        mark(&mut tree, file, ResourceKind::File);
+        let deep = tree
+            .ensure_child(dir, "deep", ResourceRole::User)
+            .expect("test live parent");
+        mark(&mut tree, deep, ResourceKind::Dir);
+
+        let mut scratch = PathBuf::new();
+        assert_eq!(
+            classify(&profile, dir, &tree, &mut scratch),
+            CoverageClass::Boundary,
+            "covered depth-1 Dir under recursive=false is not descended into",
+        );
+        assert_eq!(
+            classify(&profile, file, &tree, &mut scratch),
+            CoverageClass::Interior,
+            "a covered Leaf at the same depth is Interior — leaf_hash is in the proof object",
+        );
+        assert_eq!(
+            classify(&profile, deep, &tree, &mut scratch),
+            CoverageClass::Outside,
+            "the boundary's interior is Outside, not Boundary",
+        );
+    }
+
+    #[test]
+    fn classify_max_depth_rim_dir_is_boundary_interior_above() {
+        let mut tree = Tree::new();
+        let (root, profile) = anchor(&mut tree, "root", recursive_unbounded().max_depth(Some(2)));
+        let d1 = tree
+            .ensure_child(root, "d1", ResourceRole::User)
+            .expect("test live parent");
+        let d2 = tree
+            .ensure_child(d1, "d2", ResourceRole::User)
+            .expect("test live parent");
+        for r in [d1, d2] {
+            mark(&mut tree, r, ResourceKind::Dir);
+        }
+        let f2 = tree
+            .ensure_child(d1, "f.rs", ResourceRole::User)
+            .expect("test live parent");
+        mark(&mut tree, f2, ResourceKind::File);
+
+        let mut scratch = PathBuf::new();
+        assert_eq!(
+            classify(&profile, d1, &tree, &mut scratch),
+            CoverageClass::Interior,
+            "depth 1 < max_depth: the shape descends into it",
+        );
+        assert_eq!(
+            classify(&profile, d2, &tree, &mut scratch),
+            CoverageClass::Boundary,
+            "the max_depth rim Dir is admitted but not descended into",
+        );
+        assert_eq!(
+            classify(&profile, f2, &tree, &mut scratch),
+            CoverageClass::Interior,
+            "a File on the rim depth is Interior",
+        );
+    }
+
+    #[test]
+    fn classify_anchor_is_interior_unconditionally() {
+        // recursive=false would make any non-anchor Dir at this position a Boundary; depth 0
+        // bypasses the recursion edge entirely. Same for a File anchor.
+        let mut tree = Tree::new();
+        let (root, profile) = anchor(&mut tree, "root", ScanConfig::builder().recursive(false));
+        assert_eq!(
+            classify(&profile, root, &tree, &mut PathBuf::new()),
+            CoverageClass::Interior,
+        );
+        let f = tree.ensure_root("log.txt", ResourceRole::User);
+        mark(&mut tree, f, ResourceKind::File);
+        let fp = profile_at(f, ScanConfig::builder().build());
+        assert_eq!(
+            classify(&fp, f, &tree, &mut PathBuf::new()),
+            CoverageClass::Interior,
+        );
+    }
+
+    #[test]
+    fn classify_unprobed_slot_at_boundary_depth_collapses_to_interior() {
+        // An unprobed slot (kind None) collapses to File-shape (`kind_or_file`), so a slot that
+        // *would* be Boundary if it turned out to be a Dir classifies Interior — deliberately
+        // conservative toward driving; the probe and the target clamp sort out what it really is.
+        let mut tree = Tree::new();
+        let (root, profile) = anchor(&mut tree, "root", ScanConfig::builder().recursive(false));
+        let unprobed = tree
+            .ensure_child(root, "sub", ResourceRole::User)
+            .expect("test live parent");
+        assert!(tree.get(unprobed).unwrap().kind().is_none());
+        assert_eq!(
+            classify(&profile, unprobed, &tree, &mut PathBuf::new()),
+            CoverageClass::Interior,
+        );
+    }
+
     // ===== positional covers (MatchChain) =====
     //
     // `covers` reuses its chain walk unchanged — the positional shape only swaps the per-prefix
@@ -776,6 +975,34 @@ mod tests {
         assert!(
             !covers(&profile, etc, &tree, &mut scratch),
             "a non-matching segment rejects at its chain position",
+        );
+    }
+
+    #[test]
+    fn classify_match_chain_terminus_dir_boundary_mid_chain_interior_file_terminus_interior() {
+        // The discovery shape's proof object is the match set: mid-chain Dirs are walked through
+        // (Interior); a Dir terminus is matched-but-unexplored (Boundary — only its membership in
+        // the parent's enumeration folds); a File terminus is its own proof object (Interior).
+        let mut tree = Tree::new();
+        let (root, profile) = anchor_chain(&mut tree, "srv", "/srv/*/log");
+        let mid = child(&mut tree, root, "app1", ResourceKind::Dir);
+        let dir_terminus = child(&mut tree, mid, "log", ResourceKind::Dir);
+        let mut scratch = PathBuf::new();
+        assert_eq!(
+            classify(&profile, mid, &tree, &mut scratch),
+            CoverageClass::Interior,
+        );
+        assert_eq!(
+            classify(&profile, dir_terminus, &tree, &mut scratch),
+            CoverageClass::Boundary,
+        );
+
+        let (root2, glob_profile) = anchor_chain(&mut tree, "srv2", "/srv2/*/*.log");
+        let mid2 = child(&mut tree, root2, "app", ResourceKind::Dir);
+        let file_terminus = child(&mut tree, mid2, "x.log", ResourceKind::File);
+        assert_eq!(
+            classify(&glob_profile, file_terminus, &tree, &mut scratch),
+            CoverageClass::Interior,
         );
     }
 

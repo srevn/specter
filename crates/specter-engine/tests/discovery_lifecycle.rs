@@ -160,18 +160,6 @@ fn unsupported_warns(out: &StepOutput) -> Vec<(SubId, String, EntryKind)> {
         .collect()
 }
 
-fn assert_idle_or_pre_fire(e: &Engine, pid: ProfileId, ctx: &str) {
-    match e
-        .profiles()
-        .get(pid)
-        .expect("discovery Profile live")
-        .state()
-    {
-        ProfileState::Idle | ProfileState::Active(ActiveBurst::PreFire(_), _) => {}
-        other => panic!("{ctx}: discovery Profile must stay Idle | PreFire, got {other:?}"),
-    }
-}
-
 /// Cold-Seed first reconcile mints one Sub per chain terminus (both terminus kinds), with
 /// deterministic synthesised names, source attribution, and the minted Profiles' own cold-Seed
 /// probes in the same `StepOutput`; a Standard re-reconcile over the same tree is a dedup no-op.
@@ -327,11 +315,13 @@ fn storm_coalesces_to_one_probe_and_one_reconcile() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// Terminus-internal churn drives a benign, terminus-scoped no-op reconcile — and across the whole
-/// scenario the discovery Profile never leaves `Idle | Active(PreFire)`: no Draining, no PostFire,
-/// structurally.
+/// Terminus-internal churn cannot move the discovery proof object — the terminus is the chain's
+/// boundary, and only its membership in the parent's enumeration folds — so the event drops at
+/// routing for the discovery Profile (`EventOutsideProofObject`) and never drives it: no burst, no
+/// terminus-scoped probe, no splice breach. The event reaches the slot at all only through the
+/// minted Profile's co-located anchor FD, and that Profile correctly drives its own burst from it.
 #[test]
-fn terminus_churn_is_a_noop_reconcile_and_never_leaves_pre_fire() {
+fn terminus_churn_drops_for_discovery_and_drives_only_the_minted_profile() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
@@ -348,30 +338,174 @@ fn terminus_churn_is_a_noop_reconcile_and_never_leaves_pre_fire() {
     settle_minted_seeds(&mut e, sid, now);
     let a = e.tree().lookup(Some(srv), "a").expect("chain dir slot");
     let log = e.tree().lookup(Some(a), "log").expect("terminus slot");
+    let mid = *discovery_subs_of(&e, sid)
+        .values()
+        .next()
+        .expect("one mint");
+    let minted_pid = pid_of(&e, mid);
 
-    // Churn inside the terminus surfaces as STRUCTURE at the terminus slot (the minted Profile's
-    // FD); the discovery Profile covers it (depth == td) and bursts alongside the minted one.
+    // Churn inside the terminus surfaces as STRUCTURE at the terminus slot — the minted Profile's
+    // anchor FD (the discovery Profile holds no contribution at its boundary).
     let t1 = now + Duration::from_millis(10);
-    let _ = e.step(
+    let out = e.step(
         Input::FsEvent {
             resource: log,
             event: FsEvent::StructureChanged,
         },
         t1,
     );
-    assert_idle_or_pre_fire(&e, pid, "after terminus event");
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::EventOutsideProofObject { resource, profile, .. }
+                if *resource == log && *profile == pid,
+        )),
+        "the discovery Profile's boundary view drops the event; got {:?}",
+        out.diagnostics,
+    );
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "terminus churn never drives the discovery Profile",
+    );
+    assert!(
+        matches!(
+            e.profiles().get(minted_pid).unwrap().state(),
+            ProfileState::Active(_, _),
+        ),
+        "the minted Profile drives its own burst from the same event",
+    );
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::SpliceCrossedUncovered { .. })),
+        "no splice breach on a healthy system",
+    );
+
+    // The minted burst settles on its own; the registry converges with nothing re-minted.
+    let _ = settle_minted(&mut e, mid, None, t1);
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "discovery Profile still Idle after the minted burst settles",
+    );
+    assert_eq!(discovery_subs_of(&e, sid).len(), 1, "minted set stable");
+}
+
+/// A terminus **delete** is an identity event at the chain's boundary slot — exempt from the
+/// proof-relevance drop (it folds to STRUCTURE at a Dir slot and *is* a membership change), so it
+/// must drive the discovery reconcile. The pre-fire target clamps to the mid-chain parent (the
+/// deepest descend-chain node — probing the vanished terminus itself could not graft), the graft
+/// at that parent is clean, and the reconcile reaps the minted Sub whose terminus left the
+/// certified set.
+#[test]
+fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(srv),
+        "/srv/*/log",
+        mint_template(),
+        now,
+    );
+    let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
+    let _ = respond(&mut e, pid, &chain, now);
+    settle_minted_seeds(&mut e, sid, now);
+    let a = e.tree().lookup(Some(srv), "a").expect("chain dir slot");
+    let log = e.tree().lookup(Some(a), "log").expect("terminus slot");
+    let mid = *discovery_subs_of(&e, sid)
+        .values()
+        .next()
+        .expect("one mint");
+    let minted_pid = pid_of(&e, mid);
+
+    // `rmdir` of the Dir terminus: `Removed` on the minted Profile's anchor FD. Anchor-terminal
+    // for the minted Profile (loss-step descent); identity-at-boundary for the discovery Profile
+    // (drives the reconcile — removal authority stays with the reconcile, not the terminal).
+    let t1 = now + Duration::from_millis(10);
+    let _ = e.step(
+        Input::FsEvent {
+            resource: log,
+            event: FsEvent::Removed,
+        },
+        t1,
+    );
+    assert!(
+        matches!(
+            e.profiles().get(minted_pid).unwrap().state(),
+            ProfileState::Pending(_)
+        ),
+        "the minted Profile re-enters descent in the loss step",
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state(),
+            ProfileState::Active(_, _)
+        ),
+        "the identity exemption lets the terminus delete drive the discovery Profile",
+    );
+
+    // Settle expiry mints the verify probe; its target is the mid-chain parent, not the vanished
+    // terminus — the clamp stops the dirty-LCA resolution above the boundary.
     let t2 = t1 + SETTLE * 2;
-    drain_due(&mut e, t2);
-    assert_idle_or_pre_fire(&e, pid, "after settle drain");
-    // The dirty LCA is the terminus itself, so the probe is terminus-scoped; a chain walk targeted
-    // there prunes everything beyond the bound — an empty Dir is the honest payload.
+    let mut probe_path = None;
+    while let Some(en) = e.pop_expired(t2) {
+        let out = e.step(
+            Input::TimerExpired {
+                profile: en.profile,
+                kind: en.kind,
+                id: en.id,
+            },
+            t2,
+        );
+        if let Some(p) = last_probe_path(&out) {
+            probe_path = Some(p);
+        }
+    }
+    let a_path = e.tree().path_of(a).expect("chain dir live");
+    assert_eq!(
+        probe_path.as_deref(),
+        Some(&*a_path),
+        "verify probe targets the deepest descend-chain ancestor",
+    );
+
+    // The honest payload at the parent: `log` is gone from its enumeration. Clean graft —
+    // membership, not content, is the proof — and the reconcile reaps the minted Sub.
     let out = respond(&mut e, pid, &dir_snap(&[]), t2);
     assert!(
-        minted_paths(&out).is_empty(),
-        "no re-mint on internal churn"
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::SpliceCrossedUncovered { .. })),
+        "the clamped target grafts cleanly; got {:?}",
+        out.diagnostics,
     );
-    assert_idle_or_pre_fire(&e, pid, "after no-op reconcile");
-    assert_eq!(discovery_subs_of(&e, sid).len(), 1, "minted set stable");
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DiscoverySubReaped { source, sub, .. }
+                if *source == sid && *sub == mid
+        )),
+        "reap narration rides the reconcile",
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::SubDetached { sub, reason: DetachReason::MatchVanished, .. }
+                if *sub == mid
+        )),
+        "the minted Sub's lifecycle signal carries MatchVanished",
+    );
+    assert!(e.subs().get(mid).is_none(), "minted Sub removed");
+    assert!(
+        e.profiles().get(minted_pid).is_none(),
+        "the Pending minted Profile reaped from the removal pass",
+    );
+    assert!(discovery_subs_of(&e, sid).is_empty());
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "discovery Profile seals back to Idle",
+    );
     let _ = e.cancel_all_in_flight_probes();
 }
 

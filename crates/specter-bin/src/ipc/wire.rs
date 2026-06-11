@@ -263,6 +263,12 @@ pub(crate) enum WireDiagnostic {
         event: WireFsEvent,
         profile: WireId,
     },
+    EventOutsideProofObject {
+        at: WireTime,
+        resource: WireId,
+        event: WireFsEvent,
+        profile: WireId,
+    },
     EventOnUnwatchedResource {
         at: WireTime,
         resource: WireId,
@@ -530,6 +536,16 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 event,
                 profile,
             } => Self::EventClassDropped {
+                at: at.clone(),
+                resource: WireId::from(*resource),
+                event: WireFsEvent::from(*event),
+                profile: WireId::from(*profile),
+            },
+            Diagnostic::EventOutsideProofObject {
+                resource,
+                event,
+                profile,
+            } => Self::EventOutsideProofObject {
                 at: at.clone(),
                 resource: WireId::from(*resource),
                 event: WireFsEvent::from(*event),
@@ -820,6 +836,7 @@ impl WireDiagnostic {
             Self::ProbeVanished { .. } => "probe_vanished",
             Self::ProbeFailed { .. } => "probe_failed",
             Self::EventClassDropped { .. } => "event_class_dropped",
+            Self::EventOutsideProofObject { .. } => "event_outside_proof_object",
             Self::EventOnUnwatchedResource { .. } => "event_on_unwatched_resource",
             Self::EventNoConsumer { .. } => "event_no_consumer",
             Self::WatchOpRejected { .. } => "watch_op_rejected",
@@ -891,6 +908,7 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "probe_vanished",
     "probe_failed",
     "event_class_dropped",
+    "event_outside_proof_object",
     "event_on_unwatched_resource",
     "event_no_consumer",
     "watch_op_rejected",
@@ -1791,6 +1809,12 @@ mod tests {
                 resource: WireId(40),
                 event: WireFsEvent::ContentChanged,
                 profile: WireId(41),
+            },
+            WireDiagnostic::EventOutsideProofObject {
+                at: at(),
+                resource: WireId(45),
+                event: WireFsEvent::StructureChanged,
+                profile: WireId(46),
             },
             WireDiagnostic::EventOnUnwatchedResource {
                 at: at(),

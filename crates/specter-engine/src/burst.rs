@@ -92,7 +92,8 @@ use smallvec::SmallVec;
 use specter_core::{
     ActiveBurst, BurstFinish, BurstHelper, BurstIntent, CeilingState, Diagnostic, DirtyProvenance,
     FsEvent, PostFirePhase, PreFireBurst, PreFirePhase, ProbeSlot, Profile, ProfileId,
-    ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId, TimerKind, Tree,
+    ProfileState, ReapTrigger, ResourceId, ResourceKind, ScanConfig, StepOutput, TimerId,
+    TimerKind, Tree,
 };
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -1409,14 +1410,34 @@ impl Engine {
 
 /// Resolve a path to the live engine slot that should root the Standard pre-fire probe — and, read
 /// back, the response graft — at it. Descends the live `Tree` from the always-live `anchor` by
-/// `path`'s anchor-relative components (`Tree::lookup` per segment).
+/// `path`'s anchor-relative components (`Tree::lookup` per segment), clamped to the shape's
+/// descend chain.
 ///
-/// Any miss — `path` not under the anchor, a non-UTF-8 component, or a reaped-not-recreated
-/// intermediate — falls back to the anchor. The fallback is a strictly *wider* root that can never
-/// clip a chain: `coverage::covers` routes events only at-or-under the anchor, so the anchor is an
-/// ancestor-or-equal of every captured path. The result is always a live `ResourceId` (the anchor
-/// at minimum); the caller promotes a non-Dir result to its parent Dir.
-fn resolve_under_anchor(anchor: ResourceId, path: &Path, tree: &Tree) -> ResourceId {
+/// **The clamp.** The walk stops *above* the first depth the shape does not descend into
+/// ([`coverage::descends_at`]), returning the deepest graftable prefix. Graftability of a target
+/// at depth `d` requires a `Covered` snapshot entry at every hop `1..=d` (`splice_dir` looks up a
+/// covered Dir at each hop, the target included), and an entry at depth `k` is `Covered` exactly
+/// when the walker recursed into it — `descends_into(k)`. Both production shapes are
+/// downward-closed in depth (`Subtree`: `recursive ∧ k < max_depth`; `MatchChain`:
+/// `k < terminus_depth`), so the first non-descend depth bounds every deeper one and
+/// `descends_at(d)` alone decides graftability. Without the clamp a boundary Dir — a `MatchChain`
+/// terminus driven by an identity event, or a dirty-LCA on a `max_depth` rim — would root the
+/// probe, and the commit's splice would refuse with `SpliceCrossedUncovered` on a healthy tree.
+/// Depth 0 (the anchor) is the wholesale-replace arm that always grafts, so the clamp's fallback
+/// terminates structurally.
+///
+/// Any lookup miss — `path` not under the anchor, a non-UTF-8 component, or a
+/// reaped-not-recreated intermediate — falls back to the anchor. Both the clamp and the fallback
+/// only ever move the root *up*: the result stays an ancestor-or-equal of every captured path
+/// (`coverage` routes events only at-or-under the anchor), so neither can clip an obligation
+/// chain. The result is always a live `ResourceId` (the anchor at minimum); the caller promotes a
+/// non-Dir result to its parent Dir.
+fn resolve_under_anchor(
+    anchor: ResourceId,
+    config: &ScanConfig,
+    path: &Path,
+    tree: &Tree,
+) -> ResourceId {
     let Some(anchor_path) = tree.get(anchor).map(|r| Arc::clone(r.path())) else {
         return anchor;
     };
@@ -1424,10 +1445,14 @@ fn resolve_under_anchor(anchor: ResourceId, path: &Path, tree: &Tree) -> Resourc
         return anchor;
     };
     let mut cur = anchor;
-    for comp in rel.components() {
+    for (i, comp) in rel.components().enumerate() {
         let Some(seg) = comp.as_os_str().to_str() else {
             return anchor;
         };
+        let depth = u32::try_from(i + 1).unwrap_or(u32::MAX);
+        if !crate::coverage::descends_at(config, depth) {
+            return cur;
+        }
         match tree.lookup(Some(cur), seg) {
             Some(next) => cur = next,
             None => return anchor,
@@ -1480,10 +1505,12 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 /// - Seed intent (Dir / unclassified anchor) → the anchor. Seed bursts compare against fire history
 ///   rather than against a stable subtree verdict, so they probe at the anchor unconditionally.
 /// - Standard intent (Dir / unclassified anchor) → the live slot at the component-LCA of `dirty`'s
-///   captured paths ([`resolve_under_anchor`]), a File leaf promoted to its parent Dir
-///   ([`promote_to_dir`]). The LCA is computed over *captured paths* (history), not surviving slot
-///   ids, so a slot reaped mid-burst cannot collapse the scope below where an event landed; only
-///   the live-id *resolution* may fall back to the anchor (strictly wider, never chain-clipping).
+///   captured paths, clamped to the shape's descend chain ([`resolve_under_anchor`]), a File leaf
+///   promoted to its parent Dir ([`promote_to_dir`] — the parent of a graftable node is graftable
+///   by the descend chain's downward closure, so promotion cannot re-enter a boundary). The LCA is
+///   computed over *captured paths* (history), not surviving slot ids, so a slot reaped mid-burst
+///   cannot collapse the scope below where an event landed; only the live-id *resolution* may fall
+///   back to the anchor (strictly wider, never chain-clipping).
 ///   An empty `dirty` is a should-never this arm `debug_assert!`s against (a Standard burst always
 ///   notes its trigger); it then degrades to the anchor, which the emission choke pairs with a
 ///   `WholeSubtree` obligation under its own `debug_assert`, so the degrade proves the whole
@@ -1499,7 +1526,7 @@ pub(crate) fn pre_fire_target(p: &Profile, pre: &PreFireBurst, tree: &Tree) -> R
         (Some(ResourceKind::File), _) | (_, BurstIntent::Seed) => p.resource(),
         _ => match pre.dirty.lca_path() {
             Some(lca) => promote_to_dir(
-                resolve_under_anchor(p.resource(), &lca, tree),
+                resolve_under_anchor(p.resource(), p.config(), &lca, tree),
                 p.resource(),
                 tree,
             ),
@@ -2339,6 +2366,81 @@ mod tests {
             target, l2,
             "component-LCA of leaves under l3a and l3b is l2",
         );
+    }
+
+    #[test]
+    fn pre_fire_target_standard_boundary_dirty_clamps_to_descend_chain_ancestor() {
+        // max_depth = 2: the depth-2 Dir `l2` is admitted (`accepts` at depth 2 ≤ max) but not
+        // descended into (`descends_into(2)` is false) — a boundary Dir, reachable as a dirty path
+        // via an exempt identity event (`rm` of the dir observed through co-located demand). The
+        // resolution walk stops above it: the deepest graftable prefix is `l1`, whose enumeration
+        // observes the boundary entry's identity. Without the clamp the probe would root at `l2`
+        // and the commit's splice — unable to look `l2` up as a `Covered` child — would refuse.
+        let mut e = Engine::new();
+        let l0 = e.tree.ensure_root("/l0", ResourceRole::User);
+        e.tree.set_kind(l0, ResourceKind::Dir);
+        let l1 = e
+            .tree
+            .ensure_child(l0, "l1", ResourceRole::User)
+            .expect("test live parent");
+        e.tree.set_kind(l1, ResourceKind::Dir);
+        let l2 = e
+            .tree
+            .ensure_child(l1, "l2", ResourceRole::User)
+            .expect("test live parent");
+        e.tree.set_kind(l2, ResourceKind::Dir);
+        let pid = e.profiles.attach(
+            &mut e.tree,
+            Profile::new(
+                l0,
+                ProfileIdentity::new(
+                    ScanConfig::builder()
+                        .recursive(true)
+                        .max_depth(Some(2))
+                        .build(),
+                    MAX_SETTLE,
+                    NO_EVENTS,
+                ),
+                SETTLE,
+                None,
+            ),
+        );
+        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(l2, "/l0/l1/l2")]));
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        assert_eq!(
+            target, l1,
+            "a boundary-Dir dirty path clamps to the deepest descend-chain ancestor",
+        );
+    }
+
+    #[test]
+    fn pre_fire_target_standard_recursive_false_clamps_to_anchor() {
+        // recursive=false: every depth-1 Dir is a boundary, so the clamp terminates at depth 0 —
+        // the anchor, the wholesale-replace arm that always grafts.
+        let mut e = Engine::new();
+        let root = e.tree.ensure_root("/root", ResourceRole::User);
+        e.tree.set_kind(root, ResourceKind::Dir);
+        let a = e
+            .tree
+            .ensure_child(root, "a", ResourceRole::User)
+            .expect("test live parent");
+        e.tree.set_kind(a, ResourceKind::Dir);
+        let pid = e.profiles.attach(
+            &mut e.tree,
+            Profile::new(
+                root,
+                ProfileIdentity::new(
+                    ScanConfig::builder().recursive(false).build(),
+                    MAX_SETTLE,
+                    NO_EVENTS,
+                ),
+                SETTLE,
+                None,
+            ),
+        );
+        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(a, "/root/a")]));
+        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        assert_eq!(target, root);
     }
 
     #[test]
