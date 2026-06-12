@@ -114,7 +114,7 @@ impl Engine {
         let descent_count = carriers.descents.len();
         let recovery_count = carriers.recoveries.len();
         for owner in carriers.descents.iter().copied() {
-            self.on_descent_event(owner, now, out);
+            self.on_descent_event(owner, out);
         }
         for pid in carriers.recoveries.iter().copied() {
             self.start_pending_recovery(pid, resource, out);
@@ -1192,8 +1192,9 @@ impl Engine {
     ///   [`Engine::on_descent_event`]. A disarmed descent (awaiting an `IN_CREATE` for the next
     ///   path component) that lost that event to the overflow window would otherwise wedge until
     ///   some unrelated event at the prefix; the fresh probe reads the post-overflow tree directly.
-    ///   Skips internally when a probe is already in flight — its response reflects the
-    ///   post-overflow state.
+    ///   When a probe is already in flight, [`Engine::on_descent_event`] latches a re-probe-owed
+    ///   debt instead of dropping the overflow — the in-flight walk may predate the overflow
+    ///   window, so the response dispatch repays it with a probe that reads the post-overflow tree.
     ///
     /// # Scope
     ///
@@ -1300,10 +1301,12 @@ impl Engine {
                     // No baseline to drift-test — re-probe the descent prefix instead, so an
                     // IN_CREATE lost to the unreliable window can't wedge the descent (a disarmed
                     // slot would otherwise wait forever for an event the kernel already dropped).
-                    // Skips internally when a probe is already in flight (its response reflects the
-                    // post-overflow tree). No per-Profile diagnostic — consistent with the
-                    // Idle/Active arms; the step's SensorOverflow diagnostic covers it.
-                    self.on_descent_event(pid, now, out);
+                    // When a descent probe is already in flight, `on_descent_event` latches a
+                    // re-probe-owed debt rather than dropping the overflow: the in-flight walk may
+                    // predate the overflow window, so the response dispatch repays it with a probe
+                    // that reads the post-overflow tree. No per-Profile diagnostic — consistent
+                    // with the Idle/Active arms; the step's SensorOverflow diagnostic covers it.
+                    self.on_descent_event(pid, out);
                 }
             }
         }

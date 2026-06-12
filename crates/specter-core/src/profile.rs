@@ -1706,6 +1706,30 @@ pub struct DescentState {
     /// over an existing tree) never sets this bit, so its terminus stays cold no matter how much
     /// sibling churn reached the prefix watches.
     observed_absent: bool,
+    /// Epoch debt: a signal (a prefix `StructureChanged`, or a sensor overflow) arrived while this
+    /// descent's probe was in flight. "In flight" at the engine means only that the response is
+    /// unprocessed — the walk behind it may have completed *before* the signal, so it cannot
+    /// witness the signal's change. The correlation gate fences out *superseded* probes, but a
+    /// probe whose walk merely predates a dropped signal was never superseded: its response would
+    /// pass the gate, park the descent, and the signal (often the awaited segment's own creation)
+    /// would never re-arrive — a permanent wedge.
+    ///
+    /// The latch closes that hole. A signal arriving mid-flight sets it
+    /// ([`Self::note_reprobe_owed`]) instead of being dropped; the descent response dispatch repays
+    /// the debt ([`Self::take_reprobe_owed`]) by emitting a probe that postdates every latched
+    /// signal by construction. A `bool` suffices: the descent needs to know only *whether* a signal
+    /// raced the probe, not how many, so any number of mid-flight signals collapse to one repay
+    /// (idempotent set, single consume). The repay preserves the in-flight observation — the park
+    /// arm still records the absence half of the appearance witness, so the postdating probe can
+    /// complete it with presence — which is why descent latches rather than superseding the way the
+    /// pre-fire burst's `event_drives_batching` does (a stale stability sample is worthless; a
+    /// point-in-time absence is half a witness).
+    ///
+    /// Dies with the descent: terminal materialization, contract-violation abandon, and every
+    /// cancel / teardown drop [`DescentState`] wholesale, so a latched-but-never-repaid debt cannot
+    /// leak past the descent it belongs to (a materialized descent's Seed `WholeSubtree` probe
+    /// postdates everything; an abandoned descent must not auto-re-probe a buggy walker).
+    reprobe_owed: bool,
 }
 
 impl DescentState {
@@ -1739,6 +1763,7 @@ impl DescentState {
             probe,
             witnessed,
             observed_absent: false,
+            reprobe_owed: false,
         }
     }
 
@@ -1794,6 +1819,28 @@ impl DescentState {
             self.witnessed = true;
             self.observed_absent = false;
         }
+    }
+
+    /// Record that a signal raced this descent's in-flight probe — set the re-probe-owed latch. The
+    /// engine calls this from `on_descent_event` when a prefix event or sensor overflow arrives
+    /// while a probe is already outstanding: the in-flight walk may predate the signal, so its
+    /// response cannot witness the signal's change. Idempotent — any number of mid-flight signals
+    /// collapse to one owed re-probe (the consume is `bool`-valued). See the field doc for why the
+    /// debt is latched rather than the signal dropped.
+    pub const fn note_reprobe_owed(&mut self) {
+        self.reprobe_owed = true;
+    }
+
+    /// Consume the re-probe-owed latch, returning whether a debt was outstanding (and clearing it).
+    /// The engine calls this once per descent response dispatch: a `true` return means a signal
+    /// raced the just-consumed probe and is owed a fresh, postdating probe. The clear is
+    /// unconditional so a descent that re-armed inline (advance / rewind already postdate the
+    /// signal) drops the debt without a redundant re-probe.
+    #[must_use]
+    pub const fn take_reprobe_owed(&mut self) -> bool {
+        let owed = self.reprobe_owed;
+        self.reprobe_owed = false;
+        owed
     }
 
     /// Rewrite the descent's current prefix. Used by the engine's descent dispatcher on forward

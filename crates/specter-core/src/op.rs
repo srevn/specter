@@ -240,9 +240,9 @@ impl ProbeRequest {
     /// The filesystem path this probe targets, regardless of variant — every variant carries
     /// exactly one. A **test-only projection** (gated behind `testkit`): production never reads a
     /// `ProbeRequest` back after emit. The walker dispatches on the request *variant* (`run_probe`
-    /// destructures each arm and reads the relevant path field directly), not through this accessor;
-    /// `MockProber` routing and probe-target assertions use it to recover the path without
-    /// re-matching the variant.
+    /// destructures each arm and reads the relevant path field directly), not through this
+    /// accessor; `MockProber` routing and probe-target assertions use it to recover the path
+    /// without re-matching the variant.
     #[cfg(feature = "testkit")]
     #[must_use]
     pub fn target_path(&self) -> &Path {

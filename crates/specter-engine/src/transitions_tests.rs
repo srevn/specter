@@ -2944,10 +2944,13 @@ fn sensor_overflow_armed_verifying_reap_emits_cancel_only() {
 }
 
 #[test]
-fn sensor_overflow_pending_profile_with_in_flight_probe_not_duplicated() {
-    // Pending(_) Profile with the descent probe still in flight: the overflow re-probe skips inside
-    // `on_descent_event` (I5 — the in-flight probe's response already reflects the post-overflow
-    // tree), preserving the armed slot and emitting no second probe.
+fn sensor_overflow_pending_descent_latches_and_repays() {
+    // A Pending descent whose probe is still in flight when an overflow lands. The overflow cannot
+    // be dropped: the in-flight walk may predate the overflow window, so its response cannot
+    // witness the edges the kernel lost. `on_descent_event` latches a re-probe-owed debt instead —
+    // no second probe at overflow time, the armed slot untouched — and the descent's own response
+    // dispatch repays the debt with a fresh probe that reads the post-overflow tree. Pins both
+    // halves: the latch (overflow step) and the repay (response step).
     let mut e = Engine::new();
     let req = SubAttachRequest::for_anchor(
         "guard".into(),
@@ -2999,18 +3002,48 @@ fn sensor_overflow_pending_profile_with_in_flight_probe_not_duplicated() {
         !out.probe_ops()
             .iter()
             .any(|op| matches!(op, ProbeOp::Probe { .. })),
-        "no second probe — the in-flight one covers the overflow window",
+        "overflow latches the debt rather than emitting a second probe",
     );
     assert_eq!(
         e.pending_probe_for(pid),
         Some(in_flight_corr),
-        "in-flight correlation preserved",
+        "in-flight correlation preserved across overflow",
     );
     assert!(
         out.diagnostics
             .iter()
             .any(|d| matches!(d, Diagnostic::SensorOverflow { .. })),
         "diagnostic still emitted regardless of per-Profile dispatch",
+    );
+
+    // The in-flight probe's (pre-overflow) response lands: the awaited segment is still absent, so
+    // the descent parks. Without the latch the dropped overflow would wedge here — the segment's
+    // creation edge is gone and nothing would re-probe. The latch repays it: a fresh probe that
+    // postdates the overflow is emitted in this very dispatch step.
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: in_flight_corr,
+            outcome: ProbeOutcome::DirEnumerated(dir_tree_snap(vec![])),
+        }),
+        Instant::now(),
+    );
+    assert!(
+        e.descent_state(pid).is_some(),
+        "descent still live after the stale park",
+    );
+    let repay_corr = e
+        .pending_probe_for(pid)
+        .expect("re-probe-owed debt repaid: a fresh descent probe is in flight");
+    assert_ne!(
+        repay_corr, in_flight_corr,
+        "the repay probe carries a fresh correlation that postdates the overflow",
+    );
+    assert!(
+        out.probe_ops()
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid)),
+        "the repay probe is emitted in the response-dispatch step",
     );
     let _ = e.cancel_all_in_flight_probes();
 }

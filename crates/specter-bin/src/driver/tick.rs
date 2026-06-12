@@ -350,8 +350,11 @@ impl<W: FsWatcher> EngineDriver<W> {
             }
         }
         // Probe responses AFTER overflow: an overflow that arrived mid-burst should reseed before
-        // the in-flight probe response would have been stale-fenced anyway. Step order preserves
-        // the engine's correlation-gate discipline.
+        // its response is processed. For an Active burst the reseed supersedes the in-flight probe,
+        // so the late response stale-fences against the correlation gate. For a Pending descent the
+        // reseed (and any prefix fs-event drained earlier this tick) latches a re-probe-owed debt
+        // that the response dispatch repays with a postdating probe — so this drain order is not
+        // load-bearing for descent correctness; the latch closes the window regardless of order.
         for input in drained.probe_responses.drain(..) {
             let out = self.engine.step(input, now);
             if self.forward(out).is_break() {

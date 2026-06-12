@@ -211,6 +211,116 @@ fn pending_path_witnessed_appearance_fires() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
+/// The W1 wedge, closed: a prefix event that *races* the in-flight descent probe — arriving before
+/// its response is processed — must not be dropped. The walk behind that probe may predate the
+/// event, so its response finds the awaited segment still absent and parks; historically that was a
+/// permanent wedge, because the segment's own creation was the dropped event and nothing would
+/// re-probe. The re-probe-owed latch repays it with a postdating probe that observes the segment,
+/// completing the absence→presence appearance witness exactly as the non-racing path does — so the
+/// terminus opens a TRIGGERED Seed that fires.
+///
+/// The racing counterpart of [`pending_path_witnessed_appearance_fires`], where the event arrives
+/// *after* the absent response with the slot already disarmed (no latch involved). Both reach the
+/// same fire, which is the point: the latch makes the wedge interleaving observationally identical
+/// to the benign one.
+#[test]
+fn pending_path_event_racing_inflight_probe_repays_and_fires() {
+    let mut e = Engine::new();
+    let parent = pre_place_dir(&mut e, &["watch"]);
+    let now = Instant::now();
+
+    let req = SubAttachRequest::for_anchor(
+        "pending".into(),
+        SubAttachAnchor::Path(PathBuf::from("/watch/app.log")),
+        ScanConfig::builder().recursive(true).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::DEFAULT_SUBTREE_ROOT,
+        false,
+    );
+    let out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach succeeded");
+    let pid = e.subs().get(sid).unwrap().profile();
+    let corr1 = e
+        .pending_probe_for(pid)
+        .expect("descent probe in flight at /watch");
+
+    // The file is being created: a STRUCTURE event lands at the prefix WHILE the descent probe is
+    // still in flight. The walk behind corr1 may predate this event, so it cannot witness the
+    // creation — the event is latched, not dropped, and no second probe is emitted yet.
+    let t1 = now + Duration::from_millis(20);
+    let out = e.step(
+        Input::FsEvent {
+            resource: parent,
+            event: FsEvent::StructureChanged,
+        },
+        t1,
+    );
+    assert_eq!(
+        e.pending_probe_for(pid),
+        Some(corr1),
+        "racing event leaves the in-flight probe untouched (latched, not superseded)",
+    );
+    assert!(
+        !out.probe_ops()
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Probe { .. })),
+        "racing event emits no probe — the debt is latched",
+    );
+
+    // corr1's stale, pre-creation response: app.log still absent → the descent parks and records the
+    // absence half of the witness. The latch repays with a fresh probe that postdates the event.
+    let out = descent_advance(&mut e, pid, &dir_snap(&[]), t1);
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state(),
+            ProfileState::Pending(_)
+        ),
+        "stale absent response parks the descent",
+    );
+    let corr2 = e
+        .pending_probe_for(pid)
+        .expect("re-probe-owed debt repaid: a postdating descent probe is in flight");
+    assert_ne!(corr1, corr2);
+    assert!(
+        out.probe_ops()
+            .iter()
+            .any(|op| matches!(op, ProbeOp::Probe { .. })),
+        "the repay probe is emitted in the park's dispatch step",
+    );
+
+    // The repay probe observes the now-present file → the absence→presence pair latches the
+    // appearance witness → TRIGGERED Seed (Batching-first, no cold walk in flight).
+    let out = descent_advance(
+        &mut e,
+        pid,
+        &dir_snap(&[("app.log", EntryKind::File, 1)]),
+        t1,
+    );
+    assert!(
+        out.effects().is_empty(),
+        "materialization itself never fires"
+    );
+    assert!(
+        e.pending_probe_for(pid).is_none(),
+        "triggered Seed opens Batching-first — the latch preserved the witness through the wedge",
+    );
+
+    // Settle expiry → Verifying → the Authoritative sample classifies FreshSeedFire.
+    let t2 = t1 + SETTLE * 2;
+    drain_due(&mut e, t2);
+    let out = respond_anchor_file(&mut e, pid, 1, t2);
+    assert_eq!(
+        out.effects().len(),
+        1,
+        "the witnessed appearance fires once it settles — same outcome as the non-racing path",
+    );
+    assert!(e.subs().get(sid).unwrap().has_fired());
+    let _ = e.cancel_all_in_flight_probes();
+}
+
 /// Sibling churn at a descent prefix during an attach over an existing tree pins silently — zero
 /// effects. The flake shape this pins against: a daemon whose attach path crosses a busy shared
 /// directory (`/tmp`, `$TMPDIR`, `/var/log`) receives STRUCTURE events at the live descent prefix
@@ -747,7 +857,8 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
 
     // Profile A: Pending at /root, descending toward `foo` (does not exist). Drain its initial
     // descent probe with a no-progress response so its `pending_probe` slot is empty before the
-    // test event — `on_descent_event` short-circuits on a busy slot.
+    // test event — on a busy slot `on_descent_event` latches a re-probe-owed debt rather than
+    // emitting, so the test event would produce no fresh probe to observe.
     let req_a = SubAttachRequest::for_anchor(
         "watch-a".into(),
         SubAttachAnchor::Path(PathBuf::from("/root/foo")),

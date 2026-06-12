@@ -146,8 +146,8 @@ mod tests {
         assert_eq!(s.correlation(), None);
     }
 
-    /// `armed(c)` reports armed and surfaces the correlation. The slot is disarmed before it drops —
-    /// an armed slot reaching drop trips the linearity tripwire, and this test's point (the
+    /// `armed(c)` reports armed and surfaces the correlation. The slot is disarmed before it drops
+    /// — an armed slot reaching drop trips the linearity tripwire, and this test's point (the
     /// projection) is proven before the consume.
     #[test]
     fn armed_reports_correlation() {

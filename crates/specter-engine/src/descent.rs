@@ -55,8 +55,10 @@
 //!      fresh probe.
 //!    - `Failed { errno }`: retain Pending state; emit Diagnostic; await next event.
 //! 4. `on_descent_event` triggers a fresh probe (no settle) on `StructureChanged` at
-//!    `current_prefix` — pure mechanism, no witness write. I5: drops the re-probe if a probe is
-//!    already in flight (the in-flight response reflects the change).
+//!    `current_prefix` — pure mechanism, no witness write. I5 bounds it to at most one descent
+//!    probe in flight, so a signal racing an outstanding probe latches a re-probe-owed debt rather
+//!    than being dropped (the in-flight walk may predate the signal and so cannot witness it); the
+//!    response dispatch repays the debt with a probe that postdates the signal.
 
 use crate::path::empty_path;
 use crate::probe::DescentOutcome;
@@ -297,6 +299,23 @@ impl crate::Engine {
     /// [`Self::dispatch_burst_outcome`], total over the three [`DescentOutcome`] variants. The
     /// illegal `AnchorOk` / `SubtreeProven` shapes were already rejected by the
     /// `DescentOutcome::try_from` parse at the demux seam, so they never reach here.
+    ///
+    /// **Re-probe-owed repay.** After the arm runs, this is the single point that repays any debt
+    /// latched while the just-consumed probe was in flight (a prefix event or overflow that raced
+    /// the walk — see [`Self::on_descent_event`]). The arm has one of three shapes, and the repay
+    /// reads correctly against all of them:
+    /// - **re-armed inline** (advance / rewind): a fresh probe is already in flight and postdates
+    ///   the latched signal, so `try_emit_descent_probe` declines on the in-flight gate — debt
+    ///   consumed, no second probe.
+    /// - **parked / retained** (segment absent / `Failed`): no probe in flight, so the repay emits
+    ///   the owed postdating probe.
+    /// - **terminal / abandoned** (materialized anchor / root-prefix `Vanished`): the descent is
+    ///   gone, `descent_state_mut` is `None`, the debt died with the state (the Seed's
+    ///   `WholeSubtree` probe postdates everything; an abandoned descent must not re-probe).
+    ///
+    /// The walker-contract-violation arm (`walker_contract_violated_descent`) bypasses this hook by
+    /// construction — it is dispatched directly from `on_probe_response`, never through here, so a
+    /// buggy walker is never auto-re-probed into a tight loop.
     pub(crate) fn dispatch_descent(
         &mut self,
         owner: ProfileId,
@@ -310,6 +329,17 @@ impl crate::Engine {
             }
             DescentOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
             DescentOutcome::Failed(failure) => self.dispatch_descent_failed(owner, failure, out),
+        }
+
+        // Repay the epoch debt. `take_reprobe_owed` clears it unconditionally (a re-armed arm drops
+        // the debt without a redundant probe); `try_emit_descent_probe` then emits only when no
+        // probe is in flight, and never re-latches, so the repay converges in one probe per latched
+        // window. A gone descent (terminal / abandoned) yields `None` here and owes nothing.
+        if self
+            .descent_state_mut(owner)
+            .is_some_and(DescentState::take_reprobe_owed)
+        {
+            self.try_emit_descent_probe(owner, out);
         }
     }
 
@@ -710,10 +740,59 @@ impl crate::Engine {
         // Retain in-descent state; await next event at the prefix.
     }
 
-    /// Handler for `FsEvent` arriving at a descent's `current_prefix`: triggers a fresh probe (no
-    /// settle wait — descent is event-driven). I5: drops the event if a probe is already in flight
-    /// (the in-flight probe will pick up the change in its response). The "in flight" signal is an
-    /// armed descent probe slot for this Profile.
+    /// Emit a fresh descent probe at the current prefix iff the descent is live and idle — the
+    /// descent's probe-launch mechanism, shared by the event handler ([`Self::on_descent_event`])
+    /// and the re-probe-owed repay ([`Self::dispatch_descent`]'s hook). Returns `true` iff it
+    /// minted + armed + emitted, `false` when it declined: the Profile is no longer descending
+    /// (liveness gate), or a probe is already in flight (I5 — at most one descent probe per owner).
+    /// No settle wait — descent is event-driven.
+    ///
+    /// **No latch side effect.** It neither sets nor consumes the `reprobe_owed` debt. That keeps
+    /// the repay hook safe to call after a dispatch arm already re-armed inline (advance / rewind):
+    /// `try_emit` simply declines on the in-flight gate without re-latching against that arm's own
+    /// postdating probe, so the debt the hook just consumed cannot resurrect into a spurious extra
+    /// probe. Latching lives solely in `on_descent_event`'s miss branch.
+    fn try_emit_descent_probe(&mut self, owner: ProfileId, out: &mut StepOutput) -> bool {
+        // Liveness gate: an owner no longer descending has nothing to probe (a benign post-transition
+        // race on the event path; a materialized / abandoned descent on the repay path).
+        if self.descent_state(owner).is_none() {
+            return false;
+        }
+        // In-flight gate (I5). A probe already out covers the current prefix; the caller decides
+        // what to do with the decline — `on_descent_event` latches the debt, the repay hook leaves
+        // it to that probe (which postdates the signal).
+        if self.pending_probe_for(owner).is_some() {
+            return false;
+        }
+
+        let correlation = self.mint_probe_correlation();
+        // Loud arm — the gates above proved the owner in descent with no in-flight probe, and
+        // nothing between mutated it, so this `_mut` re-projection is structurally `Some`.
+        let Some(d) = self.descent_state_mut(owner) else {
+            unreachable!(
+                "try_emit_descent_probe: owner {owner:?} left descent between \
+                 the gates and the re-arm"
+            );
+        };
+        d.arm_probe(correlation);
+        // The choke reads the correlation back off the descent slot and resolves the prefix target
+        // off state.
+        self.emit_owner_probe(owner, out);
+        true
+    }
+
+    /// Handler for a signal reaching a descent's `current_prefix`: a prefix `StructureChanged`
+    /// (routed from `on_fs_event`) or a sensor overflow (`on_sensor_overflow`'s Pending arm calls
+    /// this directly). Tries to emit a fresh probe; if one is already in flight, latches the
+    /// re-probe-owed debt instead of dropping the signal.
+    ///
+    /// **Why latch, not drop.** "In flight" at the engine means only that the response is unprocessed
+    /// — the walk behind it may have completed *before* this signal, so its response cannot witness
+    /// this signal's change. Dropping the signal there wedges the descent: a stale pre-signal
+    /// response parks it, and the signal (often the awaited segment's own creation, or an edge the
+    /// kernel lost to the overflow window) never re-arrives. The latch defers the re-probe to the
+    /// response dispatch ([`Self::dispatch_descent`]'s repay hook), which emits a probe that
+    /// postdates the signal. See [`specter_core::DescentState`]'s `reprobe_owed` field doc.
     ///
     /// **Pure mechanism — no witness write.** A directory event at the prefix names no segment on
     /// either backend, so it cannot distinguish the awaited segment appearing from sibling churn
@@ -723,46 +802,19 @@ impl crate::Engine {
     /// [`Self::dispatch_descent_vanished`]): an absent-then-present pair latches
     /// `DescentState::witnessed`; a response that finds every segment on first observation leaves
     /// the terminus cold. The probe this handler triggers is how an appearance gets observed at all
-    /// — the event's only role.
-    ///
-    /// The overflow reseed path (`on_sensor_overflow`'s Pending arm) calls this directly. Overflow
-    /// proves events were dropped somewhere in scope, not that the awaited segment appeared — the
-    /// re-probe reads the post-overflow tree, and its observations carry whatever witness is due.
-    ///
-    /// Returns `true` iff it re-armed the descent slot and emitted a fresh probe; `false` when a
-    /// gate skipped (probe already in flight, or the Profile is no longer descending). The overflow
-    /// reseed path keys its diagnostic on this — the gates here are the single source of "did a
-    /// reseed happen", so an external re-check could never drift from them. The `FsEvent` dispatch
-    /// loop discards the value (a skipped descent event needs no narration).
-    pub(crate) fn on_descent_event(
-        &mut self,
-        owner: ProfileId,
-        _now: Instant,
-        out: &mut StepOutput,
-    ) -> bool {
-        // Liveness gate: an `FsEvent` for an owner no longer descending is a benign post-transition
-        // race — nothing to re-probe.
-        if self.descent_state(owner).is_none() {
-            return false;
+    /// — the event's only role. Overflow likewise proves events were dropped somewhere in scope,
+    /// not that the awaited segment appeared; the re-probe reads the post-overflow tree and its
+    /// observations carry whatever witness is due.
+    pub(crate) fn on_descent_event(&mut self, owner: ProfileId, out: &mut StepOutput) {
+        if self.try_emit_descent_probe(owner, out) {
+            return;
         }
-        if self.pending_probe_for(owner).is_some() {
-            return false;
+        // The probe didn't launch. The liveness gate is one decline cause; the other — the only one
+        // possible while the descent is still live — is an in-flight probe whose walk may predate
+        // this signal. Latch the debt there; a gone descent (terminal / abandoned) owes nothing.
+        if let Some(d) = self.descent_state_mut(owner) {
+            d.note_reprobe_owed();
         }
-
-        let correlation = self.mint_probe_correlation();
-        // Loud arm — the liveness resolution above proved the owner in descent and (no in-flight
-        // probe ⇒) nothing mutated it, so this `_mut` re-projection is structurally `Some`.
-        let Some(d) = self.descent_state_mut(owner) else {
-            unreachable!(
-                "on_descent_event: owner {owner:?} left descent between \
-                 the liveness gate and the re-arm"
-            );
-        };
-        d.arm_probe(correlation);
-        // The choke reads the correlation back off the descent slot and resolves the prefix target
-        // off state.
-        self.emit_owner_probe(owner, out);
-        true
     }
 }
 
@@ -1091,6 +1143,171 @@ mod tests {
             .count();
         assert_eq!(descent_probes, 0);
         let _ = e.cancel_all_in_flight_probes();
+    }
+
+    /// A signal latched during a descent probe's flight is repaid exactly once, even when the probe
+    /// fails. The first `Failed` carries an outstanding debt → one fresh probe; a second `Failed`
+    /// with no intervening signal owes nothing, so a persistently-failing prefix never spins a
+    /// tight re-probe loop. Pins the failure-arm repay and its termination.
+    #[test]
+    fn descent_failed_with_latched_signal_reprobes_exactly_once() {
+        let (mut e, _sid, pid) = setup_pending_one_level();
+        let foo = lookup_foo(&e);
+        let corr1 = e.pending_probe_for(pid).expect("first probe in flight");
+
+        // A prefix event races the in-flight probe — latched, not dropped (no new probe emitted).
+        let out = e.step(
+            Input::FsEvent {
+                resource: foo,
+                event: specter_core::FsEvent::StructureChanged,
+            },
+            Instant::now(),
+        );
+        assert!(
+            !out.probe_ops()
+                .iter()
+                .any(|op| matches!(op, ProbeOp::Probe { .. })),
+            "event during in-flight probe latches the debt, emits no probe",
+        );
+        assert_eq!(
+            e.pending_probe_for(pid),
+            Some(corr1),
+            "in-flight slot untouched by the latched event",
+        );
+
+        // The probe fails: state retained, slot disarmed. The latched debt repays — one fresh probe.
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: pid,
+                correlation: corr1,
+                outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            }),
+            Instant::now(),
+        );
+        let corr2 = e
+            .pending_probe_for(pid)
+            .expect("Failed + latched debt repays with a fresh probe");
+        assert_ne!(corr1, corr2, "the repay probe is freshly correlated");
+        assert_eq!(
+            out.probe_ops()
+                .iter()
+                .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid))
+                .count(),
+            1,
+            "exactly one repay probe — not a burst",
+        );
+
+        // The repay probe also fails, with no signal latched during it. No debt is owed, so the
+        // descent parks disarmed — no tight loop against a persistently-failing prefix.
+        let _ = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: pid,
+                correlation: corr2,
+                outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            }),
+            Instant::now(),
+        );
+        assert!(
+            e.pending_probe_for(pid).is_none(),
+            "no probe in flight: an unlatched Failed owes no re-probe",
+        );
+        assert!(
+            e.descent_state(pid).is_some(),
+            "descent retained for the next event",
+        );
+    }
+
+    /// A signal latched during a descent probe's flight whose response *advances* (the awaited
+    /// segment appeared) is repaid by the advance's own probe — which already postdates the signal
+    /// — so the repay hook emits nothing extra and the descent converges. Pins that the hook never
+    /// re-latches against an inline-re-armed probe: the spurious-probe regression the no-latch
+    /// `try_emit_descent_probe` mechanism structurally avoids.
+    #[test]
+    fn descent_advance_with_latched_signal_does_not_spuriously_reprobe() {
+        let mut e = Engine::new();
+        let foo = e
+            .tree_mut()
+            .ensure_path(&[FS_ROOT_SEGMENT, "foo"], ResourceRole::User)
+            .expect("non-empty fixture");
+        e.tree_mut().set_kind(foo, ResourceKind::Dir);
+        let req = SubAttachRequest::for_anchor(
+            "guard".into(),
+            SubAttachAnchor::Path(PathBuf::from("/foo/bar/baz")),
+            cfg(),
+            MAX_SETTLE,
+            SETTLE,
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        );
+        let out = e.step(Input::AttachSub(req), Instant::now());
+        let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
+        let pid = e.subs().get(sid).unwrap().profile();
+        let corr1 = e.pending_probe_for(pid).expect("first probe at /foo");
+
+        // A prefix event races the in-flight probe — latched.
+        let out = e.step(
+            Input::FsEvent {
+                resource: foo,
+                event: specter_core::FsEvent::StructureChanged,
+            },
+            Instant::now(),
+        );
+        assert!(
+            !out.probe_ops()
+                .iter()
+                .any(|op| matches!(op, ProbeOp::Probe { .. })),
+            "event during in-flight probe latches, emits no probe",
+        );
+
+        // The probe advances: `bar` appeared, so descent moves to /foo/bar and re-arms inline. That
+        // probe postdates the latched event; the repay hook consumes the debt but emits nothing more.
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: pid,
+                correlation: corr1,
+                outcome: ProbeOutcome::DirEnumerated(dir_snap_with(vec![(
+                    "bar",
+                    EntryKind::Dir,
+                    1,
+                )])),
+            }),
+            Instant::now(),
+        );
+        let corr2 = e
+            .pending_probe_for(pid)
+            .expect("advance re-armed a probe at /foo/bar");
+        assert_ne!(corr1, corr2);
+        assert_eq!(
+            out.probe_ops()
+                .iter()
+                .filter(|op| matches!(op, ProbeOp::Probe { request } if request.owner() == pid))
+                .count(),
+            1,
+            "exactly the advance probe — the hook did not re-latch into a second emission",
+        );
+
+        // Drive the advance probe to a park (`baz` absent). The debt was already cleared by the
+        // advance step, so this park owes no re-probe: the descent converges parked, not spinning.
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: pid,
+                correlation: corr2,
+                outcome: ProbeOutcome::DirEnumerated(dir_snap_with(vec![])),
+            }),
+            Instant::now(),
+        );
+        assert!(
+            !out.probe_ops()
+                .iter()
+                .any(|op| matches!(op, ProbeOp::Probe { .. })),
+            "no spurious probe after the park — the latch did not survive the advance",
+        );
+        assert!(
+            e.pending_probe_for(pid).is_none(),
+            "descent parked disarmed at /foo/bar awaiting the next event",
+        );
     }
 
     #[test]
