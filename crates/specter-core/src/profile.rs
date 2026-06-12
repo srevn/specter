@@ -77,7 +77,8 @@ pub enum ActiveBurst {
 /// **last-writer-wins** dedup (a slot firing N events contributes one entry, not N — see
 /// [`Self::note`]), and retaining the live-slot id as the cheap basis for any future caller needing
 /// *current* liveness rather than history (today none on the Standard pre-fire path — the projection
-/// reads only the values). No public setter — [`Self::note`] is the sole accumulator edge.
+/// reads only the values). No public setter — the accumulator edges are [`Self::note`] (one event)
+/// and [`Self::absorb`] (wholesale union, the standing-obligation park/drain merge).
 #[derive(Debug, Default)]
 pub struct DirtyProvenance(BTreeMap<ResourceId, Arc<Path>>);
 
@@ -88,13 +89,24 @@ impl DirtyProvenance {
         Self(BTreeMap::new())
     }
 
-    /// Record that an `FsEvent` named `id` at `path`. The sole accumulator edge. `path` is an
-    /// `Arc::clone` of the live `&Resource`'s materialised path captured at the ingest site — total
-    /// by construction (the `watch_demand > 0` gate proved the slot live), so no fallible
+    /// Record that an `FsEvent` named `id` at `path`. The single-event accumulator edge. `path` is
+    /// an `Arc::clone` of the live `&Resource`'s materialised path captured at the ingest site —
+    /// total by construction (the `watch_demand > 0` gate proved the slot live), so no fallible
     /// `path_of`, no `Option`. Last-writer -wins per id; ids are stable, so a repeat event for one
     /// slot re-stores the identical path.
     pub fn note(&mut self, id: ResourceId, path: Arc<Path>) {
         self.0.insert(id, path);
+    }
+
+    /// Union `other`'s captured events into this accumulator — the wholesale merge edge for the
+    /// standing-obligation lifecycle (consecutive parks union onto the parked set; a burst
+    /// constructor unions the drained set into the newborn burst's `dirty`). Per-id
+    /// last-writer-wins with `other` as the later writer, the same dedup [`Self::note`] applies
+    /// per event: ids are stable, so a duplicate id re-stores the identical path and merge order
+    /// is immaterial today. Callers still merge older-evidence-first so the liveliest writer lands
+    /// last if that contract ever loosens.
+    pub fn absorb(&mut self, other: Self) {
+        self.0.extend(other.0);
     }
 
     /// No event recorded yet. The Seed first-fire witness (`seed_owes_first_fire`) and the
@@ -460,13 +472,16 @@ pub struct PostFireBurst {
     pub phase: PostFirePhase,
     /// The final-window restart seed — events absorbed during the post-fire tail (`Awaiting |
     /// Rebasing | Settling`), captured `(slot, path)` by `absorb_event_into_fire_tail` in
-    /// `drive_burst`'s post-fire arm. Single-purpose: when the rebase loop terminates
-    /// `Authoritative` on a `ReturnToIdle` burst with a non-empty residual, restart a fresh
-    /// debounced Standard burst seeded from it (`into_pre_fire_residual` moves the whole
-    /// provenance, so the restarted burst's first verify has its captured paths intact). A zombie
-    /// (`Reap`) burst, an empty residual, or a ceiling terminal (no restart) drops it at
-    /// `finish_burst_to_idle`. The restarted burst's settle window reckons from the rebase-response
-    /// instant, not the absorbed events', a bounded ≤ one-`settle` extra re-fire latency.
+    /// `drive_burst`'s post-fire arm. Single-purpose: when the rebase loop terminates `Stable(_)`
+    /// — natural or ceiling-forced; both run the identical final-round-trip race window — on a
+    /// `ReturnToIdle` burst with a non-empty residual, restart a fresh debounced Standard burst
+    /// seeded from it (`into_pre_fire_residual` moves the whole provenance, so the restarted
+    /// burst's first verify has its captured paths intact). The non-committing terminals
+    /// (`Abandon`, a ceiling-forced transient probe failure) park it into
+    /// [`Profile::park_burst_evidence`]'s standing obligation instead, for the next burst to
+    /// re-prove. A zombie (`Reap`) burst or an empty residual drops it at `finish_burst_to_idle`.
+    /// The restarted burst's settle window reckons from the rebase-response instant, not the
+    /// absorbed events', a bounded ≤ one-`settle` extra re-fire latency.
     ///
     /// **Per-entry reset.** Cleared at *every* `Rebasing` entry (`transition_to_rebasing`, both the
     /// first `Awaiting → Rebasing` walk and each `Settling → Rebasing` re-arm), so when the loop
@@ -1141,10 +1156,19 @@ impl PostFireBurst {
     /// it apply to the residual restart that carries the final-window-race events: the caller
     /// passes the live window's birth consult for the restart instant.
     ///
+    /// `parked` is the caller's drained standing obligation ([`Profile::take_standing_obligation`])
+    /// — every pre-fire burst birth begins from the drained set, this one included. It merges
+    /// *under* the residual (older evidence first), so the residual's events — the liveliest
+    /// writers — land last under [`DirtyProvenance::absorb`]'s per-id last-writer-wins. Parks pair
+    /// with burst finishes, so in every current sequence the set is empty by the time a live
+    /// post-fire burst restarts; draining it here regardless keeps the birth rule uniform across
+    /// the three constructors, and a future park edge cannot strand evidence.
+    ///
     /// Sole production caller: `restart_burst_from_fire_tail_residual` in `burst.rs`.
     #[must_use]
     pub fn into_pre_fire_residual(
         self,
+        parked: DirtyProvenance,
         burst_deadline: TimerId,
         settle_timer: TimerId,
         now: Instant,
@@ -1155,12 +1179,13 @@ impl PostFireBurst {
             "into_pre_fire_residual: empty residual — the restart has no \
              seed; the caller must gate on a non-empty fire-tail residual",
         );
-        let residual = self.final_window_residual;
+        let mut dirty = parked;
+        dirty.absorb(self.final_window_residual);
         PreFireBurst::new(
             burst_deadline,
             PreFirePhase::Batching { settle_timer },
             BurstIntent::Standard,
-            residual,
+            dirty,
             Some(now),
             fold_latched,
         )
@@ -1211,6 +1236,21 @@ impl ActiveBurst {
         match self {
             Self::PreFire(pre) => pre.advance_certified_sample(hash),
             Self::PostFire(post) => post.advance_certified_sample(hash),
+        }
+    }
+
+    /// Take the live carrier's evidence store, leaving it empty — `PreFire ⇒ dirty` (the burst's
+    /// captured-path provenance), `PostFire ⇒ final_window_residual` (the fire-tail restart seed).
+    /// The lifecycle layer of the park cascade ([`Profile::park_burst_evidence`]); wildcard-free
+    /// dispatch with both variants taking (each side owns an evidence store), the same layered
+    /// shape as [`Self::advance_certified_sample`]. Crate-private: the only legitimate reader is
+    /// the park edge — the take runs immediately before the burst finish, so the emptied store
+    /// never feeds another verify.
+    #[must_use]
+    pub(crate) fn take_evidence(&mut self) -> DirtyProvenance {
+        match self {
+            Self::PreFire(pre) => std::mem::take(&mut pre.dirty),
+            Self::PostFire(post) => std::mem::take(&mut post.final_window_residual),
         }
     }
 
@@ -1526,6 +1566,19 @@ impl ProfileState {
         match self {
             Self::Active(burst, _) => burst.advance_certified_sample(hash),
             Self::Idle | Self::Parked | Self::Pending(_) => None,
+        }
+    }
+
+    /// Take the live burst's evidence store — the state layer of the park cascade
+    /// ([`Profile::park_burst_evidence`]). `Active ⇒` delegate to [`ActiveBurst::take_evidence`];
+    /// `Idle | Parked | Pending ⇒` an empty take (no burst, no evidence — the "nothing to park"
+    /// shape, mirroring [`Self::advance_certified_sample`]'s `None` fold). Wildcard-free, same
+    /// layered shape as the other burst-carrier delegates.
+    #[must_use]
+    pub(crate) fn take_burst_evidence(&mut self) -> DirtyProvenance {
+        match self {
+            Self::Active(burst, _) => burst.take_evidence(),
+            Self::Idle | Self::Parked | Self::Pending(_) => DirtyProvenance::new(),
         }
     }
 
@@ -2539,6 +2592,25 @@ pub struct Profile {
     /// reset when a config-hash change rebuilds the Profile). Bumped by [`Self::note_absorb_fold`];
     /// read via [`Self::absorb_count`] and projected per-Sub at the `show` boundary.
     absorb_count: u64,
+    /// Paths that owe a fresh read before the next fire — burst evidence a non-consuming verdict
+    /// terminal (`Abandon`, a ceiling-forced transient probe failure) parked, surviving the burst
+    /// that witnessed them. Without the park, the terminal's evidence dies with the burst and the
+    /// formerly-dirty region mtime-skips against the stale baseline on every later burst: loud
+    /// once at the terminal, then silent forever. Written by [`Self::park_burst_evidence`]
+    /// (consecutive parks union), drained by [`Self::take_standing_obligation`] at every pre-fire
+    /// burst birth — the next burst's obligation then covers the parked chains (the dirty-LCA
+    /// widens over them; an events-incomplete or Seed burst reads `WholeSubtree` and consumes them
+    /// structurally). Parks pair with burst finishes and every constructor drains, so the set is
+    /// non-empty only between a parking terminal and the next burst construction. Outlives anchor
+    /// loss deliberately: the parked paths testify to witnessed-but-unfired activity, so they
+    /// rightly make the recovery Seed proof-owing and first-fire-owing.
+    ///
+    /// **Recovery rides the next signal, never a poll.** A parked residue still never fires if no
+    /// in-mask event ever arrives again — parking converts "lost forever" into "lost until the
+    /// next signal". That is the deliberate trade: it is event-driven (no probe drumbeat against a
+    /// permanently unreadable region), it preserves the terminal's stop-burning-probes intent, and
+    /// it is the architecture's existing posture for [`ProfileState::Parked`] Profiles.
+    standing_obligation: DirtyProvenance,
 }
 
 impl Profile {
@@ -2612,6 +2684,7 @@ impl Profile {
             },
             absorb: None,
             absorb_count: 0,
+            standing_obligation: DirtyProvenance::new(),
         }
     }
 
@@ -3328,6 +3401,35 @@ impl Profile {
     #[must_use]
     pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
         self.state.advance_certified_sample(hash)
+    }
+
+    /// Park the live burst's evidence store into the standing obligation — the cat-(b) edge for
+    /// the non-consuming verdict terminals (`Abandon`, a ceiling-forced transient probe failure),
+    /// called by the engine's verdict-terminal router immediately before the burst finish. The
+    /// cascade ([`ProfileState::take_burst_evidence`] → [`ActiveBurst::take_evidence`]) takes
+    /// whichever carrier is live — pre-fire `dirty` or post-fire `final_window_residual` — and
+    /// unions it onto any prior parked content (consecutive parks union; per-id paths are
+    /// identical by [`DirtyProvenance::note`]'s contract). Non-Active states park nothing — an
+    /// empty take absorbed into the set is a no-op.
+    ///
+    /// The drain side is [`Self::take_standing_obligation`]; see the field rustdoc for the
+    /// recovery-rides-a-signal posture.
+    pub fn park_burst_evidence(&mut self) {
+        let evidence = self.state.take_burst_evidence();
+        self.standing_obligation.absorb(evidence);
+    }
+
+    /// Drain the standing obligation, leaving it empty — called at every pre-fire burst birth
+    /// (`start_standard_burst`, `start_seed_burst`, the fire-tail residual restart), which unions
+    /// the result into the newborn burst's `dirty` *before* noting its own trigger, so the
+    /// liveliest writer lands last. Draining into a Seed is a semantic feature, not defensive
+    /// padding: the parked paths are the witnessed-activity testimony that makes a post-loss
+    /// recovery Seed proof-owing (`owes_proof_from` reads `!dirty.is_empty()`) and a never-fired
+    /// one first-fire-owing (`seed_owes_first_fire`) — a genuinely cold attach has no parked
+    /// evidence by construction (fresh Profile), so restart-safe silence is preserved.
+    #[must_use]
+    pub fn take_standing_obligation(&mut self) -> DirtyProvenance {
+        std::mem::take(&mut self.standing_obligation)
     }
 
     /// Arm (or re-arm) the operator `absorb` window **and** retro-latch any in-flight pre-fire
@@ -5096,6 +5198,7 @@ mod tests {
         let now = std::time::Instant::now();
 
         let pre = rebasing_post(BurstIntent::Standard, residual).into_pre_fire_residual(
+            DirtyProvenance::new(),
             tid(7),
             tid(8),
             now,
@@ -5131,6 +5234,7 @@ mod tests {
             .expect("live");
         let residual = dirty_prov(&[(c1, "/w/c1")]);
         let pre = rebasing_post(BurstIntent::Seed, residual).into_pre_fire_residual(
+            DirtyProvenance::new(),
             tid(1),
             tid(2),
             std::time::Instant::now(),
@@ -5159,7 +5263,13 @@ mod tests {
     #[should_panic(expected = "empty residual")]
     fn into_pre_fire_residual_empty_residual_trips_assert() {
         let _ = rebasing_post(BurstIntent::Standard, DirtyProvenance::new())
-            .into_pre_fire_residual(tid(1), tid(2), std::time::Instant::now(), false);
+            .into_pre_fire_residual(
+                DirtyProvenance::new(),
+                tid(1),
+                tid(2),
+                std::time::Instant::now(),
+                false,
+            );
     }
 
     /// The pre-fire N=2 sample carrier drops by omission at the fire boundary:
@@ -5211,7 +5321,13 @@ mod tests {
 
         // Sealed carrier — assert the drop behaviorally: a surviving carrier would make the
         // restarted burst's first advance return `Some(0xDEAD_BEEF)`.
-        let mut pre = post.into_pre_fire_residual(tid(1), tid(2), std::time::Instant::now(), false);
+        let mut pre = post.into_pre_fire_residual(
+            DirtyProvenance::new(),
+            tid(1),
+            tid(2),
+            std::time::Instant::now(),
+            false,
+        );
         assert_eq!(
             pre.advance_certified_sample(0x5678_u128),
             None,
@@ -5249,6 +5365,7 @@ mod tests {
         let residual = dirty_prov(&[(c1, "/w/c1")]);
 
         let pre = rebasing_post(BurstIntent::Standard, residual).into_pre_fire_residual(
+            DirtyProvenance::new(),
             tid(1),
             tid(2),
             std::time::Instant::now(),
@@ -5257,6 +5374,101 @@ mod tests {
         assert!(
             pre.fold_latched.is_latched(),
             "the restart threads the latch — a live absorb window keeps folding the restarted burst",
+        );
+    }
+
+    /// The fire-tail restart begins from the caller's drained standing obligation: parked paths
+    /// merge *under* the residual, so the restarted burst's first verify obligates over both the
+    /// final-window-race events and any evidence a prior non-consuming terminal parked.
+    #[test]
+    fn into_pre_fire_residual_unions_parked_under_residual() {
+        let mut tree = Tree::new();
+        let anchor = tree.ensure_root("anchor", ResourceRole::User);
+        let c1 = tree
+            .ensure_child(anchor, "c1", ResourceRole::User)
+            .expect("live");
+        let c2 = tree
+            .ensure_child(anchor, "c2", ResourceRole::User)
+            .expect("live");
+        let parked = dirty_prov(&[(c1, "/w/c1")]);
+        let residual = dirty_prov(&[(c2, "/w/c2")]);
+
+        let pre = rebasing_post(BurstIntent::Standard, residual).into_pre_fire_residual(
+            parked,
+            tid(1),
+            tid(2),
+            std::time::Instant::now(),
+            false,
+        );
+        assert_eq!(
+            pre.dirty.chains(),
+            expected_chains(&["/w/c1", "/w/c2"]),
+            "the restarted burst's provenance unions the parked set with the residual",
+        );
+    }
+
+    /// The standing-obligation park edge takes whichever evidence carrier is live — pre-fire
+    /// `dirty` or post-fire `final_window_residual` — empties it, and unions consecutive parks.
+    /// The drain ([`Profile::take_standing_obligation`]) empties the set. Engine integration
+    /// covers the terminal routing; this pins the cat-(b) cascade's own contract.
+    #[test]
+    fn park_burst_evidence_takes_live_carrier_and_unions_across_parks() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let c = rids(2);
+        let mut p = mk_profile(
+            r,
+            cfg(),
+            MAX_SETTLE,
+            SETTLE,
+            NO_EVENTS,
+            Some(ResourceKind::Dir),
+        );
+
+        // Pre-fire park takes `dirty`, leaving the burst's store empty.
+        let mut pre = batching_burst(tid(1), tid(2));
+        pre.dirty.note(c[0], Arc::from(Path::new("/w/c1")));
+        let _ = p.transition_state(ProfileState::Active(
+            ActiveBurst::PreFire(pre),
+            BurstFinish::ReturnToIdle,
+        ));
+        p.park_burst_evidence();
+        assert!(
+            p.pre_fire_burst().unwrap().dirty.is_empty(),
+            "the park empties the live carrier",
+        );
+
+        // Post-fire park takes the residual and unions it onto the parked set.
+        let post = rebasing_post(BurstIntent::Standard, dirty_prov(&[(c[1], "/w/c2")]));
+        let _ = p.transition_state(ProfileState::Active(
+            ActiveBurst::PostFire(post),
+            BurstFinish::ReturnToIdle,
+        ));
+        p.park_burst_evidence();
+
+        let drained = p.take_standing_obligation();
+        assert_eq!(
+            drained.chains(),
+            expected_chains(&["/w/c1", "/w/c2"]),
+            "consecutive parks union",
+        );
+        assert!(
+            p.take_standing_obligation().is_empty(),
+            "the drain empties the standing obligation",
+        );
+    }
+
+    /// A park on a non-Active state takes nothing — there is no burst, hence no evidence carrier;
+    /// the empty take is absorbed as a no-op.
+    #[test]
+    fn park_burst_evidence_on_non_active_state_parks_nothing() {
+        let mut tree = Tree::new();
+        let r = tree.ensure_root("anchor", ResourceRole::User);
+        let mut p = mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None);
+        p.park_burst_evidence();
+        assert!(
+            p.take_standing_obligation().is_empty(),
+            "Idle parks nothing",
         );
     }
 

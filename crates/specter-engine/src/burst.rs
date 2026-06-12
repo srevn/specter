@@ -320,15 +320,29 @@ impl Engine {
         // moves `trigger` into the Batching arm.
         let emit_cold_walk = trigger.is_none();
 
-        let (phase, last_event_time, dirty) = match trigger {
+        // Every pre-fire burst birth begins from the drained standing obligation — a semantic
+        // feature on the Seed path, not defensive padding: parked paths testify to
+        // witnessed-but-unfired activity, so they rightly make this Seed proof-owing
+        // (`owes_proof_from` reads `!dirty.is_empty()`) and a never-fired one first-fire-owing
+        // (`seed_owes_first_fire`) — preserving the testimony across an Abandon → anchor-loss →
+        // recovery chain. A genuinely cold attach has no parked evidence (fresh Profile), so the
+        // restart-safe `SilentPin` is untouched. Drained before noting the trigger, so the live
+        // event is the last writer.
+        let mut dirty = self
+            .profiles
+            .get_mut(profile_id)
+            .map_or_else(DirtyProvenance::new, Profile::take_standing_obligation);
+
+        let (phase, last_event_time) = match trigger {
             None => {
-                // Cold attach. Mint a correlation, construct-arm the `Verifying` slot inside the
-                // phase variant. I5 holds by representability: no prior phase means no slot could
-                // hold a competing correlation, and the loud `ProbeSlot::arm` re-acquire assert is
-                // unreachable on a fresh variant. `dirty` is empty by construction —
-                // `seed_owes_first_fire` reads `!dirty.is_empty()` and folds to `false`, routing
-                // the Authoritative response to `SilentPin`. `last_event_time = None` — no event
-                // drove this burst, no settle deadline to source.
+                // Cold attach / reseed. Mint a correlation, construct-arm the `Verifying` slot
+                // inside the phase variant. I5 holds by representability: no prior phase means no
+                // slot could hold a competing correlation, and the loud `ProbeSlot::arm`
+                // re-acquire assert is unreachable on a fresh variant. No event drove this burst —
+                // `dirty` holds only the drained standing obligation (empty on a genuinely cold
+                // attach, routing the Authoritative response to `SilentPin`; non-empty when a
+                // parked residue makes the reseed fire-owing). `last_event_time = None` — no
+                // settle deadline to source.
                 debug_assert!(
                     self.pending_probe_for(profile_id).is_none(),
                     "I5: cold-Seed start with a probe already in flight \
@@ -345,7 +359,6 @@ impl Engine {
                         target: resource,
                     },
                     None,
-                    DirtyProvenance::new(),
                 )
             }
             Some((trigger_resource, trigger_path)) => {
@@ -355,9 +368,8 @@ impl Engine {
                 let settle_timer =
                     self.timers
                         .schedule(now + settle, profile_id, TimerKind::Settle);
-                let mut dirty = DirtyProvenance::new();
                 dirty.note(trigger_resource, trigger_path);
-                (PreFirePhase::Batching { settle_timer }, Some(now), dirty)
+                (PreFirePhase::Batching { settle_timer }, Some(now))
             }
         };
 
@@ -434,7 +446,16 @@ impl Engine {
             self.timers
                 .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
-        let mut dirty = DirtyProvenance::new();
+        // Every pre-fire burst birth begins from the drained standing obligation: paths a prior
+        // non-consuming terminal parked rightly re-enter the proof here — the dirty-LCA widens
+        // over them and the obligation chains cover them, so the formerly-unread region cannot
+        // mtime-skip against the stale baseline (an events-incomplete Profile reads `WholeSubtree`
+        // and consumes them structurally). Drained before noting the trigger, so the live event is
+        // the last writer.
+        let mut dirty = self
+            .profiles
+            .get_mut(profile_id)
+            .map_or_else(DirtyProvenance::new, Profile::take_standing_obligation);
         dirty.note(event_resource, Arc::clone(event_path));
 
         self.profiles.transition_state(
@@ -1380,10 +1401,12 @@ impl Engine {
     /// [`specter_core::PostFireBurst::into_pre_fire_residual`]); the inverse of
     /// `transition_to_awaiting`'s fire move.
     ///
-    /// **Caller.** `dispatch_rebase_ok` only, after `rebase_baseline`, and only once it has
-    /// established the residual is non-empty and the burst is [`BurstFinish::ReturnToIdle`].
-    /// Origin-agnostic — a Seed-origin residual restarts too; `into_pre_fire_residual` sets
-    /// `intent: Standard` because a restarted debounce burst *is* Standard by definition.
+    /// **Caller.** The verdict-terminal router (`finish_verdict_terminal`, `Restart` disposition)
+    /// only — reached from `dispatch_rebase_ok`'s `Stable(_)` arm (natural or ceiling-forced),
+    /// after `rebase_baseline`, and only once the router has established the residual is non-empty
+    /// and the burst is [`BurstFinish::ReturnToIdle`]. Origin-agnostic — a Seed-origin residual
+    /// restarts too; `into_pre_fire_residual` sets `intent: Standard` because a restarted debounce
+    /// burst *is* Standard by definition.
     ///
     /// **No refcount edges.** The typed `PostFire → PreFire` move preserves the watched anchor: it
     /// neither installs nor releases a contribution, so the restarted burst keeps the original
@@ -1433,6 +1456,15 @@ impl Engine {
         else {
             return;
         };
+        // The restart is a pre-fire burst birth, so it begins from the drained standing obligation
+        // like the other two constructors — `into_pre_fire_residual` merges the parked set under
+        // the residual (the liveliest writers land last). Parks pair with burst finishes, so the
+        // set is empty here in every current sequence; the uniform drain keeps the birth rule one
+        // rule and a future park edge cannot strand evidence.
+        let parked = self
+            .profiles
+            .get_mut(profile_id)
+            .map_or_else(DirtyProvenance::new, Profile::take_standing_obligation);
 
         // The two engine timers a fresh Standard burst arms (`start_standard_burst`): the settle
         // debounce and the burst-deadline force-fire ceiling.
@@ -1454,6 +1486,7 @@ impl Engine {
             ProfileState::Active(ActiveBurst::PostFire(post), finish) => (
                 ProfileState::Active(
                     ActiveBurst::PreFire(post.into_pre_fire_residual(
+                        parked,
                         burst_deadline,
                         settle_timer,
                         now,

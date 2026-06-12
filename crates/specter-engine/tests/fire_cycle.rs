@@ -15,14 +15,14 @@
 //!   hash-dedup suppression skips Awaiting too.
 
 use compact_str::CompactString;
-use specter_core::testkit::{dir_snap, empty_program, proven};
+use specter_core::testkit::{covered, dir_snap, dir_snap_nested, empty_program, proven};
 use specter_core::{
     ActiveBurst, BurstFinish, BurstIntent, ChildEntry, ClassSet, DedupKey, Diagnostic, DirMeta,
     DirSnapshot, EffectCompletion, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity,
     Input, LeafEntry, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation,
-    ProbeOp, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, Termination, TimerKind,
-    TreeSnapshot,
+    ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState, ProofAuthority, ResourceId,
+    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
+    Termination, TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -470,6 +470,136 @@ fn fire_cycle_post_rebase_residual_restarts_debounced_burst() {
         e.tree().get(r).unwrap().watch_demand(),
         watch_before,
         "anchor watch held across the restart, no finish-then-start flicker",
+    );
+}
+
+#[test]
+fn fire_cycle_forced_rebase_terminal_restarts_from_residual() {
+    // The Forced rebase terminal runs the identical final-round-trip race window as the Natural
+    // one, so it takes the identical restart exit. Drive a hung actuator to the gate deadline
+    // (which latches `CeilingState::Reached` and forces the FINAL rebase walk), absorb a
+    // kernel-delivered in-mask event while that walk is in flight, and answer Authoritative:
+    // `Stable(Forced)` must narrate the ceiling AND restart a debounced Standard burst from the
+    // residual — the companion pin to
+    // `fire_cycle_post_rebase_residual_restarts_debounced_burst` (the Natural terminal). The
+    // restarted burst then fires the absorbed change.
+    //
+    // The seed snapshot carries a `Covered` child Dir (not `dir_snap`'s `Uncovered` shape): the
+    // restarted burst's verify targets the dirty-LCA — the child — and the response graft must
+    // splice through the baseline's child hop.
+    let mut e = Engine::new();
+    let r = anchor_dir(&mut e, "src");
+    let child = e
+        .tree_mut()
+        .ensure_child(r, "child", ResourceRole::User)
+        .expect("test live parent");
+    e.tree_mut().set_kind(child, ResourceKind::Dir);
+    let now = Instant::now();
+    let snap = dir_snap_nested(&[("child", covered(dir_snap(&[("f", EntryKind::File, 10)])))]);
+    let (_sid, pid, seed_done) =
+        attach_and_complete_seed_with(&mut e, subtree_request_with_content("test", r), &snap, now);
+
+    // Drive to Awaiting; the actuator hangs (the effect never completes). The gate deadline
+    // (4 × max_settle) expires → handle_gate_deadline cancels the effect, latches the forced
+    // ceiling, and drives the final rebase walk.
+    let t_fire = seed_done + Duration::from_millis(10);
+    let _ = drive_to_awaiting(&mut e, pid, r, &snap, t_fire);
+    let t_gate = t_fire + MAX_SETTLE * 8;
+    let gate_diags = drain_due(&mut e, t_gate);
+    assert!(
+        gate_diags
+            .iter()
+            .any(|d| matches!(d, Diagnostic::AwaitGateDeadlineForceRebasing { .. })),
+        "gate deadline forces Awaiting → Rebasing; got {gate_diags:?}",
+    );
+    let rebase_corr = e
+        .pending_probe_for(pid)
+        .expect("forced rebase probe in flight");
+
+    // A kernel-delivered, in-mask change lands during the FINAL probe round-trip — the residual
+    // reset at the Rebasing entry means this absorb is exactly the final-window race the residual
+    // exists to save.
+    let absorb_out = e.step(
+        Input::FsEvent {
+            resource: child,
+            event: FsEvent::ContentChanged,
+        },
+        t_gate + Duration::from_millis(2),
+    );
+    assert!(
+        absorb_out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::EventAbsorbedByFireTail { profile, resource, .. }
+                if *profile == pid && *resource == child,
+        )),
+        "the final-window event is absorbed into the residual",
+    );
+
+    // The forced walk responds Authoritative (it raced the write — same snapshot). The gate
+    // projects forced = true off `CeilingState::Reached` ⇒ Stable(Forced): the ceiling narrates
+    // BEFORE the exit, then the non-empty residual restarts.
+    let t_term = t_gate + Duration::from_millis(5);
+    let term_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: rebase_corr,
+            outcome: proven(Arc::clone(&snap)),
+        }),
+        t_term,
+    );
+    assert!(
+        term_out
+            .diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::RebaseCeilingForced { .. })),
+        "the forced terminal still diagnoses; got {:?}",
+        term_out.diagnostics,
+    );
+    let child_path = Arc::clone(e.tree().get(child).unwrap().path());
+    match e.profiles().get(pid).unwrap().state() {
+        ProfileState::Active(
+            ActiveBurst::PreFire(PreFireBurst {
+                phase: PreFirePhase::Batching { .. },
+                intent: BurstIntent::Standard,
+                dirty,
+                ..
+            }),
+            BurstFinish::ReturnToIdle,
+        ) => {
+            assert!(
+                dirty.chains().contains(&child_path),
+                "the residual seeds the restarted burst's obligation chains",
+            );
+        }
+        other => {
+            panic!("expected a restarted Batching burst after the Forced terminal, got {other:?}")
+        }
+    }
+    assert!(
+        first_probe_correlation(&term_out).is_none(),
+        "restart re-enters Batching, emits no probe — settle-debounced, no livelock",
+    );
+
+    // The restarted burst fires the absorbed change: the settle expiry drives the verify at the
+    // dirty-LCA (the child), and the fresh read observes the changed subtree (a different file
+    // identity than the rebased baseline), so the Stable verdict fires rather than
+    // dedup-suppressing.
+    let t_settle = t_term + SETTLE * 2;
+    let _ = drain_due(&mut e, t_settle);
+    let restart_corr = e
+        .pending_probe_for(pid)
+        .expect("restarted burst's settle expiry drives Verifying");
+    let fire_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: restart_corr,
+            outcome: proven(dir_snap(&[("f", EntryKind::File, 11)])),
+        }),
+        t_settle,
+    );
+    assert!(
+        !fire_out.effects().is_empty(),
+        "the restarted burst fires the absorbed change",
     );
 }
 
@@ -997,6 +1127,89 @@ fn fire_cycle_reap_pending_during_awaiting_reaps_at_gate_close() {
     assert!(
         e.profiles().get(pid).is_none(),
         "Profile reaped from registry",
+    );
+}
+
+#[test]
+fn fire_cycle_zombie_rebase_retry_short_circuits_to_reap() {
+    // A burst whose last Sub detached mid-tail (`BurstFinish::Reap`) has no consumer for the
+    // baseline its rebase loop would walk to certify. The next Retry-folding response must finish
+    // the burst (and reap the Profile) instead of walking settle-spaced `WholeSubtree` probes to
+    // the ceiling — mirroring `handle_gate_deadline`'s zombie route.
+    let mut e = Engine::new();
+    let r = anchor_dir(&mut e, "src");
+    let now = Instant::now();
+    let snap = dir_snap(&[]);
+    let (sid, pid, seed_done) = attach_and_complete_seed(&mut e, r, &snap, now);
+
+    // Standard fire → Awaiting → EffectComplete::Ok → Rebasing (probe in flight).
+    let t_fire = seed_done + Duration::from_millis(10);
+    let stable_out = drive_to_awaiting(&mut e, pid, r, &snap, t_fire);
+    let key = stable_out.effects()[0].key();
+    let t_rebase = t_fire + SETTLE * 8;
+    let _ = complete_effect_to_rebasing(&mut e, sid, key, t_rebase);
+    let corr = e.pending_probe_for(pid).expect("rebase probe in flight");
+
+    // First refusal (unforced `Undischarged`) folds Retry: the live burst loops to Settling.
+    let unread: Arc<std::path::Path> = Arc::from(std::path::Path::new("/src/opaque"));
+    let undischarged = || ProbeOutcome::SubtreeProven {
+        snapshot: Arc::clone(&snap),
+        authority: ProofAuthority::Undischarged {
+            first_unread: Arc::clone(&unread),
+        },
+    };
+    let t1 = t_rebase + Duration::from_millis(5);
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: corr,
+            outcome: undischarged(),
+        }),
+        t1,
+    );
+    match e.profiles().get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PostFire(post), BurstFinish::ReturnToIdle)
+            if matches!(post.phase, PostFirePhase::Settling { .. }) => {}
+        other => panic!("unforced Undischarged rebase response loops to Settling; got {other:?}"),
+    }
+
+    // The last Sub detaches mid-Settling — the burst is now a zombie.
+    let _ = e.step(Input::DetachSub(sid), t1 + Duration::from_millis(1));
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state().burst_finish(),
+            Some(BurstFinish::Reap),
+        ),
+        "last-Sub detach mid-burst defers the reap to burst end",
+    );
+
+    // The settle expiry drives the already-armed loop once more (Settling → Rebasing probe); the
+    // Retry-folding response then short-circuits: finish + reap in this step, zero further probes.
+    let t2 = t1 + SETTLE * 2;
+    let _ = drain_due(&mut e, t2);
+    let corr = e
+        .pending_probe_for(pid)
+        .expect("loop probe in flight after the settle expiry");
+    let term_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: corr,
+            outcome: undischarged(),
+        }),
+        t2 + Duration::from_millis(1),
+    );
+    assert!(
+        term_out.probe_ops().is_empty(),
+        "the zombie short-circuit emits no further probe",
+    );
+    assert!(
+        e.profiles().get(pid).is_none(),
+        "the zombie burst finished and the Profile reaped — not another Settling window",
+    );
+    let _ = drain_due(&mut e, t2 + Duration::from_hours(1));
+    assert!(
+        e.profiles().get(pid).is_none(),
+        "an hour of timer drains produces nothing further",
     );
 }
 
