@@ -71,6 +71,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::PendingPathProbeFailed { at, .. }
         | WireDiagnostic::PendingPathAwaitingSegment { at, .. }
         | WireDiagnostic::PendingPathRetriesExhausted { at, .. }
+        | WireDiagnostic::PendingPathMaterialized { at, .. }
         | WireDiagnostic::ReapPendingCancelled { at, .. }
         | WireDiagnostic::ProfileReaped { at, .. }
         | WireDiagnostic::ProfileParked { at, .. }
@@ -186,6 +187,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::EventClassDropped { .. }
         | W::EventOutsideProofObject { .. }
         | W::EventNoConsumer { .. }
+        | W::PendingPathMaterialized { .. }
         | W::ReapPendingCancelled { .. }
         | W::ProfileReaped { .. }
         | W::EventAbsorbedByFireTail { .. }
@@ -328,6 +330,12 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "prefix", prefix.0);
             field(out, sty, "retries", retries);
             field(out, sty, "errno", errno);
+        }
+        WireDiagnostic::PendingPathMaterialized {
+            profile, anchor, ..
+        } => {
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "anchor", anchor.0);
         }
         WireDiagnostic::ReapPendingCancelled { profile, .. }
         | WireDiagnostic::PerFileDriftDroppedOnRecovery { profile, .. }
@@ -800,6 +808,9 @@ mod tests {
             }
             "pending_path_retries_exhausted" => {
                 json!({"diag": tag, "at": at, "profile": id, "prefix": id, "retries": 3, "errno": 24})
+            }
+            "pending_path_materialized" => {
+                json!({"diag": tag, "at": at, "profile": id, "anchor": id})
             }
             "reap_pending_cancelled"
             | "per_file_drift_dropped_on_recovery"

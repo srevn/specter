@@ -305,6 +305,11 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             "pending-path descent gave up retrying a signal-bearing probe; \
              awaiting a future prefix event or overflow",
         ),
+        Diagnostic::PendingPathMaterialized { profile, anchor } => tracing::info!(
+            ?profile,
+            ?anchor,
+            "pending-path descent materialized its anchor (recovery complete; baseline pending)",
+        ),
         Diagnostic::ReapPendingCancelled { profile } => tracing::debug!(
             ?profile,
             "reap-pending Profile revived (fresh attach pre-empted deferred reap)",
@@ -619,6 +624,7 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::PendingPathProbeFailed { .. }
         | D::PendingPathAwaitingSegment { .. }
         | D::PendingPathRetriesExhausted { .. }
+        | D::PendingPathMaterialized { .. }
         | D::ReapPendingCancelled { .. }
         | D::ProfileReaped { .. }
         | D::ProfileParked { .. }

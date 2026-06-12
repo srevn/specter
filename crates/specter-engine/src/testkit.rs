@@ -611,11 +611,11 @@ pub fn anchor_dir(e: &mut Engine, name: &str) -> ResourceId {
 
 /// Pre-place a `User`-roled `Dir` chain (FS-root through `segments`), returning the deepest resource.
 ///
-/// Every real (non-root) segment is classified `Dir`, so the chain models directories the engine has
-/// already discovered on disk — each slot reads [`specter_core::Resource::is_disk_observed`], not as
-/// a never-observed scaffold. The FS-root stays the `Unknown` wildcard the bootstrap intends. Kinding
-/// only the leaf would leave intermediates looking unobserved, so a `Path` attach over them would
-/// descend from `/` rather than the pre-placed prefix.
+/// Every real (non-root) segment is classified `Dir`, so the chain models directories the engine
+/// has already discovered on disk — each slot reads [`specter_core::Resource::is_disk_observed`],
+/// not as a never-observed scaffold. The FS-root stays the `Unknown` wildcard the bootstrap
+/// intends. Kinding only the leaf would leave intermediates looking unobserved, so a `Path` attach
+/// over them would descend from `/` rather than the pre-placed prefix.
 pub fn pre_place_dir(e: &mut Engine, segments: &[&str]) -> ResourceId {
     let mut comps = Vec::with_capacity(segments.len() + 1);
     comps.push(FS_ROOT_SEGMENT);

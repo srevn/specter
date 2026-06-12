@@ -263,19 +263,19 @@ impl Resource {
         !self.contributions.is_empty()
     }
 
-    /// True iff this slot has been **observed on disk** — its [`kind`](Self::kind) was classified by
-    /// a real observation (a descent advance, a probe graft, or a reconciler entry), or a live
+    /// True iff this slot has been **observed on disk** — its [`kind`](Self::kind) was classified
+    /// by a real observation (a descent advance, a probe graft, or a reconciler entry), or a live
     /// claimant is watching it ([`is_watched`](Self::is_watched), whose contribution a claimer only
     /// installs on a slot it believes real).
     ///
-    /// Distinguishes a slot that merely *exists in the Tree* from one that exists *on disk*. The two
-    /// diverge for `DescentScaffold` slots: [`crate::Tree::ensure_path`] eagerly mints an attach's
-    /// whole path — anchor included — so a `Pending` Profile can hold a stable anchor id while its
-    /// path is still descending, and those intermediate scaffolds may never be confirmed on disk. A
-    /// parked Profile's leftover descent chain is the canonical case: its slots linger (held by the
-    /// Profile's anchor back-ref and the chain's child edges) with `kind == Unknown` and no
-    /// contribution, so this predicate reads `false` for them and `true` once a probe / reconcile
-    /// makes the slot real.
+    /// Distinguishes a slot that merely *exists in the Tree* from one that exists *on disk*. The
+    /// two diverge for `DescentScaffold` slots: [`crate::Tree::ensure_path`] eagerly mints an
+    /// attach's whole path — anchor included — so a `Pending` Profile can hold a stable anchor id
+    /// while its path is still descending, and those intermediate scaffolds may never be confirmed
+    /// on disk. A parked Profile's leftover descent chain is the canonical case: its slots linger
+    /// (held by the Profile's anchor back-ref and the chain's child edges) with `kind == Unknown`
+    /// and no contribution, so this predicate reads `false` for them and `true` once a probe /
+    /// reconcile makes the slot real.
     ///
     /// The sole consumer is the engine's attach-time descent-prefix resolution: the deepest
     /// *disk-observed* ancestor is the descent prefix, so a re-attach over a never-observed scaffold
@@ -499,12 +499,12 @@ mod tests {
         assert!(r.has_anchors());
     }
 
-    /// `is_disk_observed` is the disk-honest test the engine's attach-time prefix resolution uses to
-    /// separate a slot that exists on disk from a bare Tree scaffold. It reads `true` on either
-    /// disjunct — a classified `kind` OR a live watch — and `false` on a never-observed scaffold (the
-    /// `ensure_path` residue). The watch disjunct is what keeps a watched-but-unprobed slot (`Unknown`
-    /// kind, e.g. a descent prefix) on the observed side; a profile back-ref alone does not (it is not
-    /// a disk signal).
+    /// `is_disk_observed` is the disk-honest test the engine's attach-time prefix resolution uses
+    /// to separate a slot that exists on disk from a bare Tree scaffold. It reads `true` on either
+    /// disjunct — a classified `kind` OR a live watch — and `false` on a never-observed scaffold
+    /// (the `ensure_path` residue). The watch disjunct is what keeps a watched-but-unprobed slot
+    /// (`Unknown` kind, e.g. a descent prefix) on the observed side; a profile back-ref alone does
+    /// not (it is not a disk signal).
     #[test]
     fn is_disk_observed_reads_kind_or_watch_not_bare_existence() {
         // Never-observed scaffold: Unknown kind, no contribution. The bug F-MED-3 closed treated

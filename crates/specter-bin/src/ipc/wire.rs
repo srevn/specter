@@ -306,6 +306,11 @@ pub(crate) enum WireDiagnostic {
         retries: u8,
         errno: i32,
     },
+    PendingPathMaterialized {
+        at: WireTime,
+        profile: WireId,
+        anchor: WireId,
+    },
     ReapPendingCancelled {
         at: WireTime,
         profile: WireId,
@@ -623,6 +628,13 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 retries: *retries,
                 errno: *errno,
             },
+            Diagnostic::PendingPathMaterialized { profile, anchor } => {
+                Self::PendingPathMaterialized {
+                    at: at.clone(),
+                    profile: WireId::from(*profile),
+                    anchor: WireId::from(*anchor),
+                }
+            }
             Diagnostic::ReapPendingCancelled { profile } => Self::ReapPendingCancelled {
                 at: at.clone(),
                 profile: WireId::from(*profile),
@@ -891,6 +903,7 @@ impl WireDiagnostic {
             Self::PendingPathProbeFailed { .. } => "pending_path_probe_failed",
             Self::PendingPathAwaitingSegment { .. } => "pending_path_awaiting_segment",
             Self::PendingPathRetriesExhausted { .. } => "pending_path_retries_exhausted",
+            Self::PendingPathMaterialized { .. } => "pending_path_materialized",
             Self::ReapPendingCancelled { .. } => "reap_pending_cancelled",
             Self::ProfileReaped { .. } => "profile_reaped",
             Self::ProfileParked { .. } => "profile_parked",
@@ -966,6 +979,7 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "pending_path_probe_failed",
     "pending_path_awaiting_segment",
     "pending_path_retries_exhausted",
+    "pending_path_materialized",
     "reap_pending_cancelled",
     "profile_reaped",
     "profile_parked",
@@ -1911,6 +1925,11 @@ mod tests {
                 prefix: WireId(57),
                 retries: 3,
                 errno: 24,
+            },
+            WireDiagnostic::PendingPathMaterialized {
+                at: at(),
+                profile: WireId(58),
+                anchor: WireId(59),
             },
             WireDiagnostic::ReapPendingCancelled {
                 at: at(),

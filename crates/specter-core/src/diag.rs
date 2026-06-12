@@ -269,8 +269,14 @@ pub enum Diagnostic {
         resource: ResourceId,
         failure: WatchFailure,
     },
-    /// Pending-path descent probe returned `Vanished` for `prefix`. The Engine rewinds descent to the
-    /// next-existing ancestor of `prefix`. Repeated occurrences during scaffold tear-down are normal.
+    /// Pending-path descent probe returned `Vanished` for `prefix` — the probed prefix is itself
+    /// gone. The usual consequence is a rewind: descent retreats to the next-existing ancestor of
+    /// `prefix` and re-probes (repeated occurrences during scaffold tear-down are normal, and the
+    /// FS-root bootstrap guarantees a rewind target for every non-root prefix). The one exception
+    /// is a vanished root prefix with no parent to descend from: the Profile parks instead,
+    /// narrated by a trailing [`Self::ProfileParked`] in the same step. So the operator-visible
+    /// distinction is in the stream — this variant alone is the self-healing rewind; this variant
+    /// *followed by* `ProfileParked` is the dead-ended abandon.
     PendingPathProbeVanished {
         profile: ProfileId,
         prefix: ResourceId,
@@ -300,10 +306,10 @@ pub enum Diagnostic {
     /// transient-failure budget was spent. A signal-bearing probe (a prefix-event / overflow
     /// re-trigger or a raced-signal repay) is the sole observer of a structural signal that won't
     /// re-arrive on its own; a kernel-resource blip ([`ProbeFailure::Transient`]) at every retry
-    /// means the awaited segment's creation could not be observed. The descent stays Pending — *not*
-    /// wedged forever — and re-triggers on the next prefix `StructureChanged` or sensor overflow,
-    /// which earns a fresh budget; but until one arrives nothing re-probes, so this is the loud
-    /// terminal the operator reads instead of inferring a wedge from one stale
+    /// means the awaited segment's creation could not be observed. The descent stays Pending —
+    /// *not* wedged forever — and re-triggers on the next prefix `StructureChanged` or sensor
+    /// overflow, which earns a fresh budget; but until one arrives nothing re-probes, so this is
+    /// the loud terminal the operator reads instead of inferring a wedge from one stale
     /// [`Self::PendingPathProbeFailed`]. `retries` is the budget spent; `errno` the last transient
     /// errno (always a `Transient` class — `Anchor` failures never retry).
     PendingPathRetriesExhausted {
@@ -311,6 +317,20 @@ pub enum Diagnostic {
         prefix: ResourceId,
         retries: u8,
         errno: i32,
+    },
+    /// A pending-path descent reached its terminus: the awaited anchor materialized on disk, so the
+    /// Profile left [`crate::ProfileState::Pending`] for `Idle → Active(Seed)` to establish a
+    /// baseline. `anchor` is the now-live anchor slot. This is the single *positive* signal in the
+    /// descent lifecycle — every other Pending narration (`PendingPathProbeVanished` /
+    /// `…ProbeFailed` / `…AwaitingSegment` / `…RetriesExhausted`) reports a stall or a retreat, so
+    /// without it an operator tailing after an anchor loss sees the failure chain and then, on
+    /// recovery, silence. Covers all three descent entries (attach-time, observed-loss recovery,
+    /// park recovery) — the terminus is blind to which drove it. A witnessed descent additionally
+    /// owes a fire that surfaces as a later [`Self::SubFired`]; an unwitnessed one pins its
+    /// baseline silently, so this is the only mark it leaves.
+    PendingPathMaterialized {
+        profile: ProfileId,
+        anchor: ResourceId,
     },
     /// A Profile's active burst carried [`crate::BurstFinish::Reap`] (the last Sub had detached
     /// mid-burst), then a fresh `attach_sub` arrived at the same `(resource, config_hash)` before

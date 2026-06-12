@@ -1785,9 +1785,9 @@ pub struct DescentState {
     /// signal-bearing fact and its spent budget must outlive a single dispatch.
     ///
     /// Cleared on **either** terminal fate — a successful observation (the signal's effect is seen)
-    /// or the budget being spent (the chain gives up). Both reset to `None`, so a later prefix event
-    /// re-marks a fresh `Some(0)` and earns a fresh budget; there is no stale count to starve a
-    /// genuinely new signal. Dies with the descent like the other carriers.
+    /// or the budget being spent (the chain gives up). Both reset to `None`, so a later prefix
+    /// event re-marks a fresh `Some(0)` and earns a fresh budget; there is no stale count to starve
+    /// a genuinely new signal. Dies with the descent like the other carriers.
     signal_retries: Option<u8>,
 }
 
@@ -1924,8 +1924,8 @@ impl DescentState {
 
     /// Spend one unit of the signal-bearing retry budget — the engine calls this when it re-latches
     /// `reprobe_owed` for a transiently-failed signal-bearing probe. No-op when not signal-bearing
-    /// (the engine only reaches here under a `Some` budget; the guard is pure defense). Saturating —
-    /// the engine's ceiling stops the chain long before `u8` overflow.
+    /// (the engine only reaches here under a `Some` budget; the guard is pure defense). Saturating
+    /// — the engine's ceiling stops the chain long before `u8` overflow.
     pub const fn bump_signal_retry(&mut self) {
         if let Some(n) = self.signal_retries {
             self.signal_retries = Some(n.saturating_add(1));

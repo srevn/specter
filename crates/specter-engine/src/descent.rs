@@ -113,17 +113,17 @@ impl crate::Engine {
     /// the remaining components as the descent path.
     ///
     /// "Deepest disk-observed ancestor" is the deepest `i` for which every prefix slot
-    /// `lookup(path.segments()[..=j])` (`j <= i`) reports [`specter_core::Resource::is_disk_observed`]
-    /// — classified by a real observation, or watched by a live claimant. **Tree-side existence is
-    /// not enough**: `ensure_path` (below, and at every prior attach) eagerly mints the whole path —
-    /// anchor included — as `DescentScaffold` slots, and a parked Profile's leftover chain is a run
-    /// of such never-observed scaffolds that exist in the Tree without existing on disk. Counting
-    /// those as pre-existing would short-circuit the descent and emit kernel `Watch`es for
-    /// disk-absent paths plus a doomed cold Seed; the disk-honest predicate descends instead. The
-    /// FS-root (index 0) is observed by axiom — the kernel always `lstat`s `/` — so `i >= 0` for
-    /// every absolute attach. Role plays no part in this decision: a `User` peer anchor or a
-    /// `WatchRootParent` counts only when it carries a real observation or watch; a never-observed
-    /// scaffold never does.
+    /// `lookup(path.segments()[..=j])` (`j <= i`) reports
+    /// [`specter_core::Resource::is_disk_observed`] — classified by a real observation, or watched
+    /// by a live claimant. **Tree-side existence is not enough**: `ensure_path` (below, and at
+    /// every prior attach) eagerly mints the whole path — anchor included — as `DescentScaffold`
+    /// slots, and a parked Profile's leftover chain is a run of such never-observed scaffolds that
+    /// exist in the Tree without existing on disk. Counting those as pre-existing would
+    /// short-circuit the descent and emit kernel `Watch`es for disk-absent paths plus a doomed cold
+    /// Seed; the disk-honest predicate descends instead. The FS-root (index 0) is observed by axiom
+    /// — the kernel always `lstat`s `/` — so `i >= 0` for every absolute attach. Role plays no part
+    /// in this decision: a `User` peer anchor or a `WatchRootParent` counts only when it carries a
+    /// real observation or watch; a never-observed scaffold never does.
     ///
     /// **Pre-conditions are now type-enforced.** [`TreePath`]'s type invariants (non-empty;
     /// `segments()[0] == FS_ROOT_SEGMENT`) make the prior `debug_assert!` and release-mode
@@ -147,9 +147,9 @@ impl crate::Engine {
 
         // Snapshot which segments are *disk-observed* BEFORE the walk, so we can tell a slot that
         // exists on disk from a bare Tree slot — a never-observed scaffold left by `ensure_path`
-        // (here or at a prior attach). A scaffold lingers held by a parked Profile's anchor back-ref
-        // and the chain's child edges; treating it as a usable prefix would short-circuit the
-        // descent onto a disk-absent path. `is_disk_observed` is the honest test: a real
+        // (here or at a prior attach). A scaffold lingers held by a parked Profile's anchor
+        // back-ref and the chain's child edges; treating it as a usable prefix would short-circuit
+        // the descent onto a disk-absent path. `is_disk_observed` is the honest test: a real
         // classification (`kind`) or a live claimant's watch. The FS-root (index 0) is observed by
         // axiom — the kernel always `lstat`s `/`, and the bootstrap above guarantees its slot.
         let mut pre_existed: Vec<bool> = Vec::with_capacity(components.len());
@@ -176,10 +176,10 @@ impl crate::Engine {
 
         // Walk forward to the deepest *contiguous* disk-observed prefix. Breaking at the first
         // unobserved segment is load-bearing: observation flows strictly downward through a chain,
-        // but a vacated mid-chain slot (watch rejected, kind reset) can leave a deeper observed slot
-        // stranded behind it — re-descending through the gap re-observes it, which is the
-        // disk-honest choice. The FS-root axiom guarantees `pre_existed[0] == true`, so `prefix_idx`
-        // is always at least `0` — no `Option<usize>` trichotomy is needed.
+        // but a vacated mid-chain slot (watch rejected, kind reset) can leave a deeper observed
+        // slot stranded behind it — re-descending through the gap re-observes it, which is the
+        // disk-honest choice. The FS-root axiom guarantees `pre_existed[0] == true`, so
+        // `prefix_idx` is always at least `0` — no `Option<usize>` trichotomy is needed.
         let mut prefix_idx: usize = 0;
         for (i, &observed) in pre_existed.iter().enumerate() {
             if observed {
@@ -195,8 +195,8 @@ impl crate::Engine {
         } else {
             // Segments [0..=prefix_idx] are disk-observed; [prefix_idx+1..] are unobserved
             // scaffolds. `ensure_path` above created every segment, so `resolve_components` on any
-            // prefix is guaranteed to succeed — `expect` documents that contract rather than masking
-            // a violation behind `unwrap_or(anchor)`.
+            // prefix is guaranteed to succeed — `expect` documents that contract rather than
+            // masking a violation behind `unwrap_or(anchor)`.
             let prefix = self
                 .resolve_components(&components[..=prefix_idx])
                 .expect("ensure_path created every component; prefix slice must resolve");
@@ -649,6 +649,16 @@ impl crate::Engine {
 
         self.set_watch_root_parent(profile_id, out);
 
+        // The terminus is the descent lifecycle's single positive narration: the awaited anchor is
+        // now live and the Profile is leaving Pending. Emit before the Seed burst so the stream
+        // reads recovery-complete → baseline-established in order. Unconditional across all three
+        // descent entries (attach / observed-loss / park recovery) — an unwitnessed cold descent
+        // pins its baseline without a `SubFired`, so this is the only mark it leaves.
+        out.diagnostics.push(Diagnostic::PendingPathMaterialized {
+            profile: profile_id,
+            anchor: new_resource,
+        });
+
         // A witnessed descent owes its terminus Seed the appearance provenance: the anchor threads
         // in as the trigger, so the Seed opens Batching-first and classifies
         // `Consequence::FreshSeedFire` / drift on the stable verdict. An unwitnessed descent (every
@@ -792,11 +802,11 @@ impl crate::Engine {
     ///   event / overflow earns a fresh budget. The descent stays Pending, recovering on the next
     ///   event rather than spinning.
     /// - **Everything else** — an [`ProbeFailure::Anchor`] (path-fatal `EACCES`-class — descent
-    ///   cannot fix it), or a transient failure of a *non*-signal-bearing probe (the descent-entry /
-    ///   forward-advance / rewind probes re-trigger through their own channels). Narrate
-    ///   [`Diagnostic::PendingPathProbeFailed`] and await the next event, the long-standing posture.
-    ///   A signal-bearing probe that hit a path-fatal Anchor fate also clears its marker (it will
-    ///   not retry) so a later event re-budgets.
+    ///   cannot fix it), or a transient failure of a *non*-signal-bearing probe (the descent-entry
+    ///   / forward-advance / rewind probes re-trigger through their own channels). Narrate
+    ///   [`Diagnostic::PendingPathProbeFailed`] and await the next event, the long-standing
+    ///   posture. A signal-bearing probe that hit a path-fatal Anchor fate also clears its marker
+    ///   (it will not retry) so a later event re-budgets.
     pub(crate) fn dispatch_descent_failed(
         &mut self,
         owner: ProfileId,
@@ -879,15 +889,15 @@ impl crate::Engine {
     ///
     /// **Marks the emitted probe signal-bearing.** This is the single choke for the two probes that
     /// are the sole observer of a structural signal which will not re-arrive — the prefix-event /
-    /// overflow re-trigger and the raced-signal repay — so a successful emission flags the descent's
-    /// signal-bearing retry budget ([`DescentState::mark_signal_probe`]). A transient failure of the
-    /// probe then re-latches a bounded retry rather than wedging the descent on a lost one-shot
-    /// signal (see [`Self::dispatch_descent_failed`]). Marking is idempotent on the budget: a repay
-    /// re-emission mid-chain preserves the count.
+    /// overflow re-trigger and the raced-signal repay — so a successful emission flags the
+    /// descent's signal-bearing retry budget ([`DescentState::mark_signal_probe`]). A transient
+    /// failure of the probe then re-latches a bounded retry rather than wedging the descent on a
+    /// lost one-shot signal (see [`Self::dispatch_descent_failed`]). Marking is idempotent on the
+    /// budget: a repay re-emission mid-chain preserves the count.
     ///
-    /// **No `reprobe_owed` side effect.** It neither sets nor consumes the `reprobe_owed` debt. That
-    /// keeps the repay hook safe to call after a dispatch arm already re-armed inline (advance /
-    /// rewind): `try_emit` simply declines on the in-flight gate without re-latching against that
+    /// **No `reprobe_owed` side effect.** It neither sets nor consumes the `reprobe_owed` debt.
+    /// That keeps the repay hook safe to call after a dispatch arm already re-armed inline (advance
+    /// / rewind): `try_emit` simply declines on the in-flight gate without re-latching against that
     /// arm's own postdating probe (and so never marks it signal-bearing — an advance / rewind probe
     /// re-triggers through its own channel), so the debt the hook just consumed cannot resurrect
     /// into a spurious extra probe. Latching lives solely in `on_descent_event`'s miss branch.
@@ -1058,7 +1068,7 @@ mod tests {
         );
 
         // Inject a probe response showing `bar` now exists.
-        let _foo = lookup_foo(&e);
+        let foo = lookup_foo(&e);
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
@@ -1085,6 +1095,17 @@ mod tests {
                 .iter()
                 .any(|op| matches!(op, ProbeOp::Probe { .. })),
             "cold-arm Seed: probe emitted at burst construction (materialization)",
+        );
+        // The terminus narrates its single positive signal: the awaited anchor is now live.
+        let bar = e.tree().lookup(Some(foo), "bar").expect("bar materialized");
+        assert!(
+            out.diagnostics.iter().any(|d| matches!(
+                d,
+                Diagnostic::PendingPathMaterialized { profile, anchor }
+                    if *profile == pid && *anchor == bar
+            )),
+            "descent terminus emits PendingPathMaterialized for the live anchor: {:?}",
+            out.diagnostics,
         );
         let _ = e.cancel_all_in_flight_probes();
     }
@@ -1330,10 +1351,10 @@ mod tests {
     }
 
     /// A signal-bearing descent probe that keeps failing *transiently* re-latches a **bounded**
-    /// retry: after the budget is spent the descent gives up loudly
-    /// (`PendingPathRetriesExhausted`) and parks disarmed rather than spinning a tight re-probe
-    /// loop. Pins the budget ceiling, the exact repay count, and the terminal diagnostic — the
-    /// exhaustion path the integration suite's one-retry property pin does not reach.
+    /// retry: after the budget is spent the descent gives up loudly (`PendingPathRetriesExhausted`)
+    /// and parks disarmed rather than spinning a tight re-probe loop. Pins the budget ceiling, the
+    /// exact repay count, and the terminal diagnostic — the exhaustion path the integration suite's
+    /// one-retry property pin does not reach.
     #[test]
     fn descent_signal_bearing_transient_failure_retries_then_exhausts() {
         let (mut e, _sid, pid) = setup_pending_one_level();

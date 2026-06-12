@@ -311,8 +311,8 @@ fn attach_join_onto_parked_profile_rearms_recovery() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// A re-attach (different config) over a parked Profile's never-observed scaffold chain must classify
-/// Pending (disk-honest), not Materialized-with-a-kernel-watch-on-a-nonexistent-path.
+/// A re-attach (different config) over a parked Profile's never-observed scaffold chain must
+/// classify Pending (disk-honest), not Materialized-with-a-kernel-watch-on-a-nonexistent-path.
 #[test]
 fn reattach_over_never_observed_scaffold_classifies_pending() {
     let mut e = Engine::new();
