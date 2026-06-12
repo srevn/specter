@@ -894,9 +894,9 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
 // Seed-Vanished releases the anchor claim before descent re-entry
 //
 // `dispatch_pre_fire_vanished` releases the anchor's contribution (for both intents) inside
-// `finalize_anchor_lost_and_descend`, *before* the same step re-enters `Pending` — a
-// still-Held claim would violate `reap_profile`'s `!(Pending && Held)` trichotomy invariant at the
-// descent flip. The watch is re-acquired via descent's anchor materialization on recovery.
+// `finalize_anchor_lost_and_descend`, *before* the same step re-enters `Pending` — a still-Held
+// claim would violate `reap_profile`'s `!(Pending && Held)` trichotomy invariant at the descent
+// flip. The watch is re-acquired via descent's anchor materialization on recovery.
 // ───────────────────────────────────────────────────────────────────────
 
 #[test]

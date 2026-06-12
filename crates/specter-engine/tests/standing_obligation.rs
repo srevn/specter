@@ -1,7 +1,7 @@
 //! Standing-obligation lifecycle integration. Evidence a non-consuming verdict terminal parks
-//! (`Abandon` — the bounded ceiling hit on a persistently unreadable chain) survives the burst
-//! that witnessed it and rides the next burst's proof obligation, so the formerly-dirty region
-//! cannot mtime-skip against the stale baseline once the obstruction heals — the
+//! (`Abandon` — the bounded ceiling hit on a persistently unreadable chain) survives the burst that
+//! witnessed it and rides the next burst's proof obligation, so the formerly-dirty region cannot
+//! mtime-skip against the stale baseline once the obstruction heals — the
 //! loud-once-then-silent-forever miss is closed. Recovery rides the next in-mask signal, never a
 //! poll: the park preserves the terminal's stop-burning-probes intent.
 
@@ -27,8 +27,8 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     // chmod-000-class obstruction); the burst deadline forces and the forced refusal folds
     // `Abandon` — diagnostic, no commit, and the burst's captured paths park into the standing
     // obligation. A later, unrelated in-mask event at file `b` opens a fresh burst: the drained
-    // obligation widens its probe's `Chains` over the parked `a` chain, and the fresh
-    // Authoritative read fires the originally-witnessed change.
+    // obligation widens its probe's `Chains` over the parked `a` chain, and the fresh Authoritative
+    // read fires the originally-witnessed change.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let file_a = e
@@ -42,9 +42,9 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
         .expect("test live parent");
     e.tree_mut().set_kind(file_b, ResourceKind::File);
 
-    // CONTENT mask: events-complete for a `Subtree` shape, so a single Authoritative sample
-    // closes the verdict floor and the heal-side probe ships a `Chains` obligation (the parked
-    // chain is visible on the wire, not folded into a `WholeSubtree`).
+    // CONTENT mask: events-complete for a `Subtree` shape, so a single Authoritative sample closes
+    // the verdict floor and the heal-side probe ships a `Chains` obligation (the parked chain is
+    // visible on the wire, not folded into a `WholeSubtree`).
     let now = Instant::now();
     let snap = dir_snap(&[("a", EntryKind::File, 1), ("b", EntryKind::File, 2)]);
     let req = SubAttachRequest::for_anchor(
@@ -123,8 +123,8 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
         "Abandon finishes the burst to Idle",
     );
 
-    // The obstruction heals silently. A later, unrelated in-mask event at `b` opens a fresh
-    // burst; the constructor drains the parked set into its provenance.
+    // The obstruction heals silently. A later, unrelated in-mask event at `b` opens a fresh burst;
+    // the constructor drains the parked set into its provenance.
     let t3 = t2 + Duration::from_secs(5);
     let _ = e.step(
         Input::FsEvent {
@@ -134,9 +134,9 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
         t3,
     );
 
-    // The fresh burst's verify must obligate over the parked chain: dirty = {a (parked),
-    // b (trigger)}, so the emitted probe's `Chains` covers `/src/a` — the walker cannot
-    // mtime-skip the formerly-unreadable region.
+    // The fresh burst's verify must obligate over the parked chain: dirty = {a (parked), b
+    // (trigger)}, so the emitted probe's `Chains` covers `/src/a` — the walker cannot mtime-skip
+    // the formerly-unreadable region.
     let t4 = t3 + SETTLE * 2;
     let mut probe_req: Option<ProbeRequest> = None;
     while let Some(entry) = e.pop_expired(t4) {
@@ -176,8 +176,8 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
         other => panic!("Dir-anchored Standard verify emits a Subtree probe; got {other:?}"),
     };
 
-    // The fresh Authoritative read observes the change the abandoned burst witnessed (a's
-    // identity differs from the stale baseline) — the originally-witnessed change fires.
+    // The fresh Authoritative read observes the change the abandoned burst witnessed (a's identity
+    // differs from the stale baseline) — the originally-witnessed change fires.
     let healed = dir_snap(&[("a", EntryKind::File, 9), ("b", EntryKind::File, 2)]);
     let fire_out = e.step(
         Input::ProbeResponse(ProbeResponse {

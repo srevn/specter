@@ -4109,9 +4109,9 @@ fn structure_only_profile_has_per_file_fds_false() {
 // Per-origin assertions that every anchor-loss dispatch path through `Engine::discard_anchor_state`
 // clears the cached `Profile.kind`. The helper unit tests in `claims.rs` pin the contract in
 // isolation; these tests pin the integration at every dispatch origin — both intents through each
-// merged pre-fire helper (`dispatch_pre_fire_{vanished,failed}`, now intent-parametric), both rebase
-// routes (`dispatch_rebase_{vanished,failed}`), and the anchor-terminal event — so the kind-clear
-// cannot regress at any one of them without a test failure.
+// merged pre-fire helper (`dispatch_pre_fire_{vanished,failed}`, now intent-parametric), both
+// rebase routes (`dispatch_rebase_{vanished,failed}`), and the anchor-terminal event — so the
+// kind-clear cannot regress at any one of them without a test failure.
 
 /// Drive a Profile from fresh-attach into `Active(Standard, Verifying)` with
 /// `pending_probe.is_some()`. Returns the live correlation.
@@ -4331,9 +4331,9 @@ fn dispatch_rebase_failed_clears_profile_kind() {
 /// (Standard, Transient). FD pressure on a Standard verify re-batches for another window
 /// (`!forced`) — the anchor watch and baseline retained, the pressure surfaced — then, once the
 /// `BurstDeadline` forces, finishes to Idle with the anchor watch and baseline **still** retained,
-/// so the anchor's own next event re-bursts without waiting on the parent (an `Anchor`-class failure
-/// would instead tear it down). Pins both Standard-route Transient arms in one lifecycle; the retained
-/// baseline is the central regression guard a baseline-less Seed cannot assert.
+/// so the anchor's own next event re-bursts without waiting on the parent (an `Anchor`-class
+/// failure would instead tear it down). Pins both Standard-route Transient arms in one lifecycle;
+/// the retained baseline is the central regression guard a baseline-less Seed cannot assert.
 #[test]
 fn standard_transient_retries_then_forced_finishes_retaining_anchor() {
     let (mut e, pid, _sid, root, now) = engine_with_attached_sub();
@@ -6231,12 +6231,12 @@ fn pre_fire_forced_ceiling_after_event_silent_retry_streak_emits_mask_hint() {
 }
 
 /// The mask-blindspot streak is disagreement-denominated: a window that observed *nothing* — a
-/// transient probe failure (FD pressure) — holds the streak rather than inflating it. A burst
-/// that suffered `floor` such windows and then one genuine disagreement at the forced ceiling
-/// reports the generic `QuiescenceCeilingForcedDespiteChange`, **not** `ChangeOutsideEventMask`:
-/// the story was pressure, not motion outside the mask. (The walker-refusal Retry origin folds
-/// `observed_motion: false` identically — `quiescence_verdict_folds_three_axes` pins the fold;
-/// this pins the streak consequence through the engine's failure arm.)
+/// transient probe failure (FD pressure) — holds the streak rather than inflating it. A burst that
+/// suffered `floor` such windows and then one genuine disagreement at the forced ceiling reports
+/// the generic `QuiescenceCeilingForcedDespiteChange`, **not** `ChangeOutsideEventMask`: the story
+/// was pressure, not motion outside the mask. (The walker-refusal Retry origin folds
+/// `observed_motion: false` identically — `quiescence_verdict_folds_three_axes` pins the fold; this
+/// pins the streak consequence through the engine's failure arm.)
 #[test]
 fn pre_fire_forced_ceiling_after_transient_windows_keeps_generic_diagnostic() {
     let floor = crate::transitions::CHANGE_OUTSIDE_MASK_RETRY_FLOOR;
@@ -6321,9 +6321,9 @@ fn pre_fire_forced_ceiling_after_transient_windows_keeps_generic_diagnostic() {
         })
         .expect("BurstDeadline drives a fresh forced Verifying probe");
 
-    // The forced sample disagrees with the primed carrier — but the streak witnessed only
-    // pressure, so the terminal pairs `hash_channel_disagreed = true` with `retry_streak == 0`:
-    // the generic despite-change diagnostic, never the mask hint.
+    // The forced sample disagrees with the primed carrier — but the streak witnessed only pressure,
+    // so the terminal pairs `hash_channel_disagreed = true` with `retry_streak == 0`: the generic
+    // despite-change diagnostic, never the mask hint.
     let final_sample = dir_tree_snap(vec![("draft", EntryKind::File, 2)]);
     let s_out = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -6396,9 +6396,9 @@ fn post_fire_forced_ceiling_after_retry_streak_emits_mask_hint() {
 
     // One priming loop-back plus `floor` disagreement loop-backs: each Rebasing sample hashes
     // differently from the carrier's prior, folding Retry → Settling; the settle expiry re-arms
-    // Rebasing for the next sample. The first round's `prior = None` folds `observed_motion:
-    // false` and holds the streak; each subsequent round's concrete disagreement bumps it. No
-    // FsEvent is absorbed anywhere: the streak never resets.
+    // Rebasing for the next sample. The first round's `prior = None` folds `observed_motion: false`
+    // and holds the streak; each subsequent round's concrete disagreement bumps it. No FsEvent is
+    // absorbed anywhere: the streak never resets.
     for round in 0..=floor {
         let corr = e
             .pending_probe_for(pid)

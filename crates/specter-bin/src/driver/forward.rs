@@ -531,10 +531,16 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?sub,
             "rebind targeted an unknown Sub (dispatcher routing breach)",
         ),
-        Diagnostic::DiscoveryMinted { source, path, kind } => tracing::debug!(
+        Diagnostic::DiscoveryMinted {
+            source,
+            path,
+            kind,
+            appeared,
+        } => tracing::debug!(
             ?source,
             path = %path.display(),
             ?kind,
+            appeared,
             "discovery reconcile minted a dynamic Sub",
         ),
         Diagnostic::DiscoveryUnsupportedAnchorKind { source, path, kind } => tracing::warn!(

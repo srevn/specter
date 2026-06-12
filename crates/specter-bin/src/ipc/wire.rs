@@ -455,6 +455,7 @@ pub(crate) enum WireDiagnostic {
         source: WireId,
         path: WirePath,
         kind: WireResourceKind,
+        appeared: bool,
     },
     DiscoveryUnsupportedAnchorKind {
         at: WireTime,
@@ -826,11 +827,17 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 at: at.clone(),
                 sub: WireId::from(*sub),
             },
-            Diagnostic::DiscoveryMinted { source, path, kind } => Self::DiscoveryMinted {
+            Diagnostic::DiscoveryMinted {
+                source,
+                path,
+                kind,
+                appeared,
+            } => Self::DiscoveryMinted {
                 at: at.clone(),
                 source: WireId::from(*source),
                 path: WirePath::from(path),
                 kind: WireResourceKind::from(*kind),
+                appeared: *appeared,
             },
             Diagnostic::DiscoveryUnsupportedAnchorKind { source, path, kind } => {
                 Self::DiscoveryUnsupportedAnchorKind {
@@ -2070,6 +2077,7 @@ mod tests {
                 source: WireId(190),
                 path: WirePath::from(Path::new("/srv/app1/log")),
                 kind: WireResourceKind::Dir,
+                appeared: true,
             },
             WireDiagnostic::DiscoveryUnsupportedAnchorKind {
                 at: at(),

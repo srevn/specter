@@ -427,8 +427,8 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         "cold-arm Seed: probe emitted at burst construction",
     );
 
-    // Expire P's first settle window → first Seed probe; drive it to Failed. dispatch_pre_fire_failed
-    // clears P.kind and terminates the Seed on its first response.
+    // Expire P's first settle window → first Seed probe; drive it to Failed.
+    // dispatch_pre_fire_failed clears P.kind and terminates the Seed on its first response.
     let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
         Input::ProbeResponse(ProbeResponse {

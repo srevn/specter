@@ -548,13 +548,13 @@ pub enum Diagnostic {
     /// [`Self::QuiescenceCeilingForcedDespiteChange`] / [`Self::RebaseCeilingForced`] — at the tail
     /// of `retries` consecutive *motion-observing* Retry windows during which **not one
     /// mask-admitted event arrived** (any in-mask event resets the burst's streak counter; a
-    /// transient walker refusal or probe failure observed nothing and holds the counter rather
-    /// than inflating it). Settle windows the events stream swore were quiet kept hashing
-    /// differently, so the proof object is moving via change classes outside the Profile's
-    /// subscribed `events` mask; the streak is the witness. The canonical shape: `events =
-    /// STRUCTURE` over files written in place (mmap writers, touch storms) — mtime folds into
-    /// `leaf_hash`, so every sample differs while STRUCTURE stays silent. The remedy is
-    /// config-side: widen `events` to the classes that actually move the tree.
+    /// transient walker refusal or probe failure observed nothing and holds the counter rather than
+    /// inflating it). Settle windows the events stream swore were quiet kept hashing differently,
+    /// so the proof object is moving via change classes outside the Profile's subscribed `events`
+    /// mask; the streak is the witness. The canonical shape: `events = STRUCTURE` over files
+    /// written in place (mmap writers, touch storms) — mtime folds into `leaf_hash`, so every
+    /// sample differs while STRUCTURE stays silent. The remedy is config-side: widen `events` to
+    /// the classes that actually move the tree.
     ///
     /// Emitted **instead of** the generic ceiling diagnostic, at both terminals (the pre-fire
     /// `BurstDeadline` and the post-fire `RebaseCeiling` — `intent` plus the engine's dispatch site
@@ -681,10 +681,16 @@ pub enum Diagnostic {
     /// `kind` is [`ResourceKind`] — it names the minted *slot's* kind, exactly what the Tree
     /// stamped at mint. The sibling [`Self::DiscoveryUnsupportedAnchorKind`] deliberately carries
     /// [`EntryKind`] instead; see its rustdoc.
+    ///
+    /// `appeared` carries the mint-arm classification: `false` for a first-enumeration mint (the
+    /// template's first completed pass — cold, pins silently), `true` for a witnessed appearance
+    /// against an established enumeration (triggered — the mint owes its first fire). The split
+    /// answers the triage question "why did / didn't this mint react" straight from the log.
     DiscoveryMinted {
         source: SubId,
         path: Arc<Path>,
         kind: ResourceKind,
+        appeared: bool,
     },
     /// A discovery reconcile matched a chain terminus whose kind can never anchor a minted Sub —
     /// `Symlink` or `Other` (fifo / socket / device) — and skipped the mint wholesale: no Sub

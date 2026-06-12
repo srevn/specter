@@ -387,17 +387,15 @@ impl Config {
     ///
     /// - [`IssueKind::DynamicPrefixDivergesFromCanonical`]: a dynamic pattern's literal prefix
     ///   anchors verbatim (resolving it would desync the anchor from the pattern identity the
-    ///   minted Profiles hash over) while static paths canonicalise, so a symlink inside the
-    ///   prefix (macOS `/var`, `/tmp`, `/etc`) anchors the pattern on a branch no static watch
-    ///   shares and the burst gating between overlapping watches silently never engages.
-    ///   Deliberately one line per offending dynamic watch per load — the noise *is* the
-    ///   composition hazard surfacing.
-    /// - [`IssueKind::EventsIncompleteMask`]: the watch's effective event mask (static `events`,
-    ///   or the dynamic template's) cannot witness its scan shape's quiescence classes, so every
-    ///   fire is proven by the hash channel — at least two consecutive agreeing full subtree
-    ///   walks at the anchor, mtime-skip disabled. A supported, deliberately expensive
-    ///   configuration (the safety net for writers the kernel may not surface as events); the
-    ///   warning makes the cost visible.
+    ///   minted Profiles hash over) while static paths canonicalise, so a symlink inside the prefix
+    ///   (macOS `/var`, `/tmp`, `/etc`) anchors the pattern on a branch no static watch shares and
+    ///   the burst gating between overlapping watches silently never engages. Deliberately one line
+    ///   per offending dynamic watch per load — the noise *is* the composition hazard surfacing.
+    /// - [`IssueKind::EventsIncompleteMask`]: the watch's effective event mask (static `events`, or
+    ///   the dynamic template's) cannot witness its scan shape's quiescence classes, so every fire is
+    ///   proven by the hash channel — at least two consecutive agreeing full subtree walks at the
+    ///   anchor, mtime-skip disabled. A supported, deliberately expensive configuration (the safety
+    ///   net for writers the kernel may not surface as events); the warning makes the cost visible.
     ///
     /// Disabled entries warn too, mirroring the validator's discipline: hazards surface at config
     /// load, not at re-enable time.
@@ -406,8 +404,8 @@ impl Config {
         let mut found = Vec::new();
         for (i, spec) in self.watches.iter().enumerate() {
             // The identity the watch's firing Profiles actually run under: a static entry's own
-            // (scan, events); a dynamic entry's template pair (the discovery Sub itself carries
-            // the STRUCTURE constant, which always witnesses its MatchChain shape).
+            // (scan, events); a dynamic entry's template pair (the discovery Sub itself carries the
+            // STRUCTURE constant, which always witnesses its MatchChain shape).
             let (scan, events) = match &spec.template {
                 Some(t) => (&t.scan, t.events),
                 None => (&spec.scan, spec.events),

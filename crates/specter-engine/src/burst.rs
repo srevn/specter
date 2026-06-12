@@ -72,12 +72,11 @@
 //! - [`pre_fire_target`] — returns the live `ResourceId` the next pre-fire probe walks (and the
 //!   response grafts at). Centralizes the `(anchor_kind, epistemics)` rule (File anchor → anchor;
 //!   failing [`Profile::event_chains_prove_quiescence`] — Seed or events-incomplete Standard →
-//!   anchor;
-//!   events-complete Standard → the live slot at the component-LCA of `dirty`'s captured paths, a
-//!   File leaf promoted to its parent Dir, anchor on any resolution miss). Post-fire rebases
-//!   target the anchor unconditionally and bypass this helper. `transition_to_verifying` resolves
-//!   the target through it and constructs [`PreFirePhase::Verifying`] with the target on the
-//!   variant payload for the choke to read back.
+//!   anchor; events-complete Standard → the live slot at the component-LCA of `dirty`'s captured
+//!   paths, a File leaf promoted to its parent Dir, anchor on any resolution miss). Post-fire
+//!   rebases target the anchor unconditionally and bypass this helper. `transition_to_verifying`
+//!   resolves the target through it and constructs [`PreFirePhase::Verifying`] with the target on
+//!   the variant payload for the choke to read back.
 //! - [`Engine::emit_owner_probe`] (in `probe`) — the single emission choke. Each burst-launch
 //!   helper is `mint → arm → emit_owner_probe(owner)`, with every post-gate state resolution loud
 //!   (`unreachable!()` on the gate-proven-impossible miss) and the arm guarded at its re-acquire
@@ -253,18 +252,23 @@ impl Engine {
     /// **Two named constructors, deliberately not one `intent` param.** The call site always knows
     /// whether it wants a Seed (no trusted prior — anchor + `WholeSubtree` always) or a Standard
     /// burst (event-driven; LCA + `Chains` when the events stream witnesses quiescence, anchor +
-    /// `WholeSubtree` otherwise — [`Profile::event_chains_prove_quiescence`]); a merged
-    /// constructor behind a runtime `intent` flag re-introduces exactly the dispatch flag the
-    /// burst-helper doctrine rejects. The bodies differ in `intent`, the trigger discriminator
-    /// above, and Standard's mandatory `event_resource`.
+    /// `WholeSubtree` otherwise — [`Profile::event_chains_prove_quiescence`]); a merged constructor
+    /// behind a runtime `intent` flag re-introduces exactly the dispatch flag the burst-helper
+    /// doctrine rejects. The bodies differ in `intent`, the trigger discriminator above, and
+    /// Standard's mandatory `event_resource`.
     ///
-    /// **Callers.** Three unconditionally-cold sites, one latch-selected site, one
+    /// **Callers.** Three unconditionally-cold sites, two witness-selected sites, one
     /// unconditionally-triggered site:
-    /// - [`Self::bootstrap_immediate`] — fresh attach with an already-materialised anchor on disk
-    ///   (cold).
     /// - `on_sensor_overflow` Idle path — reseed every Profile in the overflow scope (cold).
     /// - `on_sensor_overflow` Active path — after `finish_burst_to_idle` flushes the in-flight
     ///   burst (cold).
+    /// - `attach_sub_inner`'s template join-reseed — a discovery template joining an Idle discovery
+    ///   Profile drives one fresh certified walk (cold; the joiner's mints classify by its own
+    ///   enumeration latch, never by this burst's intent).
+    /// - [`Self::bootstrap_immediate`] — fresh attach with an already-materialised anchor on disk,
+    ///   selected by the attach pipeline's witness (`crate::engine::SeedWitness`, the descent
+    ///   latch's twin): a discovery mint classified as a witnessed appearance threads the anchor as
+    ///   the trigger; every other attach stays cold.
     /// - `materialize_profile_anchor` (descent terminus reached via `dispatch_descent_ok`) — cold
     ///   or triggered, selected by the descent's witnessed-activity latch: a witnessed appearance
     ///   threads the anchor as the trigger, an unwitnessed terminus (attach-time entry probe found
@@ -320,14 +324,13 @@ impl Engine {
         // moves `trigger` into the Batching arm.
         let emit_cold_walk = trigger.is_none();
 
-        // Every pre-fire burst birth begins from the drained standing obligation — a semantic
-        // feature on the Seed path, not defensive padding: parked paths testify to
-        // witnessed-but-unfired activity, so they rightly make this Seed proof-owing
-        // (`owes_proof_from` reads `!dirty.is_empty()`) and a never-fired one first-fire-owing
-        // (`seed_owes_first_fire`) — preserving the testimony across an Abandon → anchor-loss →
-        // recovery chain. A genuinely cold attach has no parked evidence (fresh Profile), so the
-        // restart-safe `SilentPin` is untouched. Drained before noting the trigger, so the live
-        // event is the last writer.
+        // Every pre-fire burst birth begins from the drained standing obligation — a semantic feature
+        // on the Seed path, not defensive padding: parked paths testify to witnessed-but-unfired
+        // activity, so they rightly make this Seed proof-owing (`owes_proof_from` reads
+        // `!dirty.is_empty()`) and a never-fired one first-fire-owing (`seed_owes_first_fire`) —
+        // preserving the testimony across an Abandon → anchor-loss → recovery chain. A genuinely cold
+        // attach has no parked evidence (fresh Profile), so the restart-safe `SilentPin` is
+        // untouched. Drained before noting the trigger, so the live event is the last writer.
         let mut dirty = self
             .profiles
             .get_mut(profile_id)
@@ -335,14 +338,13 @@ impl Engine {
 
         let (phase, last_event_time) = match trigger {
             None => {
-                // Cold attach / reseed. Mint a correlation, construct-arm the `Verifying` slot
-                // inside the phase variant. I5 holds by representability: no prior phase means no
-                // slot could hold a competing correlation, and the loud `ProbeSlot::arm`
-                // re-acquire assert is unreachable on a fresh variant. No event drove this burst —
-                // `dirty` holds only the drained standing obligation (empty on a genuinely cold
-                // attach, routing the Authoritative response to `SilentPin`; non-empty when a
-                // parked residue makes the reseed fire-owing). `last_event_time = None` — no
-                // settle deadline to source.
+                // Cold attach / reseed. Mint a correlation, construct-arm the `Verifying` slot inside
+                // the phase variant. I5 holds by representability: no prior phase means no slot could
+                // hold a competing correlation, and the loud `ProbeSlot::arm` re-acquire assert is
+                // unreachable on a fresh variant. No event drove this burst — `dirty` holds only the
+                // drained standing obligation (empty on a genuinely cold attach, routing the
+                // Authoritative response to `SilentPin`; non-empty when a parked residue makes the
+                // reseed fire-owing). `last_event_time = None` — no settle deadline to source.
                 debug_assert!(
                     self.pending_probe_for(profile_id).is_none(),
                     "I5: cold-Seed start with a probe already in flight \
@@ -447,8 +449,8 @@ impl Engine {
                 .schedule(now + max_settle, profile_id, TimerKind::BurstDeadline);
 
         // Every pre-fire burst birth begins from the drained standing obligation: paths a prior
-        // non-consuming terminal parked rightly re-enter the proof here — the dirty-LCA widens
-        // over them and the obligation chains cover them, so the formerly-unread region cannot
+        // non-consuming terminal parked rightly re-enter the proof here — the dirty-LCA widens over
+        // them and the obligation chains cover them, so the formerly-unread region cannot
         // mtime-skip against the stale baseline (an events-incomplete Profile reads `WholeSubtree`
         // and consumes them structurally). Drained before noting the trigger, so the live event is
         // the last writer.
@@ -487,12 +489,12 @@ impl Engine {
     /// in-flight verify (iff the prior phase was `Verifying`), notes `(event_resource, event_path)`
     /// into `dirty` (the captured-path basis for the next verify's probe scope and its
     /// `ProofObligation::Chains`), updates `last_event_time`, arms a fresh settle timer **only when
-    /// re-entering Batching from Verifying or Draining**, and writes `phase = Batching { settle_timer
-    /// }`. `intent`, `forced`, `burst_deadline`, and `last_certified_hash` (the carrier preserves the
-    /// prior sample — a net-zero change across an event is still a valid hash-channel pair for the
-    /// next Verifying response, active iff `!events_witness_quiescence`) are preserved. Carrying
-    /// the sample across the event is frame-safe: a carrier-active burst fails
-    /// [`Profile::event_chains_prove_quiescence`], so its probes are anchor-rooted — the new
+    /// re-entering Batching from Verifying or Draining**, and writes `phase = Batching {
+    /// settle_timer }`. `intent`, `forced`, `burst_deadline`, and `last_certified_hash` (the
+    /// carrier preserves the prior sample — a net-zero change across an event is still a valid
+    /// hash-channel pair for the next Verifying response, active iff `!events_witness_quiescence`)
+    /// are preserved. Carrying the sample across the event is frame-safe: a carrier-active burst
+    /// fails [`Profile::event_chains_prove_quiescence`], so its probes are anchor-rooted — the new
     /// event may move the dirty-LCA, but never the frame the channel's samples hash.
     ///
     /// Why this is one of two batching mutators rather than a single helper with a flag: the caller
@@ -588,8 +590,8 @@ impl Engine {
     ///   refused on some chain with a transient non-observation (`EACCES`, a chmod-000 chain —
     ///   `observed_motion: false`).
     /// - the pre-fire [`specter_core::ProbeFailure::Transient`] arm in `dispatch_pre_fire_failed` —
-    ///   the probe failed entirely (FD pressure), the epistemic twin of the `Undischarged` Retry: it
-    ///   observed nothing, so it re-batches identically (static `observed_motion = false`).
+    ///   the probe failed entirely (FD pressure), the epistemic twin of the `Undischarged` Retry:
+    ///   it observed nothing, so it re-batches identically (static `observed_motion = false`).
     ///
     /// `observed_motion` gates the streak: only windows that *observed* sample-to-sample motion
     /// count toward the mask-blindspot witness ([`PreFireBurst::retry_streak`]) — a refusal or a
@@ -728,24 +730,22 @@ impl Engine {
     /// that stale entry lazy-drops on its original deadline. The `Draining → Verifying` reconfirm arm
     /// has no settle_timer to orphan (Draining never armed one).
     ///
-    /// **Target.** Resolved via [`pre_fire_target`] — File anchors target the anchor
-    /// unconditionally; bursts failing [`Profile::event_chains_prove_quiescence`] (Seed, or
-    /// events-incomplete Standard) target the anchor regardless of phase; events-complete Standard
-    /// bursts target the live slot at the component-LCA of `dirty`'s captured paths. The same rule
-    /// covers the Draining → Verifying reconfirm: `dirty` is preserved across the burst's pre-fire
-    /// lifetime (only `note`d into), so the component-LCA on the reconfirm matches the one at the
-    /// original Verifying entry; a slot reaped in between only changes the live-id resolution
-    /// (anchor fallback).
+    /// **Target.** Resolved via [`pre_fire_target`] — File anchors target the anchor unconditionally;
+    /// bursts failing [`Profile::event_chains_prove_quiescence`] (Seed, or events-incomplete
+    /// Standard) target the anchor regardless of phase; events-complete Standard bursts target the
+    /// live slot at the component-LCA of `dirty`'s captured paths. The same rule covers the Draining
+    /// → Verifying reconfirm: `dirty` is preserved across the burst's pre-fire lifetime (only `note`d
+    /// into), so the component-LCA on the reconfirm matches the one at the original Verifying entry;
+    /// a slot reaped in between only changes the live-id resolution (anchor fallback).
     ///
     /// **Emission.** This helper writes the `Verifying` variant — armed slot and target shipped as
     /// one struct-variant payload — then calls [`Engine::emit_owner_probe`], the single choke that
-    /// reads the correlation back off the slot, materializes the proof obligation off the
-    /// persisting burst keyed on the same predicate as the target (`ProofObligation::Chains` from
-    /// `dirty`'s captured paths when the chains prove quiescence, `WholeSubtree` otherwise — read
-    /// immutably, **not** drained: the burst outlives this probe across re-batching), and reads
-    /// `forced` (so the walker bypasses mtime-skip on a force-fire). New events arriving during
-    /// `Verifying` are noted into `dirty` (via `event_drives_batching`) and reshape the obligation
-    /// on the next emission.
+    /// reads the correlation back off the slot, materializes the proof obligation off the persisting
+    /// burst keyed on the same predicate as the target (`ProofObligation::Chains` from `dirty`'s
+    /// captured paths when the chains prove quiescence, `WholeSubtree` otherwise — read immutably,
+    /// **not** drained: the burst outlives this probe across re-batching), and reads `forced` (so the
+    /// walker bypasses mtime-skip on a force-fire). New events arriving during `Verifying` are noted
+    /// into `dirty` (via `event_drives_batching`) and reshape the obligation on the next emission.
     pub(crate) fn transition_to_verifying(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToVerifying, out) {
             return;
@@ -796,11 +796,10 @@ impl Engine {
             );
         };
         // One write: the armed slot and target ship as a single variant payload, so a half-written
-        // `Verifying` is unconstructable. The choke later materializes the proof obligation
-        // (`Chains` from `dirty`'s captured paths when `event_chains_prove_quiescence` holds,
-        // `WholeSubtree` otherwise — the predicate that just resolved the target) and `forced` off
-        // this armed slot — the transition threads neither, and `dirty` is read there immutably,
-        // never drained.
+        // `Verifying` is unconstructable. The choke later materializes the proof obligation (`Chains`
+        // from `dirty`'s captured paths when `event_chains_prove_quiescence` holds, `WholeSubtree`
+        // otherwise — the predicate that just resolved the target) and `forced` off this armed slot —
+        // the transition threads neither, and `dirty` is read there immutably, never drained.
         pre.phase = PreFirePhase::Verifying {
             slot: ProbeSlot::armed(correlation),
             target,
@@ -1115,16 +1114,16 @@ impl Engine {
     /// of the bounded `Rebasing ⇄ Settling` loop, not a debounce of the fire's own events.
     ///
     /// **Two callers.** `dispatch_rebase_ok::Retry` (hash-channel disagreement, `observed_motion:
-    /// true`; walker refusal, `false`) and the post-fire
-    /// [`specter_core::ProbeFailure::Transient`] arm in `dispatch_rebase_failed` (the probe failed
-    /// entirely under FD pressure — the epistemic twin of the Undischarged Retry, it loops back
-    /// identically with static `observed_motion = false`). Both run with the rebase slot already
-    /// disarmed at the top of `on_profile_probe_response`. The loop ceiling was armed once at the
-    /// `Awaiting → Rebasing` entry ([`Self::arm_rebase_loop_ceiling`]); no re-arm here.
+    /// true`; walker refusal, `false`) and the post-fire [`specter_core::ProbeFailure::Transient`]
+    /// arm in `dispatch_rebase_failed` (the probe failed entirely under FD pressure — the epistemic
+    /// twin of the Undischarged Retry, it loops back identically with static `observed_motion =
+    /// false`). Both run with the rebase slot already disarmed at the top of
+    /// `on_profile_probe_response`. The loop ceiling was armed once at the `Awaiting → Rebasing`
+    /// entry ([`Self::arm_rebase_loop_ceiling`]); no re-arm here.
     ///
     /// `observed_motion` gates the streak exactly as on the pre-fire mirror: only windows that
-    /// observed sample-to-sample motion count toward [`PostFireBurst::retry_streak`] — a refusal
-    /// or a failed probe says nothing about the post-command tree and holds the streak.
+    /// observed sample-to-sample motion count toward [`PostFireBurst::retry_streak`] — a refusal or
+    /// a failed probe says nothing about the post-command tree and holds the streak.
     ///
     /// Writes `phase = Settling { settle_timer }`, pins `last_event_time = Some(now)` (the
     /// unfavorable-response instant), and arms a fresh [`TimerKind::PostFireSettle`] timer. Ceiling
@@ -1594,9 +1593,9 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 /// Pre-fire probe target for the next emission — the live engine slot the probe walks and the
 /// response grafts at.
 ///
-/// Centralizes the `(anchor_kind, epistemics)` rule. The three production scenarios
-/// (settle-expired Standard burst, force-fire under [`PreFirePhase::Batching`] or
-/// [`PreFirePhase::Draining`], the Draining-sweep reconfirm) all resolve here:
+/// Centralizes the `(anchor_kind, epistemics)` rule. The three production scenarios (settle-expired
+/// Standard burst, force-fire under [`PreFirePhase::Batching`] or [`PreFirePhase::Draining`], the
+/// Draining-sweep reconfirm) all resolve here:
 ///
 /// - File anchor (`Profile.kind == Some(File)`) → the anchor itself. kqueue per-file FDs surface
 ///   events at the file directly, and the walker's [`specter_core::ProbeRequest::AnchorFile`] arm
@@ -1604,21 +1603,21 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 ///   coverage.
 /// - Failing [`Profile::event_chains_prove_quiescence`] (Dir / unclassified anchor) → the anchor.
 ///   One rule covers two emission-equivalent epistemic states: a Seed burst has no trusted prior to
-///   scope a narrower walk against, and an events-incomplete Standard burst's stream cannot
-///   witness in-place writes — a dirty-LCA frame would leave out-of-LCA regions out of frame for
-///   the hash-channel samples the verdict floor compares. The emission choke keys the
-///   `WholeSubtree` obligation on the same predicate, so target and obligation cannot diverge.
+///   scope a narrower walk against, and an events-incomplete Standard burst's stream cannot witness
+///   in-place writes — a dirty-LCA frame would leave out-of-LCA regions out of frame for the
+///   hash-channel samples the verdict floor compares. The emission choke keys the `WholeSubtree`
+///   obligation on the same predicate, so target and obligation cannot diverge.
 /// - Events-complete Standard (Dir / unclassified anchor) → the live slot at the component-LCA of
 ///   `dirty`'s captured paths, clamped to the shape's descend chain ([`resolve_under_anchor`]), a
 ///   File leaf promoted to its parent Dir ([`promote_to_dir`] — the parent of a graftable node is
 ///   graftable by the descend chain's downward closure, so promotion cannot re-enter a boundary).
 ///   The LCA is computed over *captured paths* (history), not surviving slot ids, so a slot reaped
-///   mid-burst cannot collapse the scope below where an event landed; only the live-id
-///   *resolution* may fall back to the anchor (strictly wider, never chain-clipping). An empty
-///   `dirty` is a should-never this arm `debug_assert!`s against (a Standard burst always notes
-///   its trigger); it then degrades to the anchor, which the emission choke pairs with a
-///   `WholeSubtree` obligation under its own `debug_assert`, so the degrade proves the whole
-///   subtree rather than silently skipping it.
+///   mid-burst cannot collapse the scope below where an event landed; only the live-id *resolution*
+///   may fall back to the anchor (strictly wider, never chain-clipping). An empty `dirty` is a
+///   should-never this arm `debug_assert!`s against (a Standard burst always notes its trigger); it
+///   then degrades to the anchor, which the emission choke pairs with a `WholeSubtree` obligation
+///   under its own `debug_assert`, so the degrade proves the whole subtree rather than silently
+///   skipping it.
 ///
 /// **Draining-reconfirm coverage.** The Draining → Verifying reconfirm folds into the Standard case
 /// because `dirty` is preserved across the burst's whole pre-fire lifetime (only `note`d into), so
@@ -2264,8 +2263,8 @@ mod tests {
     // pre_fire_target — the (anchor_kind, epistemics) probe-target rule.
     //
     // Events-complete Standard target = the live slot at the component-LCA of `dirty`'s captured
-    // *paths* (history, not surviving slot ids), descended from the always-live anchor, a File
-    // leaf promoted to its parent Dir, anchor fallback on any resolution miss. Seed and
+    // *paths* (history, not surviving slot ids), descended from the always-live anchor, a File leaf
+    // promoted to its parent Dir, anchor fallback on any resolution miss. Seed and
     // events-incomplete Standard (`!event_chains_prove_quiescence`) target the anchor. Locks the
     // contract independent of `transition_to_verifying`'s body.
     // ---------------------------------------------------------------------------
@@ -2644,11 +2643,11 @@ mod tests {
 
     #[test]
     fn pre_fire_target_events_incomplete_standard_returns_anchor() {
-        // An events-incomplete Standard burst must not frame its samples at the dirty-LCA: the
-        // hash channel compares whole-proof-object reads, so the target rule collapses to the
-        // anchor — the same arm Seed takes (`event_chains_prove_quiescence` fails for both). The
-        // deep single-dirty twin of `pre_fire_target_standard_single_dirty_deep_returns_self`,
-        // which pins the LCA on the events-complete control.
+        // An events-incomplete Standard burst must not frame its samples at the dirty-LCA: the hash
+        // channel compares whole-proof-object reads, so the target rule collapses to the anchor —
+        // the same arm Seed takes (`event_chains_prove_quiescence` fails for both). The deep
+        // single-dirty twin of `pre_fire_target_standard_single_dirty_deep_returns_self`, which
+        // pins the LCA on the events-complete control.
         let (e, pid, root, a, _b) = engine_with_two_children_masked(NO_EVENTS);
         let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(a, "/root/a")]));
         assert_eq!(
@@ -2822,11 +2821,10 @@ mod tests {
         // The full emission shape for an events-incomplete Standard burst: target = anchor AND
         // obligation = WholeSubtree, despite a dirty set confined to one deep child. Both halves
         // are individually necessary for the hash channel's soundness — `Chains` alone Arc-clones
-        // every off-chain unchanged-mtime frame from the stale baseline regardless of frame
-        // width, and an LCA frame leaves out-of-LCA regions out of frame entirely — so the two
-        // samples the verdict floor compares are full fresh reads of the proof object. (The
-        // events-complete control keeps dirty-LCA + Chains:
-        // `transition_to_verifying_standard_uses_lca`.)
+        // every off-chain unchanged-mtime frame from the stale baseline regardless of frame width,
+        // and an LCA frame leaves out-of-LCA regions out of frame entirely — so the two samples the
+        // verdict floor compares are full fresh reads of the proof object. (The events-complete
+        // control keeps dirty-LCA + Chains: `transition_to_verifying_standard_uses_lca`.)
         let (mut e, pid, root, a, _b) = engine_with_two_children_masked(NO_EVENTS);
         let ap = rpath(&e, a);
         let now = Instant::now();

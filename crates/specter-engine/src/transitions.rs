@@ -17,7 +17,7 @@
 
 use crate::Engine;
 use crate::coverage::CoverageClass;
-use crate::engine::is_timer_referenced;
+use crate::engine::{SeedWitness, is_timer_referenced};
 use crate::path::empty_path;
 use crate::probe::{DescentOutcome, ProfileProbeRoute, ProofOutcome, WalkerContractViolation};
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
@@ -560,9 +560,9 @@ impl Engine {
         // Witness selection. The hash channel engages iff the burst owes a proof AND the events
         // stream is insufficient — both captured in the fold context above. The emission-time twin
         // is `Profile::event_chains_prove_quiescence` (the probe target / obligation predicate):
-        // `!events_witness` there forces anchor-rooted `WholeSubtree` samples, so a channel
-        // engaged here always compares two full fresh reads of the proof object — by shared
-        // source, not by runtime tripwire.
+        // `!events_witness` there forces anchor-rooted `WholeSubtree` samples, so a channel engaged
+        // here always compares two full fresh reads of the proof object — by shared source, not by
+        // runtime tripwire.
         let response_hash = snap.hash();
         let needs_hash_channel = ctx.owes_proof && !ctx.events_witness;
 
@@ -671,10 +671,9 @@ impl Engine {
     /// certified-sample machinery is intent-agnostic). `Vanished` / `Failed` ⇒ the shared pre-fire
     /// helper, threaded the burst's `intent` for the diagnostic (the route split lives at the
     /// callers, not in the certifier: a vanished anchor's cleanup is route-specific, and the Rebase
-    /// arm maps the same two variants to its own helpers).
-    /// `Degraded` ⇒ nothing — the certifier already resolved the terminal: its kind-mismatch
-    /// producer emitted the diagnostic and tore the burst down; its absent-Profile producer found
-    /// nothing to tear down.
+    /// arm maps the same two variants to its own helpers). `Degraded` ⇒ nothing — the certifier
+    /// already resolved the terminal: its kind-mismatch producer emitted the diagnostic and tore
+    /// the burst down; its absent-Profile producer found nothing to tear down.
     fn dispatch_burst_outcome(
         &mut self,
         profile_id: ProfileId,
@@ -1056,7 +1055,7 @@ impl Engine {
                         .push(Diagnostic::ConfigDiffRebindFallbackAttach {
                             name: req.params.name.clone(),
                         });
-                    let _ = self.attach_sub_inner(req, now, out);
+                    let _ = self.attach_sub_inner(req, SeedWitness::Cold, now, out);
                 }
             }
         }
@@ -1070,10 +1069,10 @@ impl Engine {
             if let Some(old) = self.subs.find_by_name(&req.params.name) {
                 self.detach_sub_inner(old, DetachReason::ConfigDiffIdentityChanged, out);
             }
-            let _ = self.attach_sub_inner(req, now, out);
+            let _ = self.attach_sub_inner(req, SeedWitness::Cold, now, out);
         }
         for req in subs.added {
-            let _ = self.attach_sub_inner(req, now, out);
+            let _ = self.attach_sub_inner(req, SeedWitness::Cold, now, out);
         }
         // The single-StepOutput sort happens at `step`'s caller.
     }
@@ -1380,7 +1379,7 @@ impl Engine {
     /// correlate logs to the deferred FsEvent. The "no baseline → Seed" branch handles the
     /// degenerate post-`Vanished` Idle state (`current.is_none()`): a Standard burst with no
     /// baseline cannot dispatch a stability verdict.
-    fn drive_burst(
+    pub(crate) fn drive_burst(
         &mut self,
         profile_id: ProfileId,
         event_resource: ResourceId,
@@ -1887,9 +1886,9 @@ impl Engine {
     /// projected by `effect_forced`) is what later lands on [`specter_core::Effect::forced`]. For a
     /// `Standard` fire the two coincide (the caller passes the same bit to both), so the split is
     /// inert; it is load-bearing only for [`EmitMode::SeedDrift`], which carries no inner bit (a
-    /// recovery drift fire is never a time-pressured force-fire on its `Effect`) yet can still arrive
-    /// here `forced = true` — a recovery that hit the bounded ceiling bypasses the gate without
-    /// marking its `Effect`.
+    /// recovery drift fire is never a time-pressured force-fire on its `Effect`) yet can still
+    /// arrive here `forced = true` — a recovery that hit the bounded ceiling bypasses the gate
+    /// without marking its `Effect`.
     fn gated_fire(
         &mut self,
         profile_id: ProfileId,
@@ -1944,8 +1943,8 @@ impl Engine {
     ///   Both origins route through [`Engine::retry_drives_batching`], which counts the window
     ///   toward the mask-blindspot streak iff the verdict's `observed_motion` bit is set (only the
     ///   disagreement origin observed anything); never commit (the prior carrier value is the last
-    ///   walker-certified sample, not a quiescent one; an unread region must not poison
-    ///   `current`). The bounded `BurstDeadline` ceiling eventually surfaces a `Stable(Forced)`
+    ///   walker-certified sample, not a quiescent one; an unread region must not poison `current`).
+    ///   The bounded `BurstDeadline` ceiling eventually surfaces a `Stable(Forced)`
     ///   (channel-disagreement path) or `Abandon` (walker-refused path) terminal.
     /// - [`QuiescenceVerdict::Abandon`] — the bounded ceiling already fired and the probe could not
     ///   discharge its obligation. Surface `first_unread` via
@@ -2010,16 +2009,15 @@ impl Engine {
             QuiescenceVerdict::Retry { observed_motion } => {
                 // Two operationally-near-identical fold origins collapse to this verdict: the hash
                 // channel observed `prior != Some(response)` (the tree is moving under the verify
-                // window — `observed_motion: true`, counted toward the mask-blindspot streak), or
-                // the walker refused on some chain (transient non-observation — `EACCES`, a
-                // chmod-000 chain — `false`, the streak holds). A third inflow reaches
-                // `retry_drives_batching` without ever folding a verdict — an unforced transient
-                // probe failure routes through `CertifiedResponse::Failed`
-                // (`dispatch_pre_fire_failed`), not this arm — so the two origins here are the
-                // *verdict's*, not the helper's. Re-arm the settle window for another sample;
-                // never commit (the prior carrier value is the last walker-certified sample, not
-                // a quiescent one; an unread region must not poison `current`). The bounded
-                // `BurstDeadline` ceiling eventually surfaces the operator-visible terminal —
+                // window — `observed_motion: true`, counted toward the mask-blindspot streak), or the
+                // walker refused on some chain (transient non-observation — `EACCES`, a chmod-000
+                // chain — `false`, the streak holds). A third inflow reaches `retry_drives_batching`
+                // without ever folding a verdict — an unforced transient probe failure routes through
+                // `CertifiedResponse::Failed` (`dispatch_pre_fire_failed`), not this arm — so the two
+                // origins here are the *verdict's*, not the helper's. Re-arm the settle window for
+                // another sample; never commit (the prior carrier value is the last walker-certified
+                // sample, not a quiescent one; an unread region must not poison `current`). The
+                // bounded `BurstDeadline` ceiling eventually surfaces the operator-visible terminal —
                 // `Stable(Forced)` on persistent disagreement, `Abandon` on a persistent unread
                 // chain.
                 self.retry_drives_batching(profile_id, observed_motion, now, out);
@@ -2030,8 +2028,8 @@ impl Engine {
                 // distinguish a Seed-baseline failure from a Standard reconfirm failure. The
                 // burst's captured paths park rather than dying with it — re-batching against a
                 // persistently unreadable region would drum probes, but the region still owes a
-                // fresh read before the next fire, so the next burst drains the parked set into
-                // its own obligation and re-proves it once the obstruction heals.
+                // fresh read before the next fire, so the next burst drains the parked set into its
+                // own obligation and re-proves it once the obstruction heals.
                 out.diagnostics
                     .push(Diagnostic::QuiescenceCeilingUnreadable {
                         profile: profile_id,
@@ -2224,10 +2222,10 @@ impl Engine {
     }
 
     /// (pre-fire, Vanished) — for both [`BurstIntent`]s. Treats a vanished probe root as an
-    /// anchor-disappearance signal: routes through [`Self::finalize_anchor_lost_and_descend`], whose
-    /// discard releases the anchor's `watch_demand` contribution so the trichotomy invariant in
-    /// `reap_profile` — `!(Pending && AnchorClaim::Held)` — holds when the wrapper re-enters descent
-    /// within this same step.
+    /// anchor-disappearance signal: routes through [`Self::finalize_anchor_lost_and_descend`],
+    /// whose discard releases the anchor's `watch_demand` contribution so the trichotomy invariant
+    /// in `reap_profile` — `!(Pending && AnchorClaim::Held)` — holds when the wrapper re-enters
+    /// descent within this same step.
     ///
     /// A Standard probe targets the dirty-LCA — possibly a *descendant*, not the anchor — so
     /// `Vanished` there means "the probed subtree root is gone", which an `rm -rf` racing the walk
@@ -2242,9 +2240,9 @@ impl Engine {
     /// (`dispatch_descent_ok`'s anchor arm re-bumps `anchor.watch_demand` with the Profile's mask).
     ///
     /// `intent` only selects the [`Diagnostic::ProbeVanished`] payload — the consequence is
-    /// identical for both. Standard bursts always run on materialized Profiles (`drive_burst` routes
-    /// baseline-less `FsEvent`s to Seed instead), so the guard is effectively unconditional in v1 —
-    /// kept for robustness against future routing changes.
+    /// identical for both. Standard bursts always run on materialized Profiles (`drive_burst`
+    /// routes baseline-less `FsEvent`s to Seed instead), so the guard is effectively unconditional
+    /// in v1 — kept for robustness against future routing changes.
     fn dispatch_pre_fire_vanished(
         &mut self,
         profile_id: ProfileId,
@@ -2284,9 +2282,9 @@ impl Engine {
     ///   anchor's own next event, no wait on the parent.
     ///
     /// The diagnostic is emitted on every window, retry included: transient pressure is the
-    /// daemon's own health signal — bounded by the ceiling, and silence would hide it. `intent` only
-    /// selects the [`Diagnostic::ProbeFailed`] payload (Seed-baseline failure vs. Standard reconfirm
-    /// failure) — the consequence is identical for both.
+    /// daemon's own health signal — bounded by the ceiling, and silence would hide it. `intent`
+    /// only selects the [`Diagnostic::ProbeFailed`] payload (Seed-baseline failure vs. Standard
+    /// reconfirm failure) — the consequence is identical for both.
     fn dispatch_pre_fire_failed(
         &mut self,
         profile_id: ProfileId,
@@ -2314,8 +2312,8 @@ impl Engine {
                     out,
                 );
             }
-            // A failed probe observed nothing — `observed_motion = false` holds the
-            // mask-blindspot streak (FD pressure must not masquerade as motion).
+            // A failed probe observed nothing — `observed_motion = false` holds the mask-blindspot
+            // streak (FD pressure must not masquerade as motion).
             ProbeFailure::Transient { .. } => {
                 self.retry_drives_batching(profile_id, false, now, out);
             }
@@ -2346,12 +2344,11 @@ impl Engine {
     /// - [`QuiescenceVerdict::Retry`] — non-firing, non-terminal: the walker certified but the hash
     ///   channel observed `prior != Some(response)` (events-incomplete fire-bearing burst), or the
     ///   walker refused on some chain (transient non-observation — `EACCES`, a chmod-000 chain).
-    ///   Never commit (the prior is the last walker-certified sample, not a quiescent one; an
-    ///   unread region must not poison `current`); settle-space the next sample via
-    ///   [`Engine::transition_to_settling`], which counts the window toward the mask-blindspot
-    ///   streak iff the verdict's `observed_motion` bit is set. The bounded `RebaseCeiling`
-    ///   eventually surfaces a `Stable(Forced)` / `Abandon` terminal if the failing condition
-    ///   persists.
+    ///   Never commit (the prior is the last walker-certified sample, not a quiescent one; an unread
+    ///   region must not poison `current`); settle-space the next sample via
+    ///   [`Engine::transition_to_settling`], which counts the window toward the mask-blindspot streak
+    ///   iff the verdict's `observed_motion` bit is set. The bounded `RebaseCeiling` eventually
+    ///   surfaces a `Stable(Forced)` / `Abandon` terminal if the failing condition persists.
     /// - [`QuiescenceVerdict::Abandon`] — ceiling reached on an unread response. Refuse to rebase
     ///   blind: surface [`Diagnostic::RebaseCeilingUnreadable`] and finish without committing — the
     ///   prior baseline stays in place, and the final-window residual parks into the standing
@@ -2373,10 +2370,10 @@ impl Engine {
     /// `restart_burst_from_fire_tail_residual`) so a final-window change is not lost —
     /// origin-agnostic (a Seed-origin drift → fire → rebase restarts too: the reconfirm is a fresh
     /// query, not a per-origin refcount, so `into_pre_fire_residual` rejoins it to the Standard
-    /// debounce lifecycle). An empty residual or a zombie `Reap` burst finishes to Idle. `Retry`
-    /// is not a terminal (it loops back through `Settling`); `Abandon` parks the residual into
-    /// the standing obligation instead of restarting — a restart would immediately re-verify the
-    /// region the walker just refused.
+    /// debounce lifecycle). An empty residual or a zombie `Reap` burst finishes to Idle. `Retry` is
+    /// not a terminal (it loops back through `Settling`); `Abandon` parks the residual into the
+    /// standing obligation instead of restarting — a restart would immediately re-verify the region
+    /// the walker just refused.
     ///
     /// **Why the verdict applies.** Kind agreement and the verdict fold are owned upstream by the
     /// shared certifier ([`Engine::certify_probe_response`]). The verdict is a pure projection of
@@ -2412,14 +2409,14 @@ impl Engine {
                     hash_channel_disagreed,
                 } = reason
                 {
-                    // Bounded terminal: the `RebaseCeiling` already fired but the walker
-                    // certified anyway. Emit one diagnostic unconditionally, BEFORE the shared
-                    // exit (the stream narrates the ceiling ahead of any restart it produces) —
-                    // no `Effect` records the forced fallback downstream (the principled
-                    // asymmetry with the pre-fire mirror). A disagreement at the tail of a
-                    // persistent event-silent retry streak upgrades the generic carrying-the-bit
-                    // form to the mask-blindspot hint, exactly as on the pre-fire ceiling — the
-                    // streak is read only under the disagreement bit, mirroring the pre-fire arm.
+                    // Bounded terminal: the `RebaseCeiling` already fired but the walker certified
+                    // anyway. Emit one diagnostic unconditionally, BEFORE the shared exit (the
+                    // stream narrates the ceiling ahead of any restart it produces) — no `Effect`
+                    // records the forced fallback downstream (the principled asymmetry with the
+                    // pre-fire mirror). A disagreement at the tail of a persistent event-silent
+                    // retry streak upgrades the generic carrying-the-bit form to the mask-blindspot
+                    // hint, exactly as on the pre-fire ceiling — the streak is read only under the
+                    // disagreement bit, mirroring the pre-fire arm.
                     let intent = self.rebase_burst_intent(profile_id);
                     if hash_channel_disagreed {
                         let retries = self
@@ -2448,29 +2445,27 @@ impl Engine {
                         });
                     }
                 }
-                // Shared `Stable(_)` exit: restart iff the final-window residual is non-empty
-                // AND the burst returns to Idle, else finish. Both reasons run the identical
-                // final-round-trip race window, so a Forced terminal restarts identically — the
-                // ceiling bounds the rebase *loop*, not the restart (the restarted burst is
-                // settle-debounced and burst-deadline-bounded, so it cannot livelock; with a
-                // continuously-writing tree the restart produces exactly the cadence fresh
-                // events would open from Idle anyway). Origin-agnostic (see
-                // `PostFireBurst::into_pre_fire_residual`).
+                // Shared `Stable(_)` exit: restart iff the final-window residual is non-empty AND the
+                // burst returns to Idle, else finish. Both reasons run the identical final-round-trip
+                // race window, so a Forced terminal restarts identically — the ceiling bounds the
+                // rebase *loop*, not the restart (the restarted burst is settle-debounced and
+                // burst-deadline-bounded, so it cannot livelock; with a continuously-writing tree the
+                // restart produces exactly the cadence fresh events would open from Idle anyway).
+                // Origin-agnostic (see `PostFireBurst::into_pre_fire_residual`).
                 self.finish_verdict_terminal(profile_id, EvidenceDisposition::Restart, now, out);
             }
 
             QuiescenceVerdict::Retry { observed_motion } => {
-                // Two operationally-near-identical origins collapse here: the hash channel
-                // observed `prior != Some(response)` (the post-command tree is moving under the
-                // rebase loop — `observed_motion: true`, counted toward the mask-blindspot
-                // streak), or the walker refused on some chain (transient non-observation —
-                // `false`, the streak holds). Never commit (the prior carrier value is the last
-                // walker-certified sample, not a quiescent one; an unread region must not poison
-                // `current`). Settle-space the next sample via Rebasing → Settling; the
-                // `RebaseCeiling` (armed at the loop's start) eventually surfaces the
-                // operator-visible terminal. A zombie (`Reap`) burst short-circuits to the finish
-                // instead — no consumer exists for the baseline the loop would walk to certify
-                // (mirroring `handle_gate_deadline`'s zombie route).
+                // Two operationally-near-identical origins collapse here: the hash channel observed
+                // `prior != Some(response)` (the post-command tree is moving under the rebase loop —
+                // `observed_motion: true`, counted toward the mask-blindspot streak), or the walker
+                // refused on some chain (transient non-observation — `false`, the streak holds).
+                // Never commit (the prior carrier value is the last walker-certified sample, not a
+                // quiescent one; an unread region must not poison `current`). Settle-space the next
+                // sample via Rebasing → Settling; the `RebaseCeiling` (armed at the loop's start)
+                // eventually surfaces the operator-visible terminal. A zombie (`Reap`) burst
+                // short-circuits to the finish instead — no consumer exists for the baseline the loop
+                // would walk to certify (mirroring `handle_gate_deadline`'s zombie route).
                 if self.burst_is_zombie(profile_id) {
                     self.finish_verdict_terminal(
                         profile_id,
@@ -2486,8 +2481,8 @@ impl Engine {
             QuiescenceVerdict::Abandon { first_unread } => {
                 // Ceiling reached on an unread response: refuse to rebase blind. No commit, no
                 // rebase — the prior baseline stays in place; the final-window residual parks for
-                // the next burst to re-prove (a restart would immediately re-verify the region
-                // the walker just refused).
+                // the next burst to re-prove (a restart would immediately re-verify the region the
+                // walker just refused).
                 let intent = self.rebase_burst_intent(profile_id);
                 out.diagnostics.push(Diagnostic::RebaseCeilingUnreadable {
                     profile: profile_id,
@@ -2568,8 +2563,8 @@ impl Engine {
                     out,
                 );
             }
-            // A failed probe observed nothing — `observed_motion = false` holds the
-            // mask-blindspot streak, mirroring the pre-fire Transient arm.
+            // A failed probe observed nothing — `observed_motion = false` holds the mask-blindspot
+            // streak, mirroring the pre-fire Transient arm.
             ProbeFailure::Transient { .. } => {
                 if self.burst_is_zombie(profile_id) {
                     self.finish_verdict_terminal(
@@ -2605,10 +2600,10 @@ impl Engine {
     /// concluded, so "evidence disposition" is a category error for them). One typed decision at
     /// exactly the arms where a proof concludes; see [`EvidenceDisposition`] for the three arms.
     ///
-    /// A zombie ([`BurstFinish::Reap`]) burst degrades every disposition to `Discard` — the
-    /// Profile is destroyed at the finish, so parked evidence would die with it and a restart
-    /// would extend a burst whose Subs are gone. The `Restart` arm carries that structurally (its
-    /// resolution requires [`BurstFinish::ReturnToIdle`]); the `ParkResidue` arm consults
+    /// A zombie ([`BurstFinish::Reap`]) burst degrades every disposition to `Discard` — the Profile
+    /// is destroyed at the finish, so parked evidence would die with it and a restart would extend
+    /// a burst whose Subs are gone. The `Restart` arm carries that structurally (its resolution
+    /// requires [`BurstFinish::ReturnToIdle`]); the `ParkResidue` arm consults
     /// [`Engine::burst_is_zombie`] explicitly.
     fn finish_verdict_terminal(
         &mut self,
@@ -2619,8 +2614,8 @@ impl Engine {
     ) {
         match disposition {
             EvidenceDisposition::Restart => {
-                // Restart iff the final-window residual is non-empty AND the burst returns to
-                // Idle. Resolved under one read borrow; the bool carries no borrow out.
+                // Restart iff the final-window residual is non-empty AND the burst returns to Idle.
+                // Resolved under one read borrow; the bool carries no borrow out.
                 let should_restart = match self
                     .profiles
                     .get(profile_id)
@@ -2763,16 +2758,15 @@ impl Engine {
         let zombie = matches!(finish, BurstFinish::Reap);
 
         // Engine→actuator effect-cancel emission — the single abandonment site, structural dual of
-        // `cancel_owner_probe` for probes. Emitted *before* the phase change so the actuator sees
-        // the cancel ahead of the forced rebase response: its `Stable(Forced)` terminal restarts a
-        // fresh burst from a non-empty final-window residual
-        // (`restart_burst_from_fire_tail_residual`) and re-submits effects for the same profile in
-        // a later step. The actuator's `handle_cancel` SIGTERMs in-flight children for this profile
-        // and drops queued work; the wait threads still drive natural reap, and the engine routes
-        // the late `EffectComplete` to `EffectCompleteOutsideAwaiting` (zombie case routes to
-        // `EffectCompleteForUnknownSub`). Same emission shape for both zombie and force-rebasing —
-        // the OS resources held by hung children must be released regardless of whether the Profile
-        // has a consumer for the rebased baseline.
+        // `cancel_owner_probe` for probes. Emitted *before* the phase change so the actuator sees the
+        // cancel ahead of the forced rebase response: its `Stable(Forced)` terminal restarts a fresh
+        // burst from a non-empty final-window residual (`restart_burst_from_fire_tail_residual`) and
+        // re-submits effects for the same profile in a later step. The actuator's `handle_cancel`
+        // SIGTERMs in-flight children for this profile and drops queued work; the wait threads still
+        // drive natural reap, and the engine routes the late `EffectComplete` to
+        // `EffectCompleteOutsideAwaiting` (zombie case routes to `EffectCompleteForUnknownSub`). Same
+        // emission shape for both zombie and force-rebasing — the OS resources held by hung children
+        // must be released regardless of whether the Profile has a consumer for the rebased baseline.
         out.push_cancel_effect(profile_id);
 
         out.diagnostics.push(if zombie {
@@ -3568,16 +3562,15 @@ enum CertifiedResponse {
 }
 
 /// What happens to a concluding burst's evidence store — pre-fire `dirty` or post-fire
-/// `final_window_residual` — at a verdict terminal. Threaded into
-/// [`Engine::finish_verdict_terminal`] by the dispatch arms; the disposition is the arm's static
-/// knowledge of *why* the proof concluded:
+/// `final_window_residual` — at a verdict terminal. Threaded into [`Engine::finish_verdict_terminal`]
+/// by the dispatch arms; the disposition is the arm's static knowledge of *why* the proof concluded:
 ///
 /// - `Restart` — a `Stable(_)` rebase terminal. The evidence's question was answered (the walk
 ///   certified and committed), but a non-empty final-window residual witnessed the genuine
 ///   final-round-trip race: restart a debounced Standard burst from it
 ///   ([`Engine::restart_burst_from_fire_tail_residual`]) on a `ReturnToIdle` burst, else finish.
-/// - `ParkResidue` — a non-consuming bounded terminal (`Abandon`, a ceiling-forced transient
-///   probe failure). The proof never read the evidence's region, so it parks into
+/// - `ParkResidue` — a non-consuming bounded terminal (`Abandon`, a ceiling-forced transient probe
+///   failure). The proof never read the evidence's region, so it parks into
 ///   [`specter_core::Profile::park_burst_evidence`]'s standing obligation for the next burst to
 ///   drain and re-prove; then finish.
 /// - `Discard` — the evidence has no future consumer (the zombie short-circuits): finish raw.

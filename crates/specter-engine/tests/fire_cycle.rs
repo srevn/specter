@@ -480,9 +480,8 @@ fn fire_cycle_forced_rebase_terminal_restarts_from_residual() {
     // (which latches `CeilingState::Reached` and forces the FINAL rebase walk), absorb a
     // kernel-delivered in-mask event while that walk is in flight, and answer Authoritative:
     // `Stable(Forced)` must narrate the ceiling AND restart a debounced Standard burst from the
-    // residual — the companion pin to
-    // `fire_cycle_post_rebase_residual_restarts_debounced_burst` (the Natural terminal). The
-    // restarted burst then fires the absorbed change.
+    // residual — the companion pin to `fire_cycle_post_rebase_residual_restarts_debounced_burst`
+    // (the Natural terminal). The restarted burst then fires the absorbed change.
     //
     // The seed snapshot carries a `Covered` child Dir (not `dir_snap`'s `Uncovered` shape): the
     // restarted burst's verify targets the dirty-LCA — the child — and the response graft must
@@ -499,9 +498,9 @@ fn fire_cycle_forced_rebase_terminal_restarts_from_residual() {
     let (_sid, pid, seed_done) =
         attach_and_complete_seed_with(&mut e, subtree_request_with_content("test", r), &snap, now);
 
-    // Drive to Awaiting; the actuator hangs (the effect never completes). The gate deadline
-    // (4 × max_settle) expires → handle_gate_deadline cancels the effect, latches the forced
-    // ceiling, and drives the final rebase walk.
+    // Drive to Awaiting; the actuator hangs (the effect never completes). The gate deadline (4 ×
+    // max_settle) expires → handle_gate_deadline cancels the effect, latches the forced ceiling,
+    // and drives the final rebase walk.
     let t_fire = seed_done + Duration::from_millis(10);
     let _ = drive_to_awaiting(&mut e, pid, r, &snap, t_fire);
     let t_gate = t_fire + MAX_SETTLE * 8;
@@ -582,8 +581,7 @@ fn fire_cycle_forced_rebase_terminal_restarts_from_residual() {
 
     // The restarted burst fires the absorbed change: the settle expiry drives the verify at the
     // dirty-LCA (the child), and the fresh read observes the changed subtree (a different file
-    // identity than the rebased baseline), so the Stable verdict fires rather than
-    // dedup-suppressing.
+    // identity than the rebased baseline), so the Stable verdict fires rather than dedup-suppressing.
     let t_settle = t_term + SETTLE * 2;
     let _ = drain_due(&mut e, t_settle);
     let restart_corr = e

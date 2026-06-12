@@ -15,9 +15,10 @@ use specter_core::testkit::{
 };
 use specter_core::{
     ActiveBurst, ClassSet, ContribKey, DetachReason, Diagnostic, DirSnapshot, EffectCompletion,
-    EffectOutcome, EffectScope, EntryKind, FsEvent, Input, MintTemplate, OverflowScope, ProbeOp,
-    ProbeOutcome, ProbeResponse, ProfileId, ProfileIdentity, ProfileState, ResourceId,
-    ResourceKind, ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor, SubId, TimerKind, WatchOp,
+    EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, MintTemplate,
+    OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileIdentity, ProfileState,
+    ResourceId, ResourceKind, ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor, SubId, TimerKind,
+    WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -70,8 +71,10 @@ fn burst_and_respond(
 /// walk, verify, re-sample, rebase) with a byte-identical kind-appropriate sample (File anchors
 /// `AnchorOk`, Dir anchors an empty subtree), completes any fired effect, and advances the clock a
 /// settle window when the burst waits on a timer. The EMPTY-mask `mint_template` folds
-/// `HashChannel` verdicts, so each certification needs two equal samples; a cold Seed pins on its
-/// single sample without a clock advance. Returns the instant the Profile rests at Idle.
+/// `HashChannel` verdicts, so each certification needs two equal samples. An enumeration mint's
+/// cold Seed pins on its single sample without a clock advance; an appearance mint opens triggered
+/// (Batching-first, no probe in flight at mint time), so the loop drains its settle window, then
+/// fires and rebases. Returns the instant the Profile rests at Idle.
 fn settle_minted(e: &mut Engine, mid: SubId, kind: Option<EntryKind>, mut at: Instant) -> Instant {
     let pid = pid_of(e, mid);
     if matches!(
@@ -116,9 +119,11 @@ fn settle_minted(e: &mut Engine, mid: SubId, kind: Option<EntryKind>, mut at: In
     panic!("minted Profile did not converge to Idle");
 }
 
-/// Drive every freshly-minted Profile's cold Seed to Idle so later timeline drains never collide
-/// with minted-burst timers. Probe-less minted Profiles are skipped (already settled), so the pass
-/// never advances the clock — a cold Seed pins on its single sample.
+/// Drive every freshly-minted Profile's first-enumeration cold Seed to Idle so later timeline drains
+/// never collide with minted-burst timers. Probe-less minted Profiles are skipped, so the pass never
+/// advances the clock — an enumeration mint's cold Seed pins on its single in-flight sample.
+/// Appearance mints (Batching-first, no probe at mint time) are deliberately *not* converged here: a
+/// test that needs one settled drives it through `settle_minted` at its own timeline position.
 fn settle_minted_seeds(e: &mut Engine, source: SubId, at: Instant) {
     let minted: Vec<SubId> = discovery_subs_of(e, source).into_values().collect();
     for mid in minted {
@@ -257,6 +262,67 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
         "re-reconcile seals back to Idle",
+    );
+}
+
+/// The safe-delivery idiom (`mv staging/app /srv/app`, then quiet): a terminus that appears
+/// atomically under a live watch mints a Sub that owes — and fires — its first reaction. The
+/// discovery Profile witnessed the STRUCTURE event *and* certified the set delta against an
+/// enumeration this template already completed, so the mint rides a triggered Seed (Batching-first)
+/// into `FreshSeedFire`; no further event ever reaches the minted anchor — the appearance witness
+/// alone carries the fire.
+#[test]
+fn witnessed_appearance_mints_sub_that_fires() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(srv),
+        "/srv/*",
+        mint_template(),
+        now,
+    );
+    // First enumeration over an empty dir: a completed pass with nothing to mint — the template's
+    // enumeration is established; every later dedup miss is a delta against it.
+    let _ = respond(&mut e, pid, &dir_snap(&[]), now);
+
+    // The atomic appearance: one STRUCTURE event at the anchor, certified listing carries the new
+    // terminus, then silence.
+    let t1 = now + Duration::from_millis(10);
+    let (out, t2) = burst_and_respond(
+        &mut e,
+        pid,
+        srv,
+        &dir_snap(&[("app", EntryKind::Dir, 7)]),
+        t1,
+    );
+    assert_eq!(
+        minted_paths(&out),
+        vec![(sid, "/srv/app".to_string())],
+        "the appearance mints",
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DiscoveryMinted { source, appeared: true, .. } if *source == sid
+        )),
+        "the narration carries the appearance classification",
+    );
+    let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
+
+    // Converge the minted Profile with no further input: the witness alone owes the fire.
+    let _ = settle_minted(&mut e, mid, None, t2);
+    let s = e.subs().get(mid).expect("minted Sub live");
+    assert!(
+        s.has_fired(),
+        "a witnessed appearance owes its first fire — mv-then-quiet must react",
+    );
+    assert_eq!(
+        s.fire_history().map(|h| h.fire_count),
+        Some(1),
+        "exactly one first fire",
     );
 }
 
@@ -507,7 +573,9 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
 /// A `Symlink` / `Other` chain terminus skips the mint wholesale — no Tree slot, no minted Sub, no
 /// mint→reap churn — narrated once per template lifetime while a real-file sibling in the same pass
 /// mints normally; replacing the symlink with a regular file at the same path then mints (the latch
-/// gates only the diagnostic; kind is read fresh off the snapshot each pass).
+/// gates only the diagnostic; kind is read fresh off the snapshot each pass) **and fires**: the
+/// skip arm never enters the enumeration's live set, so the replacement is a latched miss — a
+/// genuine witnessed change, not a re-enumeration.
 #[test]
 fn unsupported_terminus_skips_mint_and_warns_once() {
     let mut e = Engine::new();
@@ -590,8 +658,9 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
     assert!(minted_paths(&out2).is_empty(), "no re-mint, no churn");
     assert_eq!(discovery_subs_of(&e, sid).len(), 1, "minted set stable");
 
-    // The symlink is replaced by a regular file at the same path: mints normally.
-    let (out3, _) = burst_and_respond(
+    // The symlink is replaced by a regular file at the same path: mints normally — and as an
+    // appearance, since the skipped symlink was never part of the established enumeration.
+    let (out3, t3) = burst_and_respond(
         &mut e,
         pid,
         srv,
@@ -604,6 +673,15 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
         "kind is read fresh — the latch gated only the diagnostic, never the mint",
     );
     assert_eq!(discovery_subs_of(&e, sid).len(), 2);
+    let replaced = e
+        .subs()
+        .find_by_name("disc@/srv/a/current")
+        .expect("replacement minted");
+    let _ = settle_minted(&mut e, replaced, None, t3);
+    assert!(
+        e.subs().get(replaced).unwrap().has_fired(),
+        "symlink → real-file replacement fires: a latched miss is a witnessed change",
+    );
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -612,7 +690,9 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
 /// loss step parks the minted Profile in a recovery descent (`Pending`), and the certified empty
 /// listing then reaps it from there in one step: the graft deletes the leaf entry and its try-reap
 /// is refused on the minted back-ref, the removal pass detaches the Sub, and the Profile's reap
-/// cascades the slot. The path's reappearance re-mints under a fresh `SubId`.
+/// cascades the slot. The path's reappearance re-mints under a fresh `SubId` — and **fires**: a new
+/// drop at the old path is a latched miss (appeared), and continuity across a true vanish is
+/// deliberately not preserved, so the fresh Sub owes its own first reaction.
 #[test]
 fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
     let mut e = Engine::new();
@@ -701,7 +781,7 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
     );
     assert!(discovery_subs_of(&e, sid).is_empty());
 
-    let (back, _) = burst_and_respond(
+    let (back, t3) = burst_and_respond(
         &mut e,
         pid,
         data,
@@ -718,6 +798,14 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
         e.subs().get(new_mid).unwrap().name,
         "disc@/data/x.log",
         "same path ⇒ same synthesised name (the old entry freed it)",
+    );
+
+    // The re-mint is an appearance — the template's enumeration predates the vanish — so the fresh
+    // Sub converges through a triggered Seed and fires its own first reaction.
+    let _ = settle_minted(&mut e, new_mid, None, t3);
+    assert!(
+        e.subs().get(new_mid).unwrap().has_fired(),
+        "vanish → reap → reappear fires: a new drop owes a reaction",
     );
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -788,7 +876,9 @@ fn ancestor_rename_reaps_old_minted_and_mints_new() {
         new_mid, old_mid,
         "path identity changed — fresh history is correct",
     );
-    settle_minted_seeds(&mut e, sid, t2);
+    // The rename's re-mint is an appearance (fresh path against an established enumeration) —
+    // converge its triggered Seed so the second-half reconcile reaps from Idle.
+    let _ = settle_minted(&mut e, new_mid, None, t2);
 
     // mv /srv/b out of the pattern: reap only, nothing mints.
     let (gone, _) = burst_and_respond(
@@ -1059,6 +1149,82 @@ fn second_template_shares_profile_and_walk_mints_per_template() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
+/// A template with the same pattern joining the **Idle** discovery Profile must not starve until
+/// external churn: the join itself reseeds — one cold walk, operator-paced — and the reseed's
+/// reconcile mints for the joiner alone. The mints are cold (a mid-life join over an existing tree
+/// is attach-over-existing — restart parity), so nothing fires.
+#[test]
+fn template_join_on_idle_discovery_profile_reseeds_and_mints_cold() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let (sid1, pid) = attach_discovery(
+        &mut e,
+        "disc1",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_template(),
+        now,
+    );
+    let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
+    settle_minted_seeds(&mut e, sid1, now);
+    assert!(
+        matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),
+        "premise: the discovery Profile is sealed Idle before the join",
+    );
+
+    // disc2 joins post-seal — identical discovery identity, no tree event in sight.
+    let t1 = now + Duration::from_millis(10);
+    let (sid2, pid2, join) = attach_discovery_returning(
+        &mut e,
+        "disc2",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_template(),
+        t1,
+    );
+    assert_eq!(pid2, pid, "same pattern ⇒ one discovery Profile");
+    assert!(
+        join.probe_ops().iter().any(|op| matches!(
+            op,
+            ProbeOp::Probe { request } if request.owner() == pid
+        )),
+        "the join itself reseeds — a cold walk rides the attach step",
+    );
+
+    let out = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), t1);
+    assert_eq!(
+        minted_paths(&out),
+        vec![(sid2, "/data/x".to_string())],
+        "the reseed's reconcile mints for the joiner only — the sibling's set dedups",
+    );
+    assert!(out.effects().is_empty(), "a cold join-mint fires nothing");
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DiscoveryMinted { source, appeared: false, .. } if *source == sid2
+        )),
+        "a first-enumeration mint narrates cold",
+    );
+    assert!(
+        e.subs()
+            .get(sid2)
+            .unwrap()
+            .discovery_template()
+            .unwrap()
+            .enumerated(),
+        "the completed reseed pass latches the joiner's enumeration",
+    );
+    let mid2 = *discovery_subs_of(&e, sid2).values().next().expect("minted");
+    let t2 = settle_minted(&mut e, mid2, None, t1);
+    assert!(
+        !e.subs().get(mid2).unwrap().has_fired(),
+        "attach-over-existing pins silently — restart parity",
+    );
+    let _ = t2;
+    let _ = e.cancel_all_in_flight_probes();
+}
+
 /// Prefix `rm -rf` recovery: every Profile re-enters its own recovery descent (anchor loss is uniform
 /// — the minted Sub *survives*, parked `Pending`), the discovery Profile recovers through
 /// `watch_root_parent` descent, and the recovery Seed's reconcile finds the reappeared terminus live
@@ -1154,7 +1320,10 @@ fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
 }
 
 /// Overflow force-reseeds the discovery Profile (Idle and mid-burst arms); the reseed's reconcile
-/// recovers mints missed inside the unreliable window.
+/// recovers mints missed inside the unreliable window — and those mints **fire**: the reseed burst
+/// is cold, but mints classify by the template's enumeration latch, never by the reconciling
+/// burst's intent, so the certified-set delta is the appearance witness (mirroring the Standard
+/// Profile's overflow drift-fire).
 #[test]
 fn overflow_reseed_recovers_missed_mints() {
     let mut e = Engine::new();
@@ -1194,6 +1363,12 @@ fn overflow_reseed_recovers_missed_mints() {
         vec![(sid, "/data/y".to_string())],
         "the missed match mints on the reseed reconcile",
     );
+    assert!(
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::DiscoveryMinted { appeared: true, .. })),
+        "the reseed burst is cold, but the latched miss classifies as an appearance",
+    );
 
     // Mid-burst arm: overflow lands while Batching — disarm, finish, reseed, same recovery.
     let t2 = t1 + Duration::from_millis(10);
@@ -1227,6 +1402,17 @@ fn overflow_reseed_recovers_missed_mints() {
     );
     assert_eq!(minted_paths(&out2), vec![(sid, "/data/z".to_string())]);
     assert_eq!(discovery_subs_of(&e, sid).len(), 3);
+
+    // The blind-window appearance owes — and fires — its first reaction through the ordinary
+    // triggered-Seed convergence. `z` (no later overflow disrupts its Seed) is the witness; `y`'s
+    // identical classification is pinned above, but its in-flight triggered Seed was legitimately
+    // flushed by the second Global overflow (cold reseed ⇒ silent pin).
+    let z_mid = e.subs().find_by_name("disc@/data/z").expect("minted for z");
+    let _ = settle_minted(&mut e, z_mid, None, t2);
+    assert!(
+        e.subs().get(z_mid).unwrap().has_fired(),
+        "a terminus that appeared inside the blind window fires on the reseed",
+    );
     let _ = e.cancel_all_in_flight_probes();
 }
 
@@ -1722,6 +1908,75 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
             .unwrap()
             .name,
         "disc@/data/x/m",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// The mint classifier keys on the template's enumeration latch, never on the reconciling burst's
+/// intent — the cold direction: a discovery anchor that appears *while the descent watches* (a
+/// witnessed appearance of the anchor itself) materialises into a triggered Seed, yet the mints of
+/// its first reconcile stay cold — the template was never enumerated, so pre-existing termini
+/// inside the new anchor are first enumeration, not appearances. Accepted residue: continued writes
+/// inside such termini drive the minted Standard bursts anyway.
+#[test]
+fn witnessed_descent_first_enumeration_still_mints_cold() {
+    let mut e = Engine::new();
+    let now = Instant::now();
+    let (sid, pid, _) = attach_discovery_returning(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Path("/data".into()),
+        "/data/*",
+        mint_template(),
+        now,
+    );
+    assert!(
+        matches!(
+            e.profiles().get(pid).unwrap().state(),
+            ProfileState::Pending(_)
+        ),
+        "absent anchor ⇒ Pending descent",
+    );
+    let root = e
+        .tree()
+        .lookup(None, FS_ROOT_SEGMENT)
+        .expect("FS root bootstrapped by the pending attach");
+
+    // The anchor dir is created (with content) while the descent's prefix watch is live: the
+    // STRUCTURE event reaches the descent and latches its appearance witness; the next response
+    // finds the awaited segment and materialises into a *triggered* Seed, Batching-first.
+    let t1 = now + Duration::from_millis(10);
+    let _ = e.step(
+        Input::FsEvent {
+            resource: root,
+            event: FsEvent::StructureChanged,
+        },
+        t1,
+    );
+    let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
+    let t2 = t1 + SETTLE * 2;
+    drain_due(&mut e, t2);
+    let out = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), t2);
+    assert!(
+        out.effects().is_empty(),
+        "a chain Profile reconciles — never fires, whatever the Seed's intent",
+    );
+    assert_eq!(minted_paths(&out), vec![(sid, "/data/x".to_string())]);
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DiscoveryMinted {
+                appeared: false,
+                ..
+            }
+        )),
+        "the Seed is triggered, but the un-enumerated template classifies the mint cold",
+    );
+    let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
+    let _ = settle_minted(&mut e, mid, None, t2);
+    assert!(
+        !e.subs().get(mid).unwrap().has_fired(),
+        "first enumeration pins silently even under a witnessed-descent Seed",
     );
     let _ = e.cancel_all_in_flight_probes();
 }

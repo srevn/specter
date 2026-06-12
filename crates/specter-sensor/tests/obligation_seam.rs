@@ -1,18 +1,18 @@
 //! The engine-obligation × walker-skip seam, end-to-end on a real filesystem.
 //!
 //! For an events-incomplete Standard burst the engine emits anchor-rooted
-//! `ProofObligation::WholeSubtree` probes (`Profile::event_chains_prove_quiescence` fails), and
-//! the verdict floor proves quiescence through the N=2 hash channel: two consecutive
-//! Authoritative samples must agree. That proof is sound only if the walker delivers *full fresh
-//! reads* under `WholeSubtree` — every frame refuses the mtime-skip against the stale baseline
-//! (`Retry` never commits, so both samples carry the same pre-burst baseline). An in-place
-//! rewrite of an existing file bumps no parent-dir mtime, so any frame cloned from the baseline
-//! would hide it; under `Chains` the off-chain `data/` frame is exactly such a clone, and two
-//! samples would agree on a tree that changed.
+//! `ProofObligation::WholeSubtree` probes (`Profile::event_chains_prove_quiescence` fails), and the
+//! verdict floor proves quiescence through the N=2 hash channel: two consecutive Authoritative
+//! samples must agree. That proof is sound only if the walker delivers *full fresh reads* under
+//! `WholeSubtree` — every frame refuses the mtime-skip against the stale baseline (`Retry` never
+//! commits, so both samples carry the same pre-burst baseline). An in-place rewrite of an existing
+//! file bumps no parent-dir mtime, so any frame cloned from the baseline would hide it; under
+//! `Chains` the off-chain `data/` frame is exactly such a clone, and two samples would agree on a
+//! tree that changed.
 //!
-//! Real `WorkerProber`, real `quiescence_verdict`: the off-chain in-place write landing between
-//! two fixed-shape samples makes them disagree (fold = `Retry { observed_motion: true }` — no
-//! false `Stable`), and once the writer stops, two agreeing samples fold `Stable(Natural)`.
+//! Real `WorkerProber`, real `quiescence_verdict`: the off-chain in-place write landing between two
+//! fixed-shape samples makes them disagree (fold = `Retry { observed_motion: true }` — no false
+//! `Stable`), and once the writer stops, two agreeing samples fold `Stable(Natural)`.
 
 #![cfg(unix)]
 
@@ -80,9 +80,9 @@ fn whole_subtree_samples_witness_offchain_inplace_write() {
     let target: Arc<Path> = Arc::from(root.to_path_buf());
 
     // The shape the engine emits for both the Seed walk and every events-incomplete Standard
-    // sample: anchor-rooted, WholeSubtree-obligated, unforced. Only the baseline varies — the
-    // Seed walk has none; the burst samples carry the stale pre-burst baseline (Retry never
-    // commits, so it stays stale across the whole loop).
+    // sample: anchor-rooted, WholeSubtree-obligated, unforced. Only the baseline varies — the Seed
+    // walk has none; the burst samples carry the stale pre-burst baseline (Retry never commits, so
+    // it stays stale across the whole loop).
     let whole =
         |corr: u64, baseline: Option<Arc<specter_core::DirSnapshot>>| ProbeRequest::Subtree {
             owner: p,
@@ -127,14 +127,14 @@ fn whole_subtree_samples_witness_offchain_inplace_write() {
     );
 
     // The mmap-style writer the events-incomplete mask cannot see lands BETWEEN the samples: an
-    // in-place rewrite of an existing file. The leaf's own size/mtime move; the parent dir's
-    // mtime does not — under a Chains obligation this frame would be cloned from the stale
-    // baseline and the write would hide. The size change keeps the leaf hash distinct even
-    // inside one mtime-granularity window.
+    // in-place rewrite of an existing file. The leaf's own size/mtime move; the parent dir's mtime
+    // does not — under a Chains obligation this frame would be cloned from the stale baseline and
+    // the write would hide. The size change keeps the leaf hash distinct even inside one
+    // mtime-granularity window.
     std::fs::write(root.join("data/blob.bin"), b"BBBBBBBB").unwrap();
 
-    // Sample 2: the full fresh read sees the write — the samples disagree, and the channel
-    // refuses to certify (`observed_motion: true` counts toward the mask-blindspot streak).
+    // Sample 2: the full fresh read sees the write — the samples disagree, and the channel refuses
+    // to certify (`observed_motion: true` counts toward the mask-blindspot streak).
     prober.submit(whole(3, Some(Arc::clone(&s0))));
     let (s2, a2) = recv_snapshot(&rx);
     assert_eq!(a2, ProofAuthority::Authoritative);

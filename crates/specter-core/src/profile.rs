@@ -76,9 +76,9 @@ pub enum ActiveBurst {
 /// The map is keyed by the slot, not reduced to a bare path set, for two reasons: per-slot
 /// **last-writer-wins** dedup (a slot firing N events contributes one entry, not N — see
 /// [`Self::note`]), and retaining the live-slot id as the cheap basis for any future caller needing
-/// *current* liveness rather than history (today none on the Standard pre-fire path — the projection
-/// reads only the values). No public setter — the accumulator edges are [`Self::note`] (one event)
-/// and [`Self::absorb`] (wholesale union, the standing-obligation park/drain merge).
+/// *current* liveness rather than history (today none on the Standard pre-fire path — the
+/// projection reads only the values). No public setter — the accumulator edges are [`Self::note`]
+/// (one event) and [`Self::absorb`] (wholesale union, the standing-obligation park/drain merge).
 #[derive(Debug, Default)]
 pub struct DirtyProvenance(BTreeMap<ResourceId, Arc<Path>>);
 
@@ -101,9 +101,9 @@ impl DirtyProvenance {
     /// Union `other`'s captured events into this accumulator — the wholesale merge edge for the
     /// standing-obligation lifecycle (consecutive parks union onto the parked set; a burst
     /// constructor unions the drained set into the newborn burst's `dirty`). Per-id
-    /// last-writer-wins with `other` as the later writer, the same dedup [`Self::note`] applies
-    /// per event: ids are stable, so a duplicate id re-stores the identical path and merge order
-    /// is immaterial today. Callers still merge older-evidence-first so the liveliest writer lands
+    /// last-writer-wins with `other` as the later writer, the same dedup [`Self::note`] applies per
+    /// event: ids are stable, so a duplicate id re-stores the identical path and merge order is
+    /// immaterial today. Callers still merge older-evidence-first so the liveliest writer lands
     /// last if that contract ever loosens.
     pub fn absorb(&mut self, other: Self) {
         self.0.extend(other.0);
@@ -335,17 +335,17 @@ pub struct PreFireBurst {
     pub last_event_time: Option<Instant>,
     /// Consecutive *motion-observing* [`QuiescenceVerdict::Retry`] re-entries (hash-channel
     /// disagreement, `observed_motion: true`) with no intervening driving event. Born `0`;
-    /// `retry_drives_batching` increments only when the Retry observed motion —
-    /// a transient walker refusal or probe failure observed *nothing* and holds the streak —
-    /// and `event_drives_batching` zeroes on every driving `FsEvent` (a delivered in-mask event
+    /// `retry_drives_batching` increments only when the Retry observed motion — a transient walker
+    /// refusal or probe failure observed *nothing* and holds the streak — and
+    /// `event_drives_batching` zeroes on every driving `FsEvent` (a delivered in-mask event
     /// explains the observed motion and breaks the streak). A surviving streak therefore witnesses
     /// event-*silent* windows that each *hashed differently*: the disagreement-denominated count
     /// the hint floor was calibrated against. Read once, at the forced-ceiling terminal with the
     /// disagreement bit set: a streak at-or-above the engine's hint floor upgrades the generic
-    /// despite-change diagnostic to [`crate::Diagnostic::ChangeOutsideEventMask`] (the proof
-    /// object is moving via change classes outside the Profile's `events` mask). Dropped by
-    /// omission at [`Self::into_post_fire`]: the rebase loop counts its own windows over the
-    /// post-command tree ([`PostFireBurst::retry_streak`]).
+    /// despite-change diagnostic to [`crate::Diagnostic::ChangeOutsideEventMask`] (the proof object
+    /// is moving via change classes outside the Profile's `events` mask). Dropped by omission at
+    /// [`Self::into_post_fire`]: the rebase loop counts its own windows over the post-command tree
+    /// ([`PostFireBurst::retry_streak`]).
     pub retry_streak: u32,
     /// Pre-fire N=2 sample carrier — see [`CertifiedSample`] for the sealed single-writer contract.
     /// Engaged (read at the verdict floor) only when the burst owes quiescence proof (Standard,
@@ -362,10 +362,9 @@ pub struct PreFireBurst {
     /// **Orthogonal to [`Self::intent`].** Intent feeds the proof-obligation axis
     /// ([`Profile::event_chains_prove_quiescence`] — events-complete `Standard ⇒ Chains`, all else
     /// ⇒ `WholeSubtree`); a fold-latched burst still runs its probe semantics in full and changes
-    /// only the *terminal consequence*. **Dropped by omission** at
-    /// [`Self::into_post_fire`] — a fold replaces the fire, so a latched burst must never cross the
-    /// boundary; the move debug-asserts `!latched` as the structural dual of the verdict-time
-    /// override.
+    /// only the *terminal consequence*. **Dropped by omission** at [`Self::into_post_fire`] — a
+    /// fold replaces the fire, so a latched burst must never cross the boundary; the move
+    /// debug-asserts `!latched` as the structural dual of the verdict-time override.
     pub(crate) fold_latched: FoldLatch,
 }
 
@@ -397,8 +396,7 @@ pub enum PreFirePhase {
     /// bursts ([`Profile::event_chains_prove_quiescence`]): the live id at the component-LCA of
     /// `dirty`'s captured paths (File leaf promoted to its parent Dir; anchor on any resolution
     /// miss). For Seed bursts (triggered or cold-walk) and events-incomplete Standard bursts: the
-    /// Profile's anchor. The Verifying response reads this for the post-fire snapshot-commit
-    /// target.
+    /// Profile's anchor. The Verifying response reads this for the post-fire snapshot-commit target.
     ///
     /// Constructing the variant *requires* both fields, so a verify phase without a correlation or
     /// without a target cannot exist:
@@ -472,8 +470,8 @@ pub struct PostFireBurst {
     pub phase: PostFirePhase,
     /// The final-window restart seed — events absorbed during the post-fire tail (`Awaiting |
     /// Rebasing | Settling`), captured `(slot, path)` by `absorb_event_into_fire_tail` in
-    /// `drive_burst`'s post-fire arm. Single-purpose: when the rebase loop terminates `Stable(_)`
-    /// — natural or ceiling-forced; both run the identical final-round-trip race window — on a
+    /// `drive_burst`'s post-fire arm. Single-purpose: when the rebase loop terminates `Stable(_)` —
+    /// natural or ceiling-forced; both run the identical final-round-trip race window — on a
     /// `ReturnToIdle` burst with a non-empty residual, restart a fresh debounced Standard burst
     /// seeded from it (`into_pre_fire_residual` moves the whole provenance, so the restarted
     /// burst's first verify has its captured paths intact). The non-committing terminals
@@ -511,14 +509,13 @@ pub struct PostFireBurst {
     /// transition, mirroring `on_settle_expired`'s pre-fire fork.
     pub last_event_time: Option<Instant>,
     /// Consecutive *motion-observing* rebase-loop [`QuiescenceVerdict::Retry`] re-entries
-    /// (hash-channel disagreement, `observed_motion: true`) with no intervening absorbed event —
-    /// the post-fire mirror of [`PreFireBurst::retry_streak`], counting this loop's own windows
-    /// over the post-command tree. Born `0`; `transition_to_settling` increments only when the
-    /// Retry observed motion (a transient refusal or probe failure holds the streak),
-    /// `absorb_event_into_fire_tail` zeroes on every absorbed `FsEvent`. Read once, at the
-    /// `RebaseCeiling` forced terminal with the disagreement bit set, for the same
-    /// [`crate::Diagnostic::ChangeOutsideEventMask`] upgrade. Dropped by omission at
-    /// [`Self::into_pre_fire_residual`].
+    /// (hash-channel disagreement, `observed_motion: true`) with no intervening absorbed event — the
+    /// post-fire mirror of [`PreFireBurst::retry_streak`], counting this loop's own windows over the
+    /// post-command tree. Born `0`; `transition_to_settling` increments only when the Retry observed
+    /// motion (a transient refusal or probe failure holds the streak), `absorb_event_into_fire_tail`
+    /// zeroes on every absorbed `FsEvent`. Read once, at the `RebaseCeiling` forced terminal with the
+    /// disagreement bit set, for the same [`crate::Diagnostic::ChangeOutsideEventMask`] upgrade.
+    /// Dropped by omission at [`Self::into_pre_fire_residual`].
     pub retry_streak: u32,
     /// The rebase-loop ceiling lifecycle — the post-fire mirror of [`PreFireBurst::forced`] + the
     /// pre-fire `burst_deadline` pair, collapsed into a single sum type. See [`CeilingState`] for
@@ -680,8 +677,8 @@ impl QuiescenceWitness {
     /// answer `false` — there is no observed disagreement, only the absence of confirmation.
     ///
     /// The one witness test behind both motion-shaped verdict bits, so they cannot drift apart:
-    /// [`StableReason::Forced`]'s `hash_channel_disagreed` (the forced-ceiling diagnostic
-    /// selector) and [`QuiescenceVerdict::Retry`]'s `observed_motion` (the streak-counting fork).
+    /// [`StableReason::Forced`]'s `hash_channel_disagreed` (the forced-ceiling diagnostic selector)
+    /// and [`QuiescenceVerdict::Retry`]'s `observed_motion` (the streak-counting fork).
     const fn observed_disagreement(self) -> bool {
         matches!(
             self,
@@ -730,8 +727,8 @@ pub enum StableReason {
 ///   (pre-fire re-Batch via `Engine::retry_drives_batching`, post-fire re-Settle via
 ///   `Engine::transition_to_settling`); neither commits. `observed_motion` is the one bit on which
 ///   they diverge: only a concrete channel disagreement counts toward the burst's `retry_streak`
-///   (the mask-blindspot witness) — a refusal observed nothing, so it holds the streak instead.
-///   The transient `first_unread` is consumed only on the [`Self::Abandon`] terminal, and the
+///   (the mask-blindspot witness) — a refusal observed nothing, so it holds the streak instead. The
+///   transient `first_unread` is consumed only on the [`Self::Abandon`] terminal, and the
 ///   channel-disagreement provenance persists through the burst's `last_certified_hash` carrier for
 ///   the eventual forced-ceiling read. The bounded `BurstDeadline` / `RebaseCeiling` eventually
 ///   surfaces a [`StableReason::Forced`] (channel-disagreement path) or [`Self::Abandon`]
@@ -788,14 +785,14 @@ pub enum QuiescenceVerdict {
 ///   fold to `false` — there is no observed disagreement, only the absence of confirmation.
 /// - [`ProofAuthority::Authoritative`] + `!forced` ⇒ [`QuiescenceVerdict::Stable`]
 ///   ([`StableReason::Natural`]) iff the witness proves quiescence
-///   ([`QuiescenceWitness::EventsReliable`] OR `HashChannel { prior: Some(p), response }` with `p ==
-///   response`). Otherwise (`HashChannel` with `prior = None` OR `prior != Some(response)`) ⇒
-///   [`QuiescenceVerdict::Retry`], whose `observed_motion` runs the same witness test as the
-///   Forced arm's `hash_channel_disagreed` — `true` on a concrete `Some(p) != response`, `false`
-///   on the first-sample `None` (absence of confirmation, not observed motion). The
-///   channel-disagreement provenance persists through the burst's `last_certified_hash` carrier;
-///   the eventual forced-ceiling read reconstructs the strong-signal
-///   `*CeilingForcedDespiteChange` if disagreement persists, so no operator-visible signal is lost.
+///   ([`QuiescenceWitness::EventsReliable`] OR `HashChannel { prior: Some(p), response }` with `p
+///   == response`). Otherwise (`HashChannel` with `prior = None` OR `prior != Some(response)`) ⇒
+///   [`QuiescenceVerdict::Retry`], whose `observed_motion` runs the same witness test as the Forced
+///   arm's `hash_channel_disagreed` — `true` on a concrete `Some(p) != response`, `false` on the
+///   first-sample `None` (absence of confirmation, not observed motion). The channel-disagreement
+///   provenance persists through the burst's `last_certified_hash` carrier; the eventual
+///   forced-ceiling read reconstructs the strong-signal `*CeilingForcedDespiteChange` if
+///   disagreement persists, so no operator-visible signal is lost.
 #[must_use]
 pub fn quiescence_verdict(
     authority: ProofAuthority,
@@ -2595,19 +2592,19 @@ pub struct Profile {
     /// Paths that owe a fresh read before the next fire — burst evidence a non-consuming verdict
     /// terminal (`Abandon`, a ceiling-forced transient probe failure) parked, surviving the burst
     /// that witnessed them. Without the park, the terminal's evidence dies with the burst and the
-    /// formerly-dirty region mtime-skips against the stale baseline on every later burst: loud
-    /// once at the terminal, then silent forever. Written by [`Self::park_burst_evidence`]
-    /// (consecutive parks union), drained by [`Self::take_standing_obligation`] at every pre-fire
-    /// burst birth — the next burst's obligation then covers the parked chains (the dirty-LCA
-    /// widens over them; an events-incomplete or Seed burst reads `WholeSubtree` and consumes them
-    /// structurally). Parks pair with burst finishes and every constructor drains, so the set is
-    /// non-empty only between a parking terminal and the next burst construction. Outlives anchor
-    /// loss deliberately: the parked paths testify to witnessed-but-unfired activity, so they
-    /// rightly make the recovery Seed proof-owing and first-fire-owing.
+    /// formerly-dirty region mtime-skips against the stale baseline on every later burst: loud once
+    /// at the terminal, then silent forever. Written by [`Self::park_burst_evidence`] (consecutive
+    /// parks union), drained by [`Self::take_standing_obligation`] at every pre-fire burst birth —
+    /// the next burst's obligation then covers the parked chains (the dirty-LCA widens over them;
+    /// an events-incomplete or Seed burst reads `WholeSubtree` and consumes them structurally).
+    /// Parks pair with burst finishes and every constructor drains, so the set is non-empty only
+    /// between a parking terminal and the next burst construction. Outlives anchor loss
+    /// deliberately: the parked paths testify to witnessed-but-unfired activity, so they rightly
+    /// make the recovery Seed proof-owing and first-fire-owing.
     ///
     /// **Recovery rides the next signal, never a poll.** A parked residue still never fires if no
-    /// in-mask event ever arrives again — parking converts "lost forever" into "lost until the
-    /// next signal". That is the deliberate trade: it is event-driven (no probe drumbeat against a
+    /// in-mask event ever arrives again — parking converts "lost forever" into "lost until the next
+    /// signal". That is the deliberate trade: it is event-driven (no probe drumbeat against a
     /// permanently unreadable region), it preserves the terminal's stop-burning-probes intent, and
     /// it is the architecture's existing posture for [`ProfileState::Parked`] Profiles.
     standing_obligation: DirtyProvenance,
@@ -3115,8 +3112,8 @@ impl Profile {
     /// See also `Engine::owes_proof_from` — the orthogonal predicate selecting *which* bursts owe a
     /// proof. The two compose at the witness-selection join inside `Engine::certify_probe_response`.
     /// The emission-time consumer is [`Self::event_chains_prove_quiescence`] — the probe target and
-    /// obligation reach this primitive only through it, never directly.
-    /// Not `const`: reads the shape through [`Self::config`]'s `Arc` deref.
+    /// obligation reach this primitive only through it, never directly. Not `const`: reads the shape
+    /// through [`Self::config`]'s `Arc` deref.
     #[must_use]
     pub fn events_witness_quiescence(&self) -> bool {
         self.events()
@@ -3132,15 +3129,14 @@ impl Profile {
     /// emission-equivalent reasons for a full fresh read.
     ///
     /// The emission-time twin of the verdict floor's witness selection
-    /// (`Engine::certify_probe_response`, which engages the hash channel iff the burst owes proof
-    /// AND `!events_witness_quiescence()`). Sharing this one source is what makes "hash channel
-    /// engaged ⇒ both samples were full fresh anchor-rooted reads of the proof object" hold by
-    /// construction: a `Chains`-obligated sample would `Arc`-clone every off-chain frame with an
-    /// unchanged mtime from the stale baseline, so two such samples agree *by construction* on
-    /// exactly the regions an events-incomplete mask cannot witness — the channel would certify a
-    /// tree that demonstrably changed. The two halves are individually necessary: a chains-scoped
-    /// frame leaves out-of-LCA regions out of frame, and an anchor-rooted `Chains` walk still
-    /// skips off-chain frames.
+    /// (`Engine::certify_probe_response`, which engages the hash channel iff the burst owes proof AND
+    /// `!events_witness_quiescence()`). Sharing this one source is what makes "hash channel engaged ⇒
+    /// both samples were full fresh anchor-rooted reads of the proof object" hold by construction: a
+    /// `Chains`-obligated sample would `Arc`-clone every off-chain frame with an unchanged mtime from
+    /// the stale baseline, so two such samples agree *by construction* on exactly the regions an
+    /// events-incomplete mask cannot witness — the channel would certify a tree that demonstrably
+    /// changed. The two halves are individually necessary: a chains-scoped frame leaves out-of-LCA
+    /// regions out of frame, and an anchor-rooted `Chains` walk still skips off-chain frames.
     ///
     /// Exactly two consumers — the pre-fire probe-target rule (`pre_fire_target`) and the emission
     /// choke's obligation arm (`Engine::probe_emission_request`); they key the LCA-vs-anchor and
@@ -3403,14 +3399,14 @@ impl Profile {
         self.state.advance_certified_sample(hash)
     }
 
-    /// Park the live burst's evidence store into the standing obligation — the cat-(b) edge for
-    /// the non-consuming verdict terminals (`Abandon`, a ceiling-forced transient probe failure),
+    /// Park the live burst's evidence store into the standing obligation — the cat-(b) edge for the
+    /// non-consuming verdict terminals (`Abandon`, a ceiling-forced transient probe failure),
     /// called by the engine's verdict-terminal router immediately before the burst finish. The
     /// cascade ([`ProfileState::take_burst_evidence`] → [`ActiveBurst::take_evidence`]) takes
     /// whichever carrier is live — pre-fire `dirty` or post-fire `final_window_residual` — and
-    /// unions it onto any prior parked content (consecutive parks union; per-id paths are
-    /// identical by [`DirtyProvenance::note`]'s contract). Non-Active states park nothing — an
-    /// empty take absorbed into the set is a no-op.
+    /// unions it onto any prior parked content (consecutive parks union; per-id paths are identical
+    /// by [`DirtyProvenance::note`]'s contract). Non-Active states park nothing — an empty take
+    /// absorbed into the set is a no-op.
     ///
     /// The drain side is [`Self::take_standing_obligation`]; see the field rustdoc for the
     /// recovery-rides-a-signal posture.
@@ -4707,8 +4703,8 @@ mod tests {
     /// Cases covered: all reachable shapes; the `Authoritative + !forced +
     /// HashChannel(prior≠response)` row produces `Retry`, ruling out the would-be `Stable(Natural)`
     /// mistake. `Retry.observed_motion` is `true` only on the concrete-disagreement row — the
-    /// first-sample `prior=None` and the walker refusal both observed nothing, so they fold
-    /// `false` (the streak holds, it does not inflate). The `Undischarged + !forced` arm drops
+    /// first-sample `prior=None` and the walker refusal both observed nothing, so they fold `false`
+    /// (the streak holds, it does not inflate). The `Undischarged + !forced` arm drops
     /// `first_unread` at the fold — the transient retry arm at both dispatch sites has no consumer
     /// for it (consumption-aligned: an unused `Arc<Path>` is one `Arc::drop` instead of
     /// clone-then-drop downstream).
@@ -4797,9 +4793,9 @@ mod tests {
             }),
         );
 
-        // Undischarged — witness ignored; forced selects Retry vs Abandon. !forced drops first_unread
-        // at the fold (transient arm — no consumer); forced carries it verbatim on Abandon. A
-        // refusal observed nothing, so it never reports motion.
+        // Undischarged — witness ignored; forced selects Retry vs Abandon. !forced drops
+        // first_unread at the fold (transient arm — no consumer); forced carries it verbatim on
+        // Abandon. A refusal observed nothing, so it never reports motion.
         assert_eq!(
             quiescence_verdict(undischarged(), false, er),
             QuiescenceVerdict::Retry {
@@ -5408,9 +5404,9 @@ mod tests {
     }
 
     /// The standing-obligation park edge takes whichever evidence carrier is live — pre-fire
-    /// `dirty` or post-fire `final_window_residual` — empties it, and unions consecutive parks.
-    /// The drain ([`Profile::take_standing_obligation`]) empties the set. Engine integration
-    /// covers the terminal routing; this pins the cat-(b) cascade's own contract.
+    /// `dirty` or post-fire `final_window_residual` — empties it, and unions consecutive parks. The
+    /// drain ([`Profile::take_standing_obligation`]) empties the set. Engine integration covers the
+    /// terminal routing; this pins the cat-(b) cascade's own contract.
     #[test]
     fn park_burst_evidence_takes_live_carrier_and_unions_across_parks() {
         let mut tree = Tree::new();

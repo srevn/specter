@@ -377,10 +377,10 @@ pub(crate) fn covering_profiles(
 /// ([`ProfileMap::iter`]), keeps each candidate in an Active **Standard** burst whose shape is not
 /// `MatchChain`, then tests **strict** Tree-descendancy of its anchor under `ancestor.resource` by
 /// an upward parent walk ([`Tree::ancestors`], which starts above the candidate's own anchor). The
-/// strict test fails for `ancestor` itself and for any co-anchor Profile sharing its slot — matching
-/// the old refcount never self-counting. Strict descendancy is a sound superset of `{D : ancestor ∈
-/// chain(D)}` (every [`nearest_covering_ancestor`] hop is a strict Resource-ancestor move, so a
-/// contributing `D.resource` is necessarily a Tree-descendant of `ancestor.resource`);
+/// strict test fails for `ancestor` itself and for any co-anchor Profile sharing its slot —
+/// matching the old refcount never self-counting. Strict descendancy is a sound superset of `{D :
+/// ancestor ∈ chain(D)}` (every [`nearest_covering_ancestor`] hop is a strict Resource-ancestor
+/// move, so a contributing `D.resource` is necessarily a Tree-descendant of `ancestor.resource`);
 /// [`chain_reaches`] is the exact filter. Returns on the first witness.
 ///
 /// Profile-major (`O(profiles × depth)`), not subtree-major (`O(covered slots)`): this consult is

@@ -9,11 +9,12 @@
 //! - `refcounts.rs` — `watch_demand` (contributions-map) edges.
 //!
 //! `step` is the single dispatch point; each `Input` variant routes to the corresponding `on_*`
-//! handler — Sub attachment and detachment enter as `Input::AttachSub` / `Input::DetachSub`
-//! through `step`, not as standalone methods (`attach_sub_inner` / `detach_sub_inner` are
-//! `pub(crate)` internals).
+//! handler — Sub attachment and detachment enter as `Input::AttachSub` / `Input::DetachSub` through
+//! `step`, not as standalone methods (`attach_sub_inner` / `detach_sub_inner` are `pub(crate)`
+//! internals).
 
 use crate::counter::MonotonicCounter;
+use crate::path::empty_path;
 use crate::refcounts::add_watch;
 use crate::timer::{TimerEntry, TimerHeap};
 use crate::transitions::ParkNarration;
@@ -39,7 +40,7 @@ use specter_core::{ClassSet, ContribKey};
 // Probe + effect correlation.
 use specter_core::{CorrelationId, ProbeCorrelation};
 // Engine step I/O.
-use specter_core::{Diagnostic, Input, StepOutput};
+use specter_core::{Diagnostic, FsEvent, Input, StepOutput};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -166,7 +167,7 @@ impl Engine {
                 self.on_sensor_overflow(scope, now, &mut out);
             }
             Input::AttachSub(req) => {
-                let _ = self.attach_sub_inner(req, now, &mut out);
+                let _ = self.attach_sub_inner(req, SeedWitness::Cold, now, &mut out);
             }
             Input::DetachSub(sub) => {
                 // [`Input::DetachSub`] is the engine's public detach surface. Its sole external
@@ -202,6 +203,21 @@ impl Engine {
     /// directive flips back to [`BurstFinish::ReturnToIdle`], and the cleanup the deferred detach
     /// skipped (`recompute_profile_settle`) runs. The in-flight burst continues to completion under
     /// the new Sub set.
+    ///
+    /// **Witness.** `witness` says whether a live observation of the anchor's own appearance stands
+    /// behind this attach ([`SeedWitness`]). `Fresh` attaches thread it into `bootstrap_immediate`,
+    /// where it selects the Seed's cold/triggered arm exactly as the descent terminus's latch does;
+    /// a witnessed attach landing on an *existing* Profile notes the appearance into whatever burst
+    /// that Profile is running (a synthesized STRUCTURE event through `drive_burst` — an appearance
+    /// *is* a structure change), so the live verdict fires instead of cold-pinning.
+    /// `Pending`/`Parked` hits deliberately drop the note: descents own their own witness latch.
+    ///
+    /// **Template join-reseed.** A discovery template joining an existing **Idle** Profile reseeds
+    /// it (cold — the overflow-reseed lever): reconcile's convergence claim covers the one delta
+    /// axis that arrives without any tree event, a registry delta — without the reseed the joiner
+    /// starves until external churn. Every other join state already converges: Pending's terminus
+    /// seeds, an Active pass derives templates from the live registry, Parked re-descends, zombies
+    /// ride the revived burst.
     ///
     /// Total: an unresolvable anchor returns `None` with a typed diagnostic —
     /// [`Diagnostic::AttachPathInvalid`] for a malformed `Path`, [`Diagnostic::AttachResourceStale`]
@@ -251,6 +267,7 @@ impl Engine {
     pub(crate) fn attach_sub_inner(
         &mut self,
         req: SubAttachRequest,
+        witness: SeedWitness,
         now: Instant,
         out: &mut StepOutput,
     ) -> Option<SubId> {
@@ -297,9 +314,10 @@ impl Engine {
         let (profile_id, origin) = self.find_or_create_profile(resolved_anchor, identity, &params);
 
         // Phase 2 — Sub registration. Consumes `params` for the `Sub::from_request` move; captures
-        // `settle` first for the `ExistingJoin` arm below (params is no longer accessible after
-        // this point).
+        // `settle` and the template predicate first for the `ExistingJoin` arm below (params is no
+        // longer accessible after this point).
         let attach_settle = params.settle;
+        let attach_is_template = params.is_template();
         let sub_id = self.register_sub(params, profile_id, out);
 
         // Phase 3 — Per-origin bookkeeping. Existing-Profile arms run their targeted cleanup and
@@ -311,7 +329,27 @@ impl Engine {
         // existing-Profile arm.
         match origin {
             ProfileOrigin::ZombieRevival => self.revive_zombie(profile_id, out),
-            ProfileOrigin::ExistingJoin => self.join_existing(profile_id, attach_settle),
+            ProfileOrigin::ExistingJoin => {
+                self.join_existing(profile_id, attach_settle);
+                // Template join-reseed: a template joining an *Idle* discovery Profile would
+                // otherwise starve until external churn — reconcile converges registry deltas only
+                // when a verdict runs, and a registry delta arrives without any tree event. The
+                // cold reseed (the overflow-reseed lever) drives one fresh certified walk whose
+                // pass mints for the joiner — cold, since the joiner is un-enumerated: a mid-life
+                // join over an existing tree is attach-over-existing, restart parity. The Idle
+                // check is this arm's own (not `start_seed_burst`'s `require_idle`, which narrates
+                // a contract violation): non-Idle joins need nothing — Pending's descent terminus
+                // seeds, an Active pass derives its templates from the live registry at pass time,
+                // and zombies took the revival arm.
+                if attach_is_template
+                    && self
+                        .profiles
+                        .get(profile_id)
+                        .is_some_and(|p| matches!(p.state(), ProfileState::Idle))
+                {
+                    self.start_seed_burst(profile_id, None, now, out);
+                }
+            }
             ProfileOrigin::ParkedRejoin => {
                 self.join_existing(profile_id, attach_settle);
                 // An explicit re-attach is the in-band equivalent of the operator restart the
@@ -322,14 +360,51 @@ impl Engine {
             }
             ProfileOrigin::Fresh => match resolved {
                 AnchorResolution::Immediate { anchor } => {
-                    self.bootstrap_immediate(profile_id, anchor, now, out);
+                    self.bootstrap_immediate(profile_id, anchor, witness, now, out);
                 }
                 AnchorResolution::Pending {
                     prefix, remaining, ..
                 } => {
+                    // A witness names an observed appearance of the anchor itself, so a witnessed
+                    // anchor is materialised by construction: mints anchor at a freshly ensured
+                    // `SubAttachAnchor::Resource` (which never descends), and no Path-anchored
+                    // caller can claim a witness.
+                    debug_assert!(
+                        matches!(witness, SeedWitness::Cold),
+                        "attach_sub_inner: a witnessed attach cannot resolve Pending \
+                         (profile = {profile_id:?})",
+                    );
                     self.bootstrap_pending(profile_id, prefix, remaining, out);
                 }
             },
+        }
+
+        // A witnessed appearance landing on an existing Profile must not be dropped — the existing
+        // burst (or Idle baseline fork) folds it exactly as a kernel STRUCTURE event at the anchor
+        // would, which is what an appearance is. `drive_burst` is total over every state: an Active
+        // pre-fire burst notes it into `dirty` (idempotent for same-pass sibling-template mints
+        // onto the just-created Batching Profile), a revived zombie's in-flight burst absorbs it so
+        // its verdict fires instead of cold-pinning, the theoretically-unreachable Idle hit takes
+        // the baseline fork (Standard burst / triggered Seed — correct semantics, not just
+        // containment), and Pending/Parked no-op — descents latch their own witness at loss entry.
+        // The Fresh arm already threaded the witness into its Seed above.
+        if matches!(witness, SeedWitness::Appeared) && !matches!(origin, ProfileOrigin::Fresh) {
+            let path = self.tree.path_of(resolved_anchor).unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "attach_sub_inner: a witnessed live anchor must resolve a path \
+                     (profile = {profile_id:?}, resource = {resolved_anchor:?})",
+                );
+                empty_path()
+            });
+            self.drive_burst(
+                profile_id,
+                resolved_anchor,
+                &path,
+                FsEvent::StructureChanged,
+                now,
+                out,
+            );
         }
 
         Some(sub_id)
@@ -526,9 +601,13 @@ impl Engine {
     /// 2. Flip [`AnchorClaim::Held`].
     /// 3. Set up the `watch_root_parent` (STRUCTURE contribution at the anchor's parent, for
     ///    anchor-reappearance detection).
-    /// 4. Start the Seed burst (`PreFire(Batching)`); the baseline is established once the
-    ///    settle-spaced quiescence proof converges (the Seed-Ok pin in `fire_or_seal`), not on the
-    ///    first probe.
+    /// 4. Start the Seed burst, witness-selected — the descent terminus's twin
+    ///    (`materialize_profile_anchor`): a `Cold` attach opens the cold arm (`Verifying`-first,
+    ///    pins silently); an `Appeared` attach threads the anchor as the trigger, so the Seed opens
+    ///    `Batching`-first (the settle window absorbs a terminus still being written,
+    ///    post-watch-install) and its stable verdict owes the first fire. Either way the baseline
+    ///    is established once the settle-spaced quiescence proof converges (the Seed-Ok pin in
+    ///    `fire_or_seal`), not on the first probe.
     ///
     /// (No parent-edge step: the `Draining → Verifying` reconfirm is a fresh `coverage` query, so
     /// an attach maintains no per-Profile ancestor cache.)
@@ -541,6 +620,7 @@ impl Engine {
         &mut self,
         profile_id: ProfileId,
         anchor: ResourceId,
+        witness: SeedWitness,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -562,7 +642,22 @@ impl Engine {
         }
         self.set_watch_root_parent(profile_id, out);
 
-        self.start_seed_burst(profile_id, None, now, out);
+        // A witnessed appearance threads the anchor as the Seed trigger — the trigger's only job is
+        // landing in `dirty` so `seed_owes_first_fire` sees the witness; the degrade keeps it (an
+        // empty path in `dirty` still counts as activity, and every Seed probe targets the anchor
+        // off `Profile.resource`, never the dirty paths).
+        let trigger = matches!(witness, SeedWitness::Appeared).then(|| {
+            let path = self.tree.path_of(anchor).unwrap_or_else(|| {
+                debug_assert!(
+                    false,
+                    "bootstrap_immediate: a just-resolved live anchor must resolve a path \
+                     (profile = {profile_id:?}, resource = {anchor:?})",
+                );
+                empty_path()
+            });
+            (anchor, path)
+        });
+        self.start_seed_burst(profile_id, trigger, now, out);
     }
 
     /// Phase 3 of `attach_sub_inner` — fresh-Profile, pending-descent arm (anchor scaffolded but
@@ -575,11 +670,14 @@ impl Engine {
     /// the four-step `mint correlation → state-flip → add_watch on prefix → emit probe` sequence);
     /// the named arm is retained for dispatch symmetry with [`Self::bootstrap_immediate`].
     ///
-    /// Unwitnessed entry: no observation stands behind the attach, so a descent that finds every
-    /// segment on first observation stays cold and pins silently — attach-over-existing must not fire
-    /// (restart-safe doctrine). An appearance *after* attach is witnessed by the probes themselves: a
-    /// response observing the awaited segment absent records the absence half, and the later response
-    /// that finds it completes the appearance, so the terminus Seed opens triggered and fires.
+    /// Unwitnessed entry: a [`SeedWitness`] names the anchor's own observed appearance, and an
+    /// anchor whose slot resolved `Pending` was just observed *absent* — `attach_sub_inner`
+    /// debug-asserts the witness is `Cold` before dispatching here. With no observation behind the
+    /// attach, a descent that finds every segment on first observation stays cold and pins silently
+    /// — attach-over-existing must not fire (restart-safe doctrine). An appearance *after* attach
+    /// is witnessed by the probes themselves: a response observing the awaited segment absent
+    /// records the absence half, and the later response that finds it completes the appearance, so
+    /// the terminus Seed opens triggered and fires.
     fn bootstrap_pending(
         &mut self,
         profile_id: ProfileId,
@@ -1193,6 +1291,25 @@ enum ProfileOrigin {
     ExistingJoin,
     ParkedRejoin,
     ZombieRevival,
+}
+
+/// Whether a live observation of the anchor's *own appearance* stands behind an `attach_sub_inner`
+/// call — the attach pipeline's twin of the descent state machine's witnessed-activity latch.
+///
+/// Deliberately an engine-internal parameter, **not** a [`SubAttachRequest`] field: the request
+/// crosses channels (config load, hot reload, IPC), and a fire-owing witness must not be claimable
+/// from the wire. Payload-less by the same reasoning the descent latch is a bool — the witness
+/// names the anchor's own appearance, so the trigger tuple derives from the resolved anchor and a
+/// witness disagreeing with its anchor is unrepresentable.
+///
+/// `Appeared` has exactly one producer: the discovery mint arm (`reconcile_matches`), classifying a
+/// dedup miss against a template's established enumeration. Every other caller — the
+/// `Input::AttachSub` step arm and the three config-diff arms — attaches on intent alone and passes
+/// `Cold`.
+#[derive(Clone, Copy)]
+pub(crate) enum SeedWitness {
+    Cold,
+    Appeared,
 }
 
 /// Outcome of `attach_sub_inner`'s Phase 1 anchor resolution. The two variants encode the semantic
@@ -1901,9 +2018,10 @@ mod tests {
         let sid_b =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
 
-        // Drive the in-flight Seed-Verifying burst to a terminal Vanished. `dispatch_pre_fire_vanished
-        // → finalize_anchor_lost → finish_burst_to_idle` would reap if `reap_pending` were still
-        // set; the revival cleared it, so the Profile transitions to Idle (anchor lost) and stays.
+        // Drive the in-flight Seed-Verifying burst to a terminal Vanished.
+        // `dispatch_pre_fire_vanished → finalize_anchor_lost → finish_burst_to_idle` would reap if
+        // `reap_pending` were still set; the revival cleared it, so the Profile transitions to Idle
+        // (anchor lost) and stays.
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,

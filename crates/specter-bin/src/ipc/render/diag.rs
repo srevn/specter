@@ -501,11 +501,16 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "sub", sub.0);
         }
         WireDiagnostic::DiscoveryMinted {
-            source, path, kind, ..
+            source,
+            path,
+            kind,
+            appeared,
+            ..
         } => {
             field(out, sty, "source", source.0);
             field(out, sty, "path", path);
             field(out, sty, "kind", kind);
+            field(out, sty, "appeared", appeared);
         }
         WireDiagnostic::DiscoveryUnsupportedAnchorKind {
             source, path, kind, ..
@@ -878,6 +883,7 @@ mod tests {
             "sub_rebound" | "rebind_unknown_sub" => json!({"diag": tag, "at": at, "sub": id}),
             "discovery_minted" => json!({
                 "diag": tag, "at": at, "source": id, "path": "/x", "kind": "dir",
+                "appeared": true,
             }),
             "discovery_unsupported_anchor_kind" => json!({
                 "diag": tag, "at": at, "source": id, "path": "/x", "kind": "symlink",

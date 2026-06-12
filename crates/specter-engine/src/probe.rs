@@ -467,9 +467,9 @@ impl Engine {
             /// [`DirtyProvenance`] — the obligation source for the chains arm. Events-complete
             /// Standard ⇒ `Chains` from `dirty`'s captured paths, read in the render pass
             /// (`chains()` allocates, so the obligation stays lazy — never built for a `File`
-            /// anchor); Seed and events-incomplete Standard ⇒ `WholeSubtree` (no trustworthy
-            /// prior, or a stream that cannot witness in-place writes). The *persisting* `dirty`
-            /// outlives this probe across re-batching, so the borrow is sound for the resolution.
+            /// anchor); Seed and events-incomplete Standard ⇒ `WholeSubtree` (no trustworthy prior,
+            /// or a stream that cannot witness in-place writes). The *persisting* `dirty` outlives
+            /// this probe across re-batching, so the borrow is sound for the resolution.
             PreFire {
                 target: ResourceId,
                 forced: bool,
@@ -567,18 +567,17 @@ impl Engine {
                         // arm — events-complete Standard — re-proves the event-dirty root→leaf
                         // chains, the captured paths off the carrier's `Copy` borrow of the
                         // *persisting* `dirty` (the burst outlives this probe across re-batching).
-                        // Every captured path is at-or-under `target` by construction (the target
-                        // is the captured paths' LCA), so no subtree filter is needed.
+                        // Every captured path is at-or-under `target` by construction (the target is
+                        // the captured paths' LCA), so no subtree filter is needed.
                         // `NonEmptyChainSet::new` rejects an empty projection — degrade to
-                        // `WholeSubtree` so the walker proves the whole subtree rather than
-                        // silently certifying Authoritative against a chain-less obligation.
-                        // Production never reaches the `None` arm (a Standard burst notes its
-                        // trigger), but the type wrapper makes the silent-skip failure mode
-                        // structurally unrepresentable regardless. The `WholeSubtree` arm covers
-                        // the two emission-equivalent epistemic states: Seed (no trusted prior)
-                        // and events-incomplete Standard (the stream cannot witness in-place
-                        // writes, so a chains walk would clone exactly the frames the hash-channel
-                        // samples must freshly observe).
+                        // `WholeSubtree` so the walker proves the whole subtree rather than silently
+                        // certifying Authoritative against a chain-less obligation. Production never
+                        // reaches the `None` arm (a Standard burst notes its trigger), but the type
+                        // wrapper makes the silent-skip failure mode structurally unrepresentable
+                        // regardless. The `WholeSubtree` arm covers the two emission-equivalent
+                        // epistemic states: Seed (no trusted prior) and events-incomplete Standard
+                        // (the stream cannot witness in-place writes, so a chains walk would clone
+                        // exactly the frames the hash-channel samples must freshly observe).
                         Carrier::PreFire { intent, dirty, .. } => {
                             if p.event_chains_prove_quiescence(intent) {
                                 NonEmptyChainSet::new(dirty.chains())

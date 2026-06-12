@@ -111,9 +111,9 @@ pub struct MintTemplate {
     pub identity: ProfileIdentity,
     /// Minted Subs' debounce (the user's `settle`). Together with `identity.max_settle()` it must
     /// satisfy the config layer's `validate_settle` floor (`max_settle >= 4 × settle`), enforced at
-    /// lowering. `Profile::new` independently debug-asserts only the weaker structural invariant the
-    /// state machine itself relies on — `settle <= max_settle` — at every mint; the 4× headroom is a
-    /// config-layer policy, not a Profile invariant.
+    /// lowering. `Profile::new` independently debug-asserts only the weaker structural invariant
+    /// the state machine itself relies on — `settle <= max_settle` — at every mint; the 4× headroom
+    /// is a config-layer policy, not a Profile invariant.
     pub settle: Duration,
     /// Minted Subs' reaction — the user's program / scope / `log_output`, sealed once at lowering
     /// so `needs_diff` travels pre-derived into every mint.
@@ -451,9 +451,9 @@ impl ClassSet {
     /// cover [`Self::IN_PLACE_WRITES`] (e.g. `STRUCTURE` only), forcing the hash-channel safety net.
     ///
     /// **Even the hash channel proves lstat-identity quiescence, not byte quiescence**: a walk's
-    /// `leaf_hash` folds `(kind, size, mtime, fs_id)`, so a same-size in-place write landing
-    /// inside one mtime-granularity window is invisible to any walk — an inherent platform limit,
-    /// not a mask choice.
+    /// `leaf_hash` folds `(kind, size, mtime, fs_id)`, so a same-size in-place write landing inside
+    /// one mtime-granularity window is invisible to any walk — an inherent platform limit, not a
+    /// mask choice.
     pub const IN_PLACE_WRITES: Self = Self::CONTENT;
 
     /// Classes whose subscription suffices to witness *membership* quiescence over a settle window
@@ -463,12 +463,18 @@ impl ClassSet {
     /// span the window invisibly, so a STRUCTURE-covering mask folds the verdict via
     /// `EventsReliable` — N=1, no hash-channel ride.
     ///
-    /// **HAZARD — the membership witness does not cover leaf content.** A matched *file* terminus
-    /// still folds `{mtime, size, leaf_hash}` into the pruned snapshot hash, so an unwatched
-    /// in-place append moves the hash without an event. Under this witness the hash is never
-    /// consulted for the verdict and match-set reconciliation depends only on names and kinds, so
-    /// that drift is cosmetic baseline noise — but never add an "equal hash ⇒ skip reconcile"
-    /// shortcut on this witness without first making terminus leaves fold identity-only.
+    /// **HAZARD — an "equal hash ⇒ skip reconcile" shortcut has two obstructions.** The
+    /// load-bearing one is registry-delta starvation: a discovery template can join its Profile
+    /// with no tree event in sight (hot reload, mid-life join), and its mints are then owed on an
+    /// *unchanged* tree — a hash gate would skip exactly the pass that owes them. The template's
+    /// [`DiscoveryTemplate::enumerated`] latch is the disarm: gating additionally on "every
+    /// captured template already enumerated" makes the skip sound, because a joining template
+    /// arrives un-enumerated and defeats the gate. The second obstruction is hash noise: a matched
+    /// *file* terminus still folds `{mtime, size, leaf_hash}` into the pruned snapshot hash, so an
+    /// unwatched in-place append moves the hash without an event — under this witness the hash is
+    /// never consulted for the verdict and reconciliation depends only on names and kinds, so the
+    /// drift is cosmetic baseline noise, but it keeps "equal hash" needlessly strict until terminus
+    /// leaves fold identity-only.
     pub const MEMBERSHIP_CHANGES: Self = Self::STRUCTURE;
 
     /// True iff every bit in `other` is set in `self` AND `other` is non-empty.
@@ -531,14 +537,14 @@ impl std::ops::BitAndAssign for ClassSet {
 /// ([`MintTemplate`], frozen at attach) plus the per-template-lifetime state that has no meaning
 /// off a template.
 ///
-/// Every field is module-private. The frozen spec reads through [`Self::spec`]; the two warning
-/// latches mutate *only* through their registry edges ([`SubRegistry::latch_fanout_warning`] /
-/// [`SubRegistry::latch_unsupported_kind_warning`] — the registry holds the sole `&mut Sub`). The
-/// latches share one discipline — same as [`FireHistory::has_fired`]: a plain bool whose lifetime
-/// *is* the slotmap entry's, one-shot per template lifetime so a steady-state pathological pattern
-/// narrates once, not once per reconcile. Homing them on the `Mint` variant *behind private access*
-/// makes a latched non-template unrepresentable and keeps the registry edge the sole writer — the
-/// contract rests on the type, not on every call site remembering it.
+/// Every field is module-private. The frozen spec reads through [`Self::spec`]; the three latches
+/// mutate *only* through their registry edges ([`SubRegistry::latch_fanout_warning`] /
+/// [`SubRegistry::latch_unsupported_kind_warning`] / [`SubRegistry::mark_enumerated`] — the
+/// registry holds the sole `&mut Sub`). The latches share one discipline — same as
+/// [`FireHistory::has_fired`]: a plain bool whose lifetime *is* the slotmap entry's, one-shot per
+/// template lifetime. Homing them on the `Mint` variant *behind private access* makes a latched
+/// non-template unrepresentable and keeps the registry edge the sole writer — the contract rests on
+/// the type, not on every call site remembering it.
 #[derive(Debug)]
 pub struct DiscoveryTemplate {
     spec: Arc<MintTemplate>,
@@ -551,6 +557,18 @@ pub struct DiscoveryTemplate {
     /// snapshot each pass, so a symlink later replaced by a regular file at the same path mints
     /// normally.
     unsupported_kind_warned: bool,
+    /// `true` once this template completed its first reconcile pass — a full certified walk of the
+    /// match set, however many mints it produced. Mutated only through
+    /// [`SubRegistry::mark_enumerated`].
+    ///
+    /// The mint-arm classifier reads it: a dedup miss while un-enumerated is *first enumeration*
+    /// (cold mint — restart parity, attach-over-existing must not fire), while a miss against an
+    /// established enumeration is a witnessed *appearance* (triggered mint — the operator contract
+    /// owes a fire when a new match settles). The minted set is the durable prior-match-set witness
+    /// — it survives anchor loss, overflow, and baseline clears — so this one bool is the only
+    /// state the classifier needs, and it deliberately never resets: a post-blind-window miss
+    /// genuinely means the terminus appeared while the kernel channel was down.
+    enumerated: bool,
 }
 
 impl DiscoveryTemplate {
@@ -562,13 +580,21 @@ impl DiscoveryTemplate {
     pub const fn spec(&self) -> &Arc<MintTemplate> {
         &self.spec
     }
+
+    /// Whether this template has completed its first reconcile pass — the mint-arm classifier's
+    /// pre-pass capture (see the field rustdoc for the cold/appeared split it decides).
+    #[must_use]
+    pub const fn enumerated(&self) -> bool {
+        self.enumerated
+    }
 }
 
 /// A live Sub's reaction — the [`ReactionSpec`] intent enriched with per-Sub runtime state.
 ///
 /// [`Sub::from_request`] performs the enrichment: `Spawn` gains a fresh (never-fired)
-/// [`FireHistory`]; `Mint` wraps the template in its [`DiscoveryTemplate`] carrier with both warning
-/// latches open. The same idiom on both variants: frozen spec in, spec-plus-lifetime-state out.
+/// [`FireHistory`]; `Mint` wraps the template in its [`DiscoveryTemplate`] carrier with every
+/// per-lifetime latch open. The same idiom on both variants: frozen spec in,
+/// spec-plus-lifetime-state out.
 ///
 /// Every spawn-field consumer dispatches on this sum, so the template case cannot be forgotten — a
 /// `Mint` Sub has no `scope`, `program`, or fire history of its own (the minted Subs' reaction
@@ -614,7 +640,7 @@ pub struct Sub {
 impl Sub {
     /// Construct a Sub from its [`ProfileId`] and the per-Sub [`SubParams`], enriching the reaction
     /// with its runtime state: a `Spawn` starts with a fresh (never-fired) [`FireHistory`]; a `Mint`
-    /// wraps the template in its [`DiscoveryTemplate`] carrier with both warning latches open.
+    /// wraps the template in its [`DiscoveryTemplate`] carrier with every per-lifetime latch open.
     ///
     /// The slotmap key is the Sub's identity authority — there is no `id` field. `params.name`
     /// (`CompactString`) and the spawn spec (with its program Arc) move through unchanged (no
@@ -636,6 +662,7 @@ impl Sub {
                     spec,
                     fanout_warned: false,
                     unsupported_kind_warned: false,
+                    enumerated: false,
                 }),
             },
         }
@@ -739,16 +766,15 @@ impl Sub {
 ///   [`Self::find_by_name`] (O(log N)).
 ///
 /// `by_name` mirrors the slotmap entry's lifetime: [`Self::insert`] populates it, [`Self::remove`]
-/// clears it id-checked. The `insert` `debug_assert!` is the dev/CI signal for a duplicate name;
-/// the validator (static side) and the discovery reconcile's registry-derived dedup (dynamic side)
-/// make a collision unreachable in correct operation, and the `@`-disjointness keeps the two
-/// construction sites from racing each other. A release-mode breach is contained by the id-checked
-/// `remove`: `by_name` last-writer-wins, so the name resolves to the later id, and the id-check
-/// refuses to clear that mapping when the earlier (shadowed) id is removed — the *mapping* stays
-/// 1:1, the wrong name→id edge never forms. The shadowed Sub is **not** inert, though: its slotmap
-/// entry stays in `by_profile` and keeps firing on its Profile's verdicts until that Profile is
-/// reaped — it is merely unreachable by name. Containment bounds the damage; it does not erase the
-/// duplicate.
+/// clears it id-checked. The `insert` `debug_assert!` is the dev/CI signal for a duplicate name; the
+/// validator (static side) and the discovery reconcile's registry-derived dedup (dynamic side) make a
+/// collision unreachable in correct operation, and the `@`-disjointness keeps the two construction
+/// sites from racing each other. A release-mode breach is contained by the id-checked `remove`:
+/// `by_name` last-writer-wins, so the name resolves to the later id, and the id-check refuses to
+/// clear that mapping when the earlier (shadowed) id is removed — the *mapping* stays 1:1, the wrong
+/// name→id edge never forms. The shadowed Sub is **not** inert, though: its slotmap entry stays in
+/// `by_profile` and keeps firing on its Profile's verdicts until that Profile is reaped — it is
+/// merely unreachable by name. Containment bounds the damage; it does not erase the duplicate.
 #[derive(Debug, Default)]
 pub struct SubRegistry {
     subs: SlotMap<SubId, Sub>,
@@ -1063,6 +1089,19 @@ impl SubRegistry {
     pub fn latch_unsupported_kind_warning(&mut self, sub: SubId) -> bool {
         self.discovery_template_mut(sub, "latch_unsupported_kind_warning")
             .is_some_and(|t| !std::mem::replace(&mut t.unsupported_kind_warned, true))
+    }
+
+    /// Record that the discovery template `sub` completed a reconcile pass — the
+    /// [`DiscoveryTemplate::enumerated`] latch's sole write edge. Idempotent: the latch only ever
+    /// moves open → closed, and there is nothing to report (no narration rides it). The caller
+    /// invokes it exclusively at the *end* of a completed certified walk — a pass that bailed
+    /// before walking (no Dir anchor, unresolvable anchor path) established no enumeration and must
+    /// not reach here. Carrier resolution and its two-loudness miss contract (stale id silent,
+    /// `Spawn` hit debug-loud) live in [`Self::discovery_template_mut`].
+    pub fn mark_enumerated(&mut self, sub: SubId) {
+        if let Some(t) = self.discovery_template_mut(sub, "mark_enumerated") {
+            t.enumerated = true;
+        }
     }
 
     /// Whether `profile` has at least one attached Sub that *reacts* per-stable-file — the scope
@@ -1827,6 +1866,31 @@ mod tests {
             None,
             "stale id: silent miss",
         );
+    }
+
+    /// The enumeration latch's lifecycle at its registry edge: a fresh template is un-enumerated,
+    /// `mark_enumerated` closes the latch, and the write is idempotent — the latch never re-opens
+    /// for the template's lifetime. The loud/quiet miss arms are `discovery_template_mut`'s,
+    /// already pinned by the fan-out latch tests.
+    #[test]
+    fn mark_enumerated_closes_the_latch_once_for_the_lifetime() {
+        let mut reg = SubRegistry::new();
+        let sid = reg.insert(Sub::from_request(
+            ProfileId::default(),
+            template_params("disc"),
+        ));
+        let enumerated = |reg: &SubRegistry| {
+            reg.get(sid)
+                .unwrap()
+                .discovery_template()
+                .unwrap()
+                .enumerated()
+        };
+        assert!(!enumerated(&reg), "a fresh template is un-enumerated");
+        reg.mark_enumerated(sid);
+        assert!(enumerated(&reg), "the edge closes the latch");
+        reg.mark_enumerated(sid);
+        assert!(enumerated(&reg), "idempotent — the latch never re-opens");
     }
 
     /// Rebind tripwire: `minted_by` is a synthesis-origin identity axis — crossing the
