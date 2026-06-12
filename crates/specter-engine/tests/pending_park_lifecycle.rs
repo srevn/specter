@@ -312,10 +312,9 @@ fn attach_join_onto_parked_profile_rearms_recovery() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// F-MED-3 — a re-attach (different config) over a parked Profile's never-observed scaffold chain
-/// must classify Pending (disk-honest), not Materialized-with-a-kernel-watch-on-a- nonexistent-path.
+/// A re-attach (different config) over a parked Profile's never-observed scaffold chain must classify
+/// Pending (disk-honest), not Materialized-with-a-kernel-watch-on-a-nonexistent-path.
 #[test]
-#[ignore = "desired property does not hold at HEAD; un-ignore with the Parked-state fix"]
 fn reattach_over_never_observed_scaffold_classifies_pending() {
     let mut e = Engine::new();
     let watch = pre_place_dir(&mut e, &["watch"]);
@@ -359,11 +358,14 @@ fn reattach_over_never_observed_scaffold_classifies_pending() {
     let p = e.profiles().get(pid_c).unwrap();
     assert!(
         matches!(p.state(), ProfileState::Pending(_)),
-        "DESIRED: attach over a never-observed chain classifies Pending; \
-         OBSERVED: state={:?} watch_ops={:?} (a Watch for a disk-absent path)",
+        "attach over a never-observed chain classifies Pending; \
+         got state={:?} watch_ops={:?} (a Watch for a disk-absent path would mean Materialized)",
         p.state().discriminant(),
         out.watch_ops,
     );
+    // The disk-honest classification dropped C into a live recovery descent with an armed entry
+    // probe; cancel it so the Engine's teardown doesn't trip `ProbeSlot`'s Drop tripwire.
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// F-MED-4 — a signal-bearing transient repay failure permanently drops the consumed signal: after

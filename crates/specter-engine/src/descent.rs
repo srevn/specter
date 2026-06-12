@@ -74,11 +74,11 @@ use specter_core::{
 };
 use std::time::Instant;
 
-/// Result of `Engine::materialize_path_or_pending`. Either the entire path resolved to a live Tree
-/// slot (the anchor exists; proceed with the normal P4 Seed-burst flow) or the deepest existing
-/// prefix is an ancestor (descent registers; remaining components are tracked).
+/// Result of `Engine::materialize_path_or_pending`. Either the entire path is disk-observed (the
+/// anchor is live on disk; proceed with the normal immediate Seed-burst flow) or the deepest
+/// disk-observed prefix is an ancestor (descent registers; remaining components are tracked).
 pub(crate) enum MaterializeResult {
-    /// All segments existed; the leaf is `User`-rooted.
+    /// Every segment is disk-observed (the whole path is live on disk); the leaf is `User`-rooted.
     Materialized(ResourceId),
     /// Descent is needed. The leaf `ResourceId` is the anchor's (currently `DescentScaffold`-roled)
     /// slot; the engine registers `DescentState` keyed by the Profile's id once it's been minted.
@@ -98,17 +98,22 @@ impl crate::Engine {
     /// `ensure_root` / `ensure_child` preserve existing roles, so an already- User parent stays
     /// User).
     ///
-    /// Returns `Materialized` iff every segment was already a live Tree slot AND the leaf's role is
-    /// `User` after the walk (i.e., no scaffolding was created). Otherwise returns `Pending` with
-    /// the deepest existing ancestor as `prefix` and the remaining components as the descent path.
+    /// Returns `Materialized` iff every segment is **disk-observed** (the whole path is live on
+    /// disk). Otherwise returns `Pending` with the deepest disk-observed ancestor as `prefix` and
+    /// the remaining components as the descent path.
     ///
-    /// "Deepest existing ancestor" is determined by Tree-side pre-existence: each component is
-    /// `lookup`'d before the walk; the deepest `i` for which `lookup(path.segments()[..=i])`
-    /// succeeded before the materialising `ensure_path` call is the prefix index. The FS-root
-    /// bootstrap guarantees `i >= 0` for every absolute attach. Role plays no part in this decision
-    /// — a slot that existed before the walk may be a `User` peer anchor, a `WatchRootParent` of
-    /// some other Profile, or a `DescentScaffold` retained from an earlier Pending Profile's
-    /// descent chain; any of those count as "pre-existing".
+    /// "Deepest disk-observed ancestor" is the deepest `i` for which every prefix slot
+    /// `lookup(path.segments()[..=j])` (`j <= i`) reports [`specter_core::Resource::is_disk_observed`]
+    /// — classified by a real observation, or watched by a live claimant. **Tree-side existence is
+    /// not enough**: `ensure_path` (below, and at every prior attach) eagerly mints the whole path —
+    /// anchor included — as `DescentScaffold` slots, and a parked Profile's leftover chain is a run
+    /// of such never-observed scaffolds that exist in the Tree without existing on disk. Counting
+    /// those as pre-existing would short-circuit the descent and emit kernel `Watch`es for
+    /// disk-absent paths plus a doomed cold Seed; the disk-honest predicate descends instead. The
+    /// FS-root (index 0) is observed by axiom — the kernel always `lstat`s `/` — so `i >= 0` for
+    /// every absolute attach. Role plays no part in this decision: a `User` peer anchor or a
+    /// `WatchRootParent` counts only when it carries a real observation or watch; a never-observed
+    /// scaffold never does.
     ///
     /// **Pre-conditions are now type-enforced.** [`TreePath`]'s type invariants (non-empty;
     /// `segments()[0] == FS_ROOT_SEGMENT`) make the prior `debug_assert!` and release-mode
@@ -130,19 +135,27 @@ impl crate::Engine {
         self.tree
             .ensure_root(FS_ROOT_SEGMENT, ResourceRole::DescentScaffold);
 
-        // Snapshot which segments existed BEFORE the walk so we can tell freshly-scaffolded
-        // segments from already-existing ones. The bootstrap above guarantees `components[0]`
-        // (FS-root) always pre-exists.
+        // Snapshot which segments are *disk-observed* BEFORE the walk, so we can tell a slot that
+        // exists on disk from a bare Tree slot — a never-observed scaffold left by `ensure_path`
+        // (here or at a prior attach). A scaffold lingers held by a parked Profile's anchor back-ref
+        // and the chain's child edges; treating it as a usable prefix would short-circuit the
+        // descent onto a disk-absent path. `is_disk_observed` is the honest test: a real
+        // classification (`kind`) or a live claimant's watch. The FS-root (index 0) is observed by
+        // axiom — the kernel always `lstat`s `/`, and the bootstrap above guarantees its slot.
         let mut pre_existed: Vec<bool> = Vec::with_capacity(components.len());
         let mut cur_lookup: Option<ResourceId> = None;
-        for comp in &components {
+        for (i, comp) in components.iter().enumerate() {
             let id = self.tree.lookup(cur_lookup, comp);
-            pre_existed.push(id.is_some());
+            let observed = i == 0
+                || id
+                    .and_then(|rid| self.tree.get(rid))
+                    .is_some_and(specter_core::Resource::is_disk_observed);
+            pre_existed.push(observed);
             cur_lookup = id;
         }
         debug_assert!(
             pre_existed[0],
-            "materialize_path_or_pending: FS-root bootstrap must make components[0] pre-exist",
+            "materialize_path_or_pending: FS-root is observed by axiom (index 0)",
         );
 
         // Now do the walk. `ensure_path` creates non-leaf as `DescentScaffold`, leaf as `User`.
@@ -151,12 +164,15 @@ impl crate::Engine {
             .ensure_path(&components, ResourceRole::User)
             .expect("TreePath::segments() is non-empty by type invariant");
 
-        // Walk forward to find the deepest pre-existing prefix. The bootstrap guarantees
-        // `pre_existed[0] == true`, so `prefix_idx` is always at least `0` — no `Option<usize>`
-        // trichotomy is needed.
+        // Walk forward to the deepest *contiguous* disk-observed prefix. Breaking at the first
+        // unobserved segment is load-bearing: observation flows strictly downward through a chain,
+        // but a vacated mid-chain slot (watch rejected, kind reset) can leave a deeper observed slot
+        // stranded behind it — re-descending through the gap re-observes it, which is the
+        // disk-honest choice. The FS-root axiom guarantees `pre_existed[0] == true`, so `prefix_idx`
+        // is always at least `0` — no `Option<usize>` trichotomy is needed.
         let mut prefix_idx: usize = 0;
-        for (i, &existed) in pre_existed.iter().enumerate() {
-            if existed {
+        for (i, &observed) in pre_existed.iter().enumerate() {
+            if observed {
                 prefix_idx = i;
             } else {
                 break;
@@ -164,13 +180,13 @@ impl crate::Engine {
         }
 
         if prefix_idx + 1 == components.len() {
-            // Whole path pre-existed. P4 immediate-Seed path.
+            // Whole path is disk-observed — the immediate-Seed path.
             MaterializeResult::Materialized(anchor)
         } else {
-            // Segments [0..=prefix_idx] pre-existed; [prefix_idx+1..] are scaffolds. `ensure_path`
-            // above created every segment, so `resolve_components` on any prefix is guaranteed to
-            // succeed — convert from the prior `unwrap_or(anchor)` (which masked an invariant
-            // violation) to `expect` with an explicit contract message.
+            // Segments [0..=prefix_idx] are disk-observed; [prefix_idx+1..] are unobserved
+            // scaffolds. `ensure_path` above created every segment, so `resolve_components` on any
+            // prefix is guaranteed to succeed — `expect` documents that contract rather than masking
+            // a violation behind `unwrap_or(anchor)`.
             let prefix = self
                 .resolve_components(&components[..=prefix_idx])
                 .expect("ensure_path created every component; prefix slice must resolve");

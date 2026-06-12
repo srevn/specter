@@ -263,6 +263,30 @@ impl Resource {
         !self.contributions.is_empty()
     }
 
+    /// True iff this slot has been **observed on disk** — its [`kind`](Self::kind) was classified by
+    /// a real observation (a descent advance, a probe graft, or a reconciler entry), or a live
+    /// claimant is watching it ([`is_watched`](Self::is_watched), whose contribution a claimer only
+    /// installs on a slot it believes real).
+    ///
+    /// Distinguishes a slot that merely *exists in the Tree* from one that exists *on disk*. The two
+    /// diverge for `DescentScaffold` slots: [`crate::Tree::ensure_path`] eagerly mints an attach's
+    /// whole path — anchor included — so a `Pending` Profile can hold a stable anchor id while its
+    /// path is still descending, and those intermediate scaffolds may never be confirmed on disk. A
+    /// parked Profile's leftover descent chain is the canonical case: its slots linger (held by the
+    /// Profile's anchor back-ref and the chain's child edges) with `kind == Unknown` and no
+    /// contribution, so this predicate reads `false` for them and `true` once a probe / reconcile
+    /// makes the slot real.
+    ///
+    /// The sole consumer is the engine's attach-time descent-prefix resolution: the deepest
+    /// *disk-observed* ancestor is the descent prefix, so a re-attach over a never-observed scaffold
+    /// chain descends (disk-honest) rather than fabricating a baseline and watching a disk-absent
+    /// path. A vacated slot (kind reset, contributions cleared by [`crate::Tree::vacate`]) reads
+    /// `false` — conservatively re-descended to re-observe, never trusted stale.
+    #[must_use]
+    pub fn is_disk_observed(&self) -> bool {
+        self.kind().is_some() || self.is_watched()
+    }
+
     /// OR-fold of every contributor's `ClassSet` mask — the per-Resource events mask the sensor
     /// sees on `WatchOp::Watch`. `ClassSet::EMPTY` when the Resource has no contributors.
     ///
@@ -473,6 +497,55 @@ mod tests {
         let mut r = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
         r.insert_profile_anchor(42, crate::ids::ProfileId::default());
         assert!(r.has_anchors());
+    }
+
+    /// `is_disk_observed` is the disk-honest test the engine's attach-time prefix resolution uses to
+    /// separate a slot that exists on disk from a bare Tree scaffold. It reads `true` on either
+    /// disjunct — a classified `kind` OR a live watch — and `false` on a never-observed scaffold (the
+    /// `ensure_path` residue). The watch disjunct is what keeps a watched-but-unprobed slot (`Unknown`
+    /// kind, e.g. a descent prefix) on the observed side; a profile back-ref alone does not (it is not
+    /// a disk signal).
+    #[test]
+    fn is_disk_observed_reads_kind_or_watch_not_bare_existence() {
+        // Never-observed scaffold: Unknown kind, no contribution. The bug F-MED-3 closed treated
+        // this as pre-existing.
+        let mut r = Resource::new(
+            None,
+            dummy_segment(),
+            ResourceRole::DescentScaffold,
+            dummy_path(),
+        );
+        assert!(
+            !r.is_disk_observed(),
+            "Unknown + unwatched ⇒ not disk-observed"
+        );
+
+        // A profile back-ref (the parked anchor's retention) is not a disk signal on its own.
+        r.insert_profile_anchor(7, ProfileId::default());
+        assert!(
+            !r.is_disk_observed(),
+            "a profile back-ref is retention, not a disk observation",
+        );
+
+        // The watch disjunct: a contribution (e.g. a descent-prefix watch) marks the slot observed
+        // even while its kind is still Unknown — the load-bearing FS-root-as-prefix case.
+        r.insert_contribution(
+            ContribKey::ProfileDescent(ProfileId::default()),
+            ClassSet::STRUCTURE,
+        );
+        assert!(
+            r.is_disk_observed(),
+            "a live watch ⇒ disk-observed even at Unknown kind"
+        );
+
+        // The kind disjunct, in isolation: a classified slot with no watch is observed.
+        let mut k = Resource::new(None, dummy_segment(), ResourceRole::User, dummy_path());
+        k.kind = ResourceKind::Dir;
+        assert!(!k.is_watched());
+        assert!(
+            r.is_disk_observed() && k.is_disk_observed(),
+            "classified kind ⇒ disk-observed"
+        );
     }
 
     #[test]
