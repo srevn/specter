@@ -2310,7 +2310,7 @@ mod tests {
             }),
             t_settle,
         );
-        // dispatch_seed_vanished routes through finalize_anchor_lost_and_descend: anchor
+        // dispatch_pre_fire_vanished routes through finalize_anchor_lost_and_descend: anchor
         // contribution released, baseline/current cleared, and the same step re-enters pending
         // descent at foo — the recovery overlap is established by the production loss path itself.
         assert!(matches!(

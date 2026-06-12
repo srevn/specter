@@ -1898,7 +1898,7 @@ mod tests {
         let sid_b =
             specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
 
-        // Drive the in-flight Seed-Verifying burst to a terminal Vanished. `dispatch_seed_vanished
+        // Drive the in-flight Seed-Verifying burst to a terminal Vanished. `dispatch_pre_fire_vanished
         // → finalize_anchor_lost → finish_burst_to_idle` would reap if `reap_pending` were still
         // set; the revival cleared it, so the Profile transitions to Idle (anchor lost) and stays.
         let out = e.step(

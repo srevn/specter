@@ -893,8 +893,8 @@ fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
 // ───────────────────────────────────────────────────────────────────────
 // Seed-Vanished releases the anchor claim before descent re-entry
 //
-// `dispatch_seed_vanished` releases the anchor's contribution (mirroring `dispatch_standard_*`)
-// inside `finalize_anchor_lost_and_descend`, *before* the same step re-enters `Pending` — a
+// `dispatch_pre_fire_vanished` releases the anchor's contribution (for both intents) inside
+// `finalize_anchor_lost_and_descend`, *before* the same step re-enters `Pending` — a
 // still-Held claim would violate `reap_profile`'s `!(Pending && Held)` trichotomy invariant at the
 // descent flip. The watch is re-acquired via descent's anchor materialization on recovery.
 // ───────────────────────────────────────────────────────────────────────
@@ -1038,7 +1038,7 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
 
 #[test]
 fn seed_failed_releases_anchor_claim() {
-    // Symmetric regression for dispatch_seed_failed.
+    // Symmetric regression for dispatch_pre_fire_failed (Seed intent).
     let mut e = Engine::new();
     let parent = anchor_dir(&mut e, "p");
     let anchor = e
@@ -1082,8 +1082,9 @@ fn seed_failed_releases_anchor_claim() {
 }
 
 // ───────────────────────────────────────────────────────────────────────
-// Regression: dispatch_standard_vanished/failed + reap_pending must not double-release the anchor
-// contribution. The release-before-finish ordering keeps the debug_assert unreachable.
+// Regression: dispatch_pre_fire_vanished/failed (Standard intent) + reap_pending must not
+// double-release the anchor contribution. The release-before-finish ordering keeps the debug_assert
+// unreachable.
 // ───────────────────────────────────────────────────────────────────────
 
 /// Set up a Profile + a covered Dir child so the anchor cannot reap when the Profile detaches (the
@@ -1178,7 +1179,7 @@ fn standard_vanished_with_reap_pending_does_not_double_release_anchor() {
 
 #[test]
 fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
-    // Symmetric regression for dispatch_standard_failed.
+    // Symmetric regression for dispatch_pre_fire_failed (Standard intent).
     let mut e = Engine::new();
     let (root, _child, sid, pid) = setup_with_surviving_child(&mut e);
 
@@ -1504,10 +1505,10 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
 }
 
 #[test]
-fn release_descendant_claim_dispatch_standard_vanished_releases_descendants() {
-    // dispatch_standard_vanished path: an anchor that disappears mid-burst must release the
-    // per-descendant contributions alongside the anchor's — the descendants must not leak when the
-    // anchor is released.
+fn release_descendant_claim_dispatch_pre_fire_vanished_releases_descendants() {
+    // dispatch_pre_fire_vanished path (Standard route): an anchor that disappears mid-burst must
+    // release the per-descendant contributions alongside the anchor's — the descendants must not
+    // leak when the anchor is released.
     let mut e = Engine::new();
     let (root, child, sid, pid) = setup_with_surviving_child(&mut e);
 

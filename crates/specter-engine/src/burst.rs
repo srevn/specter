@@ -555,9 +555,9 @@ impl Engine {
     /// - [`Engine::dispatch_quiescence_ok`]'s [`specter_core::QuiescenceVerdict::Retry`] arm — the
     ///   hash channel observed `prior != Some(response)`, or the walker refused on some chain with
     ///   a transient non-observation (`EACCES`, a chmod-000 chain).
-    /// - the pre-fire [`specter_core::ProbeFailure::Transient`] arm in
-    ///   `dispatch_{seed,standard}_failed` — the probe failed entirely (FD pressure), the epistemic
-    ///   twin of the `Undischarged` Retry: it observed nothing, so it re-batches identically.
+    /// - the pre-fire [`specter_core::ProbeFailure::Transient`] arm in `dispatch_pre_fire_failed` —
+    ///   the probe failed entirely (FD pressure), the epistemic twin of the `Undischarged` Retry: it
+    ///   observed nothing, so it re-batches identically.
     ///
     /// Either way the verify slot was already disarmed at the top of `on_profile_probe_response`;
     /// no Cancel needed. Arms a fresh settle timer and writes `phase = Batching { settle_timer }`.

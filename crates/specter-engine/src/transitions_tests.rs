@@ -4106,10 +4106,12 @@ fn structure_only_profile_has_per_file_fds_false() {
 
 // ---------- Anchor-loss kind-cache invalidation ----------
 //
-// Per-site assertions that every dispatch path through `Engine::discard_anchor_state` clears the
-// cached `Profile.kind`. The helper unit tests in `claims.rs` pin the contract in isolation; these
-// tests pin the integration at the seven production call sites so the kind-clear cannot regress at
-// any one of them without a test failure.
+// Per-origin assertions that every anchor-loss dispatch path through `Engine::discard_anchor_state`
+// clears the cached `Profile.kind`. The helper unit tests in `claims.rs` pin the contract in
+// isolation; these tests pin the integration at every dispatch origin — both intents through each
+// merged pre-fire helper (`dispatch_pre_fire_{vanished,failed}`, now intent-parametric), both rebase
+// routes (`dispatch_rebase_{vanished,failed}`), and the anchor-terminal event — so the kind-clear
+// cannot regress at any one of them without a test failure.
 
 /// Drive a Profile from fresh-attach into `Active(Standard, Verifying)` with
 /// `pending_probe.is_some()`. Returns the live correlation.
@@ -4190,7 +4192,7 @@ fn drive_to_rebasing(
 }
 
 #[test]
-fn dispatch_seed_vanished_clears_profile_kind() {
+fn dispatch_pre_fire_vanished_seed_clears_profile_kind() {
     let (mut e, pid, _sid, _r, _) = engine_with_attached_sub();
     assert_eq!(
         e.profiles.get(pid).unwrap().kind(),
@@ -4216,7 +4218,7 @@ fn dispatch_seed_vanished_clears_profile_kind() {
 }
 
 #[test]
-fn dispatch_seed_failed_clears_profile_kind() {
+fn dispatch_pre_fire_failed_seed_clears_profile_kind() {
     let (mut e, pid, _sid, _r, _) = engine_with_attached_sub();
     // Seed is Batching-first; expire the settle timer to put a verify probe in flight, then answer
     // it Failed.
@@ -4237,7 +4239,7 @@ fn dispatch_seed_failed_clears_profile_kind() {
 }
 
 #[test]
-fn dispatch_standard_vanished_clears_profile_kind() {
+fn dispatch_pre_fire_vanished_standard_clears_profile_kind() {
     let (mut e, pid, _sid, root, now) = engine_with_attached_sub();
     let correlation = drive_to_standard_verifying(&mut e, pid, root, now);
     assert_eq!(
@@ -4260,7 +4262,7 @@ fn dispatch_standard_vanished_clears_profile_kind() {
 }
 
 #[test]
-fn dispatch_standard_failed_clears_profile_kind() {
+fn dispatch_pre_fire_failed_standard_clears_profile_kind() {
     let (mut e, pid, _sid, root, now) = engine_with_attached_sub();
     let correlation = drive_to_standard_verifying(&mut e, pid, root, now);
     let _ = e.step(
@@ -4323,14 +4325,14 @@ fn dispatch_rebase_failed_clears_profile_kind() {
 // A `Transient` probe failure (FD / kernel-resource pressure — `EMFILE`, errno 24) is the epistemic
 // twin of an `Undischarged` proof: the probe observed nothing, so the engine takes the same
 // consequence the verdict floor gives `Undischarged` — retry the window while the deadline holds,
-// finish to Idle once it forces — never tearing the anchor down (the old uniform-`Failed` teardown).
-// `Anchor` failures keep that teardown, pinned by the `*_clears_profile_kind` tests above.
+// finish to Idle once it forces — never tearing the anchor down. Only `Anchor`-class failures tear
+// the anchor down, pinned by the `*_clears_profile_kind` tests above.
 
 /// (Standard, Transient). FD pressure on a Standard verify re-batches for another window
 /// (`!forced`) — the anchor watch and baseline retained, the pressure surfaced — then, once the
-/// `BurstDeadline` forces, finishes to Idle with the anchor watch and baseline **still** retained
-/// (unlike the old uniform-`Failed` teardown), so the anchor's own next event re-bursts without
-/// waiting on the parent. Pins both Standard-route Transient arms in one lifecycle; the retained
+/// `BurstDeadline` forces, finishes to Idle with the anchor watch and baseline **still** retained,
+/// so the anchor's own next event re-bursts without waiting on the parent (an `Anchor`-class failure
+/// would instead tear it down). Pins both Standard-route Transient arms in one lifecycle; the retained
 /// baseline is the central regression guard a baseline-less Seed cannot assert.
 #[test]
 fn standard_transient_retries_then_forced_finishes_retaining_anchor() {

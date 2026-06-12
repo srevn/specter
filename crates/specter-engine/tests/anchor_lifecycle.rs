@@ -388,7 +388,7 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
 #[test]
 fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     // Mirror of `recovery_from_file_to_dir_anchor_uses_subtree_probe` for the Failed dispatch path.
-    // dispatch_seed_failed shares the helper; the post-recovery probe must be Subtree.
+    // dispatch_pre_fire_failed shares the helper; the post-recovery probe must be Subtree.
     let mut e = Engine::new();
     let parent = e.tree_mut().ensure_root("var", ResourceRole::User);
     e.tree_mut().set_kind(parent, ResourceKind::Dir);
@@ -427,7 +427,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         "cold-arm Seed: probe emitted at burst construction",
     );
 
-    // Expire P's first settle window → first Seed probe; drive it to Failed. dispatch_seed_failed
+    // Expire P's first settle window → first Seed probe; drive it to Failed. dispatch_pre_fire_failed
     // clears P.kind and terminates the Seed on its first response.
     let (p_corr, p_at) = assert_seed_verifying(&mut e, pid_p, t_p);
     e.step(
@@ -626,10 +626,10 @@ fn parent_event_before_terminal_still_recovers_and_fires() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `dispatch_standard_vanished` at a descendant LCA while the anchor survives: an `rm -rf` racing
-/// the walk yields `Vanished` at the dirty-LCA descendant. The descent resolves the ambiguity in
-/// one hop — the anchor re-materializes from the parent listing and the triggered Seed fires (the
-/// `rm` was a change) instead of the watch parking dead.
+/// `dispatch_pre_fire_vanished` (Standard route) at a descendant LCA while the anchor survives: an
+/// `rm -rf` racing the walk yields `Vanished` at the dirty-LCA descendant. The descent resolves the
+/// ambiguity in one hop — the anchor re-materializes from the parent listing and the triggered Seed
+/// fires (the `rm` was a change) instead of the watch parking dead.
 #[test]
 fn standard_vanished_at_descendant_lca_recovers_live_anchor_and_fires() {
     let mut e = Engine::new();

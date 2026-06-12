@@ -624,10 +624,16 @@ pub enum AwaitVerdict {
 /// Parallel to [`ProofAuthority`] (which proves *accuracy* of the snapshot): the witness encodes
 /// *which* of the two safety channels discharges quiescence at the verdict floor.
 ///
-/// - [`Self::EventsReliable`] — the Profile's `events_union` covers in-place writes (see
-///   [`Profile::events_witness_quiescence`]) OR the burst's consequence does not require quiescence
-///   (cold-Seed `SilentPin`). Settle-window silence is the witness; the hash channel is bypassed
-///   structurally (no carrier read, no comparison).
+/// - [`Self::EventsReliable`] — settle-window silence alone discharges quiescence; the hash channel
+///   is bypassed structurally (no carrier read, no comparison). This variant deliberately *doubles*
+///   over two epistemically distinct situations that fold identically, so no dispatch consumer
+///   distinguishes them — collapsing them is the over-discrimination axiom in force, not an
+///   oversight:
+///   - the Profile's `events_union` covers in-place writes (see
+///     [`Profile::events_witness_quiescence`]), so the stream is a sufficient witness and silence
+///     *proves* quiescence; or
+///   - the burst's consequence owes no quiescence proof at all (cold-Seed `SilentPin`) — nothing to
+///     prove, so any witness trivially suffices.
 /// - [`Self::HashChannel`] — events-incomplete fire-bearing burst. Quiescence requires two
 ///   consecutive Authoritative samples to agree on `leaf_hash` / `dir_hash`. `prior` is the
 ///   burst-resident carrier read (`None` on first sample); `response` is the current observation's
@@ -639,7 +645,8 @@ pub enum AwaitVerdict {
 /// elide the meaning behind anonymous wrapping.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum QuiescenceWitness {
-    /// Settle-window silence is sufficient — no hash channel engaged.
+    /// Settle-window silence is sufficient — no hash channel engaged. Doubles as "no proof owed"
+    /// (cold-Seed `SilentPin`) and "stream is a sufficient witness"; both meanings fold identically.
     EventsReliable,
     /// Hash-equality channel: `Stable` iff `prior == Some(response)`.
     HashChannel { prior: Option<u128>, response: u128 },
