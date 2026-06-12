@@ -299,6 +299,13 @@ pub(crate) enum WireDiagnostic {
         prefix: WireId,
         segment: CompactString,
     },
+    PendingPathRetriesExhausted {
+        at: WireTime,
+        profile: WireId,
+        prefix: WireId,
+        retries: u8,
+        errno: i32,
+    },
     ReapPendingCancelled {
         at: WireTime,
         profile: WireId,
@@ -604,6 +611,18 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 prefix: WireId::from(*prefix),
                 segment: segment.clone(),
             },
+            Diagnostic::PendingPathRetriesExhausted {
+                profile,
+                prefix,
+                retries,
+                errno,
+            } => Self::PendingPathRetriesExhausted {
+                at: at.clone(),
+                profile: WireId::from(*profile),
+                prefix: WireId::from(*prefix),
+                retries: *retries,
+                errno: *errno,
+            },
             Diagnostic::ReapPendingCancelled { profile } => Self::ReapPendingCancelled {
                 at: at.clone(),
                 profile: WireId::from(*profile),
@@ -871,6 +890,7 @@ impl WireDiagnostic {
             Self::PendingPathProbeVanished { .. } => "pending_path_probe_vanished",
             Self::PendingPathProbeFailed { .. } => "pending_path_probe_failed",
             Self::PendingPathAwaitingSegment { .. } => "pending_path_awaiting_segment",
+            Self::PendingPathRetriesExhausted { .. } => "pending_path_retries_exhausted",
             Self::ReapPendingCancelled { .. } => "reap_pending_cancelled",
             Self::ProfileReaped { .. } => "profile_reaped",
             Self::ProfileParked { .. } => "profile_parked",
@@ -945,6 +965,7 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "pending_path_probe_vanished",
     "pending_path_probe_failed",
     "pending_path_awaiting_segment",
+    "pending_path_retries_exhausted",
     "reap_pending_cancelled",
     "profile_reaped",
     "profile_parked",
@@ -1883,6 +1904,13 @@ mod tests {
                 profile: WireId(54),
                 prefix: WireId(55),
                 segment: "app.log".into(),
+            },
+            WireDiagnostic::PendingPathRetriesExhausted {
+                at: at(),
+                profile: WireId(56),
+                prefix: WireId(57),
+                retries: 3,
+                errno: 24,
             },
             WireDiagnostic::ReapPendingCancelled {
                 at: at(),

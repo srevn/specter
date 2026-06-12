@@ -296,6 +296,22 @@ pub enum Diagnostic {
         prefix: ResourceId,
         segment: CompactString,
     },
+    /// A pending-path descent gave up retrying a *signal-bearing* probe after its bounded
+    /// transient-failure budget was spent. A signal-bearing probe (a prefix-event / overflow
+    /// re-trigger or a raced-signal repay) is the sole observer of a structural signal that won't
+    /// re-arrive on its own; a kernel-resource blip ([`ProbeFailure::Transient`]) at every retry
+    /// means the awaited segment's creation could not be observed. The descent stays Pending — *not*
+    /// wedged forever — and re-triggers on the next prefix `StructureChanged` or sensor overflow,
+    /// which earns a fresh budget; but until one arrives nothing re-probes, so this is the loud
+    /// terminal the operator reads instead of inferring a wedge from one stale
+    /// [`Self::PendingPathProbeFailed`]. `retries` is the budget spent; `errno` the last transient
+    /// errno (always a `Transient` class — `Anchor` failures never retry).
+    PendingPathRetriesExhausted {
+        profile: ProfileId,
+        prefix: ResourceId,
+        retries: u8,
+        errno: i32,
+    },
     /// A Profile's active burst carried [`crate::BurstFinish::Reap`] (the last Sub had detached
     /// mid-burst), then a fresh `attach_sub` arrived at the same `(resource, config_hash)` before
     /// the burst completed — the directive is flipped back to [`crate::BurstFinish::ReturnToIdle`]

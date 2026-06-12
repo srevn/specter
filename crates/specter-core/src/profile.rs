@@ -1762,6 +1762,33 @@ pub struct DescentState {
     /// leak past the descent it belongs to (a materialized descent's Seed `WholeSubtree` probe
     /// postdates everything; an abandoned descent must not auto-re-probe a buggy walker).
     reprobe_owed: bool,
+    /// Signal-bearing retry budget. A *signal-bearing* descent probe is one emitted by
+    /// `engine::descent::try_emit_descent_probe` — the single choke for the two cases where a probe
+    /// is the only observer of a structural signal that will not re-arrive on its own: a prefix
+    /// `StructureChanged` / overflow re-trigger, and the re-probe-owed repay of a signal that raced
+    /// an earlier probe. (The descent-entry, forward-advance, and rewind probes go through
+    /// `emit_owner_probe` directly and are *not* signal-bearing — they re-trigger through their own
+    /// channels, so a transient blip there merely parks the descent for the next event.)
+    ///
+    /// `None` while the outstanding / last descent probe is not signal-bearing, or once a
+    /// signal-bearing probe reached a terminal fate. `Some(n)` while a signal-bearing probe is
+    /// outstanding (or has just failed), having already spent `n` of its transient-retry budget.
+    ///
+    /// **Why a budget.** If a signal-bearing probe fails transiently (an EMFILE-class
+    /// [`ProbeFailure::Transient`](crate::ProbeFailure::Transient) the walk couldn't observe past),
+    /// dropping it wedges the descent: the awaited segment's own creation was the signal, and the
+    /// kernel never re-announces an entry that already exists. The engine re-latches `reprobe_owed`
+    /// so the response dispatch emits a fresh postdating probe — bounded by a small budget so a
+    /// *persistently*-failing prefix cannot spin a tight re-probe loop. The count rides here on
+    /// [`DescentState`] because the repay that re-arms the next probe runs before that probe's fate
+    /// is known; the failure being dispatched is always the *previous* probe's, so the
+    /// signal-bearing fact and its spent budget must outlive a single dispatch.
+    ///
+    /// Cleared on **either** terminal fate — a successful observation (the signal's effect is seen)
+    /// or the budget being spent (the chain gives up). Both reset to `None`, so a later prefix event
+    /// re-marks a fresh `Some(0)` and earns a fresh budget; there is no stale count to starve a
+    /// genuinely new signal. Dies with the descent like the other carriers.
+    signal_retries: Option<u8>,
 }
 
 impl DescentState {
@@ -1796,6 +1823,7 @@ impl DescentState {
             witnessed,
             observed_absent: false,
             reprobe_owed: false,
+            signal_retries: None,
         }
     }
 
@@ -1873,6 +1901,42 @@ impl DescentState {
         let owed = self.reprobe_owed;
         self.reprobe_owed = false;
         owed
+    }
+
+    /// Flag the just-emitted descent probe as signal-bearing — its transient failure must re-latch
+    /// a fresh postdating probe rather than park the descent. The engine calls this from the single
+    /// signal-bearing emission choke (`try_emit_descent_probe`). Idempotent on the count: a repay
+    /// re-emission while the budget is mid-spend (`Some(n)`) preserves `n` — only a fresh emission
+    /// from `None` starts a new budget at `Some(0)`. See the [`Self::signal_retries`] field doc.
+    pub const fn mark_signal_probe(&mut self) {
+        if self.signal_retries.is_none() {
+            self.signal_retries = Some(0);
+        }
+    }
+
+    /// Transient-retry budget already spent by the outstanding / last signal-bearing probe, or
+    /// `None` if that probe is not signal-bearing. The engine compares it against its retry ceiling
+    /// to decide between a bounded re-latch and giving up.
+    #[must_use]
+    pub const fn signal_retries(&self) -> Option<u8> {
+        self.signal_retries
+    }
+
+    /// Spend one unit of the signal-bearing retry budget — the engine calls this when it re-latches
+    /// `reprobe_owed` for a transiently-failed signal-bearing probe. No-op when not signal-bearing
+    /// (the engine only reaches here under a `Some` budget; the guard is pure defense). Saturating —
+    /// the engine's ceiling stops the chain long before `u8` overflow.
+    pub const fn bump_signal_retry(&mut self) {
+        if let Some(n) = self.signal_retries {
+            self.signal_retries = Some(n.saturating_add(1));
+        }
+    }
+
+    /// Clear the signal-bearing marker and its spent budget — the outstanding signal-bearing probe
+    /// reached a terminal fate (it observed, so the signal's effect is seen; or its retries were
+    /// spent and the chain gave up). The next signal-bearing emission earns a fresh `Some(0)`.
+    pub const fn clear_signal_probe(&mut self) {
+        self.signal_retries = None;
     }
 
     /// Rewrite the descent's current prefix. Used by the engine's descent dispatcher on forward

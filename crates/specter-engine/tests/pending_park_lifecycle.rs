@@ -2,9 +2,8 @@
 //! narrated at entry, exits only through a recovery descent (never a Seed), and each of its consumers
 //! holds its door: burst routing filters `Parked` out of coverage, the event-carriers scan recovers
 //! via the parent channel or the co-claimed anchor slot, an overflow attempts one Tree-derived
-//! descent, a re-attach re-arms recovery, and a detach reaps. The two `#[ignore]`d tests pin
-//! properties of fixes that have not landed yet (disk-honest attach resolution; the bounded repay
-//! re-latch) — un-ignore each as its fix lands; `--run-ignored all` reproduces their evidence.
+//! descent, a re-attach re-arms recovery, and a detach reaps. A signal-bearing descent probe that
+//! fails transiently re-latches a bounded retry rather than dropping the consumed signal.
 
 use specter_core::testkit::{MockSensor, dir_snap};
 use specter_core::{
@@ -368,11 +367,10 @@ fn reattach_over_never_observed_scaffold_classifies_pending() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// F-MED-4 — a signal-bearing transient repay failure permanently drops the consumed signal: after
-/// `latched signal → repay probe fails transiently`, no probe is in flight and no timer exists.
-/// Desired property: the descent eventually observes again.
+/// A signal-bearing transient repay failure must not permanently drop the consumed signal. After
+/// `latched signal → repay probe fails transiently`, the bounded re-latch arms a fresh postdating
+/// probe so the descent observes again rather than wedging on a quiet prefix.
 #[test]
-#[ignore = "desired property does not hold at HEAD; un-ignore with the Parked-state fix"]
 fn signal_bearing_transient_repay_failure_eventually_reprobes() {
     let mut e = Engine::new();
     let watch = pre_place_dir(&mut e, &["watch"]);
@@ -427,6 +425,9 @@ fn signal_bearing_transient_repay_failure_eventually_reprobes() {
          state={:?}",
         e.profiles().get(pid).unwrap().state().discriminant(),
     );
+    // The bounded re-latch left a fresh postdating probe armed; cancel it so the Engine's teardown
+    // doesn't trip `ProbeSlot`'s Drop tripwire.
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// A claim-Held Idle Profile is never kidnapped into recovery descent. A transient-forced Seed

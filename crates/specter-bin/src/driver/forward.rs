@@ -292,6 +292,19 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             %segment,
             "recovery descent parked: awaiting segment under prefix",
         ),
+        Diagnostic::PendingPathRetriesExhausted {
+            profile,
+            prefix,
+            retries,
+            errno,
+        } => tracing::warn!(
+            ?profile,
+            ?prefix,
+            retries,
+            errno,
+            "pending-path descent gave up retrying a signal-bearing probe; \
+             awaiting a future prefix event or overflow",
+        ),
         Diagnostic::ReapPendingCancelled { profile } => tracing::debug!(
             ?profile,
             "reap-pending Profile revived (fresh attach pre-empted deferred reap)",
@@ -605,6 +618,7 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::PendingPathProbeVanished { .. }
         | D::PendingPathProbeFailed { .. }
         | D::PendingPathAwaitingSegment { .. }
+        | D::PendingPathRetriesExhausted { .. }
         | D::ReapPendingCancelled { .. }
         | D::ProfileReaped { .. }
         | D::ProfileParked { .. }

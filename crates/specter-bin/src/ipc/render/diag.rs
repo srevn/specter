@@ -70,6 +70,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::PendingPathProbeVanished { at, .. }
         | WireDiagnostic::PendingPathProbeFailed { at, .. }
         | WireDiagnostic::PendingPathAwaitingSegment { at, .. }
+        | WireDiagnostic::PendingPathRetriesExhausted { at, .. }
         | WireDiagnostic::ReapPendingCancelled { at, .. }
         | WireDiagnostic::ProfileReaped { at, .. }
         | WireDiagnostic::ProfileParked { at, .. }
@@ -155,6 +156,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::WatchOpRejected { .. }
         | W::PendingPathProbeVanished { .. }
         | W::PendingPathProbeFailed { .. }
+        | W::PendingPathRetriesExhausted { .. }
         | W::ProfileParked { .. }
         | W::ProfileClaimPurged { .. }
         | W::AttachResourceStale { .. }
@@ -314,6 +316,18 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             field(out, sty, "profile", profile.0);
             field(out, sty, "prefix", prefix.0);
             field(out, sty, "segment", segment);
+        }
+        WireDiagnostic::PendingPathRetriesExhausted {
+            profile,
+            prefix,
+            retries,
+            errno,
+            ..
+        } => {
+            field(out, sty, "profile", profile.0);
+            field(out, sty, "prefix", prefix.0);
+            field(out, sty, "retries", retries);
+            field(out, sty, "errno", errno);
         }
         WireDiagnostic::ReapPendingCancelled { profile, .. }
         | WireDiagnostic::PerFileDriftDroppedOnRecovery { profile, .. }
@@ -783,6 +797,9 @@ mod tests {
             }
             "pending_path_awaiting_segment" => {
                 json!({"diag": tag, "at": at, "profile": id, "prefix": id, "segment": "x"})
+            }
+            "pending_path_retries_exhausted" => {
+                json!({"diag": tag, "at": at, "profile": id, "prefix": id, "retries": 3, "errno": 24})
             }
             "reap_pending_cancelled"
             | "per_file_drift_dropped_on_recovery"

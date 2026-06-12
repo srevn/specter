@@ -74,6 +74,16 @@ use specter_core::{
 };
 use std::time::Instant;
 
+/// Transient-failure retry ceiling for a *signal-bearing* descent probe (one emitted by
+/// [`Engine::try_emit_descent_probe`] — a prefix-event / overflow re-trigger or a raced-signal
+/// repay). When such a probe fails with [`ProbeFailure::Transient`], the descent re-latches a fresh
+/// postdating probe up to this many times before giving up loudly
+/// ([`Diagnostic::PendingPathRetriesExhausted`]) and parking for a future event. The bound closes
+/// the micro-blip wedge (a one-shot EMFILE losing the awaited segment's creation) without letting a
+/// persistently-failing prefix spin a tight re-probe loop; sustained kernel-resource pressure is a
+/// walk-policy concern, not the engine's. See [`specter_core::DescentState::signal_retries`].
+const SIGNAL_PROBE_RETRY_BUDGET: u8 = 3;
+
 /// Result of `Engine::materialize_path_or_pending`. Either the entire path is disk-observed (the
 /// anchor is live on disk; proceed with the normal immediate Seed-burst flow) or the deepest
 /// disk-observed prefix is an ancestor (descent registers; remaining components are tracked).
@@ -325,14 +335,16 @@ impl crate::Engine {
     /// `DescentOutcome::try_from` parse at the demux seam, so they never reach here.
     ///
     /// **Re-probe-owed repay.** After the arm runs, this is the single point that repays any debt
-    /// latched while the just-consumed probe was in flight (a prefix event or overflow that raced
-    /// the walk — see [`Self::on_descent_event`]). The arm has one of three shapes, and the repay
-    /// reads correctly against all of them:
+    /// owed — whether latched by a signal that raced the just-consumed probe (a prefix event or
+    /// overflow — see [`Self::on_descent_event`]) or re-latched by the failure arm's bounded retry
+    /// (a transiently-failed signal-bearing probe — see [`Self::dispatch_descent_failed`]). The arm
+    /// has one of three shapes, and the repay reads correctly against all of them:
     /// - **re-armed inline** (advance / rewind): a fresh probe is already in flight and postdates
     ///   the latched signal, so `try_emit_descent_probe` declines on the in-flight gate — debt
     ///   consumed, no second probe.
     /// - **parked / retained** (segment absent / `Failed`): no probe in flight, so the repay emits
-    ///   the owed postdating probe.
+    ///   the owed postdating probe. A `Failed` arm may have re-latched the debt itself (the bounded
+    ///   signal-bearing retry), in which case the emitted probe carries the retry forward.
     /// - **terminal / abandoned** (materialized anchor / root-prefix `Vanished`): the descent is
     ///   gone, `descent_state_mut` is `None`, the debt died with the state (the Seed's
     ///   `WholeSubtree` probe postdates everything; an abandoned descent must not re-probe).
@@ -426,12 +438,17 @@ impl crate::Engine {
         // variant intact, so a `None` is a state-machine breach — a silent skip would drop the
         // response's advance / materialize / park and wedge the descent. Same discipline as the
         // `_mut` re-projections below.
-        let Some(descent) = self.descent_state(owner) else {
+        let Some(descent) = self.descent_state_mut(owner) else {
             unreachable!(
                 "dispatch_descent_ok: owner {owner:?} not in descent at \
                  dispatch entry — on_probe_response's probe gate proved Pending"
             );
         };
+        // A successful observation is a terminal fate for any outstanding signal-bearing probe — the
+        // signal's effect is now seen (present, still-absent, or, on the rewind path, the prefix
+        // moved). Release the bounded-retry budget so a later signal earns a fresh one; the forward
+        // advance / rewind probes emitted below are non-signal-bearing and must not inherit a marker.
+        descent.clear_signal_probe();
         let prefix = descent.current_prefix();
         let next_segment = descent.remaining_components().head().clone();
         let is_terminal = descent.remaining_components().is_terminal();
@@ -699,6 +716,10 @@ impl crate::Engine {
         // not an attach-over-existing. Moot on the root-prefix arm below (the release helper tears
         // the descent down), so the uniform entry write costs nothing there.
         descent.note_observed_absent();
+        // Observing the prefix vanished is a terminal fate for any outstanding signal-bearing probe:
+        // the signal's effect is seen and the descent rewinds. Release the bounded-retry budget so
+        // the rewind probe (non-signal-bearing) starts unmarked and a later signal re-budgets.
+        descent.clear_signal_probe();
         let prefix = descent.current_prefix();
 
         out.diagnostics.push(Diagnostic::PendingPathProbeVanished {
@@ -758,17 +779,34 @@ impl crate::Engine {
         }
     }
 
-    /// Failed response handler. The descent retains in-descent state and emits a diagnostic; the
-    /// next event at the prefix re-triggers via [`Self::on_descent_event`].
+    /// Failed response handler. The descent always retains in-descent state; the fork is over the
+    /// failure class crossed with whether the failed probe was *signal-bearing* (the marker on
+    /// [`DescentState`], read here after the consume-once disarm left the variant intact):
+    ///
+    /// - **[`ProbeFailure::Transient`] of a signal-bearing probe, budget remaining** — re-latch
+    ///   `reprobe_owed` and spend one unit. The repay hook in [`Self::dispatch_descent`] then emits
+    ///   a fresh postdating probe. This is the bounded re-latch that keeps a one-shot EMFILE blip
+    ///   from permanently dropping the awaited segment's own creation event.
+    /// - **[`ProbeFailure::Transient`] of a signal-bearing probe, budget spent** — give up loudly
+    ///   ([`Diagnostic::PendingPathRetriesExhausted`]) and clear the marker so a *future* prefix
+    ///   event / overflow earns a fresh budget. The descent stays Pending, recovering on the next
+    ///   event rather than spinning.
+    /// - **Everything else** — an [`ProbeFailure::Anchor`] (path-fatal `EACCES`-class — descent
+    ///   cannot fix it), or a transient failure of a *non*-signal-bearing probe (the descent-entry /
+    ///   forward-advance / rewind probes re-trigger through their own channels). Narrate
+    ///   [`Diagnostic::PendingPathProbeFailed`] and await the next event, the long-standing posture.
+    ///   A signal-bearing probe that hit a path-fatal Anchor fate also clears its marker (it will
+    ///   not retry) so a later event re-budgets.
     pub(crate) fn dispatch_descent_failed(
-        &self,
+        &mut self,
         owner: ProfileId,
         failure: ProbeFailure,
         out: &mut StepOutput,
     ) {
         // Loud entry: the probe gate proved `Pending` and the consume-once disarm leaves the
         // variant intact, so a `None` is a state-machine breach — a silent skip would swallow the
-        // failure diagnostic. Same discipline as the dispatch family's `_mut` re-projections.
+        // failure diagnostic. Same discipline as the dispatch family's `_mut` re-projections. Both
+        // reads are `Copy`, so the borrow ends before the `_mut` re-projections in the arms below.
         let Some(descent) = self.descent_state(owner) else {
             unreachable!(
                 "dispatch_descent_failed: owner {owner:?} not in descent at \
@@ -776,12 +814,60 @@ impl crate::Engine {
             );
         };
         let prefix = descent.current_prefix();
-        out.diagnostics.push(Diagnostic::PendingPathProbeFailed {
-            profile: owner,
-            prefix,
-            failure,
-        });
-        // Retain in-descent state; await next event at the prefix.
+        let signal_retries = descent.signal_retries();
+
+        match (failure, signal_retries) {
+            (ProbeFailure::Transient { .. }, Some(spent)) if spent < SIGNAL_PROBE_RETRY_BUDGET => {
+                // Signal-bearing transient failure with budget left: re-latch the postdating probe
+                // (emitted by the repay hook) and spend one unit. Silent — a self-healing blip
+                // should not log; the terminal arm narrates only when the chain actually gives up.
+                let Some(d) = self.descent_state_mut(owner) else {
+                    unreachable!(
+                        "dispatch_descent_failed: owner {owner:?} left descent \
+                         between the entry resolution and the re-latch"
+                    );
+                };
+                d.note_reprobe_owed();
+                d.bump_signal_retry();
+            }
+            (ProbeFailure::Transient { errno }, Some(spent)) => {
+                // Budget spent: the signal-driven observation could not be made across the bounded
+                // retries. Give up loudly and clear the marker so a future event starts fresh.
+                let Some(d) = self.descent_state_mut(owner) else {
+                    unreachable!(
+                        "dispatch_descent_failed: owner {owner:?} left descent \
+                         between the entry resolution and the budget-spent clear"
+                    );
+                };
+                d.clear_signal_probe();
+                out.diagnostics
+                    .push(Diagnostic::PendingPathRetriesExhausted {
+                        profile: owner,
+                        prefix,
+                        retries: spent,
+                        errno,
+                    });
+            }
+            _ => {
+                // Anchor (path-fatal), or a non-signal-bearing transient failure: retain Pending,
+                // narrate, await the next event. Clear a stale signal marker iff a signal-bearing
+                // probe reached this non-retry fate — a non-signal probe carries none.
+                if signal_retries.is_some() {
+                    let Some(d) = self.descent_state_mut(owner) else {
+                        unreachable!(
+                            "dispatch_descent_failed: owner {owner:?} left descent \
+                             between the entry resolution and the stale-marker clear"
+                        );
+                    };
+                    d.clear_signal_probe();
+                }
+                out.diagnostics.push(Diagnostic::PendingPathProbeFailed {
+                    profile: owner,
+                    prefix,
+                    failure,
+                });
+            }
+        }
     }
 
     /// Emit a fresh descent probe at the current prefix iff the descent is live and idle — the
@@ -791,11 +877,20 @@ impl crate::Engine {
     /// (liveness gate), or a probe is already in flight (I5 — at most one descent probe per owner).
     /// No settle wait — descent is event-driven.
     ///
-    /// **No latch side effect.** It neither sets nor consumes the `reprobe_owed` debt. That keeps
-    /// the repay hook safe to call after a dispatch arm already re-armed inline (advance / rewind):
-    /// `try_emit` simply declines on the in-flight gate without re-latching against that arm's own
-    /// postdating probe, so the debt the hook just consumed cannot resurrect into a spurious extra
-    /// probe. Latching lives solely in `on_descent_event`'s miss branch.
+    /// **Marks the emitted probe signal-bearing.** This is the single choke for the two probes that
+    /// are the sole observer of a structural signal which will not re-arrive — the prefix-event /
+    /// overflow re-trigger and the raced-signal repay — so a successful emission flags the descent's
+    /// signal-bearing retry budget ([`DescentState::mark_signal_probe`]). A transient failure of the
+    /// probe then re-latches a bounded retry rather than wedging the descent on a lost one-shot
+    /// signal (see [`Self::dispatch_descent_failed`]). Marking is idempotent on the budget: a repay
+    /// re-emission mid-chain preserves the count.
+    ///
+    /// **No `reprobe_owed` side effect.** It neither sets nor consumes the `reprobe_owed` debt. That
+    /// keeps the repay hook safe to call after a dispatch arm already re-armed inline (advance /
+    /// rewind): `try_emit` simply declines on the in-flight gate without re-latching against that
+    /// arm's own postdating probe (and so never marks it signal-bearing — an advance / rewind probe
+    /// re-triggers through its own channel), so the debt the hook just consumed cannot resurrect
+    /// into a spurious extra probe. Latching lives solely in `on_descent_event`'s miss branch.
     fn try_emit_descent_probe(&mut self, owner: ProfileId, out: &mut StepOutput) -> bool {
         // Liveness gate: an owner no longer descending has nothing to probe (a benign post-transition
         // race on the event path; a materialized / abandoned descent on the repay path).
@@ -819,6 +914,9 @@ impl crate::Engine {
             );
         };
         d.arm_probe(correlation);
+        // The probe this choke emits is the only observer of an unrepeatable signal; flag it so a
+        // transient failure re-latches a bounded retry instead of dropping the signal.
+        d.mark_signal_probe();
         // The choke reads the correlation back off the descent slot and resolves the prefix target
         // off state.
         self.emit_owner_probe(owner, out);
@@ -1228,6 +1326,79 @@ mod tests {
         assert!(
             e.descent_state(pid).is_some(),
             "descent retained for the next event",
+        );
+    }
+
+    /// A signal-bearing descent probe that keeps failing *transiently* re-latches a **bounded**
+    /// retry: after the budget is spent the descent gives up loudly
+    /// (`PendingPathRetriesExhausted`) and parks disarmed rather than spinning a tight re-probe
+    /// loop. Pins the budget ceiling, the exact repay count, and the terminal diagnostic — the
+    /// exhaustion path the integration suite's one-retry property pin does not reach.
+    #[test]
+    fn descent_signal_bearing_transient_failure_retries_then_exhausts() {
+        let (mut e, _sid, pid) = setup_pending_one_level();
+        let foo = lookup_foo(&e);
+        let mut corr = e.pending_probe_for(pid).expect("entry probe in flight");
+
+        // A prefix event races the entry probe → latches the re-probe-owed debt. The entry probe is
+        // itself non-signal-bearing; its Transient failure repays the latched debt with the first
+        // signal-bearing probe, and every signal-bearing failure thereafter re-latches until the
+        // budget is spent.
+        let _ = e.step(
+            Input::FsEvent {
+                resource: foo,
+                event: specter_core::FsEvent::StructureChanged,
+            },
+            Instant::now(),
+        );
+
+        // Feed Transient failures, following each freshly-correlated repay probe, until the descent
+        // parks disarmed (the bound stops the chain). The loop cap is well past the budget so a
+        // regression that fails to bound shows as a runaway rather than a hang.
+        let mut probes_emitted = 0usize;
+        let mut exhausted_retries = None;
+        for _ in 0..16 {
+            let out = e.step(
+                Input::ProbeResponse(ProbeResponse {
+                    owner: pid,
+                    correlation: corr,
+                    outcome: ProbeOutcome::Failed(ProbeFailure::Transient { errno: 24 }),
+                }),
+                Instant::now(),
+            );
+            for d in &out.diagnostics {
+                if let Diagnostic::PendingPathRetriesExhausted { retries, .. } = d {
+                    exhausted_retries = Some(*retries);
+                }
+            }
+            match e.pending_probe_for(pid) {
+                Some(next) => {
+                    probes_emitted += 1;
+                    corr = next;
+                }
+                None => break,
+            }
+        }
+
+        assert_eq!(
+            exhausted_retries,
+            Some(super::SIGNAL_PROBE_RETRY_BUDGET),
+            "descent gave up via PendingPathRetriesExhausted after spending the full budget",
+        );
+        // One entry-debt repay probe + exactly `budget` bounded retries; the budget-spent failure
+        // emits none.
+        assert_eq!(
+            probes_emitted,
+            1 + usize::from(super::SIGNAL_PROBE_RETRY_BUDGET),
+            "one entry repay plus budget-many bounded retries — no more",
+        );
+        assert!(
+            e.pending_probe_for(pid).is_none(),
+            "parked disarmed once the budget is spent — no tight loop",
+        );
+        assert!(
+            e.descent_state(pid).is_some(),
+            "descent retained Pending, recovering on a future prefix event",
         );
     }
 
