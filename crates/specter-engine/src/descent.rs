@@ -28,9 +28,10 @@
 //!   `watch_root_parent` *inside the loss step itself* — "anchor lost" and "anchor doesn't yet
 //!   exist" are the same state. Witnessed: the loss signal is the absence half of the appearance
 //!   witness, so the terminus Seed owes a fire.
-//! - **Event-scan fallback** (`Engine::start_pending_recovery`): a parent `StructureChanged`
-//!   re-enters a Profile that a probe-`Failed` discard or a watch-rejection purge left parked
-//!   Idle-anchorless. Unwitnessed: the entry event can be sibling churn out of the Sub's scope.
+//! - **Park recovery** (`Engine::start_pending_recovery`): a `Parked` Profile — a probe-`Failed`
+//!   terminal or a watch-rejection purge — re-enters on a parent / anchor-slot event, a sensor
+//!   overflow, or an operator re-attach. Unwitnessed: the trigger can be sibling churn out of the
+//!   Sub's scope (or carries no observation at all).
 //!
 //! **Lifecycle.**
 //! 1. One of the three entries above flips the Profile to `Pending`. The deepest existing ancestor
@@ -64,6 +65,7 @@
 use crate::path::empty_path;
 use crate::probe::DescentOutcome;
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
+use crate::transitions::ParkNarration;
 use compact_str::CompactString;
 use specter_core::{
     ClassSet, ContribKey, DescentRemaining, DescentState, Diagnostic, EntryKind, FS_ROOT_SEGMENT,
@@ -222,9 +224,13 @@ impl crate::Engine {
     /// correlation cannot exist. State-flip *then* refcount keeps the contribution attribution
     /// coherent with the Profile's claim shape at the moment of the refcount edge.
     ///
-    /// **Pre-condition.** Profile must be `Idle`. The debug_assert below catches any caller passing
-    /// a non-Idle Profile. ("No in-flight probe" is implied, not separately asserted: `Idle`
-    /// carries no `DescentState`, so an idle Profile structurally has no probe slot.)
+    /// **Pre-conditions.** Profile must be `Idle` (a fresh attach) or `Parked` (a recovery
+    /// re-entry), and must not hold the anchor claim — a claim-Held Profile entering descent would
+    /// breach the reap trichotomy and `materialize_anchor`'s precondition at the terminus (the
+    /// recovery arms select on `Parked`, whose coherence assert pins `AnchorClaim::None`, so the
+    /// claim assert below is the tripwire for a future mis-routed caller). The debug_asserts catch
+    /// both. ("No in-flight probe" is implied, not separately asserted: neither `Idle` nor `Parked`
+    /// carries a `DescentState`, so the Profile structurally has no probe slot.)
     ///
     /// **Recovery-overlap invariant.** When called from `start_pending_recovery`, the Profile already
     /// holds a `+1 STRUCTURE` contribution on the parent via `Profile.watch_root_parent` (set at the
@@ -244,24 +250,32 @@ impl crate::Engine {
         debug_assert!(
             self.profiles
                 .get(profile_id)
-                .is_some_and(|p| matches!(p.state(), ProfileState::Idle)),
-            "enter_pending_descent: Profile must be Idle before re-entering \
-             descent; caller must release prior state first. ('No in-flight \
-             probe' is not a separate condition — `Idle` carries no \
-             `DescentState`, so an idle Profile structurally has no probe \
-             slot.) (profile = {profile_id:?})",
+                .is_some_and(|p| matches!(p.state(), ProfileState::Idle | ProfileState::Parked)),
+            "enter_pending_descent: Profile must be Idle or Parked before \
+             entering descent; caller must release prior state first. ('No \
+             in-flight probe' is not a separate condition — neither variant \
+             carries a `DescentState`, so the Profile structurally has no \
+             probe slot.) (profile = {profile_id:?})",
+        );
+        debug_assert!(
+            self.profiles
+                .get(profile_id)
+                .is_some_and(|p| matches!(p.anchor_claim(), specter_core::AnchorClaim::None)),
+            "enter_pending_descent: a claim-Held Profile must never enter \
+             descent — Pending ∧ Held breaches the reap trichotomy and the \
+             terminus' materialize_anchor precondition (profile = {profile_id:?})",
         );
 
         // Step 1: mint the correlation. Runs first so the Pending state below is constructed with
         // its slot already armed — no window where the phase exists without a correlation.
         let correlation = self.mint_probe_correlation();
 
-        // Step 2: state-flip Idle → Pending, constructed armed. Done before the refcount edge so
-        // any reader between this point and step 3 sees the Profile's claim shape that the
+        // Step 2: state-flip Idle/Parked → Pending, constructed armed. Done before the refcount
+        // edge so any reader between this point and step 3 sees the Profile's claim shape that the
         // contribution will attribute to (matches `materialize_profile_anchor`'s sequencing).
         //
-        // Liveness needs no separate guard. The entry `debug_assert` carries the Idle precondition
-        // in dev/CI; in release the construct-armed slot enforces liveness structurally — on the
+        // Liveness needs no separate guard. The entry `debug_assert` carries the precondition in
+        // dev/CI; in release the construct-armed slot enforces liveness structurally — on the
         // (synchronously unreachable) stale id `transition_state` no-ops and drops the constructed
         // `Pending`, whose armed `ProbeSlot` trips its `Drop` guard loudly in every build, naming
         // the orphaned correlation. The discard *is* the enforcement.
@@ -347,10 +361,10 @@ impl crate::Engine {
     /// [`Self::release_descent_prefix_claim`] — the abandon terminal (the same release path the
     /// root-prefix `dispatch_descent_vanished` branch uses), **not** `dispatch_descent_vanished`
     /// itself: that rewinds to the parent and re-arms a fresh probe, which against a
-    /// persistently-buggy walker is a tight re-probe loop. Abandoning leaves the Profile
-    /// operator-recoverable (stuck Idle) and self-healing on a fresh descent. The probe slot was
-    /// disarmed by `take_owner_probe` before dispatch and the descent state is unflipped at entry,
-    /// so the release helper's preconditions hold.
+    /// persistently-buggy walker is a tight re-probe loop. Abandoning parks the Profile loudly
+    /// (recovery via the park's own doors — overflow, re-attach — and self-healing on a fresh
+    /// descent). The probe slot was disarmed by `take_owner_probe` before dispatch and the descent
+    /// state is unflipped at entry, so the release helper's preconditions hold.
     pub(crate) fn walker_contract_violated_descent(
         &mut self,
         owner: ProfileId,
@@ -364,7 +378,7 @@ impl crate::Engine {
         );
         out.diagnostics
             .push(Diagnostic::WalkerContractViolated { owner });
-        self.release_descent_prefix_claim(owner, out);
+        self.release_descent_prefix_claim(owner, ParkNarration::Operational, out);
     }
 
     /// Dispatch a successful descent response. The walker honoured the `Descent` request shape and
@@ -549,9 +563,17 @@ impl crate::Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        let witnessed = self
-            .descent_state(profile_id)
-            .is_some_and(DescentState::witnessed);
+        // Loud read: `dispatch_descent_ok`'s found-segment latch just proved the owner in descent and
+        // only Tree writes intervened, so a `None` is a state-machine breach — a silent unwitnessed
+        // degrade here would turn an owed first fire into a quiet pin, the worst failure shape this
+        // terminus can produce. Same discipline as the dispatch family's entry resolutions.
+        let Some(descent) = self.descent_state(profile_id) else {
+            unreachable!(
+                "materialize_profile_anchor: owner {profile_id:?} not in descent \
+                 at the terminus — dispatch_descent_ok proved it"
+            );
+        };
+        let witnessed = descent.witnessed();
 
         // `new_resource` is either a freshly-ensured DescentScaffold or a peer's pre-existing slot
         // (the caller's lookup hit). `promote_scaffold` flips only a still-scaffold slot and no-ops
@@ -564,10 +586,10 @@ impl crate::Engine {
             .get(profile_id)
             .map_or(ClassSet::EMPTY, specter_core::Profile::events);
 
-        let anchor_kind = ResourceKind::from(entry_kind);
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.materialize_anchor(anchor_kind);
-        }
+        // Through the ProfileMap chokepoint: the bundled `Pending → (Idle, Held, classified)` write
+        // is a carrier-count edge (`Pending` counted, `Idle` not) the wrapper reconciles.
+        self.profiles
+            .materialize_anchor(profile_id, ResourceKind::from(entry_kind));
 
         // Profile.resource was assigned to the anchor's slot at attach time; the materialised
         // slot's id should match by construction.
@@ -708,14 +730,14 @@ impl crate::Engine {
                 self.emit_owner_probe(owner, out);
             }
             None => {
-                // Root prefix vanished — no rewind target. Delegate to the release helper
-                // (state-flip terminal + counter-aware sub + try_reap). Its preconditions hold
-                // here: the descent probe slot was disarmed by `on_probe_response` before dispatch
+                // Root prefix vanished — no rewind target. Delegate to the release helper (park
+                // terminal + counter-aware sub + try_reap). Its preconditions hold here: the
+                // descent probe slot was disarmed by `on_probe_response` before dispatch
                 // (cancel-first contract) and descent state is unflipped at entry.
                 //
-                // The Profile is left stuck Idle without a usable descent path — operator recovery
-                // is required.
-                self.release_descent_prefix_claim(owner, out);
+                // The Profile parks loudly without a usable descent path — recovery via the park's
+                // own doors (overflow, re-attach) or operator action.
+                self.release_descent_prefix_claim(owner, ParkNarration::Operational, out);
             }
         }
     }
@@ -1940,10 +1962,10 @@ mod tests {
             Instant::now(),
         );
 
-        // Purge transitions Pending → Idle; descent_state agrees.
+        // Purge parks the torn-down descent; descent_state agrees.
         assert!(matches!(
             e.profiles().get(pid).unwrap().state(),
-            ProfileState::Idle
+            ProfileState::Parked
         ));
         assert!(e.descent_state(pid).is_none());
     }
@@ -1993,10 +2015,10 @@ mod tests {
             e.pending_probe_for(pid).is_none(),
             "slot disarmed by cancel-before-release",
         );
-        // Profile transitioned via `release_descent_prefix_claim`.
+        // Profile parked via `release_descent_prefix_claim`.
         assert!(matches!(
             e.profiles().get(pid).unwrap().state(),
-            ProfileState::Idle,
+            ProfileState::Parked,
         ));
         // Exactly one Cancel for the Profile (idempotency check).
         let cancels = out
@@ -2118,11 +2140,11 @@ mod tests {
 
     /// Cancel-first contract on `release_descent_prefix_claim`: invoked without a prior
     /// `cancel_owner_probe`, on a Pending Profile whose descent probe is still in flight, the
-    /// helper's `transition_state(ProfileState::Idle)` discard drops the armed
-    /// `Pending(DescentState)`, tripping `ProbeSlot`'s Drop tripwire. The tripwire is unconditional
-    /// (fires in debug AND release), so the test runs in every build profile. The four production
-    /// cancel-paths each call `cancel_owner_probe` first — this guards against future regressions
-    /// that bypass the cancel-first order.
+    /// helper's park transition discard drops the armed `Pending(DescentState)`, tripping
+    /// `ProbeSlot`'s Drop tripwire. The tripwire is unconditional (fires in debug AND release), so
+    /// the test runs in every build profile. The four production cancel-paths each call
+    /// `cancel_owner_probe` first — this guards against future regressions that bypass the
+    /// cancel-first order.
     #[test]
     #[should_panic(expected = "ProbeSlot dropped while armed")]
     fn release_descent_prefix_claim_without_cancel_trips_probeslot_drop() {
@@ -2134,6 +2156,10 @@ mod tests {
 
         // Direct invocation without the prior cancel — assertion fires.
         let mut out = specter_core::StepOutput::default();
-        e.release_descent_prefix_claim(pid, &mut out);
+        e.release_descent_prefix_claim(
+            pid,
+            crate::transitions::ParkNarration::Operational,
+            &mut out,
+        );
     }
 }

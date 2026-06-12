@@ -1373,7 +1373,8 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         t2,
     );
 
-    // P reaped; Q remains Idle with anchor_claim cleared.
+    // P reaped; Q survives with anchor_claim cleared. Q's anchor is a root (no parent), so the loss
+    // wrapper's fallback parks it.
     assert!(e.profiles().get(pid_p).is_none(), "P reaped");
     let q = e.profiles().get(pid_q).expect("Q survives");
     assert_eq!(
@@ -1381,7 +1382,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         AnchorClaim::None,
         "Q's anchor_claim cleared by terminal event",
     );
-    assert!(matches!(q.state(), ProfileState::Idle));
+    assert!(matches!(q.state(), ProfileState::Parked));
 
     // Counter walked 2 → 1 → 0 cleanly. Anchor slot is reaped because the surviving-child only kept
     // it alive while P+Q were attached; Q's anchor_claim = None leaves only the child anchor, which
@@ -1572,10 +1573,10 @@ fn release_descendant_claim_anchor_terminal_event_releases_descendants() {
         Instant::now(),
     );
 
-    // After Removed at the anchor: Profile is Idle (post-finalize), anchor_claim cleared to None,
-    // current taken by release_descendant_claim, child reaped.
+    // After Removed at the root anchor: no recovery parent, so the loss wrapper's fallback parks the
+    // Profile; anchor_claim cleared to None, current taken by release_descendant_claim, child reaped.
     let p = e.profiles().get(pid).expect("Profile survives anchor loss");
-    assert!(matches!(p.state(), ProfileState::Idle));
+    assert!(matches!(p.state(), ProfileState::Parked));
     assert_eq!(p.anchor_claim(), AnchorClaim::None);
     assert!(
         p.current().is_none(),
@@ -1665,9 +1666,10 @@ fn release_descendant_claim_dispatch_rebase_vanished_releases_descendants() {
         t2 + SETTLE,
     );
 
+    // Root anchor — the rebase-Vanished loss has no recovery parent, so the wrapper's fallback parks.
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle,
+        ProfileState::Parked,
     ));
     assert!(
         e.tree().get(child).is_none(),

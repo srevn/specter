@@ -685,7 +685,8 @@ fn probe_response_seed_vanished_clears_baseline_and_diagnoses() {
         now + SETTLE,
     );
     let p = e.profiles.get(pid).unwrap();
-    assert!(matches!(p.state(), ProfileState::Idle));
+    // Root anchor — no recovery parent, so the observed-loss wrapper's fallback parks.
+    assert!(matches!(p.state(), ProfileState::Parked));
     assert!(p.baseline().is_none());
     assert!(p.current().is_none());
     let has_diag = out.diagnostics.iter().any(|d| {
@@ -1718,7 +1719,8 @@ fn fs_event_anchor_terminal_bypasses_class_filter() {
     );
     assert!(p.baseline().is_none());
     assert!(p.current().is_none());
-    assert!(matches!(p.state(), ProfileState::Idle));
+    // Root anchor — no recovery parent, so the observed-loss wrapper's fallback parks.
+    assert!(matches!(p.state(), ProfileState::Parked));
 }
 
 #[test]
@@ -1804,7 +1806,8 @@ fn fs_event_removed_at_anchor_active_terminates() {
         now,
     );
     let p = e.profiles.get(pid).unwrap();
-    assert!(matches!(p.state(), ProfileState::Idle));
+    // Root anchor — no recovery parent, so the loss wrapper's fallback parks.
+    assert!(matches!(p.state(), ProfileState::Parked));
     assert!(p.baseline().is_none());
     assert!(p.current().is_none());
     // watch_demand on anchor → 0; one Unwatch op emitted.
@@ -1819,10 +1822,11 @@ fn fs_event_removed_at_anchor_active_terminates() {
 
 #[test]
 fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
-    // FsEvent: Removed/Renamed/Revoked on an Idle profile transitions idempotently. We additionally
-    // release the watch contribution and drop baseline/current — they refer to a now-vanished slot,
-    // and clearing them lets the watch-root-parent recovery path (`on_fs_event`'s
-    // `start_pending_recovery`) detect "anchor is gone" via `current.is_none()`.
+    // FsEvent: Removed/Renamed/Revoked on an idle-but-anchored profile transitions idempotently. We
+    // additionally release the watch contribution and drop baseline/current — they refer to a
+    // now-vanished slot. This root anchor has no recovery parent, so the loss wrapper's fallback
+    // parks the Profile; the `Parked` state is what the event-scan recovery arm selects on later
+    // activity at the slot.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
     assert_eq!(e.tree.get(root).unwrap().watch_demand(), 1);
@@ -1836,10 +1840,10 @@ fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
         Instant::now(),
     );
 
-    // Profile state stays Idle (no Active transition).
+    // Root anchor — no recovery parent, so the loss wrapper's fallback parks.
     assert!(matches!(
         e.profiles.get(pid).unwrap().state(),
-        ProfileState::Idle,
+        ProfileState::Parked,
     ));
     // watch_demand released; baseline/current cleared.
     assert_eq!(e.tree.get(root).unwrap().watch_demand(), 0);
@@ -1851,13 +1855,13 @@ fn fs_event_removed_at_anchor_idle_releases_watch_and_clears_baseline() {
 #[test]
 fn count_gate_zero_iff_no_carrier_and_anchor_loss_while_idle_balances_nonsteady() {
     // Oracle (b): the O(1) carrier gate is sound. `nonsteady() == 0` ⇒ `classify_event_carriers`
-    // empty ∀ r — a healthy *anchored* Idle Profile is excluded by the tight predicate, so a quiet
-    // watcher never pins the gate. And the count stays balanced across the anchor-loss-while-Idle
-    // reconcile (`discard_anchor_state` → `ProfileMap::reconcile_nonsteady`), the loss direction of
-    // the plan's subtlest count point. The debug count-vs-full-scan tripwire inside
+    // empty ∀ r — a healthy *anchored* Idle Profile is excluded by the pure state predicate
+    // (`Pending ∨ Parked`), so a quiet watcher never pins the gate. And the count stays balanced
+    // across the anchor-loss-while-Idle park (the loss wrapper's `Idle → Parked` edge through the
+    // `ProfileMap` chokepoint). The debug count-vs-full-scan tripwire inside
     // `classify_event_carriers` runs on every covering scan here (and across the whole suite), so a
     // desync panics in debug regardless of the explicit asserts below — this test pins the
-    // *implication* and the loss/recovery balance the tripwire alone does not state.
+    // *implication* and the loss balance the tripwire alone does not state.
     let (mut e, pid, _sid, root, _now) = engine_with_attached_sub();
     complete_seed_burst(&mut e, pid);
 
@@ -1882,10 +1886,9 @@ fn count_gate_zero_iff_no_carrier_and_anchor_loss_while_idle_balances_nonsteady(
         assert!(empty(&e, par), "gate zero ⇒ no carrier at the parent");
     }
 
-    // Anchor lost while Idle: `Removed @ anchor` ⇒ finalize_anchor_lost with `was_active == false`
-    // ⇒ `discard_anchor_state` clears the anchor with no state edge. The reconcile must move the
-    // count 0 → 1 (pre-fix this desynced — the Profile is now an Idle-anchorless recovery carrier
-    // the gate would have hidden).
+    // Anchor lost while Idle: `Removed @ anchor` ⇒ the observed-loss wrapper. This root anchor has
+    // no recovery parent, so the fallback parks — a chokepointed `Idle → Parked` edge that must
+    // move the count 0 → 1.
     e.step(
         Input::FsEvent {
             resource: root,
@@ -1896,22 +1899,19 @@ fn count_gate_zero_iff_no_carrier_and_anchor_loss_while_idle_balances_nonsteady(
 
     {
         let p = e.profiles().get(pid).unwrap();
-        assert!(matches!(p.state(), ProfileState::Idle) && p.current().is_none());
+        assert!(matches!(p.state(), ProfileState::Parked) && p.current().is_none());
     }
     assert_eq!(
         e.profiles().nonsteady(),
         1,
-        "anchor-loss-while-Idle reconciled the carrier count via reconcile_nonsteady \
-         (pre-fix this desynced to 0 — a false-skip of the recovery scan)",
+        "the park's state edge recorded the carrier count (a zero here would \
+         false-skip the recovery scan)",
     );
-    // Sound over-approximation: the predicate is `Idle ∧ ¬current` (state + anchor), *not* the
-    // precise recovery predicate (which also needs `watch_root_parent`). This root-anchor harness
-    // has no parent recovery channel, so the scan finds no carrier here even though the count is 1
-    // — the gate over-counts harmlessly (the scan runs and returns empty) but, critically, *never
-    // under-counts* (it would never have wrongly skipped the scan).
+    // The gated scan finds the park through its anchor-slot channel: the slot is the Profile's own
+    // anchor, so an event there is a recovery signal even with no watch_root_parent cached.
     assert!(
-        empty(&e, root),
-        "over-approx: count gated the scan ON; no precise carrier in this harness",
+        !empty(&e, root),
+        "the parked Profile is a recovery carrier at its own anchor slot",
     );
 }
 

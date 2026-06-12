@@ -818,8 +818,7 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
 }
 
 // Behavioral parity: a single FsEvent at one Resource fans out to a Pending Profile (descent
-// dispatch) AND an Idle Profile with absent anchor (recovery dispatch), without disturbing an
-// unrelated Profile.
+// dispatch) AND a Parked Profile (recovery dispatch), without disturbing an unrelated Profile.
 #[test]
 #[allow(clippy::similar_names)]
 fn classifier_routes_descent_and_recovery_in_single_pass() {
@@ -907,10 +906,11 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Some(root_dir),
         "B watches its parent /root for anchor recovery",
     );
-    // B's loss arrives via probe-`Failed` — the path that parks Idle-anchorless awaiting event-scan
-    // recovery. (An observed loss — terminal / Vanished — re-enters descent inside the loss step
-    // and would join the *descents* class instead; `Failed` is how the recoveries class is
-    // populated.) Drive a Standard burst at the anchor, then fail its verify probe.
+    // B's loss arrives via probe-`Failed` — the path that parks the Profile
+    // (`ProfileState::Parked`) awaiting event-scan recovery. (An observed loss — terminal /
+    // Vanished — on a Profile with a parent re-enters descent inside the loss step and would join
+    // the *descents* class instead; `Failed` is how the recoveries class is populated.) Drive a
+    // Standard burst at the anchor, then fail its verify probe.
     let after_b_seed = b_seed_done + SETTLE;
     e.step(
         Input::FsEvent {
@@ -933,7 +933,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         b_fail_at,
     );
     let p_b = e.profiles().get(pid_b).unwrap();
-    assert!(matches!(p_b.state(), ProfileState::Idle));
+    assert!(matches!(p_b.state(), ProfileState::Parked));
     assert!(p_b.current().is_none(), "B's anchor is gone");
     assert_eq!(p_b.watch_root_parent(), Some(root_dir));
 
@@ -968,7 +968,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
 
     // The trigger: a single StructureChanged event at /root.
     // - A's `current_prefix == /root` ⇒ descent dispatch.
-    // - B's `watch_root_parent == /root && current.is_none()` ⇒ recovery dispatch (Idle → Pending).
+    // - B is `Parked` with `watch_root_parent == /root` ⇒ recovery dispatch (Parked → Pending).
     // - C is anchored at /elsewhere ⇒ untouched. Strictly after both Seed proofs (B and C each
     //   consumed two settle windows since `now`).
     let trigger = c_seed_done + SETTLE;
@@ -1007,7 +1007,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
             e.profiles().get(pid_b).unwrap().state(),
             ProfileState::Pending(_),
         ),
-        "B transitioned Idle → Pending",
+        "B transitioned Parked → Pending",
     );
 
     // C: untouched. No probe; state still Idle.

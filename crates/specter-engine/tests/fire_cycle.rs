@@ -692,7 +692,8 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
 #[test]
 fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
     // Drive to Awaiting; inject anchor terminal event; finalize_anchor_lost releases anchor,
-    // finishes burst → Idle. Inject late EffectComplete → diagnoses outside Awaiting.
+    // finishes burst → Parked (root anchor — no recovery parent). Inject late EffectComplete →
+    // diagnoses outside Awaiting.
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -720,14 +721,14 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
         cancels, 0,
         "no probe in flight during Awaiting; nothing to cancel"
     );
-    // Profile is Idle, baseline cleared.
+    // Root anchor — no recovery parent, so the loss wrapper's fallback parks; baseline cleared.
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
+        ProfileState::Parked
     ));
     assert!(e.profiles().get(pid).unwrap().baseline().is_none());
 
-    // Late EffectComplete → diagnoses (Profile Idle now).
+    // Late EffectComplete → diagnoses (Profile is Parked, not Awaiting).
     let late_out = e.step(
         Input::EffectComplete(EffectCompletion {
             sub: sid,
@@ -749,7 +750,7 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
 #[test]
 fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
     // Drive to Rebasing; inject anchor terminal event; cancel_pending_probe emits ProbeOp::Cancel;
-    // finish_burst_to_idle.
+    // the burst finishes and the root anchor parks (no recovery parent).
     let mut e = Engine::new();
     let r = anchor_dir(&mut e, "src");
     let now = Instant::now();
@@ -796,9 +797,10 @@ fn fire_cycle_anchor_loss_during_rebasing_cancels_probe() {
         .filter(|op| matches!(op, ProbeOp::Cancel { owner: profile} if *profile == pid))
         .count();
     assert_eq!(cancels, 1, "Rebasing probe cancelled on anchor loss");
+    // Root anchor — no recovery parent, so the loss wrapper's fallback parks.
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle
+        ProfileState::Parked
     ));
 }
 

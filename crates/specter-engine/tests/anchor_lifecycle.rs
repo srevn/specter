@@ -17,8 +17,9 @@
 //! - **Observed loss**: the parent's directory listing re-classifies the anchor's kind *before* any
 //!   anchor probe is emitted — the recovery Seed probes with the freshly-observed shape in both
 //!   flip directions (File→Dir ⇒ Subtree; Dir→File ⇒ AnchorFile), one anchor probe per recovery.
-//! - **Probe `Failed`**: the Profile parks Idle-anchorless with `kind = None`; the event-driven
-//!   recovery Seed routes through the kind-agnostic Subtree arm.
+//! - **Probe `Failed`**: the Profile parks anchorless (`ProfileState::Parked`) with `kind = None`.
+//!   A recovery event at the anchor slot re-enters descent through the event-scan recovery arm; the
+//!   re-classifying descent feeds the kind-agnostic Subtree arm of the materialised Seed.
 
 use specter_core::testkit::{anchor_ok, dir_snap, file_leaf, proven};
 use specter_core::{
@@ -439,7 +440,9 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
     );
     assert!(e.profiles().get(pid_p).unwrap().kind().is_none());
 
-    // Recovery FsEvent → Batching-first Seed (no probe at burst start).
+    // The park left P `Parked`-anchorless. A recovery FsEvent at the anchor slot routes through the
+    // event-scan recovery arm (which selects a `Parked` Profile whose own anchor slot is the event
+    // resource) into a Pending descent — the descent probe materializes at the parent prefix.
     let recovery_t0 = p_at + SETTLE;
     let recovery_out = e.step(
         Input::FsEvent {
@@ -448,30 +451,24 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         },
         recovery_t0,
     );
+    assert!(
+        matches!(
+            e.profiles().get(pid_p).unwrap().state(),
+            ProfileState::Pending(_)
+        ),
+        "recovery from a probe-Failed park re-enters descent",
+    );
     assert_eq!(
         count_probes(&recovery_out),
-        0,
-        "Batching-first recovery Seed emits no probe at burst start",
+        1,
+        "the recovery descent probes the parent prefix immediately",
     );
 
-    // Expire the recovery Seed's first settle window → the recovery Seed probe materializes; it
-    // must be Subtree-shaped (kind=None after the Failed-driven discard).
-    let probe_at = recovery_t0 + SETTLE;
-    let mut settle_out = None;
-    while let Some(en) = e.pop_expired(probe_at) {
-        let o = e.step(
-            Input::TimerExpired {
-                profile: en.profile,
-                kind: en.kind,
-                id: en.id,
-            },
-            probe_at,
-        );
-        if first_probe_request(&o).is_some() {
-            settle_out = Some(o);
-        }
-    }
-    let settle_out = settle_out.expect("recovery Seed probe after settle expiry");
+    // The descent re-classifies the anchor as a Dir (File→Dir flip) → cold Seed (Verifying-first,
+    // unwitnessed recovery). The Seed's probe materializes inline with the descent's terminal
+    // response and must be Subtree-shaped: the Failed-driven discard left kind=None, and the
+    // descent observed a Dir.
+    let settle_out = descent_advance(&mut e, pid_p, Some(EntryKind::Dir), recovery_t0);
     let p_probe = settle_out
         .probe_ops()
         .iter()

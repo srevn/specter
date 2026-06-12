@@ -308,6 +308,13 @@ pub(crate) enum WireDiagnostic {
         profile: WireId,
         via: WireReapTrigger,
     },
+    ProfileParked {
+        at: WireTime,
+        profile: WireId,
+        /// The cached recovery channel (`watch_root_parent`), if any — `None` is a channel-less
+        /// park whose recovery waits on an overflow, a re-attach, or detach.
+        recovery: Option<WireId>,
+    },
     ProfileClaimPurged {
         at: WireTime,
         profile: WireId,
@@ -606,6 +613,11 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 profile: WireId::from(*profile),
                 via: WireReapTrigger::from(*via),
             },
+            Diagnostic::ProfileParked { profile, recovery } => Self::ProfileParked {
+                at: at.clone(),
+                profile: WireId::from(*profile),
+                recovery: recovery.map(WireId::from),
+            },
             Diagnostic::ProfileClaimPurged {
                 profile,
                 claim,
@@ -861,6 +873,7 @@ impl WireDiagnostic {
             Self::PendingPathAwaitingSegment { .. } => "pending_path_awaiting_segment",
             Self::ReapPendingCancelled { .. } => "reap_pending_cancelled",
             Self::ProfileReaped { .. } => "profile_reaped",
+            Self::ProfileParked { .. } => "profile_parked",
             Self::ProfileClaimPurged { .. } => "profile_claim_purged",
             Self::AttachPathInvalid { .. } => "attach_path_invalid",
             Self::AttachResourceStale { .. } => "attach_resource_stale",
@@ -934,6 +947,7 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "pending_path_awaiting_segment",
     "reap_pending_cancelled",
     "profile_reaped",
+    "profile_parked",
     "profile_claim_purged",
     "attach_path_invalid",
     "attach_resource_stale",
@@ -1383,6 +1397,7 @@ impl std::fmt::Display for WireBurstHelper {
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireProfileStateDiscriminant {
     Idle,
+    Parked,
     Pending,
     ActivePreFire,
     ActivePostFire,
@@ -1392,6 +1407,7 @@ impl From<ProfileStateDiscriminant> for WireProfileStateDiscriminant {
     fn from(d: ProfileStateDiscriminant) -> Self {
         match d {
             ProfileStateDiscriminant::Idle => Self::Idle,
+            ProfileStateDiscriminant::Parked => Self::Parked,
             ProfileStateDiscriminant::Pending => Self::Pending,
             ProfileStateDiscriminant::ActivePreFire => Self::ActivePreFire,
             ProfileStateDiscriminant::ActivePostFire => Self::ActivePostFire,
@@ -1403,6 +1419,7 @@ impl WireProfileStateDiscriminant {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
+            Self::Parked => "parked",
             Self::Pending => "pending",
             Self::ActivePreFire => "active_pre_fire",
             Self::ActivePostFire => "active_post_fire",
@@ -1416,13 +1433,14 @@ impl std::fmt::Display for WireProfileStateDiscriminant {
     }
 }
 
-/// Operator-display phase. Mirrors `specter_core::StateLabel`'s eight phases verbatim; landing here
+/// Operator-display phase. Mirrors `specter_core::StateLabel`'s nine phases verbatim; landing here
 /// keeps the wire projection layer cohesive even though `StateLabel` is not currently referenced by
 /// [`Diagnostic`].
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireStateLabel {
     Idle,
+    Parked,
     Pending,
     Batching,
     Verifying,
@@ -1436,6 +1454,7 @@ impl From<StateLabel> for WireStateLabel {
     fn from(s: StateLabel) -> Self {
         match s {
             StateLabel::Idle => Self::Idle,
+            StateLabel::Parked => Self::Parked,
             StateLabel::Pending => Self::Pending,
             StateLabel::Batching => Self::Batching,
             StateLabel::Verifying => Self::Verifying,
@@ -1451,6 +1470,7 @@ impl WireStateLabel {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
+            Self::Parked => "parked",
             Self::Pending => "pending",
             Self::Batching => "batching",
             Self::Verifying => "verifying",
@@ -1873,6 +1893,11 @@ mod tests {
                 profile: WireId(61),
                 via: WireReapTrigger::Immediate,
             },
+            WireDiagnostic::ProfileParked {
+                at: at(),
+                profile: WireId(62),
+                recovery: Some(WireId(63)),
+            },
             WireDiagnostic::ProfileClaimPurged {
                 at: at(),
                 profile: WireId(70),
@@ -2210,6 +2235,7 @@ mod tests {
         assert_snake_round_trip(
             &[
                 WireProfileStateDiscriminant::Idle,
+                WireProfileStateDiscriminant::Parked,
                 WireProfileStateDiscriminant::Pending,
                 WireProfileStateDiscriminant::ActivePreFire,
                 WireProfileStateDiscriminant::ActivePostFire,
@@ -2223,6 +2249,7 @@ mod tests {
         assert_snake_round_trip(
             &[
                 WireStateLabel::Idle,
+                WireStateLabel::Parked,
                 WireStateLabel::Pending,
                 WireStateLabel::Batching,
                 WireStateLabel::Verifying,

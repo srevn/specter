@@ -311,6 +311,20 @@ pub enum Diagnostic {
         profile: ProfileId,
         via: crate::ReapTrigger,
     },
+    /// A Profile entered [`crate::ProfileState::Parked`] — anchorless, awaiting recovery or
+    /// operator action. Emitted once per operational park entry (a path-fatal probe failure, a
+    /// kernel watch rejection purge, a descent-prefix purge / abandon, an observed loss with no
+    /// recovery parent); a park that is part of the Profile's own teardown in the same step is
+    /// silent (the reap narrates instead).
+    ///
+    /// `recovery` is the cached `watch_root_parent` channel, if any: `Some(parent)` means the next
+    /// `StructureChanged` at `parent` (or at the co-claimed anchor slot) re-enters recovery descent
+    /// automatically; `None` is a channel-less park — recovery waits on a sensor overflow (which
+    /// re-derives the parent from the Tree), an operator re-attach, or detach.
+    ProfileParked {
+        profile: ProfileId,
+        recovery: Option<ResourceId>,
+    },
     /// A Profile's claim on `resource` was purged because the kernel rejected the watch on it
     /// (`Input::WatchOpRejected` arrived, clamping `watch_demand := 0`). One emission per affected
     /// (Profile, claim_kind) pair — a single rejection at a multi-claim resource (anchor of P,

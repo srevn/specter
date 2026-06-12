@@ -299,6 +299,11 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
         Diagnostic::ProfileReaped { profile, via } => {
             tracing::info!(?profile, ?via, "Profile reaped");
         }
+        Diagnostic::ProfileParked { profile, recovery } => tracing::warn!(
+            ?profile,
+            ?recovery,
+            "Profile parked (anchorless; recovery via parent/anchor event, overflow, or re-attach)",
+        ),
         Diagnostic::ProfileClaimPurged {
             profile,
             claim,
@@ -602,6 +607,7 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::PendingPathAwaitingSegment { .. }
         | D::ReapPendingCancelled { .. }
         | D::ProfileReaped { .. }
+        | D::ProfileParked { .. }
         | D::ProfileClaimPurged { .. }
         | D::AttachPathInvalid { .. }
         | D::AttachResourceStale { .. }

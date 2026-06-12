@@ -296,13 +296,15 @@ pub(crate) fn nearest_covering_ancestor(
 /// resolves to 0 or 1. `pub(crate)` — the sole caller is `Engine::on_fs_event`; a coverage
 /// derivation co-located with [`covers`] / [`nearest_covering_ancestor`].
 ///
-/// **Pending Profiles are filtered at the source.** A Pending Profile carries no anchor-side
-/// `watch_demand` from this Profile — the descent prefix carries it instead (via
-/// [`specter_core::ContribKey::ProfileDescent`]); the anchor slot itself only receives the
-/// [`specter_core::ContribKey::ProfileAnchor`] contribution at descent-completion time. Events at
-/// the prefix route via `classify_event_carriers` / `on_descent_event`; events at the anchor or its
-/// descendants are structurally unreachable in production (the anchor's `watch_demand` is 0 ⇒ head
-/// guard short-circuits). Filtering here makes the routing contract explicit: covering-Profile
+/// **Pending and Parked Profiles are filtered at the source — load-bearing routing policy, not
+/// belt-and-braces.** Neither holds an anchor-side `watch_demand` of its own (a Pending descent's
+/// prefix carries it via [`specter_core::ContribKey::ProfileDescent`]; a park holds nothing), but
+/// the anchor *slot* can stay kernel-watched through a co-claimer — another Profile's
+/// `watch_root_parent` claim, a co-anchored Profile, a descent prefix — so events at it do pass the
+/// head guard and would otherwise dispatch here: an unfiltered park would run a full unanchored
+/// fire cycle off its `Idle`-shaped burst fork. Events at a descent prefix route via
+/// `classify_event_carriers` / `on_descent_event`; events at a parked anchor's slot route via the
+/// same scan's recovery arm. Filtering here makes the routing contract explicit: covering-Profile
 /// dispatch (Standard burst, anchor terminal event) only sees Profiles with a materialized anchor.
 #[must_use]
 pub(crate) fn covering_profiles(
@@ -333,7 +335,7 @@ pub(crate) fn covering_profiles(
             let Some(p) = profiles.get(pid) else {
                 continue;
             };
-            if matches!(p.state(), ProfileState::Pending(_)) {
+            if matches!(p.state(), ProfileState::Pending(_) | ProfileState::Parked) {
                 continue;
             }
             // Depth 0 — the event landed on this Profile's own anchor — is Interior by

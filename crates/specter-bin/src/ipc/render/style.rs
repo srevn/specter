@@ -57,11 +57,13 @@ pub(crate) const ERR: Style = AnsiColor::Red.on_default();
 pub(crate) const ERR_CODE: Style = AnsiColor::Red.on_default().bold();
 
 /// Hue for an operator-display phase. `Idle` rests at the default (unstyled, so painting it is a
-/// no-op); `Pending` is cyan; the pre-fire phases are yellow; the post-fire phases are blue.
+/// no-op); `Parked` is red — anchorless, awaiting recovery or operator action, the one phase that is
+/// wrong-at-rest; `Pending` is cyan; the pre-fire phases are yellow; the post-fire phases are blue.
 #[must_use]
 pub(crate) const fn state(label: WireStateLabel) -> Style {
     match label {
         WireStateLabel::Idle => Style::new(),
+        WireStateLabel::Parked => AnsiColor::Red.on_default(),
         WireStateLabel::Pending => AnsiColor::Cyan.on_default(),
         WireStateLabel::Batching | WireStateLabel::Verifying | WireStateLabel::Draining => {
             AnsiColor::Yellow.on_default()
@@ -417,6 +419,7 @@ mod tests {
     fn state_idle_is_default_others_hued() {
         assert_eq!(state(WireStateLabel::Idle), Style::new());
         for label in [
+            WireStateLabel::Parked,
             WireStateLabel::Pending,
             WireStateLabel::Batching,
             WireStateLabel::Verifying,

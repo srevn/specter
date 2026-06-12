@@ -284,7 +284,8 @@ impl Engine {
                 }),
                 PostFirePhase::Awaiting { .. } | PostFirePhase::Settling { .. } => None,
             },
-            ProfileState::Idle => None,
+            // No slot, structurally — the read-back above already returned `None` for both.
+            ProfileState::Idle | ProfileState::Parked => None,
         }?;
         Some((correlation, route))
     }
@@ -513,7 +514,7 @@ impl Engine {
                     return None;
                 }
             },
-            ProfileState::Idle => return None,
+            ProfileState::Idle | ProfileState::Parked => return None,
         };
 
         // The Rebase target is the anchor (the post-fire side carries no probe target on its

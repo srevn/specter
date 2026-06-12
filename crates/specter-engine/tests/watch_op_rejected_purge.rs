@@ -291,8 +291,8 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
 
 #[test]
 fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
-    // Pending Profile with prefix=/foo. WatchOpRejected at /foo purges the descent. Profile
-    // transitions to Idle without an anchor; operator restart is required to recover (no automatic
+    // Pending Profile with prefix=/foo. WatchOpRejected at /foo purges the descent. The Profile
+    // parks (`ProfileState::Parked`); operator restart is required to recover (no automatic
     // recovery via parent's StructureChanged because the parent watch failed).
     let mut e = Engine::new();
     let foo = e
@@ -330,10 +330,10 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
         Instant::now(),
     );
 
-    // Descent vacated.
+    // Descent vacated — the purge parks the Profile (no recovery channel).
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
-        ProfileState::Idle,
+        ProfileState::Parked,
     ));
     // Cancel + ProfileClaimPurged{DescentPrefix} surface.
     assert!(

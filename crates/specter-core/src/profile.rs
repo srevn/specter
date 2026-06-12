@@ -1268,8 +1268,17 @@ pub enum ReapTrigger {
 
 /// Profile state machine.
 ///
-/// Three lifecycle states, mutually exclusive by construction:
-/// - `Idle`: no probe in flight, no burst, no descent. Reads/writes baseline and current as-is.
+/// Four lifecycle states, mutually exclusive by construction:
+/// - `Idle`: healthy rest — anchor claim held (possibly pre-first-pin), no probe in flight, no
+///   burst, no descent. Reads/writes baseline and current as-is.
+/// - `Parked`: anchorless rest — the anchor was lost in a way the engine could not immediately heal
+///   (a path-fatal probe failure, a kernel watch rejection, a descent-prefix purge, an observed loss
+///   with no recovery parent). No claim, no snapshots, no probe slot. Exits *only* through a recovery
+///   descent (a parent / anchor-slot event, a sensor overflow, an operator re-attach) — never
+///   directly into a Seed; the descent terminus is the single re-bootstrap path. A unit variant: the
+///   recovery channel is `Profile.watch_root_parent` and the survival witness rides
+///   `AnchorClassification::Unclassified { witness }`, so a payload here would only duplicate facts
+///   that must outlive the variant anyway. The variant's job is to force match arms, not carry data.
 /// - `Pending(DescentState)`: anchor doesn't yet exist on disk; the engine is probing the deepest
 ///   existing prefix and advancing one path component per response. The anchor's `Profile.resource`
 ///   slot is `DescentScaffold`-roled and carries no `watch_demand` from this Profile (the prefix
@@ -1293,6 +1302,11 @@ pub enum ReapTrigger {
 pub enum ProfileState {
     #[default]
     Idle,
+    /// Anchorless rest — awaiting recovery or operator action. Entered only through the engine's
+    /// `park_profile` coordinator (the loss wrappers and the descent-prefix purge); exits only
+    /// through a recovery descent (`Parked → Pending`) or detach-reap. Holds no probe slot
+    /// structurally (unit variant), so I5 is untouched.
+    Parked,
     /// Pending-path descent in flight. The anchor (`Profile.resource`) is `DescentScaffold`-roled
     /// and carries no `watch_demand` from this Profile; `DescentState.current_prefix` does. When
     /// the anchor materializes (descent's last component arrives) the engine transitions Pending →
@@ -1308,11 +1322,12 @@ pub enum ProfileState {
 
 impl ProfileState {
     /// Variant-tag projection used by diagnostics that need to name "what state was the Profile
-    /// actually in" without copying the payload. The four discriminants line up with the four
-    /// routing classes burst helpers care about: `Idle` (pre-burst), `Pending` (descent in flight),
-    /// `ActivePreFire` (settling / verifying / draining), `ActivePostFire` (awaiting / rebasing).
-    /// The fire transition (`PreFire → PostFire`) is the only edge that crosses the third-vs-fourth
-    /// discriminator, which is exactly the same boundary the [`ActiveBurst`] type split enforces.
+    /// actually in" without copying the payload. The five discriminants line up with the routing
+    /// classes burst helpers care about: `Idle` (pre-burst), `Parked` (anchorless rest), `Pending`
+    /// (descent in flight), `ActivePreFire` (settling / verifying / draining), `ActivePostFire`
+    /// (awaiting / rebasing). The fire transition (`PreFire → PostFire`) is the only edge that
+    /// crosses the pre-vs-post-fire discriminator, which is exactly the same boundary the
+    /// [`ActiveBurst`] type split enforces.
     ///
     /// [`BurstFinish`] is intentionally collapsed at this projection — zombie and live bursts share
     /// routing class because every burst-helper that consults the discriminant routes identically
@@ -1322,6 +1337,7 @@ impl ProfileState {
     pub const fn discriminant(&self) -> ProfileStateDiscriminant {
         match self {
             Self::Idle => ProfileStateDiscriminant::Idle,
+            Self::Parked => ProfileStateDiscriminant::Parked,
             Self::Pending(_) => ProfileStateDiscriminant::Pending,
             Self::Active(ActiveBurst::PreFire(_), _) => ProfileStateDiscriminant::ActivePreFire,
             Self::Active(ActiveBurst::PostFire(_), _) => ProfileStateDiscriminant::ActivePostFire,
@@ -1329,11 +1345,11 @@ impl ProfileState {
     }
 
     /// Operator-display projection — one [`StateLabel`] per visible phase. Distinct from
-    /// [`Self::discriminant`]: the discriminant names the four *routing classes* the burst helpers
+    /// [`Self::discriminant`]: the discriminant names the *routing classes* the burst helpers
     /// branch on (collapsing `Batching | Verifying | Draining` to `ActivePreFire` and `Awaiting |
-    /// Rebasing | Settling` to `ActivePostFire`), whereas this projection names the eight *phases*
+    /// Rebasing | Settling` to `ActivePostFire`), whereas this projection names the nine *phases*
     /// an operator reading `specter status` / `specter list` would expect to see — every leaf of
-    /// the [`PreFirePhase`] / [`PostFirePhase`] split, plus `Idle` and `Pending`.
+    /// the [`PreFirePhase`] / [`PostFirePhase`] split, plus `Idle`, `Parked`, and `Pending`.
     ///
     /// [`BurstFinish`] is collapsed (a zombie burst displays the same label as a live one — the
     /// directive is operationally irrelevant to the phase name).
@@ -1341,6 +1357,7 @@ impl ProfileState {
     pub const fn label(&self) -> StateLabel {
         match self {
             Self::Idle => StateLabel::Idle,
+            Self::Parked => StateLabel::Parked,
             Self::Pending(_) => StateLabel::Pending,
             Self::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
                 PreFirePhase::Batching { .. } => StateLabel::Batching,
@@ -1356,7 +1373,7 @@ impl ProfileState {
     }
 
     /// Read the burst-finish directive. `Some(_)` only when the Profile is in an Active burst;
-    /// `None` for Idle and Pending (where the directive is structurally meaningless).
+    /// `None` for Idle, Parked, and Pending (where the directive is structurally meaningless).
     ///
     /// Read by `emit_effects` (suppress emission on zombie), `on_effect_complete` (route last
     /// completion), `handle_gate_deadline` (zombie-skip), and indirectly by every test that
@@ -1365,7 +1382,7 @@ impl ProfileState {
     pub const fn burst_finish(&self) -> Option<BurstFinish> {
         match self {
             Self::Active(_, finish) => Some(*finish),
-            Self::Idle | Self::Pending(_) => None,
+            Self::Idle | Self::Parked | Self::Pending(_) => None,
         }
     }
 
@@ -1378,7 +1395,9 @@ impl ProfileState {
     #[must_use]
     pub const fn detach_lifecycle(&self) -> DetachLifecycle {
         match self {
-            Self::Idle | Self::Pending(_) => DetachLifecycle::ReapNow,
+            // A parked Profile reaps synchronously alongside Idle / Pending: detaching the last Sub
+            // ends the park (and its nonsteady pin) — there is no burst to drain.
+            Self::Idle | Self::Parked | Self::Pending(_) => DetachLifecycle::ReapNow,
             Self::Active(_, _) => DetachLifecycle::DeferToBurstEnd,
         }
     }
@@ -1428,9 +1447,9 @@ impl ProfileState {
     /// The live `TimerId` for the requested `kind` slot, or `None` if the state owns no timer of
     /// that kind right now.
     ///
-    /// Only [`Self::Active`] Profiles schedule timers — [`Self::Idle`] and [`Self::Pending`]
-    /// (descent) own none and return `None` for every kind. The `Active` arm delegates to
-    /// [`ActiveBurst::timer_token`], which in turn routes to whichever burst-side type
+    /// Only [`Self::Active`] Profiles schedule timers — [`Self::Idle`], [`Self::Parked`], and
+    /// [`Self::Pending`] (descent) own none and return `None` for every kind. The `Active` arm
+    /// delegates to [`ActiveBurst::timer_token`], which in turn routes to whichever burst-side type
     /// ([`PreFireBurst`] or [`PostFireBurst`]) actually carries the field. Each layer only
     /// enumerates the kinds its data shape can carry, so type-impossible pairs fold to `None` at
     /// the leaf without an explicit wildcard arm.
@@ -1442,57 +1461,60 @@ impl ProfileState {
     pub const fn timer_token(&self, kind: TimerKind) -> Option<TimerId> {
         match self {
             Self::Active(burst, _) => burst.timer_token(kind),
-            Self::Idle | Self::Pending(_) => None,
+            Self::Idle | Self::Parked | Self::Pending(_) => None,
         }
     }
 
-    /// Delegate to the active burst's post-fire counter; `Idle` / `Pending` own none and fold to
-    /// [`AwaitVerdict::NotAwaiting`]. Same layered, wildcard-free delegation as
+    /// Delegate to the active burst's post-fire counter; `Idle` / `Parked` / `Pending` own none and
+    /// fold to [`AwaitVerdict::NotAwaiting`]. Same layered, wildcard-free delegation as
     /// [`Self::timer_token`].
     #[must_use]
     pub fn note_effect_completion(&mut self) -> AwaitVerdict {
         match self {
             Self::Active(burst, _) => burst.note_effect_completion(),
-            Self::Idle | Self::Pending(_) => AwaitVerdict::NotAwaiting,
+            Self::Idle | Self::Parked | Self::Pending(_) => AwaitVerdict::NotAwaiting,
         }
     }
 
-    /// Delegate to the active burst's `last_certified_hash` carrier; `Idle` / `Pending` own none
-    /// and fold to `None` (the "no carrier exists to advance" shape). Same layered, wildcard- free
-    /// delegation as [`Self::note_effect_completion`].
+    /// Delegate to the active burst's `last_certified_hash` carrier; `Idle` / `Parked` / `Pending`
+    /// own none and fold to `None` (the "no carrier exists to advance" shape). Same layered,
+    /// wildcard-free delegation as [`Self::note_effect_completion`].
     #[must_use]
     pub const fn advance_certified_sample(&mut self, hash: u128) -> Option<u128> {
         match self {
             Self::Active(burst, _) => burst.advance_certified_sample(hash),
-            Self::Idle | Self::Pending(_) => None,
+            Self::Idle | Self::Parked | Self::Pending(_) => None,
         }
     }
 
     /// Drive the fold latch onto an in-flight pre-fire burst — the state layer of the retro-latch
     /// cascade, the entry [`Profile::arm_absorb`] calls. `Active ⇒` delegate to
-    /// [`ActiveBurst::latch_fold`] (itself a PreFire-set / PostFire- no-op); `Idle | Pending ⇒`
-    /// no-op — there is no burst whose terminal consequence the window could override, so an arm in
-    /// those states only sets the window for the *next* burst's birth consult. Wildcard-free, same
-    /// layered shape as [`Self::advance_certified_sample`].
+    /// [`ActiveBurst::latch_fold`] (itself a PreFire-set / PostFire- no-op); `Idle | Parked |
+    /// Pending ⇒` no-op — there is no burst whose terminal consequence the window could override,
+    /// so an arm in those states only sets the window for the *next* burst's birth consult.
+    /// Wildcard-free, same layered shape as [`Self::advance_certified_sample`].
     pub const fn latch_fold(&mut self) {
         match self {
             Self::Active(burst, _) => burst.latch_fold(),
-            Self::Idle | Self::Pending(_) => {}
+            Self::Idle | Self::Parked | Self::Pending(_) => {}
         }
     }
 
     /// True iff the state is `Active(PreFire(Draining))`. The reconfirm cascade (the `Draining →
     /// Verifying` re-probe) keys off this predicate: at every `finish_burst_to_idle` the engine
     /// sweeps the Draining Profiles and reconfirms each whose covered-descendant query has gone
-    /// false. `Idle` and `Pending` are structurally not-Draining; the post-fire arm and the other
-    /// pre-fire phases (Batching, Verifying) also return `false`.
+    /// false. `Idle`, `Parked`, and `Pending` are structurally not-Draining; the post-fire arm and
+    /// the other pre-fire phases (Batching, Verifying) also return `false`.
     #[must_use]
     pub const fn is_draining(&self) -> bool {
         match self {
             Self::Active(ActiveBurst::PreFire(pre), _) => {
                 matches!(pre.phase, PreFirePhase::Draining)
             }
-            Self::Idle | Self::Pending(_) | Self::Active(ActiveBurst::PostFire(_), _) => false,
+            Self::Idle
+            | Self::Parked
+            | Self::Pending(_)
+            | Self::Active(ActiveBurst::PostFire(_), _) => false,
         }
     }
 
@@ -1515,7 +1537,7 @@ impl ProfileState {
     pub const fn in_active_standard_burst(&self) -> bool {
         match self {
             Self::Active(burst, _) => matches!(burst.intent(), BurstIntent::Standard),
-            Self::Idle | Self::Pending(_) => false,
+            Self::Idle | Self::Parked | Self::Pending(_) => false,
         }
     }
 
@@ -1533,17 +1555,21 @@ impl ProfileState {
     pub const fn burst_fold_latched(&self) -> bool {
         match self {
             Self::Active(ActiveBurst::PreFire(pre), _) => pre.fold_latched.is_latched(),
-            Self::Idle | Self::Pending(_) | Self::Active(ActiveBurst::PostFire(_), _) => false,
+            Self::Idle
+            | Self::Parked
+            | Self::Pending(_)
+            | Self::Active(ActiveBurst::PostFire(_), _) => false,
         }
     }
 
     /// Borrow the descent payload if the state is currently [`Self::Pending`]. `None` for
-    /// [`Self::Idle`] and [`Self::Active`] — the descent payload only lives in the `Pending` variant.
+    /// [`Self::Idle`], [`Self::Parked`], and [`Self::Active`] — the descent payload only lives in
+    /// the `Pending` variant.
     #[must_use]
     pub const fn descent_state(&self) -> Option<&DescentState> {
         match self {
             Self::Pending(d) => Some(d),
-            Self::Idle | Self::Active(_, _) => None,
+            Self::Idle | Self::Parked | Self::Active(_, _) => None,
         }
     }
 
@@ -1551,7 +1577,7 @@ impl ProfileState {
     pub const fn descent_state_mut(&mut self) -> Option<&mut DescentState> {
         match self {
             Self::Pending(d) => Some(d),
-            Self::Idle | Self::Active(_, _) => None,
+            Self::Idle | Self::Parked | Self::Active(_, _) => None,
         }
     }
 
@@ -1571,7 +1597,7 @@ impl ProfileState {
                 PostFirePhase::Awaiting { .. } | PostFirePhase::Settling { .. } => None,
             },
             Self::Pending(d) => d.probe_correlation(),
-            Self::Idle => None,
+            Self::Idle | Self::Parked => None,
         }
     }
 
@@ -1593,7 +1619,7 @@ impl ProfileState {
                 PostFirePhase::Awaiting { .. } | PostFirePhase::Settling { .. } => None,
             },
             Self::Pending(d) => d.disarm_probe(),
-            Self::Idle => None,
+            Self::Idle | Self::Parked => None,
         }
     }
 }
@@ -1601,7 +1627,7 @@ impl ProfileState {
 /// Variant tag for [`ProfileState`], carried on diagnostics that report state-machine routing
 /// breaches without copying the payload.
 ///
-/// The four variants match the four routing classes the engine's burst helpers branch on. They are
+/// The five variants match the routing classes the engine's burst helpers branch on. They are
 /// coarser than the full state enum (`Active(PreFire(Batching{settle_timer}))` collapses to
 /// `ActivePreFire`) — for diagnostic triage; see [`StateLabel`] for operator display. Stable
 /// against future phase additions.
@@ -1609,6 +1635,8 @@ impl ProfileState {
 pub enum ProfileStateDiscriminant {
     /// [`ProfileState::Idle`].
     Idle,
+    /// [`ProfileState::Parked`].
+    Parked,
     /// [`ProfileState::Pending`].
     Pending,
     /// [`ProfileState::Active`] with [`ActiveBurst::PreFire`].
@@ -1617,14 +1645,14 @@ pub enum ProfileStateDiscriminant {
     ActivePostFire,
 }
 
-/// Operator-display label for a [`ProfileState`] — the eight visible phases an operator reading
+/// Operator-display label for a [`ProfileState`] — the nine visible phases an operator reading
 /// `specter status` / `specter list` would expect to see.
 ///
-/// Distinct from [`ProfileStateDiscriminant`]: the discriminant names the four *routing classes*
-/// the engine's burst helpers branch on, whereas this enum names the eight *phases* the state can
-/// occupy. Two enums, two consumers — diagnostics keep their stable `ActivePreFire` /
-/// `ActivePostFire` tag, operator surfaces print the phase (`Batching` / `Verifying` / `Draining` /
-/// `Awaiting` / `Rebasing` / `Settling`).
+/// Distinct from [`ProfileStateDiscriminant`]: the discriminant names the *routing classes* the
+/// engine's burst helpers branch on, whereas this enum names the *phases* the state can occupy. Two
+/// enums, two consumers — diagnostics keep their stable `ActivePreFire` / `ActivePostFire` tag,
+/// operator surfaces print the phase (`Batching` / `Verifying` / `Draining` / `Awaiting` /
+/// `Rebasing` / `Settling`).
 ///
 /// Constructed via [`ProfileState::label`]; the projection is exhaustive over the type space, so a
 /// future phase addition is a compile error rather than a silently-collapsing display.
@@ -1632,6 +1660,10 @@ pub enum ProfileStateDiscriminant {
 pub enum StateLabel {
     /// [`ProfileState::Idle`] — no burst in flight.
     Idle,
+    /// [`ProfileState::Parked`] — anchorless; awaiting recovery (a parent / anchor-slot event, an
+    /// overflow, a re-attach) or operator action. The honest operator row for the state that used
+    /// to display as a healthy `Idle`.
+    Parked,
     /// [`ProfileState::Pending`] — anchor path descent in flight.
     Pending,
     /// [`PreFirePhase::Batching`] — activity-gap settle wait.
@@ -2610,10 +2642,11 @@ impl Profile {
     /// Atomically install a descent-materialised anchor: transition `Pending → Idle`, install the
     /// claim, and classify the anchor with the discovered `kind`, **carrying the survival witness
     /// forward** (`Unclassified { witness } ⇒ File/Dir { current: None, settled: Witness(h) | Unset
-    /// }`). Sole caller `Engine::materialize_profile_anchor`, which launches the Seed burst on the
-    /// next statement — the `Idle` written here is a structural intermediate, never observed. The
-    /// whole sequence runs under one `&mut self` so no reader sees a partial write. Inverse of
-    /// [`Self::clear_anchor_classification`].
+    /// }`). Reached only through [`ProfileMap::materialize_anchor`] (which reconciles the carrier
+    /// count across the `Pending → Idle` edge); the engine's descent terminus launches the Seed
+    /// burst on the next statement — the `Idle` written here is a structural intermediate, never
+    /// observed. The whole sequence runs under one `&mut self` so no reader sees a partial write.
+    /// Inverse of [`Self::clear_anchor_classification`].
     ///
     /// Debug-asserts the fresh-materialisation preconditions (`state == Pending`, no claim, anchor
     /// `Unclassified`); release builds compile the asserts out and still classify atomically.
@@ -2662,23 +2695,28 @@ impl Profile {
     ///
     /// The snapshot-shape (`kind ⇔ current` variant) and baseline/witness-exclusion invariants are
     /// *structural* — no representable `AnchorClassification` violates them, so there is nothing to
-    /// check there. What remains is the pair of one-directional cross-axis invariants the type
-    /// system does not cover, asserted here so a future coordinator that leaves a `Pending` Profile
-    /// classified (or holding the anchor claim) trips at the write site rather than latently at the
-    /// next dispatch / reap:
+    /// check there. What remains is the cross-axis invariants the type system does not cover,
+    /// asserted here so a future coordinator that leaves a `Pending` / `Parked` Profile classified
+    /// (or holding the anchor claim) trips at the write site rather than latently at the next
+    /// dispatch / reap:
     /// - `Pending ⇒ Unclassified` — during descent the anchor is not probed; the descent prefix,
     ///   not the anchor, carries the watch.
     /// - `Pending ⇒ ¬AnchorClaim::Held` — the descent prefix carries the STRUCTURE watch; the anchor
     ///   claim is installed only at materialisation. (`reap_profile`'s trichotomy depends on this.)
+    /// - `Parked ⇒ Unclassified ∧ ¬AnchorClaim::Held` — the mirror pair: a park is anchorless rest,
+    ///   entered only after `discard_anchor_state` (or from a `Pending` descent, where the pair
+    ///   already held), so a classified or claim-holding park is a coordinator regression.
     pub fn debug_assert_anchor_coherent(&self) {
-        if matches!(self.state, ProfileState::Pending(_)) {
+        if matches!(self.state, ProfileState::Pending(_) | ProfileState::Parked) {
             debug_assert!(
                 matches!(self.anchor, AnchorClassification::Unclassified { .. }),
-                "anchor coherence: a Pending Profile must be Unclassified",
+                "anchor coherence: a {:?} Profile must be Unclassified",
+                self.state.discriminant(),
             );
             debug_assert!(
                 matches!(self.contributions.anchor_claim, AnchorClaim::None),
-                "anchor coherence: a Pending Profile must not hold the anchor claim",
+                "anchor coherence: a {:?} Profile must not hold the anchor claim",
+                self.state.discriminant(),
             );
         }
     }
@@ -2693,8 +2731,8 @@ impl Profile {
     /// `require_active_pre_fire`), not here.
     ///
     /// [`Self::materialize_anchor`] is the single documented bypass — a three-field atomic `Pending
-    /// → (Idle, AnchorClaim::Held, classified)` write; [`Self::is_nonsteady`]'s carrier count is
-    /// invariant under it by construction.
+    /// → (Idle, AnchorClaim::Held, classified)` write; [`ProfileMap::materialize_anchor`] is its
+    /// counter-reconciling wrapper (the bypass is a genuine `Pending → Idle` carrier-count edge).
     pub const fn transition_state(&mut self, new: ProfileState) -> ProfileState {
         std::mem::replace(&mut self.state, new)
     }
@@ -3059,33 +3097,23 @@ impl Profile {
     /// membership predicate of [`ProfileMap`]'s `nonsteady` carrier count, and the single source
     /// both that counter's delta and its debug full-scan tripwire read.
     ///
-    /// A carrier is either a `Pending` descent (`current_prefix == R`) or an anchor-recovery `Idle`
-    /// Profile (`watch_root_parent == Some(R)` ∧ anchor absent). This is the **state+anchor**
-    /// over-approximation of that set: every true carrier satisfies it (soundness — the count-gate
-    /// never under-counts), and it is *tight* in the dimension that matters — a healthy `Idle`
-    /// Profile (anchor grafted, `current_is_some()`) is **excluded**, so a quiet watcher coexisting
-    /// with a storm does not pin the count above zero.
+    /// A carrier is either a `Pending` descent (`current_prefix == R`) or a `Parked` Profile
+    /// (recovery via `watch_root_parent == Some(R)` or its own co-claimed anchor slot). This is a
+    /// **pure state predicate** over exactly those two variants: every true carrier satisfies it
+    /// (soundness — the count-gate never under-counts; a channel-less park is counted too, a sound
+    /// over-approximation), and it is *tight* in the dimension that matters — a healthy `Idle`
+    /// Profile and a steady `Active` burst are excluded, so a quiet watcher coexisting with a storm
+    /// does not pin the count above zero.
     ///
-    /// This reads two inputs — `state` and anchor presence — moved by three write channels;
-    /// [`ProfileMap`] owns the count and reconciles each:
-    /// - **`state`** routes through [`ProfileMap::transition_state`], except the
-    ///   `materialize_anchor` `Pending → Idle` write that bypasses it; that bypass keeps the anchor
-    ///   absent and both endpoints satisfy this predicate, so it is delta-0 and needs no hook.
-    /// - **anchor graft** (`current` `None → Some`, `install_*_current`) happens only mid-`Active`,
-    ///   which is uncounted regardless of the anchor; the burst-end `transition_state(Active →
-    ///   Idle)` reads the grafted anchor and records the edge.
-    /// - **anchor clear** (`current` `Some → None`, `Engine::discard_anchor_state`) on a non-`Active`
-    ///   Profile — a healthy `Idle` anchor lost via `finalize_anchor_lost` (`was_active == false`) —
-    ///   flips `false → true` outside any `state` edge; [`ProfileMap::reconcile_nonsteady`]
-    ///   reconciles it at that coordinator. On an `Active` Profile the same clear is delta-0 (the
-    ///   predicate ignores the anchor while `Active`) and the burst-end transition records it.
+    /// Because the predicate reads only `state`, every edge flows through the [`ProfileMap`]
+    /// chokepoints: [`ProfileMap::transition_state`] / [`ProfileMap::map_state`] (the push and
+    /// transform writers) and [`ProfileMap::materialize_anchor`] (the wrapper over
+    /// [`Profile::materialize_anchor`]'s three-field atomic write, whose `Pending → Idle` move is a
+    /// genuine `true → false` counting edge). [`ProfileMap::attach`] / [`ProfileMap::detach`]
+    /// derive the membership edges from the predicate directly.
     #[must_use]
     pub const fn is_nonsteady(&self) -> bool {
-        match &self.state {
-            ProfileState::Active(_, _) => false,
-            ProfileState::Pending(_) => true,
-            ProfileState::Idle => !self.current_is_some(),
-        }
+        matches!(self.state, ProfileState::Pending(_) | ProfileState::Parked)
     }
 
     /// Whether a settled baseline `Snapshot` is present, without minting (or `Arc`-bumping) one —
@@ -3257,16 +3285,16 @@ impl Profile {
 pub struct ProfileMap {
     profiles: SlotMap<ProfileId, Profile>,
     by_resource: SecondaryMap<ResourceId, SmallVec<[(u64, ProfileId); 1]>>,
-    /// Live count of Profiles satisfying [`Profile::is_nonsteady`] — the O(1) carrier gate the engine
-    /// reads before the O(P) `classify_event_carriers` scan. `is_nonsteady` reads `state` *and*
-    /// anchor presence, so it is maintained at five points: [`Self::attach`] / [`Self::detach`] (the
-    /// membership edges), [`Self::transition_state`] and [`Self::map_state`] (the two `state` edges —
-    /// push and transform), and [`Self::reconcile_nonsteady`] (the anchor-presence edge cleared by
-    /// `Engine::discard_anchor_state` on a non-`Active` Profile). The `materialize_anchor` `state`
-    /// bypass is delta-0 by [`Profile::is_nonsteady`]'s construction and needs no hook. A debug
-    /// full-scan tripwire in `Engine::classify_event_carriers` is the desync net: a missed `+`
-    /// (under-count) would false-skip a real carrier and is caught there; a missed `−` (over-count)
-    /// only degrades the gate to the status-quo scan (perf, never correctness).
+    /// Live count of Profiles satisfying [`Profile::is_nonsteady`] — the O(1) carrier gate the
+    /// engine reads before the O(P) `classify_event_carriers` scan. `is_nonsteady` is a pure
+    /// `state` predicate (`Pending ∨ Parked`), so it is maintained at exactly the `state`
+    /// chokepoints: [`Self::attach`] / [`Self::detach`] (the membership edges),
+    /// [`Self::transition_state`] and [`Self::map_state`] (the push and transform `state` writers),
+    /// and [`Self::materialize_anchor`] (the wrapper over [`Profile::materialize_anchor`]'s
+    /// `transition_state` bypass — a true `Pending → Idle` counting edge). A debug full-scan
+    /// tripwire in `Engine::classify_event_carriers` is the desync net: a missed `+` (under-count)
+    /// would false-skip a real carrier and is caught there; a missed `−` (over-count) only degrades
+    /// the gate to the status-quo scan (perf, never correctness).
     nonsteady: usize,
 }
 
@@ -3348,10 +3376,10 @@ impl ProfileMap {
     }
 
     /// Apply one [`Profile::is_nonsteady`] edge to [`Self::nonsteady`] — the single source of the
-    /// carrier-count arithmetic, shared by the three reconcile paths: [`Self::transition_state`]
-    /// and [`Self::map_state`] (the two `state` edges) and [`Self::reconcile_nonsteady`] (the
-    /// anchor-presence edge). Saturating on the `−` side so a (debug-tripwired) missed `+` upstream
-    /// degrades the gate to the status-quo scan rather than underflowing.
+    /// carrier-count arithmetic, shared by the three `state`-edge reconcile paths:
+    /// [`Self::transition_state`], [`Self::map_state`], and [`Self::materialize_anchor`].
+    /// Saturating on the `−` side so a (debug-tripwired) missed `+` upstream degrades the gate to
+    /// the status-quo scan rather than underflowing.
     const fn apply_nonsteady_edge(&mut self, before: bool, after: bool) {
         match (before, after) {
             (false, true) => self.nonsteady += 1,
@@ -3363,9 +3391,7 @@ impl ProfileMap {
     /// The **push**-shape counter-reconciling path for a Profile **state** edge — the sibling of
     /// [`Self::map_state`] (the **transform** dual). Delegates to [`Profile::transition_state`]
     /// (the core `state` chokepoint, installing the given `new`) and reconciles [`Self::nonsteady`]
-    /// across the edge from [`Profile::is_nonsteady`] read before and after the swap. Only the
-    /// `state` discriminant moves here; the anchor-presence half of the predicate is reconciled by
-    /// the sibling [`Self::reconcile_nonsteady`].
+    /// across the edge from [`Profile::is_nonsteady`] read before and after the swap.
     ///
     /// Reached by the install-a-given-state callers — `start_seed_burst` / `start_standard_burst` /
     /// descent materialisation / the claims-ledger Idle reset — which discard the returned prior
@@ -3405,24 +3431,23 @@ impl ProfileMap {
         Some(r)
     }
 
-    /// The counter-reconciling path for a Profile **anchor-presence** edge — the structural sibling
-    /// of [`Self::transition_state`]. [`Profile::is_nonsteady`] reads `state` *and* anchor
-    /// presence; the `state` half reconciles through `transition_state`, the anchor half here.
+    /// The counter-reconciling wrapper over [`Profile::materialize_anchor`]'s three-field atomic
+    /// `Pending → (Idle, Held, classified)` write — the chokepoint sibling of
+    /// [`Self::transition_state`] / [`Self::map_state`] for the one documented `state` write that
+    /// bypasses [`Profile::transition_state`]. Under the pure-state [`Profile::is_nonsteady`]
+    /// predicate that bypass is a genuine `true → false` counting edge (`Pending` counted, `Idle`
+    /// not), so it must reconcile here or the engine's debug full-recount tripwire fires on the
+    /// next delivered event.
     ///
-    /// The sole live-Profile anchor-clear, `Engine::discard_anchor_state` (`take_current` +
-    /// `clear_anchor_classification`), runs through raw `get_mut` and can flip `is_nonsteady` `false
-    /// → true` on a **non-`Active`** Profile (a healthy `Idle` anchor lost via `finalize_anchor_lost`
-    /// with `was_active == false`); on an `Active` Profile it is delta-0 (the predicate ignores the
-    /// anchor while `Active`) and the eventual burst-end `transition_state(Active → Idle)` records
-    /// the edge instead. `before` is [`Profile::is_nonsteady`] sampled by the caller *before* that
-    /// mutation; this reads it after and reconciles.
-    ///
-    /// Idempotent for a stale id — the Profile reaped, so [`Self::detach`] already reconciled. A
-    /// missed reconcile is debug-tripwired, perf-only in release.
-    pub fn reconcile_nonsteady(&mut self, id: ProfileId, before: bool) {
-        let Some(p) = self.profiles.get(id) else {
+    /// Silently no-ops on a stale id — the same policy as `transition_state`'s `None` return; the
+    /// sole caller (`Engine::materialize_profile_anchor`, the descent terminus) operates on an
+    /// owner the probe gate just proved live.
+    pub fn materialize_anchor(&mut self, id: ProfileId, kind: ResourceKind) {
+        let Some(p) = self.profiles.get_mut(id) else {
             return;
         };
+        let before = p.is_nonsteady();
+        p.materialize_anchor(kind);
         let after = p.is_nonsteady();
         self.apply_nonsteady_edge(before, after);
     }
@@ -3463,13 +3488,14 @@ impl ProfileMap {
         self.profiles.is_empty()
     }
 
-    /// Count of Profiles not in [`ProfileState::Idle`] — the operator-facing "in flight" count
-    /// distinct from [`Self::len`] (the total, Idle inclusive). Disjoint from [`Self::nonsteady`]:
-    /// `nonsteady` is the engine's carrier-eligibility predicate (`Pending ∨ (Idle ∧
-    /// anchor-absent)`), whereas this projection is the operator's "doing something right now"
-    /// predicate (`Pending ∨ Active`). A healthy `Idle` with the anchor grafted is uncounted by
-    /// both; a `Pending` is counted by both; an `Active` burst is counted here and excluded from
-    /// `nonsteady` (the burst itself is the dispatch authority — no recovery channel is needed).
+    /// Count of Profiles doing something right now (`Pending ∨ Active`) — the operator-facing "in
+    /// flight" count distinct from [`Self::len`] (the total). Disjoint from [`Self::nonsteady`]:
+    /// `nonsteady` is the engine's carrier-eligibility predicate (`Pending ∨ Parked`), whereas this
+    /// projection is the operator's activity predicate. A healthy `Idle` and a `Parked` Profile are
+    /// both at rest and uncounted here (a park is a stuck state awaiting recovery, not in-flight
+    /// work — `StateLabel::Parked` is its operator surface); a `Pending` is counted by both; an
+    /// `Active` burst is counted here and excluded from `nonsteady` (the burst itself is the
+    /// dispatch authority — no recovery channel is needed).
     ///
     /// O(N) over [`Self::iter`]. Acceptable for v1: `specter status` is operator-paced (single
     /// request, human latency tolerance). A future cached counter belongs on [`ProfileMap`] itself,
@@ -3477,7 +3503,12 @@ impl ProfileMap {
     #[must_use]
     pub fn active_count(&self) -> usize {
         self.iter()
-            .filter(|(_, p)| !matches!(p.state(), ProfileState::Idle))
+            .filter(|(_, p)| {
+                matches!(
+                    p.state(),
+                    ProfileState::Pending(_) | ProfileState::Active(_, _)
+                )
+            })
             .count()
     }
 }
@@ -5349,19 +5380,22 @@ mod tests {
             &mut tree,
             mk_profile(r, cfg(), MAX_SETTLE, SETTLE, NO_EVENTS, None),
         );
-        // A fresh Profile is Idle with the anchor absent ⇒ nonsteady.
+        // A fresh Profile births steady Idle; the descent entry's `transition_state(Pending)`
+        // records the +1.
+        assert_eq!(profiles.nonsteady(), 0, "a fresh Profile births steady");
+        let _ = profiles.transition_state(pid, pending(r));
         assert_eq!(
             profiles.nonsteady(),
             1,
-            "fresh Idle-anchorless Profile counts as nonsteady",
+            "the Idle → Pending push records the carrier edge",
         );
 
-        // Transform Idle → Active(PreFire). The closure consumes the prior by value and computes
-        // the next from it; the auxiliary `R` is threaded back out. Idle(anchorless) → Active is a
-        // nonsteady true → false edge.
+        // Transform Pending → Active(PreFire). The closure consumes the prior by value and computes
+        // the next from it; the auxiliary `R` is threaded back out. Pending → Active is a nonsteady
+        // true → false edge.
         let aux = profiles.map_state(pid, |prior| {
             assert!(
-                matches!(prior, ProfileState::Idle),
+                matches!(prior, ProfileState::Pending(_)),
                 "the closure consumes the prior state by value",
             );
             (active_prefire(), 0xABCD_u32)
@@ -6011,9 +6045,10 @@ mod tests {
         assert_eq!(p.kind(), None);
     }
 
-    /// `debug_assert_anchor_coherent` enforces the residual cross-axis invariant `Pending ⇒
-    /// Unclassified ∧ ¬Held`. The happy path (every shape outside `Pending`, or `Pending` while
-    /// `Unclassified`) is silent; a classified `Pending` trips.
+    /// `debug_assert_anchor_coherent` enforces the residual cross-axis invariant `Pending | Parked
+    /// ⇒ Unclassified ∧ ¬Held`. The happy path (every shape outside `Pending` / `Parked`, or either
+    /// while `Unclassified`) is silent; a classified `Pending` trips (the `Parked` trip is the same
+    /// assert).
     #[test]
     fn anchor_coherent_is_silent_on_reachable_shapes() {
         let mut tree = Tree::new();
@@ -6023,6 +6058,8 @@ mod tests {
         p.debug_assert_anchor_coherent(); // Idle + Unclassified
         p.transition_state(pending(r));
         p.debug_assert_anchor_coherent(); // Pending + Unclassified ✓
+        p.transition_state(ProfileState::Parked);
+        p.debug_assert_anchor_coherent(); // Parked + Unclassified ✓
         p.transition_state(ProfileState::Idle);
         p.install_dir_current(empty_dir_snapshot());
         p.debug_assert_anchor_coherent(); // Idle + classified ✓

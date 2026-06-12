@@ -109,7 +109,7 @@ impl Engine {
         // responsibility for this resource. Descent prefix and watch-root-parent watches both
         // register STRUCTURE-only, so any event reaching here is structurally relevant for both
         // arms — no class filter applies before dispatch. Mutual exclusion is structural (`Pending`
-        // excludes `Idle` at the `ProfileState` sum-type level).
+        // excludes `Parked` at the `ProfileState` sum-type level).
         let carriers = self.classify_event_carriers(resource);
         let descent_count = carriers.descents.len();
         let recovery_count = carriers.recoveries.len();
@@ -117,7 +117,7 @@ impl Engine {
             self.on_descent_event(owner, out);
         }
         for pid in carriers.recoveries.iter().copied() {
-            self.start_pending_recovery(pid, resource, out);
+            self.start_pending_recovery(pid, out);
         }
 
         // Find covering Profiles (anchor or any covering ancestor). For P4 single-Profile this
@@ -214,49 +214,62 @@ impl Engine {
         }
     }
 
-    /// Re-enter pending descent for an Idle Profile whose anchor is currently absent — the
-    /// event-scan arm of [`Self::classify_event_carriers`], triggered by a `StructureChanged` at
-    /// the Profile's `watch_root_parent`.
+    /// Re-enter recovery descent for a [`ProfileState::Parked`] Profile — the single park exit
+    /// every recovery trigger converges on: the event-scan arm of [`Self::classify_event_carriers`]
+    /// (a `StructureChanged` at `watch_root_parent` or at the co-claimed anchor slot),
+    /// `on_sensor_overflow`'s Parked arm, and `attach_sub_inner`'s `ParkedRejoin` re-arm. **Every
+    /// park exit is a descent entry, never a Seed** — the descent terminus is the one place that
+    /// knows how to re-install the claim, the anchor watch, and the parent edge.
+    ///
+    /// **The prefix is re-derived from the Profile, not the trigger.** `watch_root_parent` when
+    /// cached, else `tree.parent(anchor)` (the Tree chain is retained by the anchor back-ref, so
+    /// the parent resolves for every non-root anchor) — so a channel-bearing park, a channel-less
+    /// park reached by an anchor-slot event or an overflow, and a re-attach all enter the same
+    /// single-segment descent. Descent is self-correcting (a probe at a disk-absent prefix answers
+    /// `Vanished` → rewind toward `/`), so any Tree-derived entry is safe; a re-rejected prefix
+    /// watch re-purges to `Parked` — converges, no loop within a step. A root anchor with no parent
+    /// stays parked (degenerate — nothing to descend from).
     ///
     /// **Fallback, not the primary recovery route.** Every *observed* loss (anchor-terminal event,
     /// probe `Vanished`, kind mismatch) re-enters descent inside the loss step itself via
     /// [`Self::finalize_anchor_lost_and_descend`], so this arm never sees those Profiles — they are
-    /// `Pending` before any later parent event can arrive. What still parks Idle-anchorless and
-    /// needs this arm's event luck: the probe-`Failed` discards (transient `EACCES` — the anchor
-    /// typically never left disk; an immediate descent would loop probe → fail tightly) and the
-    /// watch-rejection anchor purge (the kernel refused the watch; descending would loop
-    /// materialize → watch → reject).
+    /// `Pending` before any later trigger can arrive. What parks and needs this arm: the
+    /// probe-`Failed { Anchor }` terminals, the watch-rejection purges, and an observed loss with
+    /// no recovery parent.
     ///
-    /// **The entry event does not latch the descent's appearance witness.** The event that selected
-    /// this Profile into the recoveries arm is a `StructureChanged` at the *parent* — it can be
-    /// sibling churn entirely out of the Sub's scope, and latching it would false-first-fire a
-    /// never-fired Sub whose anchor the entry probe then finds unchanged on disk (the transient
-    /// probe-`Failed` discard is the canonical shape: the anchor typically never left). Fired Subs
-    /// are protected by witness-drift either way. A genuine replacement is witnessed by the probes
-    /// themselves: an entry probe finding the anchor absent records the absence half, and the later
-    /// probe that finds it completes the appearance — descent-wide semantics, not a recovery
-    /// special case. Accepted narrow miss: when the entry probe finds the replacement already
-    /// present (no absence half ever observed), a never-fired Sub misses that one fire.
+    /// **Unwitnessed entry — the trigger does not latch the descent's appearance witness.** The
+    /// selecting event can be sibling churn entirely out of the Sub's scope (and an overflow / a
+    /// re-attach carries no observation at all); latching it would false-first-fire a never-fired
+    /// Sub whose anchor the entry probe then finds unchanged on disk. Fired Subs are protected by
+    /// witness-drift either way. A genuine replacement is witnessed by the probes themselves: an
+    /// entry probe finding the anchor absent records the absence half, and the later probe that
+    /// finds it completes the appearance — descent-wide semantics, not a recovery special case.
+    /// Accepted narrow miss: when the entry probe finds the replacement already present (no absence
+    /// half ever observed), a never-fired Sub misses that one fire.
     ///
-    /// **Recovery overlap.** The parent already holds `+1 STRUCTURE` from
+    /// **Recovery overlap.** A channel-bearing park's parent already holds `+1 STRUCTURE` from
     /// `Profile.watch_root_parent` (set at the original anchor materialization, never cleared on
     /// anchor loss). The helper bumps another `+1` for the descent contribution; the refcount sums
     /// to `+2`. The descent contribution drops at re-materialization while the `watch_root_parent`
     /// contribution persists — see the rustdoc on `enter_pending_descent` for the full lifecycle.
-    fn start_pending_recovery(
-        &mut self,
-        profile_id: ProfileId,
-        parent: ResourceId,
-        out: &mut StepOutput,
-    ) {
+    pub(crate) fn start_pending_recovery(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        let Some(p) = self.profiles.get(profile_id) else {
+            return;
+        };
+        let Some(parent) = p
+            .watch_root_parent()
+            .or_else(|| self.tree.parent(p.resource()))
+        else {
+            return;
+        };
         self.enter_anchor_recovery_descent(profile_id, parent, /* witnessed: */ false, out);
     }
 
-    /// Shared single-segment descent entry for anchor recovery: the anchor's segment becomes the
-    /// sole remaining component and `parent` the descent prefix. Both recovery producers funnel
-    /// here — the event-scan arm ([`Self::start_pending_recovery`], unwitnessed) and the
-    /// observed-loss wrapper ([`Self::finalize_anchor_lost_and_descend`], witnessed) — differing
-    /// only in the latch's birth value.
+    /// Shared single-segment descent entry for anchor recovery: the anchor's segment becomes the sole
+    /// remaining component and `parent` the descent prefix. Both recovery producers funnel here — the
+    /// park exit ([`Self::start_pending_recovery`]: parent / anchor-slot event, overflow, re-attach —
+    /// unwitnessed) and the observed-loss wrapper ([`Self::finalize_anchor_lost_and_descend`],
+    /// witnessed) — differing only in the latch's birth value.
     ///
     /// The early returns are structural no-recovery cases, not races: a reaped Profile has nothing
     /// to recover, and an anchor with no segment name (the FS root) has no parent to descend from.
@@ -632,7 +645,7 @@ impl Engine {
                     !pre.dirty.is_empty() || self.subs.any_fired(profile_id)
                 }
             },
-            ProfileState::Idle | ProfileState::Pending(_) => {
+            ProfileState::Idle | ProfileState::Parked | ProfileState::Pending(_) => {
                 debug_assert!(
                     false,
                     "owes_proof_from: non-Active Profile {profile_id:?} reached the \
@@ -1127,14 +1140,15 @@ impl Engine {
         // watch rejection is EMFILE-rare.
         self.tree.vacate(resource, out);
 
-        // Anchor claimers: synthesise an anchor-loss. Bare `finalize_anchor_lost` — deliberately
-        // not the descend wrapper: the anchor still exists on disk, the *kernel* refused the watch,
-        // so a descent would re-materialize and loop materialize → Watch → reject. The coordinator
+        // Anchor claimers: synthesise an anchor-loss and park. The park wrapper — deliberately not
+        // the descend wrapper: the anchor still exists on disk, the *kernel* refused the watch, so
+        // a descent would re-materialize and loop materialize → Watch → reject. The coordinator
         // cancels any in-flight Active probe, releases the anchor flag (silent no-op on the
-        // post-vacate contributions map), and finishes the burst to Idle. Net Sensor ops match the
-        // pre-vacate accounting.
+        // post-vacate contributions map), finishes the burst, and parks. Net Sensor ops match the
+        // pre-vacate accounting. Recovery: a parent / anchor-slot event, an overflow's one descent
+        // attempt (re-trying the watch the kernel may now accept), or an operator re-attach.
         for pid in anchor_claimers {
-            self.finalize_anchor_lost(pid, out);
+            self.finalize_anchor_lost_and_park(pid, out);
             out.diagnostics.push(Diagnostic::ProfileClaimPurged {
                 profile: pid,
                 claim: ClaimKind::Anchor,
@@ -1162,7 +1176,7 @@ impl Engine {
         // transitions out of Pending and drop with `StaleProbeResponse` — wasted I/O.
         for pid in descent_claimers {
             self.cancel_owner_probe(pid, out);
-            self.release_descent_prefix_claim(pid, out);
+            self.release_descent_prefix_claim(pid, ParkNarration::Operational, out);
             out.diagnostics.push(Diagnostic::ProfileClaimPurged {
                 profile: pid,
                 claim: ClaimKind::DescentPrefix,
@@ -1199,6 +1213,10 @@ impl Engine {
     ///   When a probe is already in flight, [`Engine::on_descent_event`] latches a re-probe-owed
     ///   debt instead of dropping the overflow — the in-flight walk may predate the overflow
     ///   window, so the response dispatch repays it with a probe that reads the post-overflow tree.
+    /// - **`Parked`** — one recovery-descent attempt via [`Engine::start_pending_recovery`]
+    ///   (channel-less parks included: the prefix re-derives from the Tree). Never a re-Seed — a
+    ///   park has no anchor to probe; the cold Seed the Idle arm runs would fabricate a baseline
+    ///   for a tree the Profile no longer observes, closing the recovery channel forever.
     ///
     /// # Scope
     ///
@@ -1312,6 +1330,16 @@ impl Engine {
                     // with the Idle/Active arms; the step's SensorOverflow diagnostic covers it.
                     self.on_descent_event(pid, out);
                 }
+                ProfileState::Parked => {
+                    // One recovery-descent attempt per overflow — including channel-less parks: the
+                    // purge's no-descend rationale is about *immediate* re-descent at purge time,
+                    // while an overflow is a later, externally-paced signal, so re-trying the
+                    // prefix watch the kernel may now accept is bounded by overflow rate, not a
+                    // tight loop. The entry derives the prefix from `watch_root_parent` or the
+                    // Tree; a re-rejected watch re-purges to Parked — converges. A root anchor with
+                    // no parent stays parked (degenerate).
+                    self.start_pending_recovery(pid, out);
+                }
             }
         }
 
@@ -1406,9 +1434,11 @@ impl Engine {
             ProfileState::Active(ActiveBurst::PreFire(_), _) => {
                 self.event_drives_batching(profile_id, event_resource, event_path, now, out);
             }
-            // Pending Profiles never reach here — `covering_profiles` filters them at the source.
-            // Defensive no-op.
-            ProfileState::Pending(_) => {}
+            // Pending and Parked Profiles never reach here — `covering_profiles` filters both at
+            // the source (a parked anchor's slot can stay kernel-watched through a co-claimer's FD,
+            // so the filter is load-bearing routing, not belt-and-braces; events at a parked anchor
+            // route to the recovery arm instead). Defensive no-ops.
+            ProfileState::Pending(_) | ProfileState::Parked => {}
         }
     }
 
@@ -1450,17 +1480,19 @@ impl Engine {
     /// `watch_demand` contribution, drop the stale `baseline` / `current` snapshots, and finish the
     /// burst to Idle if Active.
     ///
-    /// **The single anchor-loss coordinator.** Every loss route funnels here: the five observed-loss
-    /// sites through [`Self::finalize_anchor_lost_and_descend`] (which re-enters descent after this
-    /// returns), the three probe-`Failed` dispatches and `on_watch_op_rejected`'s anchor purge
-    /// directly (no descent — their failure modes would loop it). The probe-dispatch callers reach
-    /// this with their slot already disarmed (`take_owner_probe` ran before dispatch), so the
-    /// `cancel_owner_probe` below is a no-op there — no wire Cancel; for the event/rejection routes
-    /// it cancels a genuinely in-flight Verifying/Rebasing probe.
+    /// **The single anchor-loss coordinator, reachable only through the two loss wrappers.** Every
+    /// loss route funnels here: the five observed-loss sites through
+    /// [`Self::finalize_anchor_lost_and_descend`] (which re-enters descent after this returns), the
+    /// three probe-`Failed` dispatches and `on_watch_op_rejected`'s anchor purge through
+    /// [`Self::finalize_anchor_lost_and_park`] (no descent — their failure modes would loop it; the
+    /// park is the honest terminal). The probe-dispatch callers reach this with their slot already
+    /// disarmed (`take_owner_probe` ran before dispatch), so the `cancel_owner_probe` below is a
+    /// no-op there — no wire Cancel; for the event/rejection routes it cancels a genuinely
+    /// in-flight Verifying/Rebasing probe.
     ///
     /// **`watch_root_parent` is intentionally preserved.** It is both the descent prefix the
-    /// observed-loss wrapper re-enters against immediately, and — for the bare-finalize callers —
-    /// the channel through which a later parent `StructureChanged` re-enters descent
+    /// observed-loss wrapper re-enters against immediately, and — for the parked terminals — the
+    /// channel through which a later parent `StructureChanged` re-enters descent
     /// (`start_pending_recovery`); releasing it here would close recovery in both shapes. The
     /// contribution is released only when the Profile itself reaps (`reap_profile` →
     /// `release_watch_root_parent_claim`). Sibling helpers — anchor, descendants, descent prefix —
@@ -1473,18 +1505,20 @@ impl Engine {
     /// post-`finish` release would then see an absent contribution and silently no-op — correct but
     /// redundant. The "release-then-finish" ordering keeps the cleanup ordered.
     ///
-    /// **Pending exclusion.** `ProfileState::Pending` is defensive on the FsEvent route
-    /// (`covering_profiles` filters Pending Profiles at the source) and vacuous on the
-    /// probe-dispatch routes (`profile_probe_gate` proves `Active(Verifying | Rebasing)`).
-    /// `on_watch_op_rejected` calls this directly after iterating the full registry, where the
-    /// guard does load-bearing work: a Pending Profile holds no anchor (it is still descending
-    /// toward one) — anchor-loss finalization does not apply to it, and its descent-prefix watch
-    /// rejection is handled separately as a descent-prefix claim purge.
-    pub(crate) fn finalize_anchor_lost(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+    /// **Pending / Parked exclusion.** `ProfileState::Pending` is defensive on the FsEvent route
+    /// (`covering_profiles` filters Pending Profiles at the source) and vacuous on the probe-dispatch
+    /// routes (`profile_probe_gate` proves `Active(Verifying | Rebasing)`). `on_watch_op_rejected`
+    /// reaches this through its wrapper after iterating the full registry, where the guard does
+    /// load-bearing work: a Pending Profile holds no anchor (it is still descending toward one) —
+    /// anchor-loss finalization does not apply to it, and its descent-prefix watch rejection is
+    /// handled separately as a descent-prefix claim purge. `Parked` joins the guard for idempotence:
+    /// a second loss signal against an already-parked Profile (e.g. a watch rejection racing a probe
+    /// failure) must not re-discard or double-narrate.
+    fn finalize_anchor_lost(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let Some(p) = self.profiles.get(profile_id) else {
             return;
         };
-        if matches!(p.state(), ProfileState::Pending(_)) {
+        if matches!(p.state(), ProfileState::Pending(_) | ProfileState::Parked) {
             return;
         }
         // Capture `was_active` BEFORE discard_anchor_state. The helper does not mutate
@@ -1518,18 +1552,17 @@ impl Engine {
     /// "Anchor lost" and "anchor doesn't yet exist" are the same state: Resource identity is
     /// `(parent, segment)` and survives delete-and-recreate, so an observed loss re-enters the same
     /// descent a not-yet-existing attach runs, and operators see an honest `Pending`. Descending
-    /// immediately — rather than parking Idle-anchorless and betting on a *future*
-    /// `watch_root_parent` event — is what kills the two atomic-save races: the loss signal
-    /// postdates the rename, so the descent probe reads post-rename truth (a parent event that
-    /// *preceded* the terminal can no longer strand the Profile), and there is no anchorless window
-    /// in which the next save's early tmp-create event could re-capture the dying inode.
+    /// immediately — rather than parking and betting on a *future* `watch_root_parent` event — is
+    /// what kills the two atomic-save races: the loss signal postdates the rename, so the descent
+    /// probe reads post-rename truth (a parent event that *preceded* the terminal can no longer
+    /// strand the Profile), and there is no anchorless window in which the next save's early
+    /// tmp-create event could re-capture the dying inode.
     ///
     /// Callers are the five observed-loss sites: the anchor-terminal event path, the kind-mismatch
     /// certifier arm, and the three probe-`Vanished` dispatches. The three probe-`Failed`
-    /// dispatches and `on_watch_op_rejected`'s anchor purge stay on bare
-    /// [`Self::finalize_anchor_lost`] — descending there would loop tightly (probe → fail;
-    /// materialize → watch → reject) against a condition the descent cannot fix; those Profiles
-    /// keep the event-scan re-entry ([`Self::start_pending_recovery`]).
+    /// dispatches and `on_watch_op_rejected`'s anchor purge take the sibling wrapper
+    /// [`Self::finalize_anchor_lost_and_park`] — descending there would loop tightly (probe → fail;
+    /// materialize → watch → reject) against a condition the descent cannot fix.
     fn finalize_anchor_lost_and_descend(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         self.finalize_anchor_lost(profile_id, out);
         // `finish_burst_to_idle` may have honoured a deferred reap (`BurstFinish::Reap`); a reaped
@@ -1538,19 +1571,82 @@ impl Engine {
             return;
         };
         // Post-finalize the Profile is Idle-anchorless on every reachable path (finalize returns
-        // early on `Pending` and never constructs it). The guard is the recoveries-arm predicate
-        // verbatim, kept as a structural backstop rather than an assert: a non-Idle or still-anchored
-        // Profile here means finalize declined, and descending would tear live state.
+        // early on `Pending` / `Parked` and never constructs either). The guard is a structural
+        // backstop rather than an assert: a non-Idle or still-anchored Profile here means finalize
+        // declined, and descending would tear live state.
         if !matches!(p.state(), ProfileState::Idle) || p.current_is_some() {
             return;
         }
         // The recovery channel, NOT `tree.parent(anchor)`: `None` only after a parent-watch
-        // rejection purge, where a descent would loop materialize → watch → reject — stay latent
-        // (operator restart is the documented recovery there).
+        // rejection purge, where a descent would loop materialize → watch → reject. Park explicitly
+        // — the honest state label; recovery comes from the channel-less park's own doors (a sensor
+        // overflow re-deriving the parent from the Tree, an operator re-attach, detach).
         let Some(parent) = p.watch_root_parent() else {
+            self.park_profile(profile_id, ParkNarration::Operational, out);
             return;
         };
         self.enter_anchor_recovery_descent(profile_id, parent, /* witnessed: */ true, out);
+    }
+
+    /// Unhealable-loss terminal: [`Self::finalize_anchor_lost`], then park. The wrapper for the
+    /// loss routes where an immediate descent would tight-loop against a condition descent cannot
+    /// fix — the three probe-`Failed { Anchor }` dispatches (path-fatal `EACCES`/`ELOOP`/`EIO`: the
+    /// anchor typically never left disk, so probe → fail repeats) and `on_watch_op_rejected`'s
+    /// anchor purge (the kernel refused the watch, so materialize → Watch → reject repeats).
+    ///
+    /// The park is the typed home of "anchorless, awaiting recovery or operator action": the
+    /// Profile leaves every burst-routing surface (`covering_profiles` filters `Parked`) and gains
+    /// the recovery doors — a `StructureChanged` at `watch_root_parent` or at the co-claimed anchor
+    /// slot, a sensor overflow, an operator re-attach — each re-entering descent, never a Seed.
+    fn finalize_anchor_lost_and_park(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
+        self.finalize_anchor_lost(profile_id, out);
+        // A reaped Profile has nothing to park; a non-Idle or still-anchored Profile means finalize
+        // declined (already Pending / Parked, the idempotence guard) — same backstop as the descend
+        // wrapper.
+        let Some(p) = self.profiles.get(profile_id) else {
+            return;
+        };
+        if !matches!(p.state(), ProfileState::Idle) || p.current_is_some() {
+            return;
+        }
+        self.park_profile(profile_id, ParkNarration::Operational, out);
+    }
+
+    /// The single `Parked` writer — every park entry (the two loss wrappers' park arms and
+    /// [`Self::release_descent_prefix_claim`]'s descent teardown) routes the state write through
+    /// here. Transitions through the `ProfileMap` chokepoint (counting the carrier edge; the
+    /// dropped prior is `Idle` or a disarmed `Pending` descent — `ProbeSlot`'s Drop tripwire
+    /// enforces cancel-first at the discard itself), asserts the park's anchor coherence (`Parked ⇒
+    /// Unclassified ∧ AnchorClaim::None`), and narrates.
+    ///
+    /// `narration` keeps the operator stream honest in both directions: every *operational* park
+    /// emits exactly one [`Diagnostic::ProfileParked`] (carrying the recovery channel, so a debug
+    /// tail shows whether auto-recovery is possible), while a park that is part of the Profile's
+    /// own teardown in the same step ([`Engine::reap_profile`]'s descent release) is silent — a
+    /// Profile detached in the same step must not log as parked.
+    pub(crate) fn park_profile(
+        &mut self,
+        profile_id: ProfileId,
+        narration: ParkNarration,
+        out: &mut StepOutput,
+    ) {
+        if self
+            .profiles
+            .transition_state(profile_id, ProfileState::Parked)
+            .is_none()
+        {
+            return;
+        }
+        let Some(p) = self.profiles.get(profile_id) else {
+            return;
+        };
+        p.debug_assert_anchor_coherent();
+        if matches!(narration, ParkNarration::Operational) {
+            out.diagnostics.push(Diagnostic::ProfileParked {
+                profile: profile_id,
+                recovery: p.watch_root_parent(),
+            });
+        }
     }
 
     /// Emit [`Diagnostic::PerFileDriftDroppedOnRecovery`] iff a live survival witness exists, the
@@ -2126,11 +2222,12 @@ impl Engine {
     /// epistemic events and take different consequences:
     ///
     /// - [`ProbeFailure::Anchor`] — path-fatal at the anchor root (`EACCES` / `ELOOP` / `ENOTDIR` /
-    ///   `EIO`). The anchor's *identity* is in question, so release its `watch_demand` via bare
-    ///   [`Self::finalize_anchor_lost`], **not** the descend wrapper: a read error against an
-    ///   anchor that typically still exists on disk (a chmod-000 chain) would loop probe → fail
-    ///   tightly if descended. The Profile parks Idle-anchorless and the event-scan arm
-    ///   ([`Self::start_pending_recovery`]) retries on the parent's next `StructureChanged`.
+    ///   `EIO`). The anchor's *identity* is in question, so release its `watch_demand` via
+    ///   [`Self::finalize_anchor_lost_and_park`], **not** the descend wrapper: a read error against
+    ///   an anchor that typically still exists on disk (a chmod-000 chain) would loop probe → fail
+    ///   tightly if descended. The Profile parks and the recovery arm
+    ///   ([`Self::start_pending_recovery`]) retries on the parent's (or co-claimed anchor slot's)
+    ///   next event, an overflow, or a re-attach.
     /// - [`ProbeFailure::Transient`] — FD / kernel-resource pressure (`EMFILE` / `ENFILE` /
     ///   `ENOSPC` / `EAGAIN`). The probe observed *nothing* — it says nothing about the anchor's
     ///   identity, so tearing the anchor down (the old uniform-`Failed` behaviour) discarded a
@@ -2160,7 +2257,7 @@ impl Engine {
             failure,
         });
         match failure {
-            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost(profile_id, out),
+            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
             ProbeFailure::Transient { .. } if forced => self.finish_burst_to_idle(profile_id, out),
             ProbeFailure::Transient { .. } => self.retry_drives_batching(profile_id, now, out),
         }
@@ -2191,8 +2288,8 @@ impl Engine {
     }
 
     /// (Standard, Failed). Identical to [`Self::dispatch_seed_failed`] modulo the diagnostic
-    /// `intent`: `Anchor` releases the anchor via bare [`Self::finalize_anchor_lost`] (no descent —
-    /// the tight-loop rationale on `dispatch_seed_failed`); `Transient` mirrors the `Undischarged`
+    /// `intent`: `Anchor` parks via [`Self::finalize_anchor_lost_and_park`] (no descent — the
+    /// tight-loop rationale on `dispatch_seed_failed`); `Transient` mirrors the `Undischarged`
     /// consequence — [`Self::retry_drives_batching`] while `!forced`, finish-to-Idle once forced,
     /// the anchor watch and baseline retained throughout. See `dispatch_seed_failed` for the full
     /// reasoning.
@@ -2213,7 +2310,7 @@ impl Engine {
             failure,
         });
         match failure {
-            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost(profile_id, out),
+            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
             ProbeFailure::Transient { .. } if forced => self.finish_burst_to_idle(profile_id, out),
             ProbeFailure::Transient { .. } => self.retry_drives_batching(profile_id, now, out),
         }
@@ -2403,8 +2500,8 @@ impl Engine {
     }
 
     /// (Rebase, Failed). Probe failed at the anchor between fire and rebase — the post-fire mirror of
-    /// [`Self::dispatch_seed_failed`]. `Anchor` releases anchor via [`Self::finalize_anchor_lost`]
-    /// (no descent — the tight-loop rationale on `dispatch_seed_failed`). `Transient` mirrors the
+    /// [`Self::dispatch_seed_failed`]. `Anchor` parks via [`Self::finalize_anchor_lost_and_park`] (no
+    /// descent — the tight-loop rationale on `dispatch_seed_failed`). `Transient` mirrors the
     /// post-fire `Undischarged` consequence: settle-space the next sample through `Rebasing →
     /// Settling` ([`Self::transition_to_settling`]) while the `RebaseCeiling` holds (`!forced`), or
     /// finish to Idle once it forces — the prior baseline **frozen** in place, never rebased blind
@@ -2429,7 +2526,7 @@ impl Engine {
             failure,
         });
         match failure {
-            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost(profile_id, out),
+            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
             ProbeFailure::Transient { .. } if forced => self.finish_burst_to_idle(profile_id, out),
             ProbeFailure::Transient { .. } => self.transition_to_settling(profile_id, now, out),
         }
@@ -2464,7 +2561,7 @@ impl Engine {
                 );
                 pre.intent
             }
-            ProfileState::Idle | ProfileState::Pending(_) => {
+            ProfileState::Idle | ProfileState::Parked | ProfileState::Pending(_) => {
                 debug_assert!(
                     false,
                     "rebase_burst_intent: non-Active Profile {profile_id:?} \
@@ -3007,12 +3104,15 @@ impl Engine {
     /// - **Descent** ([`ProfileId`]): Profiles currently descending whose
     ///   `DescentState.current_prefix() == resource` (`ProfileState::Pending(d)`). Each descent
     ///   owner gets a fresh probe via [`Engine::on_descent_event`].
-    /// - **Recovery** ([`ProfileId`]): `Idle` Profiles whose `watch_root_parent == Some(resource)`
-    ///   and whose anchor is currently absent (`current.is_none()`).
-    ///   [`Engine::start_pending_recovery`] re-enters pending descent. This is the probe-`Failed` /
-    ///   watch-rejection fallback only: an *observed* loss re-enters descent inside the loss step
-    ///   itself (`finalize_anchor_lost_and_descend`) and is `Pending` — the descents arm — before
-    ///   any later parent event can select it here.
+    /// - **Recovery** ([`ProfileId`]): `Parked` Profiles whose `watch_root_parent == Some(resource)`
+    ///   **or** whose own anchor slot is `resource` (alive only via a co-claimer's FD — another
+    ///   Profile's parent claim, a co-anchored Profile, a descent prefix; a free, legitimate recovery
+    ///   signal). [`Engine::start_pending_recovery`] re-enters recovery descent. With `Parked`
+    ///   filtered out of `covering_profiles`, this arm is the *only* consumer of events at a parked
+    ///   anchor's slot, so the park's fate no longer depends on which event type arrives first. This
+    ///   is the probe-`Failed` / watch-rejection fallback only: an *observed* loss re-enters descent
+    ///   inside the loss step itself (`finalize_anchor_lost_and_descend`) and is `Pending` — the
+    ///   descents arm — before any later parent event can select it here.
     ///
     /// **O(1) carrier gate.** The scan body is O(profiles), but under a sustained storm every
     /// Profile is in a steady `Active` burst, so it iterates the full registry only to return
@@ -3021,17 +3121,17 @@ impl Engine {
     /// scan is provably empty and skipped in O(1) — the keeps-up-storm win an operator feels as the
     /// daemon no longer pegging a core during a build.
     ///
-    /// The count is over a pure state(+anchor) bucket, deliberately *not* the per-resource index a
-    /// naïve reading invites. The recovery predicate couples multiple fields (`state` +
-    /// `watch_root_parent` + anchor presence), and [`Profile::materialize_anchor`] writes `state`
-    /// outside the [`specter_core::ProfileMap::transition_state`] chokepoint — a state-keyed index
-    /// silently desyncs at that bypass. The bucket instead over-approximates to a single-field-ish
-    /// predicate that is invariant under the bypass by construction (`Pending` and anchorless
-    /// `Idle` are the same counted bucket) and sound (every true carrier is counted), so a zero
-    /// gate is never a false skip; it is also *tight* — a healthy anchored `Idle` Profile is
-    /// excluded, so a quiet watcher coexisting with a storm does not defeat the gate. A
-    /// `#[cfg(debug_assertions)]` full recount tripwire below pins each maintained count every
-    /// call; release pays only the O(1) compare.
+    /// The count is over the pure state bucket `Pending ∨ Parked`, deliberately *not* the
+    /// per-resource index a naïve reading invites: the carrier predicates key on per-Profile fields
+    /// (`current_prefix`, `watch_root_parent`, the anchor slot), so a resource-keyed index would
+    /// have to be rewritten at every descent advance and park edge. The bucket instead
+    /// over-approximates to the state predicate — sound (every true carrier is `Pending` or
+    /// `Parked`, so a zero gate is never a false skip; a channel-less park over-counts harmlessly)
+    /// and *tight* where it matters: a healthy anchored `Idle` Profile and a steady `Active` burst
+    /// are excluded, so a quiet watcher coexisting with a storm does not defeat the gate. Every
+    /// membership edge flows through the `ProfileMap` state chokepoints (`transition_state` /
+    /// `map_state` / `materialize_anchor`). A `#[cfg(debug_assertions)]` full recount tripwire
+    /// below pins each maintained count every call; release pays only the O(1) compare.
     fn classify_event_carriers(&self, resource: ResourceId) -> EventCarriers {
         #[cfg(debug_assertions)]
         {
@@ -3053,28 +3153,47 @@ impl Engine {
                 ProfileState::Pending(d) if d.current_prefix() == resource => {
                     out.descents.push(pid);
                 }
-                ProfileState::Idle
-                    if p.watch_root_parent() == Some(resource) && !p.current_is_some() =>
+                ProfileState::Parked
+                    if p.watch_root_parent() == Some(resource) || p.resource() == resource =>
                 {
                     out.recoveries.push(pid);
                 }
-                ProfileState::Pending(_) | ProfileState::Idle | ProfileState::Active(_, _) => {}
+                ProfileState::Pending(_)
+                | ProfileState::Parked
+                | ProfileState::Idle
+                | ProfileState::Active(_, _) => {}
             }
         }
         out
     }
 }
 
+/// Whether a park entry narrates. Threaded into [`Engine::park_profile`] (and through
+/// [`Engine::release_descent_prefix_claim`], whose teardown caller must stay silent):
+///
+/// - [`Self::Operational`] — the park is the step's outcome; emit [`Diagnostic::ProfileParked`].
+///   The loss wrappers' park arms, the watch-rejection descent purge, the root-vanish abandon, and
+///   the walker-contract descent abandon all narrate.
+/// - [`Self::Teardown`] — the park is an internal stop on the way to reap within the same step
+///   ([`Engine::reap_profile`]'s descent release); the reap narrates instead, so a parked line for
+///   a Profile that no longer exists would only mislead.
+#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+pub(crate) enum ParkNarration {
+    Operational,
+    Teardown,
+}
+
 /// Per-resource dispatch fan-out collected by [`Engine::classify_event_carriers`]. The SmallVec
 /// inline caps of 2 cover the typical "shared scaffold" case (two Subs anchored at sibling children
 /// of one parent) without a heap allocation.
 ///
-/// `descents` (via `current_prefix`) and `recoveries` (via `watch_root_parent`) are honest parallel
-/// fields: the entry helpers genuinely differ ([`Engine::on_descent_event`] re-probes a live
-/// descent; `start_pending_recovery` asserts an `Idle` Profile and re-enters descent), so a merged
-/// list would only force a match-dispatch back into the two distinct helpers. After an observed
-/// loss the same Profile moves from the recoveries class to the descents class within the loss step
-/// itself — only probe-`Failed` / watch-rejection Profiles linger in the recoveries class.
+/// `descents` (via `current_prefix`) and `recoveries` (`Parked`, via `watch_root_parent` or the
+/// co-claimed anchor slot) are honest parallel fields: the entry helpers genuinely differ
+/// ([`Engine::on_descent_event`] re-probes a live descent; `start_pending_recovery` re-enters
+/// descent from the park), so a merged list would only force a match-dispatch back into the two
+/// distinct helpers. After an observed loss the same Profile moves from the recoveries class to the
+/// descents class within the loss step itself — only probe-`Failed` / watch-rejection Profiles
+/// linger in the recoveries class.
 struct EventCarriers {
     descents: SmallVec<[ProfileId; 2]>,
     recoveries: SmallVec<[ProfileId; 2]>,

@@ -72,6 +72,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::PendingPathAwaitingSegment { at, .. }
         | WireDiagnostic::ReapPendingCancelled { at, .. }
         | WireDiagnostic::ProfileReaped { at, .. }
+        | WireDiagnostic::ProfileParked { at, .. }
         | WireDiagnostic::ProfileClaimPurged { at, .. }
         | WireDiagnostic::AttachPathInvalid { at, .. }
         | WireDiagnostic::AttachResourceStale { at, .. }
@@ -154,6 +155,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::WatchOpRejected { .. }
         | W::PendingPathProbeVanished { .. }
         | W::PendingPathProbeFailed { .. }
+        | W::ProfileParked { .. }
         | W::ProfileClaimPurged { .. }
         | W::AttachResourceStale { .. }
         | W::SpliceCrossedUncovered { .. }
@@ -326,6 +328,16 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         WireDiagnostic::ProfileReaped { profile, via, .. } => {
             field(out, sty, "profile", profile.0);
             field(out, sty, "via", via);
+        }
+        WireDiagnostic::ProfileParked {
+            profile, recovery, ..
+        } => {
+            field(out, sty, "profile", profile.0);
+            // A channel-less park omits the field — mirrors `SubAttached.minted_by`'s
+            // present-iff-meaningful shape.
+            if let Some(parent) = recovery {
+                field(out, sty, "recovery", parent.0);
+            }
         }
         WireDiagnostic::ProfileClaimPurged {
             profile,
@@ -779,6 +791,10 @@ mod tests {
             }
             "profile_reaped" => {
                 json!({"diag": tag, "at": at, "profile": id, "via": "immediate"})
+            }
+            // `recovery: Some(..)` so the optional field renders (a channel-less park omits it).
+            "profile_parked" => {
+                json!({"diag": tag, "at": at, "profile": id, "recovery": id})
             }
             "profile_claim_purged" => json!({
                 "diag": tag, "at": at, "profile": id, "claim": "anchor",

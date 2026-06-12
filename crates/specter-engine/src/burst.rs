@@ -279,6 +279,17 @@ impl Engine {
         if !self.require_idle(profile_id, BurstHelper::StartSeedBurst, out) {
             return;
         }
+        // Every legitimate Idle entry holds the anchor claim: `bootstrap_immediate` and the descent
+        // terminus install it before seeding, and a burst-end Idle never released it. An anchorless
+        // Profile is `Parked` (which `require_idle` rejected above), so a claim-less Profile here
+        // is a consumer that re-derived "which Idle?" wrongly — the next forgotten consumer trips
+        // in CI instead of fabricating a baseline.
+        debug_assert!(
+            self.profiles
+                .get(profile_id)
+                .is_some_and(|p| matches!(p.anchor_claim(), specter_core::AnchorClaim::Held)),
+            "start_seed_burst: Idle entry without the anchor claim (profile = {profile_id:?})",
+        );
         // Re-borrow for captures; the precondition has already confirmed the Profile is live + Idle.
         let Some(p) = self.profiles.get(profile_id) else {
             return;
@@ -1590,7 +1601,8 @@ mod tests {
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
     /// Build an Engine with a single Profile anchored at `/anchor`. Returns the Engine + the
-    /// `ProfileId`.
+    /// `ProfileId`. The anchor claim is installed as `bootstrap_immediate` would — the burst
+    /// helpers' Idle entries assert it (an anchorless rest is `Parked`, never a burst entry).
     fn engine_with_profile() -> (Engine, specter_core::ProfileId) {
         let mut e = Engine::new();
         let r = e.tree.ensure_root("/anchor", ResourceRole::User);
@@ -1608,6 +1620,10 @@ mod tests {
                 None,
             ),
         );
+        e.profiles
+            .get_mut(pid)
+            .expect("freshly attached")
+            .install_anchor_claim_held();
         (e, pid)
     }
 

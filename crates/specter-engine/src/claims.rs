@@ -28,8 +28,9 @@
 use crate::Engine;
 use crate::reconcile::apply_diff_to_tree;
 use crate::refcounts::{sub_watch, sub_watch_then_try_reap};
+use crate::transitions::ParkNarration;
 use specter_core::{
-    AnchorClaim, ContribKey, DescentState, Diff, ProfileId, ProfileState, StepOutput, TreeSnapshot,
+    AnchorClaim, ContribKey, DescentState, Diff, ProfileId, StepOutput, TreeSnapshot,
 };
 
 impl Engine {
@@ -83,29 +84,39 @@ impl Engine {
         sub_watch_then_try_reap(&mut self.tree, parent, ContribKey::ProfileParent(pid), out);
     }
 
-    /// Release the Profile's descent prefix `watch_demand` contribution if `Pending`. Transitions the
-    /// Profile to `Idle`. Idempotent (non-Pending ⇒ no-op); safe in any counter state. Calls
-    /// `try_reap` on the prefix slot — with this Profile's [`ContribKey::ProfileDescent`] just
-    /// removed, the slot reaps unless something else still claims it (most often a child slot in the
-    /// descent chain toward the anchor, or another descent's contribution at the shared prefix). The
-    /// prefix's role tag (`DescentScaffold` from initial `ensure_path`, or `User` / `WatchRootParent`
-    /// if a peer Profile previously promoted it) is metadata; it does not affect this reap.
+    /// Release the Profile's descent prefix `watch_demand` contribution if `Pending`. Parks the
+    /// Profile through [`Engine::park_profile`] — a torn-down descent is an anchorless terminal,
+    /// and the park's typed state keeps every `Idle` consumer (overflow re-Seed, attach join, burst
+    /// routing) from mistaking it for a healthy rest; `narration` distinguishes the operational
+    /// teardowns (watch rejection, root-vanish abandon, walker-contract abandon — each narrating
+    /// one [`specter_core::Diagnostic::ProfileParked`] inside the helper, so the three callers
+    /// cannot drift apart) from `reap_profile`'s same-step teardown (silent — the reap narrates
+    /// instead). Idempotent (non-Pending ⇒ no-op); safe in any counter state. Calls `try_reap` on
+    /// the prefix slot — with this Profile's [`ContribKey::ProfileDescent`] just removed, the slot
+    /// reaps unless something else still claims it (most often a child slot in the descent chain
+    /// toward the anchor, or another descent's contribution at the shared prefix). The prefix's
+    /// role tag (`DescentScaffold` from initial `ensure_path`, or `User` / `WatchRootParent` if a
+    /// peer Profile previously promoted it) is metadata; it does not affect this reap.
     ///
     /// **Cancel-first contract.** Callers that may have an in-flight probe (e.g., `reap_profile`,
     /// `on_watch_op_rejected` descent purge) MUST invoke [`Engine::cancel_owner_probe`] before this
-    /// helper. `ProbeSlot`'s Drop tripwire enforces this structurally: the
-    /// `transition_state(ProfileState::Idle)` below drops the prior `Pending(DescentState)`, and an
-    /// armed descent slot reaching that drop panics in every build — its orphaned correlation would
-    /// otherwise stale-detect its own response. The discard *is* the enforcement site; no local
-    /// witness is needed.
-    pub(crate) fn release_descent_prefix_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
+    /// helper. `ProbeSlot`'s Drop tripwire enforces this structurally: the park transition below
+    /// drops the prior `Pending(DescentState)`, and an armed descent slot reaching that drop panics
+    /// in every build — its orphaned correlation would otherwise stale-detect its own response. The
+    /// discard *is* the enforcement site; no local witness is needed.
+    pub(crate) fn release_descent_prefix_claim(
+        &mut self,
+        pid: ProfileId,
+        narration: ParkNarration,
+        out: &mut StepOutput,
+    ) {
         let Some(prefix) = self.descent_state(pid).map(DescentState::current_prefix) else {
             return;
         };
 
-        // The cancel-first contract is enforced here: discarding the returned prior drops the
+        // The cancel-first contract is enforced here: the park's transition drops the prior
         // `Pending(DescentState)`; an armed descent slot trips `ProbeSlot`'s Drop tripwire.
-        self.profiles.transition_state(pid, ProfileState::Idle);
+        self.park_profile(pid, narration, out);
 
         sub_watch_then_try_reap(&mut self.tree, prefix, ContribKey::ProfileDescent(pid), out);
     }
@@ -176,13 +187,13 @@ impl Engine {
         }
     }
 
-    /// Discard every anchor-derived state when the anchor is lost or kernel-rejected. The Profile
-    /// transitions to "Idle without anchor": no claim, no snapshot, no cached kind. Recovery is a
-    /// descent at [`specter_core::Profile::watch_root_parent`] ending in
-    /// `Engine::dispatch_descent_ok`'s anchor branch (which re-classifies `kind` from the parent's
-    /// directory listing) — entered immediately by the observed-loss coordinator's descend wrapper
+    /// Discard every anchor-derived state when the anchor is lost or kernel-rejected: no claim, no
+    /// snapshot, no cached kind. Recovery is a descent at
+    /// [`specter_core::Profile::watch_root_parent`] ending in `Engine::dispatch_descent_ok`'s
+    /// anchor branch (which re-classifies `kind` from the parent's directory listing) — entered
+    /// immediately by the observed-loss coordinator's descend wrapper
     /// (`Engine::finalize_anchor_lost_and_descend`), or, for the probe-`Failed` / watch-rejection
-    /// discards that leave the Profile parked here, by the parent's next `StructureChanged` →
+    /// terminals that park (`Engine::finalize_anchor_lost_and_park`), by a later recovery trigger →
     /// `Engine::start_pending_recovery`.
     ///
     /// **Cleared.**
@@ -257,14 +268,10 @@ impl Engine {
     /// classification would be wasted on a struct about to drop; see `reap_profile`'s rustdoc for
     /// the asymmetry rationale.
     ///
-    /// **Carrier-count reconcile.** `Profile::is_nonsteady` (the O(1) gate's membership predicate)
-    /// reads `state` *and* anchor presence. This coordinator clears the anchor without a `state`
-    /// edge, so on a non-`Active` Profile — a healthy `Idle` anchor lost via `finalize_anchor_lost`
-    /// (`was_active == false`) — it flips `is_nonsteady` `false → true` outside the
-    /// [`specter_core::ProfileMap::transition_state`] chokepoint. The predicate is sampled before
-    /// the clear and reconciled after via [`specter_core::ProfileMap::reconcile_nonsteady`], the
-    /// anchor-edge sibling of that wrapper; on an `Active` Profile the clear is delta-0 and the
-    /// caller's later `finish_burst_to_idle` records the edge.
+    /// **No carrier-count bookkeeping.** `Profile::is_nonsteady` is a pure state predicate
+    /// (`Pending ∨ Parked`); this coordinator writes no `state`, so the anchor clears below cannot
+    /// move the count — the caller's eventual park / descent entry records its own edge through the
+    /// `ProfileMap` chokepoints.
     pub(crate) fn discard_anchor_state(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Order:
         //   1. release_descendant_claim runs first — it `take()`s `current`. The descendant walk
@@ -276,15 +283,6 @@ impl Engine {
         //      `current` None but `settled` intact, so the witness is still available — pure
         //      Profile-state writes, no Tree-side recompute reads them.
         //   3. release_anchor_claim runs last so its recompute walks a fully-cleared Profile.
-        //
-        // Sample `is_nonsteady` BEFORE step 1: `take_current` flips the anchor-presence half of the
-        // predicate there, so a read after the body would already see the post-clear value and miss
-        // the edge. Reconciled after step 3 via the anchor-edge sibling of `transition_state`.
-        let was_nonsteady = self
-            .profiles
-            .get(pid)
-            .map(specter_core::Profile::is_nonsteady);
-
         self.release_descendant_claim(pid, out);
 
         if let Some(p) = self.profiles.get_mut(pid) {
@@ -292,10 +290,6 @@ impl Engine {
         }
 
         self.release_anchor_claim(pid, out);
-
-        if let Some(before) = was_nonsteady {
-            self.profiles.reconcile_nonsteady(pid, before);
-        }
 
         // Coordinator-exit coherence tripwire, symmetric with `Profile::materialize_anchor`'s. The
         // classification collapse above is structural, but a future regression that reordered these
@@ -889,8 +883,8 @@ mod tests {
         assert!(p.baseline().is_none());
         assert!(p.current().is_none());
 
-        // Profile is back to Idle (finish_burst_to_idle ran).
-        assert!(matches!(p.state(), specter_core::ProfileState::Idle));
+        // The purge's loss wrapper finished the burst and parked the anchorless Profile.
+        assert!(matches!(p.state(), specter_core::ProfileState::Parked));
     }
 
     /// `release_anchor_claim` flips a materialised `Held` claim to `None` and is idempotent — a

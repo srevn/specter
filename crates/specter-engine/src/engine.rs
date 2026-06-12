@@ -14,6 +14,7 @@
 use crate::counter::MonotonicCounter;
 use crate::refcounts::add_watch;
 use crate::timer::{TimerEntry, TimerHeap};
+use crate::transitions::ParkNarration;
 // Only the inline test module needs `CompactString` now that `register_sub` moves the request's own
 // (it reaches it via `use super::*`); gating keeps the lib build warning-free.
 #[cfg(test)]
@@ -230,7 +231,7 @@ impl Engine {
     ///    parsing and materialising a `Path`, or liveness-checking a `Resource` — and yields a
     ///    typed [`AnchorResolution`] indicating whether the anchor is materialised (`Immediate`) or
     ///    scaffolded (`Pending`). `find_or_create_profile` then classifies the `(anchor,
-    ///    config_hash)` lookup into a [`ProfileOrigin`] trichotomy.
+    ///    config_hash)` lookup into a [`ProfileOrigin`].
     /// 2. **Sub registration.** `register_sub` consumes the request to mint the [`Sub`] and emit
     ///    [`Diagnostic::SubAttached`] — the single point at which a SubId enters the registry.
     /// 3. **Per-origin bookkeeping.** Existing-Profile arms run their targeted cleanup
@@ -275,9 +276,9 @@ impl Engine {
             req.identity.events(),
         );
 
-        // Phase 1 — Identity resolution. The trichotomy below is the structural source of truth for
-        // "what state is this Profile entering on this attach?". Two predicates are exhaustively
-        // typed rather than derived ambiguously:
+        // Phase 1 — Identity resolution. The origin classification below is the structural source
+        // of truth for "what state is this Profile entering on this attach?". Two predicates are
+        // exhaustively typed rather than derived ambiguously:
         // - "no live Subs on the Profile" is ambiguous against `ZombieRevival` (the prior burst
         //   hasn't released its anchor claim yet) — the origin tells you whether the Sub is the
         //   *first* on the Profile or the *first since reap was deferred*.
@@ -309,6 +310,14 @@ impl Engine {
         match origin {
             ProfileOrigin::ZombieRevival => self.revive_zombie(profile_id, out),
             ProfileOrigin::ExistingJoin => self.join_existing(profile_id, attach_settle),
+            ProfileOrigin::ParkedRejoin => {
+                self.join_existing(profile_id, attach_settle);
+                // An explicit re-attach is the in-band equivalent of the operator restart the
+                // park's no-descend posture defers to — the natural trigger to re-try the kernel
+                // watch, so re-arm recovery descent (channel-less parks re-derive the prefix from
+                // the Tree; a re-rejected watch re-parks, bounded by attach rate).
+                self.start_pending_recovery(profile_id, out);
+            }
             ProfileOrigin::Fresh => match resolved {
                 AnchorResolution::Immediate { anchor } => {
                     self.bootstrap_immediate(profile_id, anchor, now, out);
@@ -588,9 +597,9 @@ impl Engine {
     /// `identity` is taken by value: the `Fresh` arm moves its fields straight into [`Profile::new`]
     /// (no clone); the existing-Profile arms drop it. The canonical hash is computed once here.
     ///
-    /// The slim three-variant enum supersedes the prior `is_fresh_profile + was_zombie` two-read
-    /// pattern: the trichotomy is captured in one read, and downstream branches dispatch on the
-    /// typed origin rather than re-deriving zombie state from `reap_pending`.
+    /// The slim enum supersedes the prior `is_fresh_profile + was_zombie` two-read pattern: the
+    /// classification is captured in one read, and downstream branches dispatch on the typed origin
+    /// rather than re-deriving zombie / parked state from the Profile.
     ///
     /// **Fresh-Profile bookkeeping that lives here.** The anchor's classified kind is read from the
     /// Tree slot and threaded through [`Profile::new`]: `None` for a `DescentScaffold` anchor
@@ -605,15 +614,10 @@ impl Engine {
     ) -> (ProfileId, ProfileOrigin) {
         let cfg_hash = identity.config_hash();
         if let Some(pid) = self.profiles.find(anchor, cfg_hash) {
-            let zombie = self
-                .profiles
-                .get(pid)
-                .and_then(|p| p.state().burst_finish())
-                == Some(BurstFinish::Reap);
-            let origin = if zombie {
-                ProfileOrigin::ZombieRevival
-            } else {
-                ProfileOrigin::ExistingJoin
+            let origin = match self.profiles.get(pid).map(Profile::state) {
+                Some(ProfileState::Active(_, BurstFinish::Reap)) => ProfileOrigin::ZombieRevival,
+                Some(ProfileState::Parked) => ProfileOrigin::ParkedRejoin,
+                _ => ProfileOrigin::ExistingJoin,
             };
             return (pid, origin);
         }
@@ -1007,7 +1011,7 @@ impl Engine {
         // independent; the four helpers touch disjoint state. Code order chosen for readability
         // (1-to-1 prefixed claims first, then the 1-to-N descendant walk, then the remaining 1-to-1
         // claims); any permutation is equally correct.
-        self.release_descent_prefix_claim(profile_id, out);
+        self.release_descent_prefix_claim(profile_id, ParkNarration::Teardown, out);
         self.release_descendant_claim(profile_id, out);
         self.release_anchor_claim(profile_id, out);
         self.release_watch_root_parent_claim(profile_id, out);
@@ -1163,13 +1167,17 @@ pub(crate) fn is_timer_referenced(
         .is_some_and(|live| live == id)
 }
 
-/// Find-or-create-or-revive outcome for `attach_sub_inner`. The three arms drive distinct
-/// downstream bookkeeping:
+/// Find-or-create-or-revive outcome for `attach_sub_inner`. The four arms drive distinct downstream
+/// bookkeeping:
 /// - `Fresh`: brand-new Profile, no prior burst history. Bumps the anchor's `watch_demand`, sets up
 ///   `watch_root_parent`, starts a Seed burst (immediate) or enters Pending descent.
 /// - `ExistingJoin`: Profile is alive with at least one live Sub; the attaching Sub joins the
 ///   existing burst lifecycle (or shares the existing baseline if Idle). Only `Profile.settle` may
 ///   need `min`-recompute.
+/// - `ParkedRejoin`: Profile is [`ProfileState::Parked`] — anchorless, awaiting recovery. The join
+///   bookkeeping runs (settle-min applies) **plus** a recovery-descent re-arm
+///   ([`Engine::start_pending_recovery`]): without it the new Sub would silently inherit the park
+///   and never fire, with a clean attach log.
 /// - `ZombieRevival`: Profile is in [`ProfileState::Active`] with [`BurstFinish::Reap`] (deferred
 ///   reap). Clear the directive via [`ProfileState::clear_active_reap`], emit
 ///   [`Diagnostic::ReapPendingCancelled`], and run the `recompute_profile_settle` the deferred-reap
@@ -1180,6 +1188,7 @@ pub(crate) fn is_timer_referenced(
 enum ProfileOrigin {
     Fresh,
     ExistingJoin,
+    ParkedRejoin,
     ZombieRevival,
 }
 
@@ -2014,7 +2023,9 @@ mod tests {
     fn run_quartet_permutation(perm: [usize; 4]) -> QuartetFinalState {
         let (mut e, pid, anchor, parent) = build_materialised_profile_for_permutation();
         let releases: [fn(&mut Engine, ProfileId, &mut StepOutput); 4] = [
-            Engine::release_descent_prefix_claim,
+            // The reap-shaped quartet: the descent release rides the teardown narration exactly as
+            // `reap_profile` invokes it.
+            |e, pid, out| e.release_descent_prefix_claim(pid, ParkNarration::Teardown, out),
             Engine::release_descendant_claim,
             Engine::release_anchor_claim,
             Engine::release_watch_root_parent_claim,
