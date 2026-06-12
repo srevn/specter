@@ -11,7 +11,7 @@
 //! Two `inotify_add_watch` registrations on the same inotify_fd:
 //!
 //! - **File watch (`file_wd`)** — installed against the canonicalised config file via the `O_PATH`
-//!   + `/proc/self/fd/N` race-free pattern (mirror of [`crate::inotify::watcher::InotifyWatcher`]).
+//!   `/proc/self/fd/N` race-free pattern (mirror of [`crate::inotify::watcher::InotifyWatcher`]).
 //!   The file mask is [`FILE_MASK`]: `IN_MODIFY | IN_DELETE_SELF | IN_MOVE_SELF | IN_ATTRIB |
 //!   IN_CLOSE_WRITE`. Catches in-place edits, terminal flags (delete / move), `chmod` / `chown`
 //!   (`IN_ATTRIB`; the driver's lstat filter then sees the mode / ownership delta), and editor

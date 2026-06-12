@@ -1642,6 +1642,126 @@ fn on_chain_kinded_drop_omits_and_stays_authoritative() {
     );
 }
 
+// ---------------------------------------------------------------- walk: non-UTF-8 filename omission
+//
+// A non-UTF-8 dirent name is permanently unaddressable: snapshot keys (`CompactString`), obligation
+// chains, config patterns, and attach paths are all UTF-8, so no `Sub` can ever name the entry or
+// anything beneath it. The walker omits it as observed-absent-from-scope and keeps the level
+// `Complete` — the kinded-gate drop's contract — rather than degrading. Degrading would wedge every
+// `WholeSubtree` proof over a tree holding one such name into permanent `Undischarged`, and (via
+// `certify`'s `Chains` arm) every Standard burst whose dirty chain passes through the containing
+// directory. The entry's churn lands on the parent dir's resource, the same accepted blindspot as
+// excluded-file / Boundary-dir churn. Linux-only: APFS rejects non-UTF-8 names at creation
+// (EILSEQ), so these gate on `target_os = "linux"`.
+
+/// Create a file whose basename is deliberately not valid UTF-8 and return its path. The `0xFF` byte
+/// never appears in a UTF-8 sequence, so `OsStr::to_str` returns `None` — modelling a real on-disk
+/// filename the UTF-8-keyed identity model (snapshot keys, chains, patterns, attach paths) cannot
+/// address. `Path::join` on a byte-built `OsStr` is faithful: no lossy round-trip through `str`.
+#[cfg(target_os = "linux")]
+fn write_non_utf8_file(dir: &Path) -> PathBuf {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let path = dir.join(OsStr::from_bytes(b"bad\xffname.log"));
+    std::fs::write(&path, b"x").expect("Linux accepts non-UTF-8 filenames");
+    path
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_filename_omitted_under_whole_subtree_stays_authoritative() {
+    // The Seed / Rebase path. `WholeSubtree` treats any degraded frame as a hole, so the pre-fix
+    // degrade let one mojibake filename poison the whole proof (Retry-loop → forced Abandon → never
+    // pins, never fires). Omission keeps the root frame `Complete` ⇒ `Authoritative`, and the
+    // addressable sibling is observed normally.
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("normal.log"), b"x").unwrap();
+    write_non_utf8_file(tmp.path());
+
+    let cfg = ScanConfig::builder().recursive(true).build();
+    let outcome = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &ProofObligation::WholeSubtree,
+        false,
+    );
+    let ProbeOutcome::SubtreeProven {
+        snapshot,
+        authority,
+    } = outcome
+    else {
+        panic!("expected SubtreeProven, got {outcome:?}");
+    };
+    assert_eq!(
+        authority,
+        ProofAuthority::Authoritative,
+        "a permanently-unaddressable name is observed-absent-from-scope, not a degraded frame; \
+         got {authority:?}",
+    );
+    assert_eq!(
+        snapshot.entries().len(),
+        1,
+        "only the addressable sibling is keyed; the non-UTF-8 entry is omitted; got {:?}",
+        snapshot.entries().keys().collect::<Vec<_>>(),
+    );
+    assert!(
+        snapshot.entries().contains_key("normal.log"),
+        "the addressable sibling is observed normally",
+    );
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn non_utf8_filename_on_chain_parent_stays_authoritative() {
+    // The Standard-burst blast radius. A dirty chain (`sub/normal.log`) runs *through* the directory
+    // holding the mojibake sibling. Pre-fix, the degraded `sub` frame sat at-or-above the chain ⇒
+    // `certify`'s `Chains` arm flagged `Undischarged` ⇒ a previously-pinned Profile stopped firing
+    // for every event in that subtree. Omission keeps `sub` `Complete`, so the chain discharges.
+    let tmp = TempDir::new().unwrap();
+    let sub = tmp.path().join("sub");
+    std::fs::create_dir(&sub).unwrap();
+    std::fs::write(sub.join("normal.log"), b"x").unwrap();
+    write_non_utf8_file(&sub);
+
+    let cfg = ScanConfig::builder().recursive(true).build();
+    let mut chain = BTreeSet::new();
+    chain.insert(Arc::from(sub.join("normal.log")));
+    let outcome = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        None,
+        &chains_from(chain),
+        false,
+    );
+    let ProbeOutcome::SubtreeProven {
+        snapshot,
+        authority,
+    } = outcome
+    else {
+        panic!("expected SubtreeProven, got {outcome:?}");
+    };
+    assert_eq!(
+        authority,
+        ProofAuthority::Authoritative,
+        "a chain through a directory holding a non-UTF-8 sibling must discharge; got {authority:?}",
+    );
+    let sub_snap = snapshot
+        .lookup_covered_dir("sub")
+        .expect("sub is a covered dir");
+    assert_eq!(
+        sub_snap.entries().len(),
+        1,
+        "the non-UTF-8 sibling is omitted from `sub`; only the chain leaf is keyed; got {:?}",
+        sub_snap.entries().keys().collect::<Vec<_>>(),
+    );
+    assert!(sub_snap.entries().contains_key("normal.log"));
+}
+
 // ---------------------------------------------------------------- walk: certify obligation fold
 //
 // `certify` folds the degrade ledger against the obligation. It is unidirectional: a degraded frame

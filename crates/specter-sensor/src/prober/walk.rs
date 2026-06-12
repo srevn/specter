@@ -542,18 +542,22 @@ fn snapshot_dir(
 /// only threaded through to recursive frames).
 ///
 /// Errors at this level are skip-and-continue. The level is `Incomplete` iff its own read was
-/// unfaithful: `read_dir` failed (non-NotFound), a dirent / non-UTF-8 / `strip_prefix` / per-child
-/// `lstat` (non-NotFound) fault dropped an entry, or [`WalkContext::note_structural_filter_drop`]
-/// caught the structural gate dropping an on-chain dirent (a should-never-happen scope regression,
-/// loud in dev). Three drops stay `Complete` because they are *observed-absent*, not blindness, and
-/// self-correct (short snapshot hash-differs → `Retry` → converge): `read_dir` `NotFound`
-/// (raced-empty dir), a per-child `lstat` `NotFound` (a child unlinked between `read_dir` and the
-/// `lstat` — a raced delete during `rm -rf` / `rsync --delete` / log-rotate), and a kinded-gate
-/// drop (the dirent's current kind left scope, e.g. an atomic replace swapped a chained Dir for a
-/// pattern-failing file). Degrading any of them would wedge a common production lifecycle into
-/// permanent `Undischarged`/never-fire. The partially-populated `BTreeMap` becomes
-/// `DirChild::Covered(empty_or_partial_arc)`; the uncovered variant stays the static-config gates'
-/// (`build_dir_child`).
+/// unfaithful: `read_dir` failed (non-NotFound), a dirent / `strip_prefix` / per-child `lstat`
+/// (non-NotFound) fault dropped an entry, or [`WalkContext::note_structural_filter_drop`] caught
+/// the structural gate dropping an on-chain dirent (a should-never-happen scope regression, loud in
+/// dev). Four drops stay `Complete` — they leave the *addressable* scope rather than failing to
+/// observe it. Two are transient and self-correct (short snapshot hash-differs → `Retry` →
+/// converge): `read_dir` `NotFound` (raced-empty dir) and a per-child `lstat` `NotFound` (a child
+/// unlinked between `read_dir` and the `lstat` — a raced delete during `rm -rf` / `rsync --delete`
+/// / log-rotate). Two are permanent scope exits the walker omits: a kinded-gate drop (the dirent's
+/// current kind left scope, e.g. an atomic replace swapped a chained Dir for a pattern-failing file
+/// — the omission hash-differs from a baseline holding the prior in-scope entity, firing through
+/// the diff path) and a non-UTF-8 name (permanently unaddressable — every Sub-facing identifier is
+/// UTF-8 — so it can never be a snapshot key or sit on a chain, and its churn is invisible to
+/// identity, the same accepted blindspot as an excluded file). Degrading any of the four would
+/// wedge a common lifecycle into permanent `Undischarged`/never-fire. The partially-populated
+/// `BTreeMap` becomes `DirChild::Covered(empty_or_partial_arc)`; the uncovered variant stays the
+/// static-config gates' (`build_dir_child`).
 fn enumerate_dir(
     ctx: &WalkContext<'_>,
     path: &Path,
@@ -598,15 +602,28 @@ fn enumerate_dir(
         let child_path = dirent.path();
         let name_os = dirent.file_name();
         let Some(name_str) = name_os.to_str() else {
-            tracing::trace!(
+            // A non-UTF-8 name is permanently unaddressable: snapshot keys (`CompactString`),
+            // obligation chains, config patterns, and attach paths are all UTF-8, so no `Sub` can
+            // ever name this entry or anything beneath it. Omit it as observed-absent-from-scope
+            // (the kinded-gate drop's contract) and leave the level `Complete` — degrading would
+            // wedge every `WholeSubtree` proof over this tree, and every `Chains` proof through
+            // this directory, into permanent `Undischarged`. Its churn lands on the parent dir's
+            // resource, the same accepted blindspot as excluded-file / Boundary-dir churn. `debug!`
+            // — louder than the transient-race omit arms' `trace!` — names the permanence: an
+            // operator asking "why isn't this file watched?" wants the answer once.
+            tracing::debug!(
                 ?child_path,
-                "probe_subtree non-UTF-8 filename; degrading level"
+                "probe_subtree non-UTF-8 filename; omitting (unaddressable)"
             );
-            completeness = Completeness::Incomplete;
             continue;
         };
         let Ok(rel) = child_path.strip_prefix(ctx.anchor_path) else {
-            tracing::trace!(
+            // Every dirent sits under the recursion root, itself at-or-below the anchor, so
+            // `strip_prefix` can only fail on a walker bug (a `child_path` that escaped the
+            // anchor). Unconstructable in normal operation — degrade loudly (`warn!`, matching the
+            // readdir / dirent / per-child `lstat` degrade siblings) rather than silently.
+            tracing::warn!(
+                anchor = ?ctx.anchor_path,
                 ?child_path,
                 "probe_subtree strip_prefix failed; degrading level"
             );
