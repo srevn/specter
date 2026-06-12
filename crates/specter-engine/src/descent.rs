@@ -258,20 +258,13 @@ impl crate::Engine {
 
         // Step 2: state-flip Idle → Pending, constructed armed. Done before the refcount edge so
         // any reader between this point and step 3 sees the Profile's claim shape that the
-        // contribution will attribute to (matches `materialize_profile_anchor`'s sequencing). Loud
-        // arm — the entry `debug_assert` proved the Profile live + Idle, so `get_mut` resolving
-        // `None` is a state-machine breach, not a benign race; a silent skip would leave the slot
-        // un-constructed while the emit below still fires (no probe, no diagnostic — a wedge).
-        if self.profiles.get(profile_id).is_none() {
-            unreachable!(
-                "enter_pending_descent: Profile {profile_id:?} vanished \
-                 between the Idle precondition and the construct-armed \
-                 Pending transition"
-            );
-        }
-        // Liveness is proven above, so the wrapper's internal `get_mut` resolves `Some`
-        // (synchronous, no intervening mutation) — the construct-armed `ProbeSlot` is only built
-        // for a live Profile, never stranded into a `None`-path drop.
+        // contribution will attribute to (matches `materialize_profile_anchor`'s sequencing).
+        //
+        // Liveness needs no separate guard. The entry `debug_assert` carries the Idle precondition
+        // in dev/CI; in release the construct-armed slot enforces liveness structurally — on the
+        // (synchronously unreachable) stale id `transition_state` no-ops and drops the constructed
+        // `Pending`, whose armed `ProbeSlot` trips its `Drop` guard loudly in every build, naming
+        // the orphaned correlation. The discard *is* the enforcement.
         self.profiles.transition_state(
             profile_id,
             ProfileState::Pending(DescentState::new(
@@ -398,8 +391,16 @@ impl crate::Engine {
         // Sample the head segment + arity from descent state, then drop the borrow. We clone only
         // the head (cheap when CompactString stays inline); the tail mutation runs in place via
         // `descent_state_mut` later, no whole-vec rebuild.
+        //
+        // Loud entry: the probe gate proved `Pending` and the consume-once disarm leaves the
+        // variant intact, so a `None` is a state-machine breach — a silent skip would drop the
+        // response's advance / materialize / park and wedge the descent. Same discipline as the
+        // `_mut` re-projections below.
         let Some(descent) = self.descent_state(owner) else {
-            return;
+            unreachable!(
+                "dispatch_descent_ok: owner {owner:?} not in descent at \
+                 dispatch entry — on_probe_response's probe gate proved Pending"
+            );
         };
         let prefix = descent.current_prefix();
         let next_segment = descent.remaining_components().head().clone();
@@ -644,8 +645,14 @@ impl crate::Engine {
         _now: Instant,
         out: &mut StepOutput,
     ) {
+        // Loud entry: the probe gate proved `Pending` and the consume-once disarm leaves the
+        // variant intact, so a `None` is a state-machine breach — a silent skip would drop the
+        // rewind and wedge the descent. Same discipline as the `_mut` re-projection below.
         let Some(descent) = self.descent_state_mut(owner) else {
-            return;
+            unreachable!(
+                "dispatch_descent_vanished: owner {owner:?} not in descent at \
+                 dispatch entry — on_probe_response's probe gate proved Pending"
+            );
         };
         // The prefix itself is gone, so a fortiori the anchor's path is incomplete — a first-hand
         // absence observation (a path cannot complete through a vanished directory). Recording it
@@ -721,10 +728,16 @@ impl crate::Engine {
         failure: ProbeFailure,
         out: &mut StepOutput,
     ) {
-        let prefix = match self.descent_state(owner) {
-            Some(d) => d.current_prefix(),
-            None => return,
+        // Loud entry: the probe gate proved `Pending` and the consume-once disarm leaves the
+        // variant intact, so a `None` is a state-machine breach — a silent skip would swallow the
+        // failure diagnostic. Same discipline as the dispatch family's `_mut` re-projections.
+        let Some(descent) = self.descent_state(owner) else {
+            unreachable!(
+                "dispatch_descent_failed: owner {owner:?} not in descent at \
+                 dispatch entry — on_probe_response's probe gate proved Pending"
+            );
         };
+        let prefix = descent.current_prefix();
         out.diagnostics.push(Diagnostic::PendingPathProbeFailed {
             profile: owner,
             prefix,
