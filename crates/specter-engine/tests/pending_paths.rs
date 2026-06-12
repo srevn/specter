@@ -68,7 +68,9 @@ fn attach_sub_path_pending_then_anchor_appears() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: var_corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("log", EntryKind::Dir, 1)])),
+            outcome: ProbeOutcome::SegmentObserved {
+                kind: Some(EntryKind::Dir),
+            },
         }),
         now,
     );
@@ -80,7 +82,9 @@ fn attach_sub_path_pending_then_anchor_appears() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: log_corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("myapp", EntryKind::Dir, 2)])),
+            outcome: ProbeOutcome::SegmentObserved {
+                kind: Some(EntryKind::Dir),
+            },
         }),
         now,
     );
@@ -152,7 +156,7 @@ fn pending_path_witnessed_appearance_fires() {
     ));
 
     // First descent probe: file not there yet.
-    let out = descent_advance(&mut e, pid, &dir_snap(&[]), now);
+    let out = descent_advance(&mut e, pid, None, now);
     assert!(out.effects().is_empty());
     assert!(matches!(
         e.profiles().get(pid).unwrap().state(),
@@ -170,12 +174,7 @@ fn pending_path_witnessed_appearance_fires() {
         },
         t1,
     );
-    let out = descent_advance(
-        &mut e,
-        pid,
-        &dir_snap(&[("app.log", EntryKind::File, 1)]),
-        t1,
-    );
+    let out = descent_advance(&mut e, pid, Some(EntryKind::File), t1);
     assert!(
         out.effects().is_empty(),
         "materialization itself never fires"
@@ -272,7 +271,7 @@ fn pending_path_event_racing_inflight_probe_repays_and_fires() {
 
     // corr1's stale, pre-creation response: app.log still absent → the descent parks and records the
     // absence half of the witness. The latch repays with a fresh probe that postdates the event.
-    let out = descent_advance(&mut e, pid, &dir_snap(&[]), t1);
+    let out = descent_advance(&mut e, pid, None, t1);
     assert!(
         matches!(
             e.profiles().get(pid).unwrap().state(),
@@ -293,12 +292,7 @@ fn pending_path_event_racing_inflight_probe_repays_and_fires() {
 
     // The repay probe observes the now-present file → the absence→presence pair latches the
     // appearance witness → TRIGGERED Seed (Batching-first, no cold walk in flight).
-    let out = descent_advance(
-        &mut e,
-        pid,
-        &dir_snap(&[("app.log", EntryKind::File, 1)]),
-        t1,
-    );
+    let out = descent_advance(&mut e, pid, Some(EntryKind::File), t1);
     assert!(
         out.effects().is_empty(),
         "materialization itself never fires"
@@ -373,17 +367,9 @@ fn sibling_churn_during_attach_descent_pins_silently() {
         "I5: the in-flight probe absorbs the re-probe",
     );
 
-    // The response finds `a` present (alongside the churned sibling) — first observation, no
-    // absence half — and advances; the descent's fresh probe at /watch/a is immediately in flight.
-    let out = descent_advance(
-        &mut e,
-        pid,
-        &dir_snap(&[
-            ("a", EntryKind::Dir, 1),
-            ("churn-junk", EntryKind::File, 99),
-        ]),
-        t1,
-    );
+    // The response finds `a` present — first observation, no absence half — and advances; the
+    // descent's fresh probe at /watch/a is immediately in flight.
+    let out = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
     assert!(out.effects().is_empty());
     let a = e
         .tree()
@@ -403,7 +389,7 @@ fn sibling_churn_during_attach_descent_pins_silently() {
 
     // The terminus finds `b` present on first observation: a COLD Seed — Verifying-first, the probe
     // emitted at burst construction — that pins silently.
-    let out = descent_advance(&mut e, pid, &dir_snap(&[("b", EntryKind::Dir, 2)]), t1);
+    let out = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
     assert!(
         out.effects().is_empty(),
         "materialization itself never fires"
@@ -451,7 +437,7 @@ fn prefix_vanished_rewind_then_recompletion_fires() {
     let pid = e.subs().get(sid).unwrap().profile();
 
     // First probe finds `a` — first observation, descent advances to /watch/a.
-    let _ = descent_advance(&mut e, pid, &dir_snap(&[("a", EntryKind::Dir, 1)]), now);
+    let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), now);
 
     // The advanced prefix vanishes out from under the descent (`rm -rf /watch/a` mid-attach): the
     // rewind re-injects `a` as the head and records the absence observation.
@@ -474,10 +460,10 @@ fn prefix_vanished_rewind_then_recompletion_fires() {
         "rewind narrated",
     );
 
-    // The path re-completes: `a` recreated (fresh identity), then `b` lands. The found-after-absent
-    // pair latches the appearance witness, so the terminus opens a TRIGGERED Seed — Batching-first.
-    let _ = descent_advance(&mut e, pid, &dir_snap(&[("a", EntryKind::Dir, 3)]), t1);
-    let out = descent_advance(&mut e, pid, &dir_snap(&[("b", EntryKind::File, 4)]), t1);
+    // The path re-completes: `a` recreated, then `b` lands. The found-after-absent pair latches the
+    // appearance witness, so the terminus opens a TRIGGERED Seed — Batching-first.
+    let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
+    let out = descent_advance(&mut e, pid, Some(EntryKind::File), t1);
     assert!(
         out.effects().is_empty(),
         "materialization itself never fires"
@@ -582,7 +568,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("other", EntryKind::File, 99)])),
+            outcome: ProbeOutcome::SegmentObserved { kind: None },
         }),
         Instant::now(),
     );
@@ -880,7 +866,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid_a,
             correlation: a_corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_snap(&[("bar", EntryKind::Dir, 1)])),
+            outcome: ProbeOutcome::SegmentObserved { kind: None },
         }),
         now,
     );

@@ -91,7 +91,6 @@ fn replace_cycle(
     e: &mut Engine,
     pid: ProfileId,
     parent: ResourceId,
-    name: &str,
     inode: u64,
     now: Instant,
 ) -> (usize, Instant) {
@@ -123,7 +122,7 @@ fn replace_cycle(
         t2,
     );
     // Descent finds the replacement file -> materialize -> triggered Seed (Batching-first).
-    let out = descent_advance(e, pid, &dir_snap(&[(name, EntryKind::File, inode)]), t2);
+    let out = descent_advance(e, pid, Some(EntryKind::File), t2);
     assert!(out.effects().is_empty(), "descent itself never fires");
     assert!(
         e.pending_probe_for(pid).is_none(),
@@ -226,17 +225,12 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
     // Q's claim keeps the anchor alive.
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
 
-    // Answer the loss step's descent probe: the parent listing re-classifies the anchor from the
-    // live filesystem — `log` is a Dir now. Materialization re-reads kind from the entry, so the
-    // stale `Some(File)` cannot leak into the recovery probe's shape; the witnessed descent opens a
+    // Answer the loss step's descent probe: the segment re-classifies the anchor from the live
+    // filesystem — `log` is a Dir now. Materialization re-reads kind from the segment, so the stale
+    // `Some(File)` cannot leak into the recovery probe's shape; the witnessed descent opens a
     // triggered Seed (Batching-first, no cold walk).
     let mat_at = p_at + SETTLE;
-    let mat_out = descent_advance(
-        &mut e,
-        pid_p,
-        &dir_snap(&[("log", EntryKind::Dir, 7)]),
-        mat_at,
-    );
+    let mat_out = descent_advance(&mut e, pid_p, Some(EntryKind::Dir), mat_at);
     assert_eq!(
         e.profiles().get(pid_p).unwrap().kind(),
         Some(ResourceKind::Dir),
@@ -343,19 +337,14 @@ fn recovery_from_dir_to_file_anchor_bounded_to_one_round_trip() {
         ProfileState::Pending(_),
     ));
 
-    // The parent listing re-classifies the anchor: `build` is a File now. Materialization opens the
+    // The descent probe re-classifies the anchor: `build` is a File now. Materialization opens the
     // triggered Seed Batching-first.
     let mat_at = p_at + SETTLE;
-    let mat_out = descent_advance(
-        &mut e,
-        pid_p,
-        &dir_snap(&[("build", EntryKind::File, 9)]),
-        mat_at,
-    );
+    let mat_out = descent_advance(&mut e, pid_p, Some(EntryKind::File), mat_at);
     assert_eq!(
         e.profiles().get(pid_p).unwrap().kind(),
         Some(ResourceKind::File),
-        "kind re-classified from the parent's directory listing",
+        "kind re-classified from the descent probe's segment answer",
     );
     assert_eq!(count_probes(&mat_out), 0, "triggered Seed: Batching-first");
 
@@ -521,7 +510,7 @@ fn replace_of_fired_anchor_recovery_fires() {
     assert!(e.subs().get(sid).unwrap().has_fired());
 
     // Replace 2 -> 3: recovery must re-fire.
-    let (fired, _t2) = replace_cycle(&mut e, pid, parent, "app.log", 3, t1 + SETTLE);
+    let (fired, _t2) = replace_cycle(&mut e, pid, parent, 3, t1 + SETTLE);
     assert_eq!(fired, 1, "fired Sub: replace -> RecoveryFire re-fires");
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -551,7 +540,7 @@ fn replace_of_never_fired_anchor_fires_first_fire() {
     );
 
     // Replace 1 -> 2: the witnessed loss owes — and fires — the first fire.
-    let (fired, t1) = replace_cycle(&mut e, pid, parent, "app.log", 2, t0 + SETTLE);
+    let (fired, t1) = replace_cycle(&mut e, pid, parent, 2, t0 + SETTLE);
     assert_eq!(
         fired, 1,
         "never-fired Sub: the witnessed replace fires (FreshSeedFire)",
@@ -627,12 +616,7 @@ fn parent_event_before_terminal_still_recovers_and_fires() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Pending(_)
     ));
-    let out = descent_advance(
-        &mut e,
-        pid,
-        &dir_snap(&[("app.log", EntryKind::File, 3)]),
-        t3,
-    );
+    let out = descent_advance(&mut e, pid, Some(EntryKind::File), t3);
     assert!(out.effects().is_empty());
     let t4 = t3 + SETTLE * 2;
     drain_due(&mut e, t4);
@@ -702,9 +686,9 @@ fn standard_vanished_at_descendant_lca_recovers_live_anchor_and_fires() {
         "descendant-LCA Vanished re-enters descent rather than parking a dead watch",
     );
 
-    // The parent listing shows the anchor alive: re-materialize -> triggered Seed -> the rm's
+    // The descent probe shows the anchor alive: re-materialize -> triggered Seed -> the rm's
     // change fires once settled.
-    let out = descent_advance(&mut e, pid, &dir_snap(&[("data", EntryKind::Dir, 9)]), t2);
+    let out = descent_advance(&mut e, pid, Some(EntryKind::Dir), t2);
     assert!(out.effects().is_empty());
     let t3 = t2 + SETTLE * 2;
     drain_due(&mut e, t3);
@@ -754,7 +738,7 @@ fn replace_storm_within_settle_window_fires_once() {
     // across replaces ((parent, segment) identity).
     let mut t = t0 + SETTLE;
     let mut fired_during_storm = 0;
-    for inode in [2u64, 3, 4] {
+    for _ in 0..3 {
         t += Duration::from_millis(10);
         let _ = e.step(
             Input::FsEvent {
@@ -770,12 +754,7 @@ fn replace_storm_within_settle_window_fires_once() {
             ),
             "every terminal in the storm re-enters descent",
         );
-        let out = descent_advance(
-            &mut e,
-            pid,
-            &dir_snap(&[("app.log", EntryKind::File, inode)]),
-            t,
-        );
+        let out = descent_advance(&mut e, pid, Some(EntryKind::File), t);
         fired_during_storm += out.effects().len();
         assert!(
             e.pending_probe_for(pid).is_none(),
@@ -829,12 +808,7 @@ fn repeated_terminal_mid_verifying_cancels_and_recovers() {
         },
         t1,
     );
-    let _ = descent_advance(
-        &mut e,
-        pid,
-        &dir_snap(&[("app.log", EntryKind::File, 2)]),
-        t1,
-    );
+    let _ = descent_advance(&mut e, pid, Some(EntryKind::File), t1);
     let t2 = t1 + SETTLE * 2;
     drain_due(&mut e, t2);
     let stale_corr = e
@@ -878,12 +852,7 @@ fn repeated_terminal_mid_verifying_cancels_and_recovers() {
     assert_eq!(e.pending_probe_for(pid), Some(descent_corr));
 
     // Recovery completes against the second replacement -> exactly one fire.
-    let out = descent_advance(
-        &mut e,
-        pid,
-        &dir_snap(&[("app.log", EntryKind::File, 3)]),
-        t3,
-    );
+    let out = descent_advance(&mut e, pid, Some(EntryKind::File), t3);
     assert!(out.effects().is_empty());
     let t4 = t3 + SETTLE * 2;
     drain_due(&mut e, t4);
@@ -929,7 +898,7 @@ fn delete_then_write_parks_narrated_then_recovers() {
         },
         t1,
     );
-    let parked = descent_advance(&mut e, pid, &dir_snap(&[]), t1);
+    let parked = descent_advance(&mut e, pid, None, t1);
     assert!(
         parked.diagnostics.iter().any(|d| matches!(
             d,
@@ -958,12 +927,7 @@ fn delete_then_write_parks_narrated_then_recovers() {
         },
         t2,
     );
-    let advanced = descent_advance(
-        &mut e,
-        pid,
-        &dir_snap(&[("app.log", EntryKind::File, 2)]),
-        t2,
-    );
+    let advanced = descent_advance(&mut e, pid, Some(EntryKind::File), t2);
     assert!(
         !advanced
             .diagnostics

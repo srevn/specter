@@ -4,8 +4,10 @@ use crate::effect::Effect;
 use crate::ids::{ProbeCorrelation, ProfileId, ResourceId};
 use crate::resource::ResourceKind;
 use crate::scan_config::ScanConfig;
+use crate::snapshot::EntryKind;
 use crate::snapshot::tree::{DirSnapshot, LeafEntry};
 use crate::sub::ClassSet;
+use compact_str::CompactString;
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -193,12 +195,16 @@ pub enum ProbeRequest {
         /// freshest possible snapshot regardless of cost.
         forced: bool,
     },
-    /// Pending-descent prefix probe. Walker enumerates one level of `target_path` — every dirent
-    /// admitted, no recursion — and returns `ProbeOutcome::DirEnumerated(arc)` containing the
-    /// prefix's direct children — descent dispatch reads `arc.entries.get(name)` and discards the
-    /// snapshot (it is never spliced into `Profile.current`). No `obligation` (a structural query is
-    /// not a quiescence observation), and no `ScanConfig`: the Profile's user-facing filters would
-    /// mask the very segment descent is searching for, so the admit-all policy lives walker-side.
+    /// Pending-descent structural query: does `segment` exist under the prefix at `target_path`,
+    /// and as what kind? The walker answers with one `lstat(target_path/segment)` —
+    /// [`ProbeOutcome::SegmentObserved`]. Descent advances one path component per response, so the
+    /// engine's question is always about exactly one name; carrying that name on the wire scopes
+    /// the walker's work to the question (the alternative — enumerating the whole prefix level for
+    /// the engine to read one entry — pays one `lstat` per dirent on every re-probe, multiplied by
+    /// sibling churn at `/tmp`-class prefixes). No `obligation` (a structural query is not a
+    /// quiescence observation), and no `ScanConfig`: the Profile's user-facing filters never apply
+    /// — there is no enumeration to filter, and the segment is queried by name regardless of what
+    /// any pattern would say.
     Descent {
         /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and used
         /// by the Sensor's expectation-map insertion.
@@ -210,6 +216,14 @@ pub enum ProbeRequest {
         /// descent prefix lives on `DescentState`); the walker only needs the path. `Arc::clone` of
         /// the slot's materialised path — no rebuild.
         target_path: Arc<Path>,
+        /// The awaited head segment of the descent's remaining path at emission time. Frozen for
+        /// the lifetime of the armed probe slot: every head mutation (forward advance, rewind
+        /// prepend) re-arms the slot with a freshly minted correlation, so a response that passes
+        /// the correlation gate is always an answer about the *current* head — the wire never needs
+        /// to echo the segment back. The kernel resolves the name during the walker's `lstat` (case
+        /// folding / Unicode normalization per filesystem), keeping descent consistent with watch
+        /// installation and anchor probes, which resolve the same user-spelled path.
+        segment: CompactString,
     },
 }
 
@@ -338,8 +352,9 @@ impl ProbeFailure {
 /// Five variants. `Vanished` / `Failed` are intent-agnostic (the engine routes those by
 /// `Profile.state` discriminator + pre-/post-fire phase, not by request shape — a vanished anchor
 /// is a vanished anchor regardless of whether the walker was looking at a file or a directory). The
-/// two directory outcomes are **type-distinct by query kind**: a `Subtree` proof carries its
-/// [`ProofAuthority`] certificate; a `Descent` enumeration cannot even name one.
+/// success outcomes are **type-distinct by query kind**: a `Subtree` proof carries its
+/// [`ProofAuthority`] certificate; a `Descent` query gets a structural answer that cannot even name
+/// one.
 #[derive(Debug, Clone)]
 pub enum ProbeOutcome {
     /// `AnchorFile` request returned a leaf observation. Sole producer is the walker's
@@ -355,12 +370,14 @@ pub enum ProbeOutcome {
         snapshot: Arc<DirSnapshot>,
         authority: ProofAuthority,
     },
-    /// `Descent` request returned one prefix level. Sole producer is the walker's `probe_descent`.
-    /// Descent dispatch reads `arc.entries.get(name)` and discards the snapshot (never spliced into
-    /// `Profile.current`), so a descent enumeration carries **no** proof — the absence of an
-    /// `authority` field is the type-level statement that structural queries are not quiescence
-    /// observations.
-    DirEnumerated(Arc<DirSnapshot>),
+    /// `Descent` request answered: a structural query gets a structural answer, not a snapshot. Sole
+    /// producer is the walker's `probe_descent`. `Some(kind)` — `lstat(prefix/segment)` succeeded;
+    /// the awaited segment exists with this kind. `None` — the prefix is a healthy directory but the
+    /// segment is absent (descent parks on the standing absence observation). A vanished or
+    /// non-directory prefix collapses to [`Self::Vanished`] (rewind) and a root I/O error to
+    /// [`Self::Failed`], exactly as the other request shapes. Carrying no payload a verdict could
+    /// fold is the type-level statement that structural queries are not quiescence observations.
+    SegmentObserved { kind: Option<EntryKind> },
     /// Path absent (`ENOENT`) or kind mismatch (file probe found dir, dir probe found file). Routed
     /// to whichever `dispatch_*_vanished` corresponds to the Profile's state.
     Vanished,

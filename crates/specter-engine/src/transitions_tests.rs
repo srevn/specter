@@ -94,7 +94,7 @@ fn engine_with_attached_sub() -> (
 /// Each child is `(name, EntryKind, inode)`; Dirs are emitted as `DirChild::Uncovered(_)` (the walker
 /// stored the entry but did not recurse). Tests that need nested subtrees should use
 /// `dir_with_subtree`. Returns `Arc<DirSnapshot>` directly — the typed `ProbeOutcome::SubtreeProven`
-/// / `DirEnumerated` variants carry an `Arc<DirSnapshot>`, not a wrapping `TreeSnapshot`.
+/// variant carries an `Arc<DirSnapshot>`, not a wrapping `TreeSnapshot`.
 fn dir_tree_snap(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
     let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
     for (name, kind, inode) in children {
@@ -402,12 +402,12 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
 }
 
 /// Walker contract: a `Pending` Profile (descent state) probes a Dir prefix with
-/// `ProbeRequest::Descent`; the only valid responses are `DirEnumerated`, `Vanished`, or `Failed`.
-/// An `AnchorOk` in this slot is a walker-side bug — descent never queries an anchor's `lstat`
-/// shape. `DescentOutcome::try_from` rejects it at the demux seam and the Descent arm routes to
-/// `walker_contract_violated_descent`, which fires a `debug_assert!` in dev/CI and, in release,
-/// emits `WalkerContractViolated` and abandons the descent prefix (no re-probe loop against a buggy
-/// walker). The test pins the dev/CI panic.
+/// `ProbeRequest::Descent`; the only valid responses are `SegmentObserved`, `Vanished`, or
+/// `Failed`. An `AnchorOk` in this slot is a walker-side bug — descent never queries an anchor's
+/// `lstat` shape. `DescentOutcome::try_from` rejects it at the demux seam and the Descent arm
+/// routes to `walker_contract_violated_descent`, which fires a `debug_assert!` in dev/CI and, in
+/// release, emits `WalkerContractViolated` and abandons the descent prefix (no re-probe loop
+/// against a buggy walker). The test pins the dev/CI panic.
 ///
 /// Disabled in release builds via the standard `cfg_attr` discipline, mirroring
 /// `mint_probe_correlation_panics_on_double_open`.
@@ -451,9 +451,9 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
         .expect("descent probe in flight at the prefix");
 
     // `AnchorOk` from a Descent probe is structurally impossible from the production walker —
-    // `probe_descent`'s root `lstat` rejects non-Dir paths via `Vanished`, and a Dir walk can only
-    // yield `DirEnumerated`. We synthesise the breach to exercise the walker-contract debug_assert
-    // in `walker_contract_violated_descent`.
+    // `probe_descent` answers a structural query and can only yield `SegmentObserved` / `Vanished`
+    // / `Failed`. We synthesise the breach to exercise the walker-contract debug_assert in
+    // `walker_contract_violated_descent`.
     let leaf = file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -466,12 +466,12 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
 }
 
 /// Walker contract: a Verifying / Rebasing probe response carries a quiescence observation
-/// (`AnchorOk` / `SubtreeProven` / `Vanished` / `Failed`). A `DirEnumerated` outcome — the
+/// (`AnchorOk` / `SubtreeProven` / `Vanished` / `Failed`). A `SegmentObserved` outcome — the
 /// descent-route shape — is a walker-side bug: the request was a `Subtree` quiescence read, not a
-/// structural enumeration. `ProofOutcome::try_from` rejects it at the demux seam and the Verifying
-/// arm routes to `walker_contract_violated_burst`, which fires a `debug_assert!` in dev/CI and, in
-/// release, emits `WalkerContractViolated` and finishes the burst to Idle (anchor/baseline
-/// preserved). The test pins the dev/CI panic.
+/// structural segment query. `ProofOutcome::try_from` rejects it at the demux seam and the
+/// Verifying arm routes to `walker_contract_violated_burst`, which fires a `debug_assert!` in
+/// dev/CI and, in release, emits `WalkerContractViolated` and finishes the burst to Idle
+/// (anchor/baseline preserved). The test pins the dev/CI panic.
 ///
 /// `profile_probe_gate` does not filter on outcome variant (it routes on owner state +
 /// correlation), so this payload-shape violation is the kind the public test surface can
@@ -487,22 +487,21 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     ignore = "debug_assert! is compiled out in release"
 )]
 #[should_panic(expected = "walker contract violated")]
-fn certify_dir_enumerated_outcome_is_walker_contract_violation() {
+fn certify_segment_observed_outcome_is_walker_contract_violation() {
     let (mut e, pid, _sid, _r, now) = engine_with_attached_sub();
     // Cold-arm Seed → Verifying probe in flight at burst construction.
     assert_seed_verifying(&e);
     let correlation = e
         .pending_probe_for(pid)
         .expect("cold-Seed Verifying probe in flight from start_seed_burst");
-    // `DirEnumerated` from a quiescence probe is structurally impossible from the production walker
-    // — the Subtree request never returns a bare directory enumeration. We synthesise the breach to
-    // exercise the walker-contract debug_assert in `walker_contract_violated_burst`.
-    let snap = dir_tree_snap(vec![]);
+    // `SegmentObserved` from a quiescence probe is structurally impossible from the production walker
+    // — the Subtree request answers a content proof, not a structural segment query. We synthesise
+    // the breach to exercise the walker-contract debug_assert in `walker_contract_violated_burst`.
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation,
-            outcome: ProbeOutcome::DirEnumerated(snap),
+            outcome: ProbeOutcome::SegmentObserved { kind: None },
         }),
         now,
     );
@@ -3024,7 +3023,7 @@ fn sensor_overflow_pending_descent_latches_and_repays() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: in_flight_corr,
-            outcome: ProbeOutcome::DirEnumerated(dir_tree_snap(vec![])),
+            outcome: ProbeOutcome::SegmentObserved { kind: None },
         }),
         Instant::now(),
     );

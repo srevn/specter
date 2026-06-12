@@ -36,20 +36,21 @@
 //! 1. One of the three entries above flips the Profile to `Pending`. The deepest existing ancestor
 //!    is `current_prefix`; the remaining path components await materialization (a recovery entry is
 //!    the one-segment special case: prefix = the anchor's parent).
-//! 2. The engine bumps `current_prefix.watch_demand` and emits a `ProbeOp::Probe` at the prefix.
+//! 2. The engine bumps `current_prefix.watch_demand` and emits a `ProbeOp::Probe` at the prefix — the
+//!    wire names the awaited head segment, and the walker answers with one `lstat(prefix/segment)`.
 //! 3. `dispatch_descent_probe` consumes the response. The responses also carry the descent's
 //!    **appearance witness**: a probe observing the awaited segment absent (or the prefix vanished)
 //!    records a standing absence observation, and a later probe finding the segment present
 //!    completes the absence→presence pair, latching `DescentState::witnessed`. Probes are the only
 //!    witness writers — a prefix event names no segment on either backend, so sibling churn at a
 //!    shared prefix can never masquerade as the anchor appearing.
-//!    - `Ok(snap)`: look for the next remaining component as a single-level child. Found and is the
-//!      anchor → materialize (promote to `User`, set kind, bump anchor's `watch_demand`, drop the
-//!      prefix's, transition Pending → Idle, start a Seed burst — cold, or Batching-first triggered
-//!      when the descent's witnessed-appearance latch is set). Found but not the anchor → advance
-//!      descent one segment. Not found → record the absence observation and park awaiting the next
-//!      event (a witnessed park narrates via `PendingPathAwaitingSegment` — the delete-then-write
-//!      recovery shape).
+//!    - `SegmentObserved { kind: Some(_) }`: the awaited segment exists. Is the anchor →
+//!      materialize (promote to `User`, set kind, bump anchor's `watch_demand`, drop the prefix's,
+//!      transition Pending → Idle, start a Seed burst — cold, or Batching-first triggered when the
+//!      descent's witnessed-appearance latch is set). Not the anchor → advance descent one segment.
+//!    - `SegmentObserved { kind: None }`: the prefix is healthy but the segment is absent — record
+//!      the absence observation and park awaiting the next event (a witnessed park narrates via
+//!      `PendingPathAwaitingSegment` — the delete-then-write recovery shape).
 //!    - `Vanished`: the prefix itself is gone — an absence observation for the whole remaining
 //!      chain. Sub the prefix's contribution; vacate; rewind to the next-existing ancestor; emit a
 //!      fresh probe.
@@ -65,9 +66,9 @@ use crate::probe::DescentOutcome;
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use compact_str::CompactString;
 use specter_core::{
-    ClassSet, ContribKey, DescentRemaining, DescentState, Diagnostic, DirSnapshot, EntryKind,
-    FS_ROOT_SEGMENT, ProbeFailure, ProbeSlot, ProfileId, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, StepOutput, TreePath,
+    ClassSet, ContribKey, DescentRemaining, DescentState, Diagnostic, EntryKind, FS_ROOT_SEGMENT,
+    ProbeFailure, ProbeSlot, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
+    StepOutput, TreePath,
 };
 use std::time::Instant;
 
@@ -324,8 +325,8 @@ impl crate::Engine {
         out: &mut StepOutput,
     ) {
         match outcome {
-            DescentOutcome::DirEnumerated(snapshot) => {
-                self.dispatch_descent_ok(owner, &snapshot, now, out);
+            DescentOutcome::SegmentObserved { kind } => {
+                self.dispatch_descent_ok(owner, kind, now, out);
             }
             DescentOutcome::Vanished => self.dispatch_descent_vanished(owner, now, out),
             DescentOutcome::Failed(failure) => self.dispatch_descent_failed(owner, failure, out),
@@ -374,16 +375,23 @@ impl crate::Engine {
     }
 
     /// Dispatch a successful descent response. The walker honoured the `Descent` request shape and
-    /// returned a single-level `Arc<DirSnapshot>` for the prefix; this routine looks up the next
-    /// remaining segment by name and either advances descent one level, materializes the anchor, or
-    /// awaits the next event.
+    /// answered the structural question about the awaited head segment with one
+    /// `lstat(prefix/segment)`; this routine either advances descent one level, materializes the
+    /// anchor, or awaits the next event.
+    ///
+    /// **The answer is always about the current head.** The wire carried the head segment at
+    /// emission, and the head is frozen for the armed slot's lifetime — every head mutation
+    /// (advance / rewind) re-arms with a freshly minted correlation, so a response that passed the
+    /// correlation gate in `on_probe_response` cannot be an answer about a different segment.
+    /// `DescentRemaining` is non-empty by type invariant, so there is no defensive empty-arm
+    /// recovery path and no corresponding `Diagnostic` variants.
     ///
     /// **Caller (`on_probe_response`).** The descent probe slot was disarmed (consume-once) before
     /// dispatch; the advance / rewind branches re-arm it with a freshly-minted correlation.
     pub(crate) fn dispatch_descent_ok(
         &mut self,
         owner: ProfileId,
-        snapshot: &DirSnapshot,
+        observed: Option<EntryKind>,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -394,49 +402,34 @@ impl crate::Engine {
             return;
         };
         let prefix = descent.current_prefix();
-
-        // The walker echoes `(owner, correlation)` verbatim — the gate match in `on_probe_response`
-        // already enforces request/response pairing, so any divergence would surface as
-        // `StaleProbeResponse`, not reach this point. The snapshot itself carries pure content;
-        // engine identity stays engine-side (here, `descent.current_prefix()`). `DescentRemaining`
-        // is non-empty by type invariant, so there is no defensive empty-arm recovery path and no
-        // corresponding `Diagnostic` variants.
         let next_segment = descent.remaining_components().head().clone();
         let is_terminal = descent.remaining_components().is_terminal();
 
-        // Descent probes are single-level enumerations (the walker's descent policy admits every
-        // dirent and never descends), so the response is a one-level Dir snapshot — look up the
-        // next segment by name in the BTreeMap directly.
-        let entry_kind = match snapshot.entries().get(next_segment.as_str()) {
-            Some(child) => child.kind(),
-            None => {
-                // Next segment not yet present: record the absence observation — the standing half
-                // of the appearance witness a later found-response completes — then await the next
-                // event. v1 descent doesn't mtime-skip, so no need to retain the snapshot — the
-                // next probe will get a fresh `lstat`-walked DirSnapshot anyway. A witnessed
-                // descent narrates the park: post-loss recovery flows through here when the
-                // replacement hasn't landed yet (delete-then-write saves), and a silent park would
-                // read as the recovery vanishing in a debug tail. Unwitnessed descents skip the
-                // narration — parking is their steady state. Loud arm: the entry resolution above
-                // proved the owner in descent and nothing in between mutated it, so a `None` here
-                // is a state-machine breach, not a benign race.
-                let Some(d) = self.descent_state_mut(owner) else {
-                    unreachable!(
-                        "dispatch_descent_ok: owner {owner:?} left descent between \
-                         the entry resolution and the park"
-                    );
-                };
-                d.note_observed_absent();
-                if d.witnessed() {
-                    out.diagnostics
-                        .push(Diagnostic::PendingPathAwaitingSegment {
-                            profile: owner,
-                            prefix,
-                            segment: next_segment,
-                        });
-                }
-                return;
+        let Some(entry_kind) = observed else {
+            // Awaited segment not yet present under a healthy prefix: record the absence
+            // observation — the standing half of the appearance witness a later found-response
+            // completes — then await the next event. A witnessed descent narrates the park:
+            // post-loss recovery flows through here when the replacement hasn't landed yet
+            // (delete-then-write saves), and a silent park would read as the recovery vanishing in
+            // a debug tail. Unwitnessed descents skip the narration — parking is their steady
+            // state. Loud arm: the entry resolution above proved the owner in descent and nothing
+            // in between mutated it, so a `None` here is a state-machine breach, not a benign race.
+            let Some(d) = self.descent_state_mut(owner) else {
+                unreachable!(
+                    "dispatch_descent_ok: owner {owner:?} left descent between \
+                     the entry resolution and the park"
+                );
+            };
+            d.note_observed_absent();
+            if d.witnessed() {
+                out.diagnostics
+                    .push(Diagnostic::PendingPathAwaitingSegment {
+                        profile: owner,
+                        prefix,
+                        segment: next_segment,
+                    });
             }
+            return;
         };
 
         // The awaited segment is present. Under a standing absence observation this completes the
@@ -838,16 +831,14 @@ mod tests {
     use compact_str::CompactString;
     use specter_core::testkit::single_exec_program;
     use specter_core::{
-        ActionProgram, AnchorClaim, ChildEntry, ClassSet, Diagnostic, DirChild, DirMeta,
-        DirSnapshot, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsIdentity, Input, LeafEntry,
-        ProbeFailure, ProbeOp, ProbeOutcome, ProbeRequest, ProbeResponse, ProfileIdentity,
+        ActionProgram, AnchorClaim, ClassSet, Diagnostic, EffectScope, EntryKind, FS_ROOT_SEGMENT,
+        Input, ProbeFailure, ProbeOp, ProbeOutcome, ProbeRequest, ProbeResponse, ProfileIdentity,
         ReapTrigger, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor,
         SubAttachRequest,
     };
-    use std::collections::BTreeMap;
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
-    use std::time::{Duration, Instant, UNIX_EPOCH};
+    use std::time::{Duration, Instant};
 
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
@@ -861,35 +852,6 @@ mod tests {
         single_exec_program([specter_core::ArgTemplate::new([
             specter_core::ArgPart::literal("/bin/true"),
         ])])
-    }
-
-    /// Build an `Arc<DirSnapshot>` carrying the supplied single-component children. Descent probes
-    /// walk a single level, so every descent test response is a single-level `DirSnapshot`; this
-    /// helper matches that shape exactly. Recursive uses are out of scope for the descent test
-    /// surface (recursive walks live in burst tests). The typed `ProbeOutcome::DirEnumerated`
-    /// variant takes `Arc<DirSnapshot>` directly — no `TreeSnapshot::Dir` wrap is needed at the
-    /// wire boundary.
-    fn dir_snap_with(children: Vec<(&str, EntryKind, u64)>) -> Arc<DirSnapshot> {
-        let mut map: BTreeMap<CompactString, ChildEntry> = BTreeMap::new();
-        for (name, kind, inode) in children {
-            let child = match kind {
-                EntryKind::Dir => {
-                    ChildEntry::Dir(DirChild::Uncovered(FsIdentity::synthetic(inode, 0)))
-                }
-                _ => ChildEntry::Leaf(LeafEntry::synthetic(
-                    kind,
-                    0,
-                    UNIX_EPOCH,
-                    FsIdentity::synthetic(inode, 0),
-                )),
-            };
-            map.insert(CompactString::new(name), child);
-        }
-        Arc::new(DirSnapshot::new(
-            DirMeta::synthetic(UNIX_EPOCH, FsIdentity::synthetic(0, 0)),
-            0,
-            map,
-        ))
     }
 
     /// Set up an Engine with `/foo` as a Dir; attach a Sub at path `/foo/bar`. Bar doesn't exist
@@ -948,12 +910,13 @@ mod tests {
 
         // Inject a probe response showing `bar` now exists.
         let _foo = lookup_foo(&e);
-        let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 99)]);
         let out = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation,
-                outcome: ProbeOutcome::DirEnumerated(snap),
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::Dir),
+                },
             }),
             Instant::now(),
         );
@@ -1013,12 +976,13 @@ mod tests {
             vec![CompactString::from("bar"), CompactString::from("baz")],
         );
 
-        let snap1 = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr1,
-                outcome: ProbeOutcome::DirEnumerated(snap1),
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::Dir),
+                },
             }),
             Instant::now(),
         );
@@ -1038,12 +1002,13 @@ mod tests {
         assert_ne!(corr1, corr2, "fresh correlation per descent step");
 
         // Inject "baz" appears.
-        let snap2 = dir_snap_with(vec![("baz", EntryKind::Dir, 2)]);
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr2,
-                outcome: ProbeOutcome::DirEnumerated(snap2),
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::Dir),
+                },
             }),
             Instant::now(),
         );
@@ -1058,14 +1023,13 @@ mod tests {
         let (mut e, _sid, pid) = setup_pending_one_level();
         let corr = e.pending_probe_for(pid).unwrap();
 
-        // Snapshot with unrelated entries (no "bar").
+        // The awaited `bar` segment is absent under a healthy prefix.
         let _foo = lookup_foo(&e);
-        let snap = dir_snap_with(vec![("other.c", EntryKind::File, 1)]);
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::DirEnumerated(snap),
+                outcome: ProbeOutcome::SegmentObserved { kind: None },
             }),
             Instant::now(),
         );
@@ -1086,15 +1050,14 @@ mod tests {
     #[test]
     fn descent_event_at_prefix_emits_fresh_probe() {
         let (mut e, _sid, pid) = setup_pending_one_level();
-        // Drain the in-flight probe.
+        // Drain the in-flight probe with the awaited segment still absent.
         let corr = e.pending_probe_for(pid).unwrap();
         let foo = lookup_foo(&e);
-        let snap = dir_snap_with(vec![("other.c", EntryKind::File, 1)]);
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::DirEnumerated(snap),
+                outcome: ProbeOutcome::SegmentObserved { kind: None },
             }),
             Instant::now(),
         );
@@ -1267,11 +1230,9 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr1,
-                outcome: ProbeOutcome::DirEnumerated(dir_snap_with(vec![(
-                    "bar",
-                    EntryKind::Dir,
-                    1,
-                )])),
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::Dir),
+                },
             }),
             Instant::now(),
         );
@@ -1294,7 +1255,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr2,
-                outcome: ProbeOutcome::DirEnumerated(dir_snap_with(vec![])),
+                outcome: ProbeOutcome::SegmentObserved { kind: None },
             }),
             Instant::now(),
         );
@@ -1355,12 +1316,13 @@ mod tests {
         let bar = e.tree().lookup(Some(foo), "bar").expect("scaffold exists");
 
         // Inject as a Dir.
-        let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::DirEnumerated(snap),
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::Dir),
+                },
             }),
             Instant::now(),
         );
@@ -1390,12 +1352,13 @@ mod tests {
         // materialisation can never re-introduce the descendant-observation dispatch path by an
         // unprobed-anchor accident.
         let _foo = lookup_foo(&e);
-        let snap = dir_snap_with(vec![("bar", EntryKind::File, 1)]);
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::DirEnumerated(snap),
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::File),
+                },
             }),
             Instant::now(),
         );
@@ -1567,10 +1530,12 @@ mod tests {
         let _ = e.cancel_all_in_flight_probes();
     }
 
-    /// Descent probes ride a dedicated `ProbeRequest::Descent` variant — the engine ships only
-    /// `(profile, correlation, target_path)`, leaving the admit-all single-level enumeration policy
-    /// entirely to the walker. Since the engine carries no scan-config on the wire, the policy's
-    /// correctness lives in the sensor's walker tests; this engine test pins the variant choice.
+    /// Descent probes ride a dedicated `ProbeRequest::Descent` variant — the engine ships
+    /// `(profile, correlation, target_path, segment)` and the walker answers with one
+    /// `lstat(prefix/segment)`. The typed variant plus the named segment is the structural
+    /// guarantee that user filters can't mask the next path segment: there is no enumeration to
+    /// filter. Since the engine carries no scan-config on the wire, the lstat's correctness lives
+    /// in the sensor's walker tests; this engine test pins the variant choice.
     #[test]
     fn descent_probe_uses_descent_variant() {
         let mut e = Engine::new();
@@ -1621,12 +1586,13 @@ mod tests {
         let (mut e, _sid, pid) = setup_pending_one_level();
         let corr = e.pending_probe_for(pid).unwrap();
         let _foo = lookup_foo(&e);
-        let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::DirEnumerated(snap),
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::Dir),
+                },
             }),
             Instant::now(),
         );
@@ -1802,12 +1768,13 @@ mod tests {
         ));
         let corr = e.pending_probe_for(pid).unwrap();
         let _foo = lookup_foo(&e);
-        let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 1)]);
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::DirEnumerated(snap),
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::Dir),
+                },
             }),
             Instant::now(),
         );
@@ -1922,12 +1889,13 @@ mod tests {
         let (mut e, _sid, pid) = setup_pending_one_level();
         let corr = e.pending_probe_for(pid).unwrap();
         let _foo = lookup_foo(&e);
-        let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 99)]);
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::DirEnumerated(snap),
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::Dir),
+                },
             }),
             Instant::now(),
         );
@@ -2051,13 +2019,14 @@ mod tests {
         // Step 1+2: Drive descent to materialization. The probe response with `bar` as a Dir entry
         // materializes the anchor.
         let corr = e.pending_probe_for(pid).expect("descent probe in flight");
-        let snap = dir_snap_with(vec![("bar", EntryKind::Dir, 99)]);
         let t_mat = Instant::now();
         let _ = e.step(
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::DirEnumerated(snap),
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::Dir),
+                },
             }),
             t_mat,
         );

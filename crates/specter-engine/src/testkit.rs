@@ -10,7 +10,7 @@
 //! test proves.
 
 use crate::Engine;
-use specter_core::testkit::{anchor_ok, enumerated, file_leaf, proven};
+use specter_core::testkit::{anchor_ok, file_leaf, proven, segment_observed};
 use specter_core::{
     ActiveBurst, ClassSet, DedupKey, Diagnostic, DirSnapshot, EffectCompletion, EffectOutcome,
     EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, MintTemplate, PatternSpec,
@@ -486,8 +486,11 @@ pub fn rebase_post_fire_to_idle(
     }
 }
 
-/// Respond to `owner`'s single in-flight descent probe with `DirEnumerated(snap)`; the engine
-/// advances one path component (or materialises the anchor, opening a Seed).
+/// Respond to `owner`'s single in-flight descent probe with `SegmentObserved { kind }`.
+///
+/// `Some(kind)` — the awaited head segment exists (the engine advances one path component or
+/// materialises the anchor, opening a Seed); `None` — absent under a healthy prefix (the descent
+/// parks on the standing absence observation).
 ///
 /// Returns the full `StepOutput`: the caller reads the next descent correlation, asserts the
 /// terminal Seed/proxy shape, or asserts no-progress. Descent runs outside the Burst lifecycle, so
@@ -496,7 +499,7 @@ pub fn rebase_post_fire_to_idle(
 pub fn descent_advance(
     e: &mut Engine,
     owner: ProfileId,
-    snap: &Arc<DirSnapshot>,
+    kind: Option<EntryKind>,
     at: Instant,
 ) -> StepOutput {
     let correlation = e.pending_probe_for(owner).expect("descent probe in flight");
@@ -504,7 +507,7 @@ pub fn descent_advance(
         Input::ProbeResponse(ProbeResponse {
             owner,
             correlation,
-            outcome: enumerated(Arc::clone(snap)),
+            outcome: segment_observed(kind),
         }),
         at,
     )

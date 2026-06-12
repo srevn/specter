@@ -146,17 +146,17 @@ pub const fn proven(snapshot: Arc<DirSnapshot>) -> ProbeOutcome {
     }
 }
 
-/// A `Descent` enumeration outcome — one prefix level, no proof obligation (structural query, not a
-/// quiescence observation).
+/// A `Descent` structural answer about the awaited head segment — `Some(kind)` present, `None` absent
+/// under a healthy prefix. No proof obligation (structural query, not a quiescence observation).
 #[must_use]
-pub const fn enumerated(snapshot: Arc<DirSnapshot>) -> ProbeOutcome {
-    ProbeOutcome::DirEnumerated(snapshot)
+pub const fn segment_observed(kind: Option<EntryKind>) -> ProbeOutcome {
+    ProbeOutcome::SegmentObserved { kind }
 }
 
 /// An `AnchorOk` outcome — a File/Symlink anchor's `lstat` result.
 ///
-/// Completes the success-outcome trio with [`proven`] (`SubtreeProven`) and [`enumerated`]
-/// (`DirEnumerated`); pair with [`file_leaf`] for a File-anchored quiescence sample (hash-channel
+/// Completes the success-outcome trio with [`proven`] (`SubtreeProven`) and [`segment_observed`]
+/// (`SegmentObserved`); pair with [`file_leaf`] for a File-anchored quiescence sample (hash-channel
 /// pair when the carrier is engaged).
 #[must_use]
 pub const fn anchor_ok(leaf: LeafEntry) -> ProbeOutcome {

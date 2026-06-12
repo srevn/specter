@@ -2089,49 +2089,106 @@ fn run_probe_dispatches_descent_to_probe_descent() {
     let p = pids[0];
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("alpha"), b"x").unwrap();
-    std::fs::write(tmp.path().join("beta"), b"x").unwrap();
 
     let req = ProbeRequest::Descent {
         owner: p,
         correlation: ProbeCorrelation::from(1),
         target_path: Arc::from(tmp.path()),
+        segment: CompactString::new("alpha"),
     };
-    let outcome = run_probe(&req);
-    let ProbeOutcome::DirEnumerated(arc) = outcome else {
-        panic!("expected DirEnumerated, got {outcome:?}");
-    };
-    // Descent enumerates one level — both children appear directly.
-    assert!(arc.entries().contains_key("alpha"));
-    assert!(arc.entries().contains_key("beta"));
-}
-
-#[test]
-fn probe_descent_admits_every_dirent_and_never_descends() {
-    let tmp = TempDir::new().unwrap();
-    // `.hidden` would be filtered by a Subtree default (`hidden=false`); `foo.tmp` would be
-    // filtered by an exclude/pattern. The descent policy admits every dirent — descent is searching
-    // for the next path segment — so every direct child must surface.
-    std::fs::write(tmp.path().join(".hidden"), b"x").unwrap();
-    std::fs::write(tmp.path().join("foo.tmp"), b"x").unwrap();
-    std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
-    // A Dir child surfaces as a dirent but is never recursed into: descent is a one-level
-    // structural query, so the entry stays `Uncovered` and the grandchild is invisible.
-    std::fs::create_dir(tmp.path().join("subdir")).unwrap();
-    std::fs::write(tmp.path().join("subdir").join("grandchild"), b"x").unwrap();
-
-    let outcome = probe_descent(tmp.path());
-    let ProbeOutcome::DirEnumerated(arc) = outcome else {
-        panic!("expected DirEnumerated, got {outcome:?}");
-    };
-    assert!(arc.entries().contains_key(".hidden"));
-    assert!(arc.entries().contains_key("foo.tmp"));
-    assert!(arc.entries().contains_key("main.c"));
     assert!(
         matches!(
-            arc.entries().get("subdir"),
-            Some(ChildEntry::Dir(DirChild::Uncovered(_))),
+            run_probe(&req),
+            ProbeOutcome::SegmentObserved {
+                kind: Some(EntryKind::File),
+            },
         ),
-        "descent never descends: a Dir child is observed but unexplored",
+        "the wire's named segment reaches probe_descent and is observed present",
+    );
+}
+
+/// A present segment is observed with its total kind classification — directory included (the
+/// engine pins the anchor kind from it) — and the query consults no `ScanConfig`: a name a Subtree
+/// shape would filter (`.hidden` under `hidden=false`) is observed all the same, because there is
+/// no enumeration to filter.
+#[test]
+fn probe_descent_observes_present_segment_with_total_kind() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
+    std::fs::create_dir(tmp.path().join("subdir")).unwrap();
+    std::os::unix::fs::symlink("main.c", tmp.path().join("link")).unwrap();
+    std::fs::write(tmp.path().join(".hidden"), b"x").unwrap();
+
+    for (segment, kind) in [
+        ("main.c", EntryKind::File),
+        ("subdir", EntryKind::Dir),
+        ("link", EntryKind::Symlink),
+        (".hidden", EntryKind::File),
+    ] {
+        let outcome = probe_descent(tmp.path(), segment);
+        assert!(
+            matches!(
+                outcome,
+                ProbeOutcome::SegmentObserved { kind: Some(k) } if k == kind,
+            ),
+            "segment {segment:?} expected kind {kind:?}, got {outcome:?}",
+        );
+    }
+}
+
+/// An absent segment under a healthy prefix is the park answer — `kind: None` — not `Vanished`: the
+/// prefix disambiguation `lstat` distinguishes "the segment alone is missing" from "the prefix is
+/// gone".
+#[test]
+fn probe_descent_absent_segment_under_healthy_prefix_is_kind_none() {
+    let tmp = TempDir::new().unwrap();
+    std::fs::write(tmp.path().join("other"), b"x").unwrap();
+
+    assert!(matches!(
+        probe_descent(tmp.path(), "missing"),
+        ProbeOutcome::SegmentObserved { kind: None },
+    ));
+}
+
+/// Both ways the prefix itself can stop being a walkable directory collapse to `Vanished` — the
+/// rewind signal: absent outright (`ENOENT` on the disambiguation `lstat`), and atomically replaced
+/// by a file (`ENOTDIR` on the segment `lstat`, then the disambiguation observes a non-directory).
+#[test]
+fn probe_descent_gone_or_replaced_prefix_is_vanished() {
+    let tmp = TempDir::new().unwrap();
+
+    let absent_prefix = tmp.path().join("nonexistent");
+    assert!(matches!(
+        probe_descent(&absent_prefix, "seg"),
+        ProbeOutcome::Vanished,
+    ));
+
+    let file_prefix = tmp.path().join("was-a-dir");
+    std::fs::write(&file_prefix, b"x").unwrap();
+    assert!(matches!(
+        probe_descent(&file_prefix, "seg"),
+        ProbeOutcome::Vanished,
+    ));
+}
+
+/// An unsearchable prefix (`EACCES` on the segment `lstat`) is a non-observation, not an absence:
+/// `Failed` retains descent state rather than parking on a false absence half of the appearance
+/// witness.
+#[test]
+fn probe_descent_unsearchable_prefix_is_failed() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let prefix = tmp.path().join("locked");
+    std::fs::create_dir(&prefix).unwrap();
+    std::fs::write(prefix.join("seg"), b"x").unwrap();
+    std::fs::set_permissions(&prefix, std::fs::Permissions::from_mode(0o000)).unwrap();
+
+    let outcome = probe_descent(&prefix, "seg");
+
+    std::fs::set_permissions(&prefix, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(
+        matches!(outcome, ProbeOutcome::Failed(_)),
+        "EACCES at the prefix is Failed (retain + diagnostic), got {outcome:?}",
     );
 }
 

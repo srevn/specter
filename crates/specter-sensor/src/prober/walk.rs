@@ -3,10 +3,10 @@
 //! Each returns a [`ProbeOutcome`] typed to its query kind: `probe_anchor_file` →
 //! `AnchorOk(LeafEntry)`; `probe_subtree` → `SubtreeProven { snapshot, authority }` where the
 //! [`ProofAuthority`] certifies whether the response discharged its proof obligation; `probe_descent`
-//! → `DirEnumerated(arc)` — a structural query is not a quiescence observation and the type carries
-//! no certificate. Kind mismatches and absent paths collapse to `Vanished`; a root-anchor I/O error
-//! is `Failed { errno }`. Mid-walk faults skip-and-continue and are accounted in the [`ProofLedger`]
-//! (`exclude` is the user-facing surface for declaring expected-EACCES paths).
+//! → `SegmentObserved { kind }` — a structural query is not a quiescence observation and the type
+//! carries no certificate. Kind mismatches and absent paths collapse to `Vanished`; a root-anchor I/O
+//! error is `Failed { errno }`. Mid-walk faults skip-and-continue and are accounted in the
+//! [`ProofLedger`] (`exclude` is the user-facing surface for declaring expected-EACCES paths).
 //!
 //! Three controls live on [`specter_core::ProbeRequest::Subtree`]:
 //! - `baseline_subtree`: the engine's last-known view. Equal `root_meta` against the freshly
@@ -21,16 +21,16 @@
 //!   `baseline_subtree` or `obligation`.
 //!
 //! [`specter_core::ProbeRequest::AnchorFile`] runs a single `lstat` (no controls — a leaf has no
-//! descendants to skip). [`specter_core::ProbeRequest::Descent`] walks under
-//! [`WalkPolicy::DescentLevel`] (admit every dirent, one level, never descend) — the Profile's
-//! user-facing filters would mask the very segment descent is searching for.
+//! descendants to skip). [`specter_core::ProbeRequest::Descent`] is a one-`lstat` structural query
+//! against the named segment ([`probe_descent`]) — it never enumerates, so none of the recursion
+//! machinery below applies to it.
 //!
 //! Symlinks are never traversed (`symlink_metadata` ≡ `lstat`); they appear as `EntryKind::Symlink`
 //! leaves when encountered as direct children. v1 has no `follow_symlinks` opt-in. Cross-filesystem
 //! descent is refused: subdir entries with a `dev` differing from the root anchor's `dev` are
 //! emitted as `DirChild::Uncovered(fs_id)` (uncovered-by-mount).
 //!
-//! Per-dirent scope filtering goes through [`WalkPolicy`]: a shape walk delegates to
+//! Per-dirent scope filtering delegates to the frozen [`ScanConfig`]:
 //! [`ScanConfig::accepts_structural`] (pre-`lstat`) plus [`ScanConfig::accepts_kinded`]
 //! (post-`lstat`, when `is_dir` is known). `covers` (engine) calls the full [`ScanConfig::accepts`]
 //! — the composition of the same two halves; both consumers run the same predicate body **and**
@@ -48,8 +48,8 @@
 use crate::ProbeFailureExt;
 use compact_str::CompactString;
 use specter_core::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, FsIdentity, LeafEntry, ProbeFailure, ProbeOutcome,
-    ProofAuthority, ProofObligation, ScanConfig,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, LeafEntry, ProbeFailure,
+    ProbeOutcome, ProofAuthority, ProofObligation, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::io;
@@ -57,89 +57,9 @@ use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 use std::sync::Arc;
 
-/// `captured_with` stamp for every `DirSnapshot` a [`probe_descent`] walk returns — an explicit
-/// reserved marker, not any Profile's identity hash. A descent enumeration keys no Profile, and its
-/// snapshot is consumed structurally (`entries.get(name)`) and dropped before any
-/// [`specter_core::DirSnapshot::dir_hash`] fold could read the stamp, so the field's only job is to
-/// be recognisably not-a-Profile in a debug dump. A live `config_hash` landing on this exact value
-/// would be the same ~2⁻⁶⁴ accident the hash route itself tolerates — and nothing compares descent
-/// stamps against Profile hashes anyway.
-const DESCENT_CAPTURED_WITH: u64 = u64::MAX;
-
-/// The scope policy one walk runs under — the walker-mode axis, distinct from the engine's
-/// identity-bearing [`ScanConfig`] shapes.
-///
-/// [`Shape`](Self::Shape) honours a Profile's frozen scan shape: the three per-dirent decisions
-/// delegate to the shape's named projections, and every frame stamps the engine-computed identity
-/// hash shipped on the wire. [`DescentLevel`](Self::DescentLevel) is the pending-descent
-/// enumeration mode: admit every dirent, one level, never descend. Descent searches for the next
-/// path component of a not-yet-existing anchor, so the user-facing filters (which would mask the
-/// very segment being searched for) must not apply — and a walker mode is not a Profile identity,
-/// so it lives here rather than as a `ScanConfig` variant whose arms every identity projection and
-/// the config hash would have to carry.
-///
-/// Pairing `captured_with` with the config inside `Shape` is load-bearing: a descent walk *cannot*
-/// stamp a Profile's identity hash and a shape walk *cannot* stamp the descent marker — the
-/// stamp/policy agreement is structural, not a call-site convention.
-#[derive(Clone, Copy)]
-enum WalkPolicy<'a> {
-    Shape {
-        config: &'a ScanConfig,
-        /// `Profile.config_hash` at emission time, from `ProbeRequest::Subtree` — the walker cannot
-        /// derive it (the hash folds identity axes the wire doesn't carry).
-        captured_with: u64,
-    },
-    DescentLevel,
-}
-
-impl WalkPolicy<'_> {
-    /// The kind-independent per-dirent gate — [`ScanConfig::accepts_structural`] for a shape walk.
-    /// Descent admits exactly one level; the walk never descends, so deeper depths are never
-    /// queried (the bound is totality, not a live filter).
-    #[must_use]
-    fn accepts_structural(&self, rel: &Path, depth: u32) -> bool {
-        match self {
-            Self::Shape { config, .. } => config.accepts_structural(rel, depth),
-            Self::DescentLevel => depth <= 1,
-        }
-    }
-
-    /// The kind-dependent per-dirent gate — [`ScanConfig::accepts_kinded`] for a shape walk.
-    /// Descent admits every kind: the next path component may be anything; kind resolution is the
-    /// engine's job at dispatch.
-    #[must_use]
-    fn accepts_kinded(&self, rel: &Path, is_dir: bool, depth: u32) -> bool {
-        match self {
-            Self::Shape { config, .. } => config.accepts_kinded(rel, is_dir, depth),
-            Self::DescentLevel => true,
-        }
-    }
-
-    /// The recursion edge — [`ScanConfig::descends_into`] (the single home of the shape
-    /// recursion-edge policy) for a shape walk. Descent never descends: it is a one-level
-    /// structural query, so every Dir dirent surfaces as `DirChild::Uncovered`.
-    #[must_use]
-    fn descends_into(&self, child_depth: u32, same_device: bool) -> bool {
-        match self {
-            Self::Shape { config, .. } => config.descends_into(child_depth, same_device),
-            Self::DescentLevel => false,
-        }
-    }
-
-    /// The `captured_with` stamp every frame of this walk writes onto its `DirSnapshot` — the
-    /// engine-computed identity hash for a shape walk, [`DESCENT_CAPTURED_WITH`] for descent.
-    #[must_use]
-    const fn captured_with(&self) -> u64 {
-        match self {
-            Self::Shape { captured_with, .. } => *captured_with,
-            Self::DescentLevel => DESCENT_CAPTURED_WITH,
-        }
-    }
-}
-
 /// Recursion-invariant inputs shared across every frame of one subtree probe. Built once at probe
-/// entry ([`walk_root`]) from the `ProbeRequest::Subtree` payload, then threaded by reference into
-/// [`snapshot_dir`], [`enumerate_dir`], and [`build_dir_child`]. Per-frame inputs (`path`,
+/// entry ([`probe_subtree`]) from the `ProbeRequest::Subtree` payload, then threaded by reference
+/// into [`snapshot_dir`], [`enumerate_dir`], and [`build_dir_child`]. Per-frame inputs (`path`,
 /// `baseline`, `cmeta`, `name`) stay as positional arguments to those callees; per-dirent depth
 /// derives from `rel` at the dirent (see [`enumerate_dir`]), not a threaded counter; the non-`Copy`
 /// [`ProofLedger`] threads as a separate `&mut`.
@@ -160,21 +80,28 @@ impl WalkPolicy<'_> {
 /// into): a Standard burst roots the walk at the dirty-LCA for speed but must still measure
 /// `exclude` / `pattern` / depth from the anchor, or its scope desyncs from the engine's `covers`.
 ///
-/// `root_dev` is the **walk root's** device — `target_path`'s, captured once in [`walk_root`] from
-/// the top-level `lstat`. It is the recursion root's device, not the anchor's; the two coincide
-/// only when the walk roots at the anchor (`target == anchor`), while a Standard burst can root at
-/// a dirty-LCA below the anchor. The cross-filesystem gate
+/// `root_dev` is the **walk root's** device — `target_path`'s, captured once in [`probe_subtree`]
+/// from the top-level `lstat`. It is the recursion root's device, not the anchor's; the two
+/// coincide only when the walk roots at the anchor (`target == anchor`), while a Standard burst can
+/// root at a dirty-LCA below the anchor. The cross-filesystem gate
 /// ([`should_recurse`](Self::should_recurse)) refuses to descend into any child whose device
 /// differs from `root_dev`, leaving a sub-mount below the recursion root uncovered.
 ///
-/// `Copy + Clone` because the struct is a handful of words — two thin references, the
-/// [`WalkPolicy`] (a reference plus the stamp), one `u64`, one `bool`. Passing by reference at
-/// recursion frequency is the convention here; the `Copy` derive is for the cheap "snapshot a `ctx`
-/// value into a closure" cases that arise during evolution.
+/// `Copy + Clone` because the struct is a handful of words — three thin references, two `u64`s, one
+/// `bool`. Passing by reference at recursion frequency is the convention here; the `Copy` derive is
+/// for the cheap "snapshot a `ctx` value into a closure" cases that arise during evolution.
 #[derive(Clone, Copy)]
 struct WalkContext<'a> {
     anchor_path: &'a Path,
-    policy: WalkPolicy<'a>,
+    /// The Profile's frozen scan shape: the per-dirent gates ([`ScanConfig::accepts_structural`] /
+    /// [`ScanConfig::accepts_kinded`]) and the recursion edge ([`ScanConfig::descends_into`]) all
+    /// read it.
+    config: &'a ScanConfig,
+    /// `Profile.config_hash` at emission time, from `ProbeRequest::Subtree` — the walker cannot
+    /// derive it (the hash folds identity axes the wire doesn't carry). Stamped onto every frame's
+    /// `DirSnapshot` so two Profiles sharing a Resource with different filters cannot produce
+    /// identical `dir_hash` for divergent in-scope content.
+    captured_with: u64,
     obligation: &'a ProofObligation,
     forced: bool,
     root_dev: u64,
@@ -236,11 +163,10 @@ fn certify(obligation: &ProofObligation, l: &ProofLedger) -> ProofAuthority {
 
 impl WalkContext<'_> {
     /// True iff a child directory at `depth_after_descent` on `child_dev` is in-scope for recursive
-    /// descent — a pure delegation to [`WalkPolicy::descends_into`] (which, for a shape walk, is
-    /// [`ScanConfig::descends_into`], the single home of the shape recursion-edge policy). The walker
-    /// contributes the one observation core cannot make (`child_dev == self.root_dev`; the engine's
-    /// `Tree` slots don't carry `device`); whether the observation *matters* is the policy's decision
-    /// (`Subtree` is device-gated, `MatchChain` is device-blind, descent never descends).
+    /// descent — a pure delegation to [`ScanConfig::descends_into`], the single home of the shape
+    /// recursion-edge policy. The walker contributes the one observation core cannot make (`child_dev
+    /// == self.root_dev`; the engine's `Tree` slots don't carry `device`); whether the observation
+    /// *matters* is the shape's decision (`Subtree` is device-gated, `MatchChain` is device-blind).
     ///
     /// Negation drives `DirChild::Uncovered(fs_id)` emission in [`build_dir_child`]. This is the
     /// only source of `Uncovered` emissions in the walker; transient I/O (raced unlink, EACCES,
@@ -253,7 +179,7 @@ impl WalkContext<'_> {
     /// directory dirent.
     #[must_use]
     fn should_recurse(&self, depth_after_descent: u32, child_dev: u64) -> bool {
-        self.policy
+        self.config
             .descends_into(depth_after_descent, child_dev == self.root_dev)
     }
 
@@ -375,53 +301,11 @@ pub(super) fn probe_anchor_file(target_path: &Path) -> ProbeOutcome {
     ProbeOutcome::AnchorOk(leaf)
 }
 
-/// Shared root entry for both directory walks: root `lstat`, kind check, [`WalkContext`]
-/// construction, then the recursive [`snapshot_dir`]. Returns the built subtree, or the
-/// early-terminal [`ProbeOutcome`] (`Vanished` on absent/kind-mismatch, `Failed` on any other root
-/// I/O error) — the caller wraps the `Ok` arm in its query-kind-specific outcome.
-///
-/// The walk *roots* at `target_path` (the `read_dir` start) but *scopes* from `anchor_path` (the
-/// basis every dirent's `rel` is `strip_prefix`-ed against). They are the same path for Seed /
-/// Rebase / Descent and for a Standard burst whose dirty-LCA is the anchor; a Standard burst rooted
-/// at a deeper LCA passes the true anchor as the second argument so scope stays anchor-relative.
-///
-/// The non-`Copy` [`ProofLedger`] is the caller's: `probe_subtree` `certify`s it; `probe_descent`
-/// discards it. Splitting the wrap from the walk is what makes `probe_descent` *not* a
-/// `probe_subtree` delegation — a descent can no longer produce a `SubtreeProven`.
-fn walk_root<'a>(
-    target_path: &'a Path,
-    anchor_path: &'a Path,
-    policy: WalkPolicy<'a>,
-    baseline: Option<&Arc<DirSnapshot>>,
-    obligation: &'a ProofObligation,
-    forced: bool,
-    ledger: &mut ProofLedger,
-) -> Result<Arc<DirSnapshot>, ProbeOutcome> {
-    let root_meta_raw = match std::fs::symlink_metadata(target_path) {
-        Ok(m) => m,
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Err(ProbeOutcome::Vanished),
-        Err(e) => return Err(ProbeOutcome::Failed(ProbeFailure::from_io(&e))),
-    };
-    if !root_meta_raw.is_dir() {
-        return Err(ProbeOutcome::Vanished);
-    }
-    let root_meta = DirMeta::from_metadata(&root_meta_raw);
-    let ctx = WalkContext {
-        anchor_path,
-        policy,
-        obligation,
-        forced,
-        // Walk root's device (from `lstat(target_path)`), deliberately not the anchor's: cross-fs
-        // refusal is scoped to sub-mounts below the recursion root, which is `target_path`.
-        root_dev: root_meta.fs_id().device(),
-    };
-    Ok(snapshot_dir(&ctx, target_path, root_meta, baseline, ledger))
-}
-
 /// Subtree probe. Recursive DFS walk rooted at `target_path` honoring `recursive`, `hidden`,
 /// `exclude`, `pattern`, and `max_depth` — each measured against `anchor_path`, the Profile anchor
 /// every dirent's `rel` is `strip_prefix`-ed from (equal to `target_path` unless the walk roots at
-/// a dirty-LCA below the anchor).
+/// a dirty-LCA below the anchor; a Standard burst rooted at a deeper LCA passes the true anchor so
+/// scope stays anchor-relative).
 ///
 /// Each recursion frame may short-circuit via mtime-skip when `!forced`, the frame is not
 /// at-or-above an `obligation` path, and a baseline subtree is provided whose `root_meta` (mtime +
@@ -433,10 +317,11 @@ fn walk_root<'a>(
 /// Returns `SubtreeProven { snapshot, authority }` where `authority` is [`certify`]'s fold of the
 /// [`ProofLedger`] against `obligation`: `Authoritative` iff no non-observation (mtime-skip of an
 /// obligation frame, or a degraded enumeration level) lies on an obligation chain. Root errors
-/// propagate as `Vanished` / `Failed`. Mid-walk `read_dir` / per-child faults skip-and-continue and
-/// degrade the affected level (`DirChild::Covered(empty_or_partial_arc)`); the uncovered variant
-/// `DirChild::Uncovered(fs_id)` stays reserved for the static gates in [`build_dir_child`]
-/// (`!recursive`, beyond `max_depth`, cross-fs).
+/// surface directly as `Vanished` (absent / kind-mismatch) or `Failed`. Mid-walk `read_dir` /
+/// per-child faults skip-and-continue and degrade the affected level
+/// (`DirChild::Covered(empty_or_partial_arc)`); the uncovered variant `DirChild::Uncovered(fs_id)`
+/// stays reserved for the static gates in [`build_dir_child`] (`!recursive`, beyond `max_depth`,
+/// cross-fs).
 pub(super) fn probe_subtree(
     target_path: &Path,
     anchor_path: &Path,
@@ -446,62 +331,82 @@ pub(super) fn probe_subtree(
     obligation: &ProofObligation,
     forced: bool,
 ) -> ProbeOutcome {
-    let mut ledger = ProofLedger::default();
-    match walk_root(
-        target_path,
+    let root_meta_raw = match std::fs::symlink_metadata(target_path) {
+        Ok(m) => m,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return ProbeOutcome::Vanished,
+        Err(e) => return ProbeOutcome::Failed(ProbeFailure::from_io(&e)),
+    };
+    if !root_meta_raw.is_dir() {
+        return ProbeOutcome::Vanished;
+    }
+    let root_meta = DirMeta::from_metadata(&root_meta_raw);
+    let ctx = WalkContext {
         anchor_path,
-        WalkPolicy::Shape {
-            config,
-            captured_with,
-        },
-        baseline,
+        config,
+        captured_with,
         obligation,
         forced,
-        &mut ledger,
-    ) {
-        Ok(snapshot) => ProbeOutcome::SubtreeProven {
-            snapshot,
-            authority: certify(obligation, &ledger),
-        },
-        Err(outcome) => outcome,
+        // Walk root's device (from `lstat(target_path)`), deliberately not the anchor's: cross-fs
+        // refusal is scoped to sub-mounts below the recursion root, which is `target_path`.
+        root_dev: root_meta.fs_id().device(),
+    };
+    let mut ledger = ProofLedger::default();
+    let snapshot = snapshot_dir(&ctx, target_path, root_meta, baseline, &mut ledger);
+    ProbeOutcome::SubtreeProven {
+        snapshot,
+        authority: certify(obligation, &ledger),
     }
 }
 
-/// Descent prefix probe. Single-level enumeration of `target_path` under
-/// [`WalkPolicy::DescentLevel`], which admits *every* dirent at one level and never descends —
-/// descent is searching for the next path segment, so the engine's user-facing filters (which would
-/// mask the very segment we're looking for) must not apply. Descent dispatch reads
-/// `arc.entries.get(name)` directly and (for Profile descent) discards the snapshot.
+/// Descent structural query: one `lstat(prefix/segment)` answering "does the awaited segment exist,
+/// and as what kind?" — the whole of [`specter_core::ProbeRequest::Descent`]'s walker arm. No
+/// enumeration, no [`ScanConfig`], no [`ProofLedger`]: the engine's question names exactly one
+/// entry, and a structural query is not a quiescence observation, so none of the proof machinery
+/// applies. The kernel resolves the name during the `lstat` (case folding / Unicode normalization
+/// per filesystem), keeping descent consistent with watch installation and anchor probes, which
+/// resolve the same user-spelled path.
 ///
-/// Returns [`ProbeOutcome::DirEnumerated`] — a structural query is not a quiescence observation, so
-/// it carries **no** [`ProofAuthority`]. It still threads the shared recursion core, so its
-/// `ProofLedger` is written-then-discarded: a descent `read_dir` fault can populate `degraded`, but
-/// the *type* (no `authority` field) is the guarantee, not an empty ledger. `WholeSubtree` is inert
-/// here — the descent policy never descends and `baseline=None` makes mtime-skip unreachable, so it
-/// never refuses a skip that could matter.
+/// - `lstat(prefix/segment)` succeeds → `SegmentObserved { kind: Some(_) }` (total [`EntryKind`]
+///   classification — directories included; the engine pins the anchor kind from it).
+/// - The segment resolves nowhere (`ENOENT`, or `ENOTDIR` from a path component that stopped being
+///   a directory) → one `lstat(prefix)` disambiguates *what* is missing:
+///   - prefix is a healthy directory → `SegmentObserved { kind: None }` — the segment alone is
+///     absent; descent parks on the standing absence observation.
+///   - prefix is absent or not a directory (replaced by a file) → `Vanished` — descent rewinds to
+///     the parent.
+///   - prefix unreadable (`EACCES` / `EIO` / an ancestor turned non-dir) → `Failed` — descent retains
+///     state and awaits the next event; an unreadable prefix is a non-observation, not an absence.
+/// - Any other segment-`lstat` error (`EACCES` on the prefix's search permission, `EIO`, `ELOOP`) →
+///   `Failed`, same retention semantics.
 ///
-/// Every frame stamps [`DESCENT_CAPTURED_WITH`], the reserved not-a-Profile marker — paired with
-/// the policy inside [`WalkPolicy::captured_with`], so this call site cannot mis-stamp.
-pub(super) fn probe_descent(target_path: &Path) -> ProbeOutcome {
-    let mut sink = ProofLedger::default();
-    // Descent roots and scopes at the same path: target == anchor, so every dirent's `rel` is its
-    // bare segment. The descent policy admits every dirent regardless, so the basis is inert here.
-    match walk_root(
-        target_path,
-        target_path,
-        WalkPolicy::DescentLevel,
-        None,
-        &ProofObligation::WholeSubtree,
-        false,
-        &mut sink,
-    ) {
-        Ok(snapshot) => ProbeOutcome::DirEnumerated(snapshot),
-        Err(outcome) => outcome,
+/// The two `lstat`s are not atomic; a prefix mutating between them yields whichever honest
+/// point-in-time answer the second read sees, and the kernel-watch + re-probe protocol converges on
+/// the next event exactly as it does for any probe racing live churn.
+pub(super) fn probe_descent(prefix: &Path, segment: &str) -> ProbeOutcome {
+    match std::fs::symlink_metadata(prefix.join(segment)) {
+        Ok(meta) => ProbeOutcome::SegmentObserved {
+            kind: Some(EntryKind::from(meta.file_type())),
+        },
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            ) =>
+        {
+            match std::fs::symlink_metadata(prefix) {
+                Ok(meta) if meta.is_dir() => ProbeOutcome::SegmentObserved { kind: None },
+                Ok(_) => ProbeOutcome::Vanished,
+                Err(e) if e.kind() == io::ErrorKind::NotFound => ProbeOutcome::Vanished,
+                Err(e) => ProbeOutcome::Failed(ProbeFailure::from_io(&e)),
+            }
+        }
+        Err(e) => ProbeOutcome::Failed(ProbeFailure::from_io(&e)),
     }
 }
 
 /// Build one directory's snapshot frame. Shared by two callers:
-/// 1. [`walk_root`], after the root `lstat` produces `root_meta` from the freshly-`lstat`ed anchor.
+/// 1. [`probe_subtree`], after the root `lstat` produces `root_meta` from the freshly-`lstat`ed
+///    anchor.
 /// 2. [`build_dir_child`], with a `cmeta`-derived `root_meta` for a covered subdir dirent.
 ///
 /// **Owns the [`ProofLedger`] degrade choke** (`enumerate_dir` reports, `snapshot_dir`
@@ -529,11 +434,7 @@ fn snapshot_dir(
     if completeness == Completeness::Incomplete {
         ledger.degraded.insert(Arc::from(path));
     }
-    Arc::new(DirSnapshot::new(
-        root_meta,
-        ctx.policy.captured_with(),
-        entries,
-    ))
+    Arc::new(DirSnapshot::new(root_meta, ctx.captured_with, entries))
 }
 
 /// Read one directory level, applying filters and recursing into covered Dir children. Returns the
@@ -642,7 +543,7 @@ fn enumerate_dir(
         // enumerate at depth d ⇒ the bound admits d`), so a drop here is always a genuine scope
         // filter, never a depth-bound desync — `note_structural_filter_drop` is the runtime
         // tripwire for exactly that regression.
-        if !ctx.policy.accepts_structural(rel, entry_depth) {
+        if !ctx.config.accepts_structural(rel, entry_depth) {
             completeness = ctx.note_structural_filter_drop(&child_path, completeness);
             continue;
         }
@@ -687,7 +588,7 @@ fn enumerate_dir(
         // `Complete` (the raced-unlink arm's semantics). The omission hash-differs from a baseline
         // that still holds the prior in-scope entity, firing the change through the ordinary diff
         // path instead of wedging the obligation in `Undischarged`.
-        if !ctx.policy.accepts_kinded(rel, is_dir, entry_depth) {
+        if !ctx.config.accepts_kinded(rel, is_dir, entry_depth) {
             tracing::trace!(
                 ?child_path,
                 "probe_subtree dirent kind now out of scope (atomic replace); omitting"
@@ -774,7 +675,7 @@ fn build_leaf_child(
 
 #[cfg(test)]
 mod tests {
-    use super::{WalkContext, WalkPolicy};
+    use super::WalkContext;
     use specter_core::{PatternSpec, ProofObligation, ScanConfig};
     use std::path::Path;
     use std::sync::Arc;
@@ -794,10 +695,8 @@ mod tests {
         ));
         let chain = WalkContext {
             anchor_path: Path::new("/srv"),
-            policy: WalkPolicy::Shape {
-                config: &chain_cfg,
-                captured_with: 0,
-            },
+            config: &chain_cfg,
+            captured_with: 0,
             obligation: &obligation,
             forced: false,
             root_dev: 1,
@@ -813,10 +712,7 @@ mod tests {
 
         let subtree_cfg = ScanConfig::builder().recursive(true).build();
         let subtree = WalkContext {
-            policy: WalkPolicy::Shape {
-                config: &subtree_cfg,
-                captured_with: 0,
-            },
+            config: &subtree_cfg,
             ..chain
         };
         assert!(

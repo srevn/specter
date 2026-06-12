@@ -284,8 +284,8 @@ pub enum Diagnostic {
         prefix: ResourceId,
         failure: ProbeFailure,
     },
-    /// Pending-path descent probe enumerated `prefix` successfully but the next awaited `segment`
-    /// is not present in it yet — the descent parks until the next event at the prefix
+    /// Pending-path descent probe observed a healthy `prefix` but the next awaited `segment` is not
+    /// present under it yet — the descent parks until the next event at the prefix
     /// (`on_descent_event`). Emitted only for *witnessed* descents (an observed anchor loss
     /// re-entering descent): there the park is a recovery in flight — typically a delete-then-write
     /// save whose create hasn't landed — and silence would read as the recovery vanishing in a
@@ -690,7 +690,7 @@ pub enum Diagnostic {
         observed: ProfileStateDiscriminant,
     },
     /// A probe response's payload shape contradicts the route the engine requested: a `Verifying` /
-    /// `Rebasing` (proof) probe received the structural `DirEnumerated`, or a `Descent` probe
+    /// `Rebasing` (proof) probe received the structural `SegmentObserved`, or a `Descent` probe
     /// received an `AnchorOk` / `SubtreeProven` proof. The engine recovers route-appropriately — a
     /// burst finishes to `Idle` preserving its anchor/baseline (a walker defect is not an
     /// anchor-identity change), a descent abandons its prefix — and is self-healing (a later

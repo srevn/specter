@@ -302,7 +302,7 @@ impl Engine {
     /// consumers accept — `ProofOutcome` for `Verifying` / `Rebasing`, `DescentOutcome` for
     /// `Descent` — so an illegal `(route, outcome)` pairing is unrepresentable past the parse and
     /// never reaches the certifier or the descent dispatcher. A payload shape the route cannot
-    /// accept (a proof route receiving the structural `DirEnumerated`, or a descent receiving an
+    /// accept (a proof route receiving the structural `SegmentObserved`, or a descent receiving an
     /// `AnchorOk` / `SubtreeProven` proof) is a walker-contract violation: the parse fails and the
     /// arm routes to the route-appropriate recovery — the burst recovery finishes the burst to Idle
     /// (anchor/baseline survive; a walker defect is not an anchor-identity change), the descent
@@ -394,7 +394,7 @@ impl Engine {
     }
 
     /// Recover a pre-fire (`Verifying`) or post-fire (`Rebasing`) burst from a walker-contract
-    /// violation — a proof-route probe whose payload resolved to the structural `DirEnumerated`
+    /// violation — a proof-route probe whose payload resolved to the structural `SegmentObserved`
     /// shape the route cannot accept. The typed [`ProofOutcome`] parse rejected the payload at the
     /// demux seam; this recovers the burst.
     ///
@@ -409,7 +409,7 @@ impl Engine {
         debug_assert!(
             false,
             "walker contract violated: a Verifying/Rebasing (proof) probe received \
-             a non-proof outcome (DirEnumerated) — a structural enumeration is not a \
+             a non-proof outcome (SegmentObserved) — a structural answer is not a \
              quiescence observation (owner = {profile_id:?})",
         );
         out.diagnostics
@@ -426,7 +426,7 @@ impl Engine {
     ///
     /// **Typed input.** The caller passes a `ProofOutcome`, not the wide wire
     /// [`ProbeOutcome`](specter_core::ProbeOutcome): the proof/descent split is parsed once at the
-    /// demux seam, so the structural `DirEnumerated` shape — a walker-contract violation on a
+    /// demux seam, so the structural `SegmentObserved` shape — a walker-contract violation on a
     /// quiescence/rebase probe — is unrepresentable here, with no defensive arm. The certifier sees
     /// only the four shapes a proof probe can legally resolve to.
     ///
@@ -490,7 +490,7 @@ impl Engine {
         out: &mut StepOutput,
     ) -> CertifiedResponse {
         // Lower the typed proof outcome to (snapshot, authority). `Vanished` / `Failed` return
-        // as-is for the caller's per-route cleanup; `DirEnumerated` is unrepresentable here —
+        // as-is for the caller's per-route cleanup; `SegmentObserved` is unrepresentable here —
         // parsed out at the demux seam, so no defensive arm is needed.
         let (snap, authority) = match proof {
             ProofOutcome::AnchorOk(leaf) => {
@@ -3291,8 +3291,8 @@ fn fire_decision(
 /// [`Engine::certify_probe_response`], routed differently by the two callers.
 ///
 /// The certifier accepts a typed `ProofOutcome` (a proof-route probe resolves to exactly `AnchorOk`
-/// / `SubtreeProven` / `Vanished` / `Failed`; the structural `DirEnumerated` shape is parsed out at
-/// the demux seam, so it is unrepresentable here), then performs the operation common to the
+/// / `SubtreeProven` / `Vanished` / `Failed`; the structural `SegmentObserved` shape is parsed out
+/// at the demux seam, so it is unrepresentable here), then performs the operation common to the
 /// Verifying choke and the post-fire Rebase arm — lower the outcome, guard kind agreement, fold the
 /// quiescence verdict (events-reliable witness for CONTENT-subscribed bursts, or the
 /// `last_certified_hash` channel otherwise) — and yields this 4-variant result. The callers own the
@@ -3311,11 +3311,11 @@ fn fire_decision(
 ///
 /// **Reachability.** Every `Regressed` producer is a contract-violation degrade, and all are
 /// unreachable on a correct sensor: the payload-shape violation (a proof route receiving
-/// `DirEnumerated`) is rejected before the certifier by the typed demux decode; the absent Profile
-/// cannot occur because the gate dispatches only on `Active(Verifying | Rebasing)`; the kind
-/// mismatch cannot occur because the walker collapses every on-disk Dir↔File swap to `Vanished`
-/// rather than returning a kind-divergent snapshot. The channel exists to degrade these violations
-/// gracefully, not to handle a reachable fault.
+/// `SegmentObserved`) is rejected before the certifier by the typed demux decode; the absent
+/// Profile cannot occur because the gate dispatches only on `Active(Verifying | Rebasing)`; the
+/// kind mismatch cannot occur because the walker collapses every on-disk Dir↔File swap to
+/// `Vanished` rather than returning a kind-divergent snapshot. The channel exists to degrade these
+/// violations gracefully, not to handle a reachable fault.
 #[derive(Debug)]
 enum CertifiedResponse {
     Proceed {

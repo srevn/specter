@@ -43,8 +43,9 @@
 
 use crate::Engine;
 use crate::path::empty_path;
+use compact_str::CompactString;
 use specter_core::{
-    ActiveBurst, BurstIntent, CeilingState, DirSnapshot, DirtyProvenance, LeafEntry,
+    ActiveBurst, BurstIntent, CeilingState, DirSnapshot, DirtyProvenance, EntryKind, LeafEntry,
     NonEmptyChainSet, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeFailure, ProbeOp,
     ProbeOutcome, ProbeRequest, Profile, ProfileId, ProfileState, ProofAuthority, ProofObligation,
     ResourceId, ResourceKind, StepOutput, subtree_at_dir,
@@ -84,15 +85,15 @@ pub(crate) enum ProfileProbeRoute {
 
 /// Engine-side proof-route payload. A `Verifying` / `Rebasing` probe — a `Subtree` / `AnchorFile`
 /// quiescence request — resolves to exactly these four shapes. [`TryFrom<ProbeOutcome>`] is the
-/// single parse from the protocol-erased wire enum; the structural [`ProbeOutcome::DirEnumerated`]
-/// is the one rejected shape (a proof route receiving a directory *enumeration* is a
-/// walker-contract violation — an enumeration is not a quiescence observation).
+/// single parse from the protocol-erased wire enum; the structural [`ProbeOutcome::SegmentObserved`]
+/// is the one rejected shape (a proof route receiving a structural answer is a walker-contract
+/// violation — a segment observation is not a quiescence observation).
 ///
 /// Parsing the wire enum into this narrower type at the demux seam makes the illegal pairing
-/// **unrepresentable** for the certifier and the pre-fire fan-out: [`ProbeOutcome::DirEnumerated`]
-/// cannot appear in a `ProofOutcome`, so the old `DirEnumerated`-defensive arm in the verdict floor
-/// ceases to exist at the type level rather than by assertion. `Vanished` / `Failed` are shared
-/// with [`DescentOutcome`] — a vanished anchor or a root I/O error is route-agnostic.
+/// **unrepresentable** for the certifier and the pre-fire fan-out: [`ProbeOutcome::SegmentObserved`]
+/// cannot appear in a `ProofOutcome`, so the verdict floor needs no defensive arm against it — the
+/// exclusion holds at the type level rather than by assertion. `Vanished` / `Failed` are shared with
+/// [`DescentOutcome`] — a vanished anchor or a root I/O error is route-agnostic.
 #[derive(Debug)]
 pub(crate) enum ProofOutcome {
     /// `AnchorFile` request returned a leaf observation. A single `lstat` has no mtime-skip
@@ -111,15 +112,17 @@ pub(crate) enum ProofOutcome {
     Failed(ProbeFailure),
 }
 
-/// Engine-side descent-route payload. A `Descent` probe enumerates one Dir prefix level, so it
-/// resolves to `DirEnumerated` / `Vanished` / `Failed`. An `AnchorOk` / `SubtreeProven` proof is
-/// the walker-contract violation this type rejects at the seam — descent never queries an anchor's
-/// `lstat` shape or a subtree proof.
-#[derive(Debug)]
+/// Engine-side descent-route payload. A `Descent` probe asks one structural question — does the
+/// awaited segment exist under the prefix, and as what kind? — so it resolves to `SegmentObserved`
+/// / `Vanished` / `Failed`. An `AnchorOk` / `SubtreeProven` proof is the walker-contract violation
+/// this type rejects at the seam — descent never queries an anchor's `lstat` shape or a subtree
+/// proof. `Copy` because every payload is a few words — the structural answer carries no snapshot.
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum DescentOutcome {
-    /// One enumerated prefix level. Descent reads `entries.get(name)` and discards the rest, so it
-    /// carries no proof.
-    DirEnumerated(Arc<DirSnapshot>),
+    /// The structural answer about the awaited head segment: `Some(kind)` — present, advance or
+    /// materialize; `None` — absent under a healthy prefix, park on the standing absence
+    /// observation. Carries no proof.
+    SegmentObserved { kind: Option<EntryKind> },
     /// Prefix absent — routed to the descent rewind / abandon terminal.
     Vanished,
     /// Root I/O error at the prefix — descent retains state and awaits the next event.
@@ -131,7 +134,7 @@ pub(crate) enum DescentOutcome {
 /// typed decode rejects at the demux seam.
 ///
 /// Carries no payload: the offending variant is statically known at each rejection site (a proof
-/// route can only be violated by `DirEnumerated`; a descent route only by `AnchorOk` /
+/// route can only be violated by `SegmentObserved`; a descent route only by `AnchorOk` /
 /// `SubtreeProven`), so the recovery helper that owns the route names the shape in its dev assert
 /// without threading the value back. The marker exists so the `Err` type is intent-revealing rather
 /// than a bare `()`.
@@ -140,8 +143,8 @@ pub(crate) struct WalkerContractViolation;
 impl TryFrom<ProbeOutcome> for ProofOutcome {
     type Error = WalkerContractViolation;
 
-    /// Parse a proof-route response. `DirEnumerated` is the sole rejected shape; the other four map
-    /// across one-to-one.
+    /// Parse a proof-route response. `SegmentObserved` is the sole rejected shape; the other four
+    /// map across one-to-one.
     fn try_from(outcome: ProbeOutcome) -> Result<Self, Self::Error> {
         match outcome {
             ProbeOutcome::AnchorOk(leaf) => Ok(Self::AnchorOk(leaf)),
@@ -154,7 +157,7 @@ impl TryFrom<ProbeOutcome> for ProofOutcome {
             }),
             ProbeOutcome::Vanished => Ok(Self::Vanished),
             ProbeOutcome::Failed(failure) => Ok(Self::Failed(failure)),
-            ProbeOutcome::DirEnumerated(_) => Err(WalkerContractViolation),
+            ProbeOutcome::SegmentObserved { .. } => Err(WalkerContractViolation),
         }
     }
 }
@@ -163,10 +166,10 @@ impl TryFrom<ProbeOutcome> for DescentOutcome {
     type Error = WalkerContractViolation;
 
     /// Parse a descent-route response. `AnchorOk` / `SubtreeProven` are the rejected shapes;
-    /// `DirEnumerated` / `Vanished` / `Failed` map across.
+    /// `SegmentObserved` / `Vanished` / `Failed` map across.
     fn try_from(outcome: ProbeOutcome) -> Result<Self, Self::Error> {
         match outcome {
-            ProbeOutcome::DirEnumerated(snapshot) => Ok(Self::DirEnumerated(snapshot)),
+            ProbeOutcome::SegmentObserved { kind } => Ok(Self::SegmentObserved { kind }),
             ProbeOutcome::Vanished => Ok(Self::Vanished),
             ProbeOutcome::Failed(failure) => Ok(Self::Failed(failure)),
             ProbeOutcome::AnchorOk(_) | ProbeOutcome::SubtreeProven { .. } => {
@@ -396,12 +399,12 @@ impl Engine {
     /// the wire carries exactly the slot's correlation* and *not-armed ⇒ no wire*. The launch sites'
     /// arm step makes *arm-guard miss ⇒ crash*, loud at both of [`specter_core::ProbeSlot`]'s linear
     /// edges: the *re-acquire edge* ([`specter_core::ProbeSlot::arm`]'s assert, guarding the in-place
-    /// re-arm of an advancing descent / enumeration) and the *destroy edge* (the [`Drop`] tripwire,
-    /// guarding the construct-armed [`specter_core::ProbeSlot::armed`] sites against overwriting a
-    /// still-armed slot), with the launch site's post-gate `unreachable!()` closing the residual hole
-    /// — a carrier that reaches emission having never armed. So a missed arm is a crash, never a
-    /// silent no-probe wedge (worse than the old orphan-stall: no diagnostic at all); a missed
-    /// read-back would instead orphan a threaded correlation. Neither half is redundant.
+    /// re-arm of an advancing descent) and the *destroy edge* (the [`Drop`] tripwire, guarding the
+    /// construct-armed [`specter_core::ProbeSlot::armed`] sites against overwriting a still-armed
+    /// slot), with the launch site's post-gate `unreachable!()` closing the residual hole — a carrier
+    /// that reaches emission having never armed. So a missed arm is a crash, never a silent no-probe
+    /// wedge (worse than the old orphan-stall: no diagnostic at all); a missed read-back would
+    /// instead orphan a threaded correlation. Neither half is redundant.
     pub(crate) fn emit_owner_probe(&self, owner: ProfileId, out: &mut StepOutput) {
         if let Some(request) = self.probe_emission_request(owner) {
             out.push_probe_op(ProbeOp::Probe { request });
@@ -425,15 +428,16 @@ impl Engine {
     /// 1. **Classify + read back.** Match the owner's state; read the correlation *off the armed
     ///    slot* (`?` ⇒ an empty slot returns `None` and nothing is emitted — the structural
     ///    armed-iff- emitted property), and resolve `(target, forced)` from the same match.
-    /// 2. **Render the wire** via `&self.tree`. Descent / enumeration are path-only; Verify / Rebase
-    ///    kind-dispatch — `Some(File)` ⇒ `AnchorFile`, else ⇒ `Subtree` with the Profile's `(config,
-    ///    config_hash)`, `baseline_subtree`, and the per-carrier [`specter_core::ProofObligation`]
-    ///    (Standard ⇒ `Chains` over the [`specter_core::NonEmptyChainSet`] from the persisting
-    ///    `dirty`'s captured paths, degrading to `WholeSubtree` when the projection is empty —
-    ///    production never reaches that arm but the type wrapper makes a silently-chainless `Chains`
-    ///    unrepresentable; Seed and Rebase ⇒ `WholeSubtree` — no trustworthy prior — built lazily,
-    ///    never for a File anchor). The kind rule lives here exactly once, so the prior positional
-    ///    constructors' fan-out dissolves into struct literals.
+    /// 2. **Render the wire** via `&self.tree`. Descent carries the prefix path plus the awaited
+    ///    head segment; Verify / Rebase kind-dispatch — `Some(File)` ⇒ `AnchorFile`, else ⇒
+    ///    `Subtree` with the Profile's `(config, config_hash)`, `baseline_subtree`, and the
+    ///    per-carrier [`specter_core::ProofObligation`] (Standard ⇒ `Chains` over the
+    ///    [`specter_core::NonEmptyChainSet`] from the persisting `dirty`'s captured paths,
+    ///    degrading to `WholeSubtree` when the projection is empty — production never reaches that
+    ///    arm but the type wrapper makes a silently-chainless `Chains` unrepresentable; Seed and
+    ///    Rebase ⇒ `WholeSubtree` — no trustworthy prior — built lazily, never for a File anchor).
+    ///    The kind rule lives here exactly once, so the prior positional constructors' fan-out
+    ///    dissolves into struct literals.
     fn probe_emission_request(&self, owner: ProfileId) -> Option<ProbeRequest> {
         // `Copy` carrier classification: which carrier, and — for the pre-fire carrier — the target +
         // `forced` + `intent` + a `Copy` borrow of the `dirty` provenance, all read off state.
@@ -443,9 +447,15 @@ impl Engine {
         // the stable `&Profile` (`p`), so it stays valid for the whole resolution.
         #[derive(Clone, Copy)]
         enum Carrier<'a> {
-            /// Profile `Pending` — a path-only `Descent` wire; the target is fully resolved here.
-            /// No proof obligation (a structural query is not a quiescence observation).
-            Descent(ResourceId),
+            /// Profile `Pending` — the `Descent` wire is the prefix path plus the awaited head
+            /// segment, both resolved here off the descent state. The head borrow is sound for the
+            /// resolution (tied to the stable `&Profile`) and frozen for the armed slot's lifetime
+            /// — every head mutation re-arms with a fresh correlation. No proof obligation (a
+            /// structural query is not a quiescence observation).
+            Descent {
+                prefix: ResourceId,
+                segment: &'a CompactString,
+            },
             /// Profile `Verifying`. `target` = the variant payload's `target` (the live id
             /// `pre_fire_target` resolved from the captured paths' LCA, immutable for the Verifying
             /// variant's lifetime), `forced` = `pre.forced`, `intent` selects the obligation kind,
@@ -484,7 +494,10 @@ impl Engine {
         // succeeded; they fold to `None` exactly as the response gate's twin arms do.
         let correlation = p.state().probe_correlation()?;
         let carrier = match p.state() {
-            ProfileState::Pending(d) => Carrier::Descent(d.current_prefix()),
+            ProfileState::Pending(d) => Carrier::Descent {
+                prefix: d.current_prefix(),
+                segment: d.remaining_components().head(),
+            },
             ProfileState::Active(ActiveBurst::PreFire(pre), _) => match &pre.phase {
                 PreFirePhase::Verifying { target, .. } => Carrier::PreFire {
                     target: *target,
@@ -508,19 +521,20 @@ impl Engine {
         // `false`. No mutation here — the Rebase obligation is `WholeSubtree` (built in the render
         // pass), so this resolution needs no `&mut` to drain anything.
         let (target, forced) = match carrier {
-            Carrier::Descent(prefix) => (prefix, false),
+            Carrier::Descent { prefix, .. } => (prefix, false),
             Carrier::PreFire { target, forced, .. } => (target, forced),
             Carrier::Rebase => (anchor, false),
         };
 
-        // Render via `&self.tree`. Descent is path-only; the pre-fire / rebase carriers
-        // kind-dispatch.
+        // Render via `&self.tree`. Descent is the prefix path plus the awaited segment; the
+        // pre-fire / rebase carriers kind-dispatch.
         let target_path = self.tree.path_of(target).unwrap_or_else(empty_path);
         Some(match carrier {
-            Carrier::Descent(_) => ProbeRequest::Descent {
+            Carrier::Descent { segment, .. } => ProbeRequest::Descent {
                 owner,
                 correlation,
                 target_path,
+                segment: segment.clone(),
             },
             Carrier::PreFire { .. } | Carrier::Rebase => match p.kind() {
                 Some(ResourceKind::File) => ProbeRequest::AnchorFile {
@@ -566,7 +580,7 @@ impl Engine {
                             .map_or(ProofObligation::WholeSubtree, ProofObligation::Chains),
                         // Descent emits ProbeRequest::Descent in the outer arm and never reaches
                         // the Subtree obligation builder.
-                        Carrier::Descent(_) => unreachable!(
+                        Carrier::Descent { .. } => unreachable!(
                             "probe_emission_request: Descent carrier in the \
                              Subtree obligation builder"
                         ),
@@ -622,11 +636,11 @@ mod tests {
         ))
     }
 
-    /// The proof-route parse (`Verifying` / `Rebasing`) accepts the four quiescence shapes
-    /// one-to-one and rejects the structural `DirEnumerated` — the single walker-contract violation
-    /// the typed decode makes unrepresentable for the certifier downstream of the demux seam.
+    /// The proof-route parse (`Verifying` / `Rebasing`) accepts the four quiescence shapes one-to-one
+    /// and rejects the structural `SegmentObserved` — the single walker-contract violation the typed
+    /// decode makes unrepresentable for the certifier downstream of the demux seam.
     #[test]
-    fn proof_outcome_try_from_accepts_proof_shapes_rejects_enumeration() {
+    fn proof_outcome_try_from_accepts_proof_shapes_rejects_segment_observed() {
         assert!(matches!(
             ProofOutcome::try_from(ProbeOutcome::AnchorOk(leaf())),
             Ok(ProofOutcome::AnchorOk(_)),
@@ -647,20 +661,24 @@ mod tests {
             Ok(ProofOutcome::Failed(_)),
         ));
         assert!(matches!(
-            ProofOutcome::try_from(ProbeOutcome::DirEnumerated(dir())),
+            ProofOutcome::try_from(ProbeOutcome::SegmentObserved { kind: None }),
             Err(WalkerContractViolation),
         ));
     }
 
-    /// The descent-route parse (`ProbeRequest::Descent` on the wire) accepts the enumeration shapes
+    /// The descent-route parse (`ProbeRequest::Descent` on the wire) accepts the structural shapes
     /// one-to-one and rejects an `AnchorOk` / `SubtreeProven` proof — a descent never queries an
     /// anchor's `lstat` shape or a subtree proof. `Vanished` / `Failed` are shared with the proof
     /// route and accepted by both.
     #[test]
-    fn descent_outcome_try_from_accepts_enumeration_shapes_rejects_proof() {
+    fn descent_outcome_try_from_accepts_structural_shapes_rejects_proof() {
         assert!(matches!(
-            DescentOutcome::try_from(ProbeOutcome::DirEnumerated(dir())),
-            Ok(DescentOutcome::DirEnumerated(_)),
+            DescentOutcome::try_from(ProbeOutcome::SegmentObserved {
+                kind: Some(EntryKind::Dir),
+            }),
+            Ok(DescentOutcome::SegmentObserved {
+                kind: Some(EntryKind::Dir),
+            }),
         ));
         assert!(matches!(
             DescentOutcome::try_from(ProbeOutcome::Vanished),

@@ -350,7 +350,11 @@ pub(super) fn run_probe(req: &ProbeRequest) -> ProbeOutcome {
             obligation,
             *forced,
         ),
-        ProbeRequest::Descent { target_path, .. } => probe_descent(target_path),
+        ProbeRequest::Descent {
+            target_path,
+            segment,
+            ..
+        } => probe_descent(target_path, segment),
     }
 }
 

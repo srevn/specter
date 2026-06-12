@@ -285,6 +285,21 @@ fn entry_kind_from_file_type(ft: std::fs::FileType) -> EntryKind {
     entry_kind_from_flags(ft.is_file(), ft.is_symlink())
 }
 
+/// The **total** kind classification of one observed filesystem entity — the answer a structural
+/// query (the walker's descent `lstat`) reports for whatever it found, directory included. Distinct
+/// from the leaf-only [`entry_kind_from_file_type`] above, whose missing `is_dir` arm is a
+/// deliberate contract (leaf construction is never reached for a directory); a structural query has
+/// no such precondition, so its classification must cover every kind.
+impl From<std::fs::FileType> for EntryKind {
+    fn from(ft: std::fs::FileType) -> Self {
+        if ft.is_dir() {
+            Self::Dir
+        } else {
+            entry_kind_from_flags(ft.is_file(), ft.is_symlink())
+        }
+    }
+}
+
 /// The leaf-kind decision over just the two booleans it depends on: `is_file` ⇒ `File`; else
 /// `is_symlink` ⇒ `Symlink`; else `Other` (directory / fifo / socket / block / char all map to
 /// `Other`). The signature *structurally* excludes an `is_dir` input, so the "no `is_dir` arm"

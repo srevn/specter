@@ -65,26 +65,21 @@ fn burst_and_respond(
 }
 
 /// Drive one minted Profile to Idle from whatever entry state it holds. A parked recovery descent
-/// advances first (answer the in-flight descent probe with `listing`, the parent enumeration —
-/// required for that entry alone); the convergence loop then answers whatever probe the burst
-/// surfaces (cold walk, verify, re-sample, rebase) with a byte-identical kind-appropriate sample
-/// (File anchors `AnchorOk`, Dir anchors an empty subtree), completes any fired effect, and advances
-/// the clock a settle window when the burst waits on a timer. The EMPTY-mask `mint_template` folds
+/// advances first (answer the in-flight descent probe with the awaited segment's `kind` — required
+/// for that entry alone); the convergence loop then answers whatever probe the burst surfaces (cold
+/// walk, verify, re-sample, rebase) with a byte-identical kind-appropriate sample (File anchors
+/// `AnchorOk`, Dir anchors an empty subtree), completes any fired effect, and advances the clock a
+/// settle window when the burst waits on a timer. The EMPTY-mask `mint_template` folds
 /// `HashChannel` verdicts, so each certification needs two equal samples; a cold Seed pins on its
 /// single sample without a clock advance. Returns the instant the Profile rests at Idle.
-fn settle_minted(
-    e: &mut Engine,
-    mid: SubId,
-    listing: Option<&Arc<DirSnapshot>>,
-    mut at: Instant,
-) -> Instant {
+fn settle_minted(e: &mut Engine, mid: SubId, kind: Option<EntryKind>, mut at: Instant) -> Instant {
     let pid = pid_of(e, mid);
     if matches!(
         e.profiles().get(pid).expect("minted Profile live").state(),
         ProfileState::Pending(_)
     ) {
-        let listing = listing.expect("a parked descent advances on the parent listing");
-        let _ = descent_advance(e, pid, listing, at);
+        let kind = kind.expect("a parked descent advances on the awaited segment's kind");
+        let _ = descent_advance(e, pid, Some(kind), at);
     }
     for _ in 0..10 {
         if matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle) {
@@ -912,14 +907,9 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
         },
         t3,
     );
-    // The minted descent finds the replacement (inode 7 != 6 — a fire-worthy change) and
-    // materializes into a triggered Seed, Batching-first.
-    let out = descent_advance(
-        &mut e,
-        minted_pid,
-        &dir_snap(&[("x.log", EntryKind::File, 7)]),
-        t3,
-    );
+    // The minted descent finds the replacement (a fire-worthy change) and materializes into a
+    // triggered Seed, Batching-first.
+    let out = descent_advance(&mut e, minted_pid, Some(EntryKind::File), t3);
     assert!(out.effects().is_empty(), "descent itself never fires");
 
     // Both settle windows expire in one drain: the discovery burst and the minted Seed go Verifying
@@ -1128,12 +1118,7 @@ fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
         },
         t2,
     ));
-    outs.push(descent_advance(
-        &mut e,
-        pid,
-        &dir_snap(&[("data", EntryKind::Dir, 7)]),
-        t2,
-    ));
+    outs.push(descent_advance(&mut e, pid, Some(EntryKind::Dir), t2));
     // The witnessed loss re-entry materializes into a triggered Seed — Batching-first; drain the
     // settle window to surface the verify probe.
     let t3 = t2 + SETTLE * 2;
@@ -1723,8 +1708,8 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
         )),
         "descent probe emitted at attach",
     );
-    let _ = descent_advance(&mut e, pid, &dir_snap(&[("data", EntryKind::Dir, 1)]), now);
-    let _ = descent_advance(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 2)]), now);
+    let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), now);
+    let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), now);
     let out = respond(&mut e, pid, &dir_snap(&[("m", EntryKind::Dir, 3)]), now);
     assert_eq!(
         minted_paths(&out),
@@ -2045,11 +2030,11 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
 
     // Forward again: the tree reappears one component per response, the anchor materialises, and
     // the recovery Seed reconciles into a fresh mint.
-    let a1 = descent_advance(&mut e, pid, &dir_snap(&[("a", EntryKind::Dir, 2)]), t1);
+    let a1 = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
     assert_eq!(last_probe_path(&a1), Some("/a".into()));
-    let a2 = descent_advance(&mut e, pid, &dir_snap(&[("b", EntryKind::Dir, 3)]), t1);
+    let a2 = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
     assert_eq!(last_probe_path(&a2), Some("/a/b".into()));
-    let a3 = descent_advance(&mut e, pid, &dir_snap(&[("c", EntryKind::Dir, 4)]), t1);
+    let a3 = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
     assert_eq!(
         last_probe_path(&a3),
         None,
@@ -2141,12 +2126,7 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
             },
             at,
         );
-        let _ = descent_advance(
-            &mut e,
-            pid,
-            &dir_snap(&[("data", EntryKind::Dir, 10 + cycle)]),
-            at,
-        );
+        let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), at);
         // Witnessed loss re-entry ⇒ triggered Seed, Batching-first: drain the settle window to
         // surface the verify probe.
         at += SETTLE * 2;
@@ -2168,13 +2148,8 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
                 .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { .. })),
             "cycle {cycle}: a live terminus is never a removal victim",
         );
-        // The minted Profile recovers through its own descent — same parent listing.
-        at = settle_minted(
-            &mut e,
-            mid,
-            Some(&dir_snap(&[("x", EntryKind::Dir, 20 + cycle)])),
-            at,
-        );
+        // The minted Profile recovers through its own descent — same awaited terminus kind.
+        at = settle_minted(&mut e, mid, Some(EntryKind::Dir), at);
 
         assert_eq!(
             e.tree().get(root).unwrap().watch_demand(),

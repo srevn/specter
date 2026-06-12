@@ -1700,7 +1700,7 @@ pub struct DescentState {
     witnessed: bool,
     /// Standing absence observation — the pending half of the absence→presence appearance witness.
     /// Set by [`Self::note_observed_absent`] when a probe observes the anchor's path incomplete
-    /// (the awaited segment missing from the prefix enumeration, or the prefix itself vanished);
+    /// (the awaited segment observed absent under the prefix, or the prefix itself vanished);
     /// consumed by [`Self::note_observed_present`] when a later probe finds the awaited segment —
     /// the pair latches `witnessed`. A descent that only ever finds its segments present (an attach
     /// over an existing tree) never sets this bit, so its terminus stays cold no matter how much
@@ -1796,8 +1796,8 @@ impl DescentState {
         self.witnessed
     }
 
-    /// Record a first-hand observation that the anchor's path is incomplete — a probe enumerated
-    /// the prefix and the awaited segment was absent, or the prefix itself vanished. An absent
+    /// Record a first-hand observation that the anchor's path is incomplete — a probe observed the
+    /// awaited segment absent under the prefix, or the prefix itself vanished. An absent
     /// intermediate segment implies the anchor absent (a path cannot complete through a missing
     /// directory), so one bit serves every descent depth. The standing observation is consumed by
     /// [`Self::note_observed_present`]; the pair is the only writer of the `witnessed` latch after
