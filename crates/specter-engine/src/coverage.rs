@@ -373,12 +373,23 @@ pub(crate) fn covering_profiles(
 /// consult points — the `gated_fire` Draining gate and the `finish_burst_to_idle` Draining sweep —
 /// never accumulated, so no mid-burst topology move can desynchronise it.
 ///
-/// Iterative DFS over the **strict** Tree descendants of `ancestor.resource` (starts at its
-/// children, so `ancestor` itself and any co-anchor Profile sharing its slot are excluded —
-/// matching the old refcount never self-counting). The strict subtree is a sound superset of `{D :
-/// ancestor ∈ chain(D)}` (every chain link is a Resource-ancestor, so a contributing `D.resource`
-/// is necessarily a Tree-descendant of `ancestor.resource`); [`chain_reaches`] is the exact filter.
-/// Short-circuits on the first witness.
+/// **Profile-major scan, never subtree-major.** Iterates the Profile map directly
+/// ([`ProfileMap::iter`]), keeps each candidate in an Active **Standard** burst whose shape is not
+/// `MatchChain`, then tests **strict** Tree-descendancy of its anchor under `ancestor.resource` by
+/// an upward parent walk ([`Tree::ancestors`], which starts above the candidate's own anchor). The
+/// strict test fails for `ancestor` itself and for any co-anchor Profile sharing its slot — matching
+/// the old refcount never self-counting. Strict descendancy is a sound superset of `{D : ancestor ∈
+/// chain(D)}` (every [`nearest_covering_ancestor`] hop is a strict Resource-ancestor move, so a
+/// contributing `D.resource` is necessarily a Tree-descendant of `ancestor.resource`);
+/// [`chain_reaches`] is the exact filter. Returns on the first witness.
+///
+/// Profile-major (`O(profiles × depth)`), not subtree-major (`O(covered slots)`): this consult is
+/// hot — `gated_fire` runs it on **every** natural fire — and a Tree-subtree walk visited every
+/// covered Resource slot beneath the anchor (with `has_per_file_fds`, every covered *file* slot)
+/// even when no Profile sat below. The query is existential, so the changed iteration order is
+/// unobservable, and freshness — the load-bearing property — is untouched. With the superset
+/// producer now `O(depth)`, [`chain_reaches`] re-deriving [`nearest_covering_ancestor`] per hop is
+/// the dominant per-witness cost; fine at Profile cardinalities.
 ///
 /// **Chain-shaped (`MatchChain`) descendants are excluded.** The gate exists to keep an ancestor's
 /// "tree settled" command from racing descendant *command* activity; a discovery burst fires no
@@ -397,18 +408,17 @@ pub(crate) fn has_active_standard_descendant(
     let Some(root) = profiles.get(ancestor).map(Profile::resource) else {
         return false;
     };
-    // Strict descendants only: seed the stack with `root`'s children, never `root` itself.
-    let mut stack: Vec<ResourceId> = tree.children_ids(root).collect();
-    while let Some(node) = stack.pop() {
-        for d in profiles.at(node) {
-            if profiles.get(d).is_some_and(|p| {
-                p.state().in_active_standard_burst() && p.config().match_chain().is_none()
-            }) && chain_reaches(tree, profiles, d, ancestor, scratch)
-            {
-                return true;
-            }
+    for (descendant, profile) in profiles.iter() {
+        // Cheap state + shape filters first; then the strict-descendancy superset test — an upward
+        // parent walk that starts above `descendant`'s own anchor, so `root` and its co-anchors
+        // fail it; and only then `chain_reaches`, the exact filter and costliest term, gated last.
+        if profile.state().in_active_standard_burst()
+            && profile.config().match_chain().is_none()
+            && tree.ancestors(profile.resource()).any(|a| a == root)
+            && chain_reaches(tree, profiles, descendant, ancestor, scratch)
+        {
+            return true;
         }
-        stack.extend(tree.children_ids(node));
     }
     false
 }

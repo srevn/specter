@@ -2992,9 +2992,10 @@ impl Engine {
 
         let effect_forced = mode.effect_forced();
 
-        // Snapshot the Sub IDs to avoid holding `&self.subs` across the loop body's
-        // `out.push_effect`.
-        let sub_ids: Vec<SubId> = self.subs.at(profile_id).to_vec();
+        // Snapshot the Sub IDs to avoid holding `&self.subs` across the loop body (which re-borrows
+        // it `&` for `get` and `&mut` for `mark_fired` / `record_fired`). Inline-2 mirrors the
+        // registry's own `by_profile` storage, so the dominant 1–2-Sub Profile snapshots heap-free.
+        let sub_ids: SmallVec<[SubId; 2]> = self.subs.at(profile_id).into();
         let mut count: u32 = 0;
         for sub_id in sub_ids {
             let (scope, needs_diff, log_output, already_fired) = match self.subs.get(sub_id) {
