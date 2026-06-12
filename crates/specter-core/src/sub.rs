@@ -110,8 +110,10 @@ pub struct MintTemplate {
     /// Minted Profiles' identity (the user's scan / events / `max_settle` knobs).
     pub identity: ProfileIdentity,
     /// Minted Subs' debounce (the user's `settle`). Together with `identity.max_settle()` it must
-    /// satisfy the config layer's `validate_settle` floor — enforced at lowering and debug-asserted
-    /// by `Profile::new` at every mint.
+    /// satisfy the config layer's `validate_settle` floor (`max_settle >= 4 × settle`), enforced at
+    /// lowering. `Profile::new` independently debug-asserts only the weaker structural invariant the
+    /// state machine itself relies on — `settle <= max_settle` — at every mint; the 4× headroom is a
+    /// config-layer policy, not a Profile invariant.
     pub settle: Duration,
     /// Minted Subs' reaction — the user's program / scope / `log_output`, sealed once at lowering
     /// so `needs_diff` travels pre-derived into every mint.
@@ -529,23 +531,37 @@ impl std::ops::BitAndAssign for ClassSet {
 /// ([`MintTemplate`], frozen at attach) plus the per-template-lifetime state that has no meaning
 /// off a template.
 ///
-/// The two warning latches share one discipline — same as [`FireHistory::has_fired`]: a plain bool
-/// whose lifetime *is* the slotmap entry's, mutated only through its single registry edge (the
-/// registry holds the sole `&mut Sub`), one-shot per template lifetime so a steady-state
-/// pathological pattern narrates once, not once per reconcile. Homing the latches on the `Mint`
-/// variant makes a latched non-template unrepresentable.
+/// Every field is module-private. The frozen spec reads through [`Self::spec`]; the two warning
+/// latches mutate *only* through their registry edges ([`SubRegistry::latch_fanout_warning`] /
+/// [`SubRegistry::latch_unsupported_kind_warning`] — the registry holds the sole `&mut Sub`). The
+/// latches share one discipline — same as [`FireHistory::has_fired`]: a plain bool whose lifetime
+/// *is* the slotmap entry's, one-shot per template lifetime so a steady-state pathological pattern
+/// narrates once, not once per reconcile. Homing them on the `Mint` variant *behind private access*
+/// makes a latched non-template unrepresentable and keeps the registry edge the sole writer — the
+/// contract rests on the type, not on every call site remembering it.
 #[derive(Debug)]
 pub struct DiscoveryTemplate {
-    pub spec: Arc<MintTemplate>,
+    spec: Arc<MintTemplate>,
     /// `true` once this template's live minted-Sub count first crossed the fan-out warning
     /// threshold. Mutated only through [`SubRegistry::latch_fanout_warning`].
-    pub fanout_warned: bool,
+    fanout_warned: bool,
     /// `true` once a reconcile pass observed a `Symlink`/`Other` chain terminus under this template
     /// and narrated the skip. Mutated only through [`SubRegistry::latch_unsupported_kind_warning`].
     /// Gates only the *diagnostic*, never the skip itself — the terminus kind is read fresh off the
     /// snapshot each pass, so a symlink later replaced by a regular file at the same path mints
     /// normally.
-    pub unsupported_kind_warned: bool,
+    unsupported_kind_warned: bool,
+}
+
+impl DiscoveryTemplate {
+    /// The frozen mint spec — the minted Profiles' identity, the minted Subs' debounce, and the
+    /// minted reaction. The reconcile pass clones it (one `Arc` bump) onto each mint; the IPC
+    /// `show` projection reads its fields. Read-only by construction: a template change is a
+    /// config-layer identity change (reap + reattach), never an in-place edit.
+    #[must_use]
+    pub const fn spec(&self) -> &Arc<MintTemplate> {
+        &self.spec
+    }
 }
 
 /// A live Sub's reaction — the [`ReactionSpec`] intent enriched with per-Sub runtime state.
@@ -727,8 +743,12 @@ impl Sub {
 /// the validator (static side) and the discovery reconcile's registry-derived dedup (dynamic side)
 /// make a collision unreachable in correct operation, and the `@`-disjointness keeps the two
 /// construction sites from racing each other. A release-mode breach is contained by the id-checked
-/// `remove`: the *mapping* stays 1:1; only a hypothetical orphaned slotmap entry (never the wrong
-/// name→id edge) could survive.
+/// `remove`: `by_name` last-writer-wins, so the name resolves to the later id, and the id-check
+/// refuses to clear that mapping when the earlier (shadowed) id is removed — the *mapping* stays
+/// 1:1, the wrong name→id edge never forms. The shadowed Sub is **not** inert, though: its slotmap
+/// entry stays in `by_profile` and keeps firing on its Profile's verdicts until that Profile is
+/// reaped — it is merely unreachable by name. Containment bounds the damage; it does not erase the
+/// duplicate.
 #[derive(Debug, Default)]
 pub struct SubRegistry {
     subs: SlotMap<SubId, Sub>,
@@ -834,6 +854,28 @@ impl SubRegistry {
                 debug_assert!(
                     false,
                     "{edge} reached a Mint Sub — discovery fires attachments, never Effects \
+                     (sub = {sub:?})",
+                );
+                None
+            }
+        }
+    }
+
+    /// The `Mint` arm's mutable template carrier for `sub` — the shared body of the discovery
+    /// per-lifetime latch edges, and the structural dual of [`Self::spawn_history_mut`]. Two
+    /// misses, two loudnesses: a stale id is a silent `None` (the template already died with the
+    /// slotmap entry — a benign detach race), while a `Spawn` hit is a **debug-loud** `None` (a
+    /// discovery-latch write on a firing Sub is a routing logic error — the latches live only on
+    /// templates, the mirror of `spawn_history_mut`'s "fire history lives only on `Spawn`"). `edge`
+    /// names the calling edge in the assert. Centralising the resolution keeps the two-loudness
+    /// contract in one place — every latch edge inherits it instead of restating it.
+    fn discovery_template_mut(&mut self, sub: SubId, edge: &str) -> Option<&mut DiscoveryTemplate> {
+        match &mut self.subs.get_mut(sub)?.reaction {
+            Reaction::Mint(t) => Some(t),
+            Reaction::Spawn { .. } => {
+                debug_assert!(
+                    false,
+                    "{edge} reached a Spawn Sub — discovery latches live only on Mint templates \
                      (sub = {sub:?})",
                 );
                 None
@@ -994,18 +1036,16 @@ impl SubRegistry {
     /// truth — no mirror to drift. Returns `Some(count)` the first time `count` exceeds `threshold`
     /// and latches [`DiscoveryTemplate::fanout_warned`] so later crossings return `None` — a
     /// pathological pattern warns once per template lifetime. The check-and-latch is atomic here,
-    /// so the one-shot property is structural rather than a caller convention. A stale `SubId` or a
-    /// non-template Sub is a silent `None` — the latch lives on the template carrier, so the miss
-    /// mirrors [`Self::mark_fired`]'s died-with-the-entry contract.
+    /// so the one-shot property is structural rather than a caller convention. Carrier resolution
+    /// and its two-loudness miss contract (stale id silent, `Spawn` hit debug-loud) live in
+    /// [`Self::discovery_template_mut`].
     pub fn latch_fanout_warning(
         &mut self,
         sub: SubId,
         threshold: usize,
         count: usize,
     ) -> Option<usize> {
-        let Reaction::Mint(t) = &mut self.subs.get_mut(sub)?.reaction else {
-            return None;
-        };
+        let t = self.discovery_template_mut(sub, "latch_fanout_warning")?;
         (count > threshold && !t.fanout_warned).then(|| {
             t.fanout_warned = true;
             count
@@ -1018,14 +1058,11 @@ impl SubRegistry {
     /// Returns `true` exactly once per template lifetime: the first call latches
     /// [`DiscoveryTemplate::unsupported_kind_warned`] and reports "newly latched"; later calls
     /// return `false`. The check-and-latch is atomic here, so the one-shot property is structural
-    /// rather than a caller convention. A stale `SubId` or a non-template Sub is a silent `false` —
-    /// the latch lives on the template carrier, mirroring [`Self::latch_fanout_warning`]'s
-    /// died-with-the-entry contract.
+    /// rather than a caller convention. Carrier resolution and its two-loudness miss contract
+    /// (stale id silent, `Spawn` hit debug-loud) live in [`Self::discovery_template_mut`].
     pub fn latch_unsupported_kind_warning(&mut self, sub: SubId) -> bool {
-        let Some(Reaction::Mint(t)) = self.subs.get_mut(sub).map(|s| &mut s.reaction) else {
-            return false;
-        };
-        !std::mem::replace(&mut t.unsupported_kind_warned, true)
+        self.discovery_template_mut(sub, "latch_unsupported_kind_warning")
+            .is_some_and(|t| !std::mem::replace(&mut t.unsupported_kind_warned, true))
     }
 
     /// Whether `profile` has at least one attached Sub that *reacts* per-stable-file — the scope
@@ -1755,10 +1792,12 @@ mod tests {
         );
     }
 
-    /// A non-template Sub and a stale id both yield a silent `None` — the latch lives on the
-    /// template carrier, so the miss mirrors `mark_fired`'s died-with-the-entry contract.
+    /// A `Spawn` Sub has no latch home: routing the fan-out latch at one is a logic error, so the
+    /// shared carrier resolution is debug-loud — the structural dual of `spawn_history_mut`'s
+    /// `Mint`-hit assert. Pins the loud arm of `discovery_template_mut` for every latch edge.
     #[test]
-    fn latch_fanout_warning_none_for_non_template_and_stale_id() {
+    #[should_panic(expected = "reached a Spawn Sub")]
+    fn latch_fanout_warning_panics_on_non_template() {
         let mut reg = SubRegistry::new();
         let plain = reg.insert(Sub::from_request(
             ProfileId::default(),
@@ -1770,14 +1809,21 @@ mod tests {
                 false,
             ),
         ));
+        let _ = reg.latch_fanout_warning(plain, 0, 10);
+    }
+
+    /// A stale id is a silent `None` — the template died with the slotmap entry, a benign detach
+    /// race. The quiet arm of `discovery_template_mut`, distinct from the loud non-template arm.
+    #[test]
+    fn latch_fanout_warning_silent_for_stale_id() {
+        let mut reg = SubRegistry::new();
+        let sid = reg.insert(Sub::from_request(
+            ProfileId::default(),
+            template_params("disc"),
+        ));
+        reg.remove(sid).expect("removed");
         assert_eq!(
-            reg.latch_fanout_warning(plain, 0, 10),
-            None,
-            "non-template Sub: the latch has no home",
-        );
-        reg.remove(plain).expect("removed");
-        assert_eq!(
-            reg.latch_fanout_warning(plain, 0, 10),
+            reg.latch_fanout_warning(sid, 0, 10),
             None,
             "stale id: silent miss",
         );

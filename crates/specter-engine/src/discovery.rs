@@ -168,7 +168,7 @@ impl Engine {
                 let t = s.discovery_template()?;
                 Some(TemplateCapture {
                     sid,
-                    tpl: Arc::clone(&t.spec),
+                    tpl: Arc::clone(t.spec()),
                     name: s.name.clone(),
                     minted: 0,
                 })
@@ -286,7 +286,10 @@ impl Engine {
                 let abs = abs.get_or_insert_with(|| build_abs(&terminus.segments));
                 // `format_compact!` writes straight into the `CompactString` that becomes
                 // `SubParams.name`; the `@` byte is reserved at config validation, so synthesised
-                // names never collide with operator names in the registry's `by_name` index.
+                // names never collide with operator names in the registry's `by_name` index. The
+                // template name (the prefix) is itself `@`-free for the same reason, so the *first*
+                // `@` delimits prefix from path deterministically: `(template, terminus-path) →
+                // name` is injective, and no two distinct mints can synthesise one name.
                 let synthesized = format_compact!("{}@{}", t.name, abs.display());
                 self.attach_sub_inner(
                     SubAttachRequest::from_parts(

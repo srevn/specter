@@ -9,7 +9,9 @@
 //! - `refcounts.rs` — `watch_demand` (contributions-map) edges.
 //!
 //! `step` is the single dispatch point; each `Input` variant routes to the corresponding `on_*`
-//! handler. `attach_sub` is the engine's public Sub-attachment API.
+//! handler — Sub attachment and detachment enter as `Input::AttachSub` / `Input::DetachSub`
+//! through `step`, not as standalone methods (`attach_sub_inner` / `detach_sub_inner` are
+//! `pub(crate)` internals).
 
 use crate::counter::MonotonicCounter;
 use crate::refcounts::add_watch;
@@ -756,9 +758,10 @@ impl Engine {
         // Emit the lifecycle signal once per real detach — *after* the removal succeeded (the
         // `DetachUnknownSub` arm above means no Sub left the registry, so there's nothing to
         // narrate) and *before* the post-detach reap branches (so an immediate reap emitting
-        // `ProfileReaped` lands after the `SubDetached` that caused it; the post-`step` sort then
-        // orders them by [`StepOutput::sort_for_emission`]'s diagnostic seal, but emission-site
-        // order matches the causal chain).
+        // `ProfileReaped` lands after the `SubDetached` that caused it). `sort_for_emission`
+        // reseals only the order-determined streams; diagnostics keep their insertion order, so
+        // emission-site order *is* the operator-visible order — emitting in causal order here is
+        // what makes the reaped Profile read as the consequence of the detach.
         out.diagnostics.push(Diagnostic::SubDetached {
             sub,
             profile: profile_id,

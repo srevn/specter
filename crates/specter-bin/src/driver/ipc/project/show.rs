@@ -122,9 +122,9 @@ fn project_details(
             dedup_suppressed_count: history.dedup_suppressed_count,
         },
         Reaction::Mint(t) => WireReaction::Mint {
-            minted_settle_ms: settle_ms(t.spec.settle),
-            minted_scope: WireEffectScope::from(t.spec.spawn.scope()),
-            minted_program: program::render(t.spec.spawn.program()),
+            minted_settle_ms: settle_ms(t.spec().settle),
+            minted_scope: WireEffectScope::from(t.spec().spawn.scope()),
+            minted_program: program::render(t.spec().spawn.program()),
             // The discovery fan-out warning's scan, run at IPC cadence: O(total Subs).
             minted_live: engine
                 .subs()
