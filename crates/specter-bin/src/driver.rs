@@ -397,13 +397,14 @@ impl<W: FsWatcher> EngineDriver<W> {
         let out = self.engine.cancel_all_in_flight_probes();
         // INVARIANT: cancel_all_in_flight_probes emits exclusively `ProbeOp::Cancel` ops (see
         // `engine::probe::cancel_owner_probe` — the disarm-then-`Cancel` choke this drain iterates
-        // over). `watch_ops` and `effects` are therefore structurally empty, so `forward`'s outbound
-        // `crossbeam::select!` arms never execute on this `StepOutput`; the `ControlFlow` return is
-        // structurally `Continue`. The cancels dispatch through `forward`'s probe arm directly to the
-        // prober (no channel, no shutdown race), so the discard is intentional. A future refactor
-        // adding non-probe ops to `cancel_all_in_flight_probes` must thread `Break` here.
+        // over). `watch_ops`, `effects`, and `cancel_effects` are therefore structurally empty, so
+        // `forward`'s outbound `crossbeam::select!` arms never execute on this `StepOutput`; the
+        // `ControlFlow` return is structurally `Continue`. The cancels dispatch through `forward`'s
+        // probe arm directly to the prober (no channel, no shutdown race), so the discard is
+        // intentional. A future refactor adding non-probe ops to `cancel_all_in_flight_probes` must
+        // thread `Break` here.
         debug_assert!(
-            out.watch_ops.is_empty() && out.effects().is_empty(),
+            out.watch_ops.is_empty() && out.effects().is_empty() && out.cancel_effects().is_empty(),
             "cancel_all_in_flight_probes must emit only ProbeOp::Cancel",
         );
         let _ = self.forward(out);

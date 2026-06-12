@@ -326,7 +326,7 @@ impl Engine {
                     // intent — and the emission choke materialises `WholeSubtree` off the same
                     // anchor).
                     PreFirePhase::Verifying {
-                        slot: ProbeSlot::armed(correlation, ()),
+                        slot: ProbeSlot::armed(correlation),
                         target: resource,
                     },
                     None,
@@ -740,7 +740,7 @@ impl Engine {
         // `forced` off this armed slot — the transition threads neither, and `dirty` is read there
         // immutably, never drained.
         pre.phase = PreFirePhase::Verifying {
-            slot: ProbeSlot::armed(correlation, ()),
+            slot: ProbeSlot::armed(correlation),
             target,
         };
 
@@ -1037,7 +1037,7 @@ impl Engine {
         // the post-fire side via the typed edge-method; cross-crate callers cannot reach
         // `DirtyProvenance::clear` directly.
         post.reset_residual();
-        post.phase = PostFirePhase::Rebasing(ProbeSlot::armed(correlation, ()));
+        post.phase = PostFirePhase::Rebasing(ProbeSlot::armed(correlation));
 
         // The choke reads the correlation back off the `Rebasing` slot, targets the anchor
         // (`forced` is pre-fire-only ⇒ `false`), and ships the `WholeSubtree` obligation — no
@@ -2620,12 +2620,10 @@ mod tests {
         match req {
             ProbeRequest::Subtree { obligation, .. } => match obligation {
                 ProofObligation::Chains(chains) => {
-                    assert!(chains.contains(&ap), "the trigger path is a chain");
-                    assert!(chains.contains(&bp), "a sibling chain is not filtered");
-                    assert!(
-                        chains.contains(&rp),
-                        "a captured ancestor path is not filtered out",
-                    );
+                    let has = |want: &Path| chains.iter().any(|p| p.as_ref() == want);
+                    assert!(has(&ap), "the trigger path is a chain");
+                    assert!(has(&bp), "a sibling chain is not filtered");
+                    assert!(has(&rp), "a captured ancestor path is not filtered out");
                     assert_eq!(chains.len(), 3, "exactly the captured paths, no more");
                 }
                 other => panic!("Standard burst obligation must be Chains; got {other:?}"),

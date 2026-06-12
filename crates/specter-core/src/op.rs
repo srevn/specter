@@ -24,7 +24,7 @@ use std::sync::Arc;
 /// non-emptiness is preserved by clone.
 ///
 /// Member order follows `BTreeSet<Arc<Path>>` (lex on the path bytes) so the walker's first-hit
-/// search ([`certify`](#)) is deterministic across replays.
+/// search (its `certify` pass) is deterministic across replays.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NonEmptyChainSet(BTreeSet<Arc<Path>>);
 
@@ -64,13 +64,6 @@ impl NonEmptyChainSet {
     #[must_use]
     pub fn any_chain_starts_with(&self, frame: &Path) -> bool {
         self.0.iter().any(|p| p.starts_with(frame))
-    }
-
-    /// True iff `path` is byte-equal to some chain path. O(log n) via `BTreeSet::contains` (lookup
-    /// keyed by `Path` through `Arc<Path>: Borrow<Path>`).
-    #[must_use]
-    pub fn contains(&self, path: &Path) -> bool {
-        self.0.contains(path)
     }
 }
 
@@ -244,9 +237,13 @@ impl ProbeRequest {
         }
     }
 
-    /// Filesystem path the walker probes. Every variant carries one; returns the borrowed path
-    /// verbatim. The wire is path-keyed — this is the load-bearing identifier the walker dispatches
-    /// on.
+    /// The filesystem path this probe targets, regardless of variant — every variant carries
+    /// exactly one. A **test-only projection** (gated behind `testkit`): production never reads a
+    /// `ProbeRequest` back after emit. The walker dispatches on the request *variant* (`run_probe`
+    /// destructures each arm and reads the relevant path field directly), not through this accessor;
+    /// `MockProber` routing and probe-target assertions use it to recover the path without
+    /// re-matching the variant.
+    #[cfg(feature = "testkit")]
     #[must_use]
     pub fn target_path(&self) -> &Path {
         match self {

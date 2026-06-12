@@ -176,7 +176,9 @@ impl<W: FsWatcher> EngineDriver<W> {
 /// detach-during-effect race routine; engine bugs surface via test assertions on the `Diagnostic::`
 /// variant rather than via log severity. `ProfileReaped` and `ReapPendingCancelled` are `info`
 /// (informational; the Profile was reaped — see `via` for the trigger — or the deferred reap was
-/// pre-empted by a revival).
+/// pre-empted by a revival). `StaleProbeResponse` is `debug`: the response gate fires it for
+/// designed supersedes (an overflow reseed, a post-cancel arrival, a fresh mint), so `warn` would
+/// misread a routine, self-fencing race as an operator-actionable fault.
 ///
 /// These per-variant levels are also the client-side severity catalogue: `specter tail` colours
 /// each line by the same judgment in `crate::ipc::render::diag::severity` (`error!`→red,
@@ -184,7 +186,7 @@ impl<W: FsWatcher> EngineDriver<W> {
 /// Re-judging a variant means moving it in both places.
 pub(super) fn log_diagnostic(d: &Diagnostic) {
     match d {
-        Diagnostic::StaleProbeResponse { owner, correlation } => tracing::warn!(
+        Diagnostic::StaleProbeResponse { owner, correlation } => tracing::debug!(
             ?owner,
             ?correlation,
             "stale probe response (state mismatch)"

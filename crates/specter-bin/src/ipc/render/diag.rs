@@ -144,8 +144,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
 
         // `warn!` in the log — a degraded-but-recovered edge — plus the wire-only `Missed`
         // data-loss marker.
-        W::StaleProbeResponse { .. }
-        | W::StaleTimer { .. }
+        W::StaleTimer { .. }
         | W::EffectCompleteOutsideAwaiting { .. }
         | W::EffectCompleteForUnknownSub { .. }
         | W::DetachUnknownSub { .. }
@@ -174,7 +173,10 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::Missed { .. } => Severity::Warn,
 
         // `info!` / `debug!` / `trace!` — routine lifecycle, benign races, class / consumer drops.
-        W::ConfigDiffUnknownSub { .. }
+        // `StaleProbeResponse` is a benign race: the response gate fires it for designed supersedes
+        // (an overflow reseed, a post-cancel arrival, a fresh mint), none operator-actionable.
+        W::StaleProbeResponse { .. }
+        | W::ConfigDiffUnknownSub { .. }
         | W::PendingPathAwaitingSegment { .. }
         | W::ConfigDiffRebindFallbackAttach { .. }
         | W::EventClassDropped { .. }

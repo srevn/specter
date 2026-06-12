@@ -350,8 +350,9 @@ pub trait Prober: Send + Sync {
     fn submit(&self, req: ProbeRequest);
 
     /// Best-effort cancel of any *queued* probe for `owner`. In-flight probes are not interrupted;
-    /// the engine drops their responses via stale-correlation discipline. After `cancel`, a fresh
-    /// `submit` for the same owner runs normally — cancellation is per-correlation, not per-owner.
+    /// the engine drops their responses via stale-correlation discipline. `cancel` clears the
+    /// owner's currently-expected correlation rather than blacklisting the owner: a subsequent
+    /// `submit` for the same owner re-arms the expectation and runs normally.
     fn cancel(&self, owner: ProfileId);
 }
 

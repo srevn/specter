@@ -274,7 +274,7 @@ impl crate::Engine {
             ProfileState::Pending(DescentState::new(
                 prefix,
                 remaining,
-                ProbeSlot::armed(correlation, ()),
+                ProbeSlot::armed(correlation),
                 witnessed,
             )),
         );

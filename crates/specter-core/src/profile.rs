@@ -1814,7 +1814,7 @@ impl DescentState {
     /// via [`Self::new`]. Asserts the slot was empty (the response handler or cancel path disarmed
     /// it first) — a double-arm would orphan the prior correlation.
     pub fn arm_probe(&mut self, correlation: ProbeCorrelation) {
-        self.probe.arm(correlation, ());
+        self.probe.arm(correlation);
     }
 
     /// Identity of the descent's in-flight probe, or `None` if idle — the **read** edge of the
@@ -4695,7 +4695,7 @@ mod tests {
             ProfileState::Pending(DescentState::new(
                 r,
                 DescentRemaining::from_vec(vec![CompactString::from("a")]).expect("non-empty"),
-                ProbeSlot::armed(c, ()),
+                ProbeSlot::armed(c),
                 false,
             ))
         };

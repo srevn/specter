@@ -94,7 +94,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
 
     // Profile is now in Active(PreFire(Seed)) — the Seed burst was started at materialization.
     // Under the cold-arm Verifying-first contract, the materializing step opens the burst in
-    // `Verifying(ProbeSlot::armed(corr, ()))` and emits the cold-walk Probe directly.
+    // `Verifying(ProbeSlot::armed(corr))` and emits the cold-walk Probe directly.
     match e.profiles().get(pid).unwrap().state() {
         ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
             assert_eq!(pre.intent, specter_core::BurstIntent::Seed);
