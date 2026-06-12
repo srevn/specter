@@ -70,12 +70,14 @@
 //! Probe emission flows through two structural primitives:
 //!
 //! - [`pre_fire_target`] — returns the live `ResourceId` the next pre-fire probe walks (and the
-//!   response grafts at). Centralizes the `(anchor_kind, intent)` rule (File anchor → anchor; Seed
-//!   → anchor; Standard → the live slot at the component-LCA of `dirty`'s captured paths, a File
-//!   leaf promoted to its parent Dir, anchor on any resolution miss). Post-fire rebases target the
-//!   anchor unconditionally and bypass this helper. `transition_to_verifying` resolves the target
-//!   through it and constructs [`PreFirePhase::Verifying`] with the target on the variant payload
-//!   for the choke to read back.
+//!   response grafts at). Centralizes the `(anchor_kind, epistemics)` rule (File anchor → anchor;
+//!   failing [`Profile::event_chains_prove_quiescence`] — Seed or events-incomplete Standard →
+//!   anchor;
+//!   events-complete Standard → the live slot at the component-LCA of `dirty`'s captured paths, a
+//!   File leaf promoted to its parent Dir, anchor on any resolution miss). Post-fire rebases
+//!   target the anchor unconditionally and bypass this helper. `transition_to_verifying` resolves
+//!   the target through it and constructs [`PreFirePhase::Verifying`] with the target on the
+//!   variant payload for the choke to read back.
 //! - [`Engine::emit_owner_probe`] (in `probe`) — the single emission choke. Each burst-launch
 //!   helper is `mint → arm → emit_owner_probe(owner)`, with every post-gate state resolution loud
 //!   (`unreachable!()` on the gate-proven-impossible miss) and the arm guarded at its re-acquire
@@ -249,10 +251,12 @@ impl Engine {
     /// to 0·settle, 2 walks to 1) make this the right trade.
     ///
     /// **Two named constructors, deliberately not one `intent` param.** The call site always knows
-    /// whether it wants a Seed (anchor, `WholeSubtree`, no trusted prior) or a Standard
-    /// (event-resource, LCA, `Chains`) burst; a merged constructor behind a runtime `intent` flag
-    /// re-introduces exactly the dispatch flag the burst-helper doctrine rejects. The bodies differ
-    /// in `intent`, the trigger discriminator above, and Standard's mandatory `event_resource`.
+    /// whether it wants a Seed (no trusted prior — anchor + `WholeSubtree` always) or a Standard
+    /// burst (event-driven; LCA + `Chains` when the events stream witnesses quiescence, anchor +
+    /// `WholeSubtree` otherwise — [`Profile::event_chains_prove_quiescence`]); a merged
+    /// constructor behind a runtime `intent` flag re-introduces exactly the dispatch flag the
+    /// burst-helper doctrine rejects. The bodies differ in `intent`, the trigger discriminator
+    /// above, and Standard's mandatory `event_resource`.
     ///
     /// **Callers.** Three unconditionally-cold sites, one latch-selected site, one
     /// unconditionally-triggered site:
@@ -394,11 +398,14 @@ impl Engine {
     /// over the live tree, so a burst start contributes nothing to maintain.
     ///
     /// `event_resource` + `event_path` are the `FsEvent`'s source slot and its path captured
-    /// pre-dispatch. They seed `dirty`, whose captured paths are both the basis for the next
+    /// pre-dispatch. They seed `dirty`, whose captured paths — when the events stream witnesses
+    /// quiescence ([`Profile::event_chains_prove_quiescence`]) — are both the basis for the next
     /// probe's scope (their component-LCA, resolved to a live id) and the source of its
     /// `ProofObligation::Chains` (the chains the walker must freshly observe — refusing mtime-skip
     /// — so the response can certify quiescence). Sourcing both from the path makes a reaped
-    /// trigger unable to collapse the obligation.
+    /// trigger unable to collapse the obligation. On an events-incomplete Profile the emission is
+    /// anchor + `WholeSubtree` instead and `dirty` still accumulates (it remains the
+    /// `owes_proof_from` activity witness and the diagnostic basis).
     pub(crate) fn start_standard_burst(
         &mut self,
         profile_id: ProfileId,
@@ -462,7 +469,10 @@ impl Engine {
     /// re-entering Batching from Verifying or Draining**, and writes `phase = Batching { settle_timer
     /// }`. `intent`, `forced`, `burst_deadline`, and `last_certified_hash` (the carrier preserves the
     /// prior sample — a net-zero change across an event is still a valid hash-channel pair for the
-    /// next Verifying response, active iff `!events_witness_quiescence`) are preserved.
+    /// next Verifying response, active iff `!events_witness_quiescence`) are preserved. Carrying
+    /// the sample across the event is frame-safe: a carrier-active burst fails
+    /// [`Profile::event_chains_prove_quiescence`], so its probes are anchor-rooted — the new
+    /// event may move the dirty-LCA, but never the frame the channel's samples hash.
     ///
     /// Why this is one of two batching mutators rather than a single helper with a flag: the caller
     /// has static knowledge that the engine has not just received a probe response. If the prior
@@ -553,19 +563,26 @@ impl Engine {
     /// ceiling not yet fired, so the engine retries through a fresh settle window:
     ///
     /// - [`Engine::dispatch_quiescence_ok`]'s [`specter_core::QuiescenceVerdict::Retry`] arm — the
-    ///   hash channel observed `prior != Some(response)`, or the walker refused on some chain with
-    ///   a transient non-observation (`EACCES`, a chmod-000 chain).
+    ///   hash channel observed `prior != Some(response)` (`observed_motion: true`), or the walker
+    ///   refused on some chain with a transient non-observation (`EACCES`, a chmod-000 chain —
+    ///   `observed_motion: false`).
     /// - the pre-fire [`specter_core::ProbeFailure::Transient`] arm in `dispatch_pre_fire_failed` —
     ///   the probe failed entirely (FD pressure), the epistemic twin of the `Undischarged` Retry: it
-    ///   observed nothing, so it re-batches identically.
+    ///   observed nothing, so it re-batches identically (static `observed_motion = false`).
+    ///
+    /// `observed_motion` gates the streak: only windows that *observed* sample-to-sample motion
+    /// count toward the mask-blindspot witness ([`PreFireBurst::retry_streak`]) — a refusal or a
+    /// failed probe says nothing about the tree, so it holds the streak rather than inflating it
+    /// (an EMFILE stretch must not masquerade as motion outside the mask).
     ///
     /// Either way the verify slot was already disarmed at the top of `on_profile_probe_response`;
     /// no Cancel needed. Arms a fresh settle timer and writes `phase = Batching { settle_timer }`.
     ///
     /// **`dirty` preserved; no re-commit.** The next verify re-targets and re-obligates per the
-    /// carrier's own rule — a Standard burst the component-LCA of the preserved `dirty` captured
-    /// paths + `ProofObligation::Chains` over those paths (the walker must freshly re-observe the
-    /// dirty chains, refusing mtime-skip); a Seed burst the anchor +
+    /// emission predicate ([`Profile::event_chains_prove_quiescence`]) — an events-complete
+    /// Standard burst the component-LCA of the preserved `dirty` captured paths +
+    /// `ProofObligation::Chains` over those paths (the walker must freshly re-observe the dirty
+    /// chains, refusing mtime-skip); a Seed or events-incomplete Standard burst the anchor +
     /// `ProofObligation::WholeSubtree` (every frame re-read, no skip). This path does **not**
     /// `apply_snapshot` — an unread region must never become `Profile.current` (the dedup / Seed
     /// baseline). The next verify either certifies authoritatively (fire-or-pin) or remains
@@ -586,6 +603,7 @@ impl Engine {
     pub(crate) fn retry_drives_batching(
         &mut self,
         profile_id: ProfileId,
+        observed_motion: bool,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -606,10 +624,13 @@ impl Engine {
         {
             pre.phase = PreFirePhase::Batching { settle_timer };
             pre.last_event_time = Some(now);
-            // One more settle window that was event-silent yet did not certify — the streak the
-            // forced-ceiling terminal reads for the mask-blindspot upgrade
-            // (`Diagnostic::ChangeOutsideEventMask`).
-            pre.retry_streak = pre.retry_streak.saturating_add(1);
+            // One more settle window that was event-silent yet *observed motion* (hash-channel
+            // disagreement) — the streak the forced-ceiling terminal reads for the mask-blindspot
+            // upgrade (`Diagnostic::ChangeOutsideEventMask`). A refusal or failed probe observed
+            // nothing and holds the streak.
+            if observed_motion {
+                pre.retry_streak = pre.retry_streak.saturating_add(1);
+            }
         }
     }
 
@@ -686,21 +707,24 @@ impl Engine {
     /// that stale entry lazy-drops on its original deadline. The `Draining → Verifying` reconfirm arm
     /// has no settle_timer to orphan (Draining never armed one).
     ///
-    /// **Target.** Resolved via [`pre_fire_target`] — File anchors target the anchor unconditionally;
-    /// Seed bursts target the anchor (regardless of phase); Standard bursts target the live slot at
-    /// the component-LCA of `dirty`'s captured paths. The same rule covers the Draining → Verifying
-    /// reconfirm: `dirty` is preserved across the burst's pre-fire lifetime (only `note`d into), so
-    /// the component-LCA on the reconfirm matches the one at the original Verifying entry; a slot
-    /// reaped in between only changes the live-id resolution (anchor fallback).
+    /// **Target.** Resolved via [`pre_fire_target`] — File anchors target the anchor
+    /// unconditionally; bursts failing [`Profile::event_chains_prove_quiescence`] (Seed, or
+    /// events-incomplete Standard) target the anchor regardless of phase; events-complete Standard
+    /// bursts target the live slot at the component-LCA of `dirty`'s captured paths. The same rule
+    /// covers the Draining → Verifying reconfirm: `dirty` is preserved across the burst's pre-fire
+    /// lifetime (only `note`d into), so the component-LCA on the reconfirm matches the one at the
+    /// original Verifying entry; a slot reaped in between only changes the live-id resolution
+    /// (anchor fallback).
     ///
     /// **Emission.** This helper writes the `Verifying` variant — armed slot and target shipped as
     /// one struct-variant payload — then calls [`Engine::emit_owner_probe`], the single choke that
     /// reads the correlation back off the slot, materializes the proof obligation off the
-    /// persisting burst (`ProofObligation::Chains` from `dirty`'s captured paths for Standard,
-    /// `WholeSubtree` for Seed — read immutably, **not** drained: the burst outlives this probe
-    /// across re-batching), and reads `forced` (so the walker bypasses mtime-skip on a force-fire).
-    /// New events arriving during `Verifying` are noted into `dirty` (via `event_drives_batching`)
-    /// and reshape the obligation on the next emission.
+    /// persisting burst keyed on the same predicate as the target (`ProofObligation::Chains` from
+    /// `dirty`'s captured paths when the chains prove quiescence, `WholeSubtree` otherwise — read
+    /// immutably, **not** drained: the burst outlives this probe across re-batching), and reads
+    /// `forced` (so the walker bypasses mtime-skip on a force-fire). New events arriving during
+    /// `Verifying` are noted into `dirty` (via `event_drives_batching`) and reshape the obligation
+    /// on the next emission.
     pub(crate) fn transition_to_verifying(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         if !self.require_active_pre_fire(profile_id, BurstHelper::TransitionToVerifying, out) {
             return;
@@ -752,9 +776,10 @@ impl Engine {
         };
         // One write: the armed slot and target ship as a single variant payload, so a half-written
         // `Verifying` is unconstructable. The choke later materializes the proof obligation
-        // (`Chains` from `dirty`'s captured paths for Standard, `WholeSubtree` for Seed) and
-        // `forced` off this armed slot — the transition threads neither, and `dirty` is read there
-        // immutably, never drained.
+        // (`Chains` from `dirty`'s captured paths when `event_chains_prove_quiescence` holds,
+        // `WholeSubtree` otherwise — the predicate that just resolved the target) and `forced` off
+        // this armed slot — the transition threads neither, and `dirty` is read there immutably,
+        // never drained.
         pre.phase = PreFirePhase::Verifying {
             slot: ProbeSlot::armed(correlation),
             target,
@@ -1068,12 +1093,17 @@ impl Engine {
     /// (`Awaiting → Rebasing`), so this is the *only* post-fire `Settling` entry — the spacing half
     /// of the bounded `Rebasing ⇄ Settling` loop, not a debounce of the fire's own events.
     ///
-    /// **Two callers.** `dispatch_rebase_ok::Retry` (hash-channel disagreement / walker refusal)
-    /// and the post-fire [`specter_core::ProbeFailure::Transient`] arm in `dispatch_rebase_failed`
-    /// (the probe failed entirely under FD pressure — the epistemic twin of the Undischarged Retry,
-    /// it loops back identically). Both run with the rebase slot already disarmed at the top of
-    /// `on_profile_probe_response`. The loop ceiling was armed once at the `Awaiting → Rebasing`
-    /// entry ([`Self::arm_rebase_loop_ceiling`]); no re-arm here.
+    /// **Two callers.** `dispatch_rebase_ok::Retry` (hash-channel disagreement, `observed_motion:
+    /// true`; walker refusal, `false`) and the post-fire
+    /// [`specter_core::ProbeFailure::Transient`] arm in `dispatch_rebase_failed` (the probe failed
+    /// entirely under FD pressure — the epistemic twin of the Undischarged Retry, it loops back
+    /// identically with static `observed_motion = false`). Both run with the rebase slot already
+    /// disarmed at the top of `on_profile_probe_response`. The loop ceiling was armed once at the
+    /// `Awaiting → Rebasing` entry ([`Self::arm_rebase_loop_ceiling`]); no re-arm here.
+    ///
+    /// `observed_motion` gates the streak exactly as on the pre-fire mirror: only windows that
+    /// observed sample-to-sample motion count toward [`PostFireBurst::retry_streak`] — a refusal
+    /// or a failed probe says nothing about the post-command tree and holds the streak.
     ///
     /// Writes `phase = Settling { settle_timer }`, pins `last_event_time = Some(now)` (the
     /// unfavorable-response instant), and arms a fresh [`TimerKind::PostFireSettle`] timer. Ceiling
@@ -1093,6 +1123,7 @@ impl Engine {
     pub(crate) fn transition_to_settling(
         &mut self,
         profile_id: ProfileId,
+        observed_motion: bool,
         now: Instant,
         out: &mut StepOutput,
     ) {
@@ -1118,9 +1149,13 @@ impl Engine {
             );
             post.phase = PostFirePhase::Settling { settle_timer };
             post.last_event_time = Some(now);
-            // One more rebase window that was event-silent yet did not certify — the post-fire half
-            // of the mask-blindspot streak (`Diagnostic::ChangeOutsideEventMask`).
-            post.retry_streak = post.retry_streak.saturating_add(1);
+            // One more rebase window that was event-silent yet *observed motion* (hash-channel
+            // disagreement) — the post-fire half of the mask-blindspot streak
+            // (`Diagnostic::ChangeOutsideEventMask`). A refusal or failed probe observed nothing
+            // and holds the streak.
+            if observed_motion {
+                post.retry_streak = post.retry_streak.saturating_add(1);
+            }
         }
     }
 
@@ -1526,26 +1561,31 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 /// Pre-fire probe target for the next emission — the live engine slot the probe walks and the
 /// response grafts at.
 ///
-/// Centralizes the `(anchor_kind, intent)` rule. The three production scenarios (settle-expired
-/// Standard burst, force-fire under [`PreFirePhase::Batching`] or [`PreFirePhase::Draining`], the
-/// Draining-sweep reconfirm) all resolve here:
+/// Centralizes the `(anchor_kind, epistemics)` rule. The three production scenarios
+/// (settle-expired Standard burst, force-fire under [`PreFirePhase::Batching`] or
+/// [`PreFirePhase::Draining`], the Draining-sweep reconfirm) all resolve here:
 ///
 /// - File anchor (`Profile.kind == Some(File)`) → the anchor itself. kqueue per-file FDs surface
 ///   events at the file directly, and the walker's [`specter_core::ProbeRequest::AnchorFile`] arm
 ///   lstat's the leaf — promoting past the anchor would route the probe outside the Profile's
 ///   coverage.
-/// - Seed intent (Dir / unclassified anchor) → the anchor. Seed bursts compare against fire history
-///   rather than against a stable subtree verdict, so they probe at the anchor unconditionally.
-/// - Standard intent (Dir / unclassified anchor) → the live slot at the component-LCA of `dirty`'s
-///   captured paths, clamped to the shape's descend chain ([`resolve_under_anchor`]), a File leaf
-///   promoted to its parent Dir ([`promote_to_dir`] — the parent of a graftable node is graftable by
-///   the descend chain's downward closure, so promotion cannot re-enter a boundary). The LCA is
-///   computed over *captured paths* (history), not surviving slot ids, so a slot reaped mid-burst
-///   cannot collapse the scope below where an event landed; only the live-id *resolution* may fall
-///   back to the anchor (strictly wider, never chain-clipping). An empty `dirty` is a should-never
-///   this arm `debug_assert!`s against (a Standard burst always notes its trigger); it then degrades
-///   to the anchor, which the emission choke pairs with a `WholeSubtree` obligation under its own
-///   `debug_assert`, so the degrade proves the whole subtree rather than silently skipping it.
+/// - Failing [`Profile::event_chains_prove_quiescence`] (Dir / unclassified anchor) → the anchor.
+///   One rule covers two emission-equivalent epistemic states: a Seed burst has no trusted prior to
+///   scope a narrower walk against, and an events-incomplete Standard burst's stream cannot
+///   witness in-place writes — a dirty-LCA frame would leave out-of-LCA regions out of frame for
+///   the hash-channel samples the verdict floor compares. The emission choke keys the
+///   `WholeSubtree` obligation on the same predicate, so target and obligation cannot diverge.
+/// - Events-complete Standard (Dir / unclassified anchor) → the live slot at the component-LCA of
+///   `dirty`'s captured paths, clamped to the shape's descend chain ([`resolve_under_anchor`]), a
+///   File leaf promoted to its parent Dir ([`promote_to_dir`] — the parent of a graftable node is
+///   graftable by the descend chain's downward closure, so promotion cannot re-enter a boundary).
+///   The LCA is computed over *captured paths* (history), not surviving slot ids, so a slot reaped
+///   mid-burst cannot collapse the scope below where an event landed; only the live-id
+///   *resolution* may fall back to the anchor (strictly wider, never chain-clipping). An empty
+///   `dirty` is a should-never this arm `debug_assert!`s against (a Standard burst always notes
+///   its trigger); it then degrades to the anchor, which the emission choke pairs with a
+///   `WholeSubtree` obligation under its own `debug_assert`, so the degrade proves the whole
+///   subtree rather than silently skipping it.
 ///
 /// **Draining-reconfirm coverage.** The Draining → Verifying reconfirm folds into the Standard case
 /// because `dirty` is preserved across the burst's whole pre-fire lifetime (only `note`d into), so
@@ -1553,27 +1593,28 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 /// during Draining changes only the live-id resolution (anchor fallback), never the captured-path
 /// basis.
 pub(crate) fn pre_fire_target(p: &Profile, pre: &PreFireBurst, tree: &Tree) -> ResourceId {
-    match (p.kind(), pre.intent) {
-        (Some(ResourceKind::File), _) | (_, BurstIntent::Seed) => p.resource(),
-        _ => match pre.dirty.lca_path() {
-            Some(lca) => promote_to_dir(
-                resolve_under_anchor(p.resource(), p.config(), &lca, tree),
+    if matches!(p.kind(), Some(ResourceKind::File)) || !p.event_chains_prove_quiescence(pre.intent)
+    {
+        return p.resource();
+    }
+    match pre.dirty.lca_path() {
+        Some(lca) => promote_to_dir(
+            resolve_under_anchor(p.resource(), p.config(), &lca, tree),
+            p.resource(),
+            tree,
+        ),
+        None => {
+            debug_assert!(
+                false,
+                "pre_fire_target: Standard burst with empty `dirty` for \
+                 anchor {:?} — a Standard burst notes its trigger at \
+                 construction, so reaching here means a future writer \
+                 opened the unreachable arm; degrading to the anchor (the \
+                 emission choke pairs it with a WholeSubtree obligation)",
                 p.resource(),
-                tree,
-            ),
-            None => {
-                debug_assert!(
-                    false,
-                    "pre_fire_target: Standard burst with empty `dirty` for \
-                     anchor {:?} — a Standard burst notes its trigger at \
-                     construction, so reaching here means a future writer \
-                     opened the unreachable arm; degrading to the anchor (the \
-                     emission choke pairs it with a WholeSubtree obligation)",
-                    p.resource(),
-                );
-                p.resource()
-            }
-        },
+            );
+            p.resource()
+        }
     }
 }
 
@@ -1599,6 +1640,11 @@ mod tests {
     const SETTLE: Duration = Duration::from_millis(100);
     const MAX_SETTLE: Duration = Duration::from_secs(6);
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
+    /// Events-complete fixture mask: CONTENT covers the recursive `Subtree` shape's quiescence
+    /// witness classes, so `event_chains_prove_quiescence` holds for Standard bursts and the
+    /// emission stays dirty-LCA + `Chains` — the shape the LCA / chains pins below lock.
+    /// Events-incomplete pins opt into [`NO_EVENTS`] explicitly.
+    const EVENTS_COMPLETE: ClassSet = ClassSet::CONTENT;
 
     /// Build an Engine with a single Profile anchored at `/anchor`. Returns the Engine + the
     /// `ProfileId`. The anchor claim is installed as `bootstrap_immediate` would — the burst
@@ -1614,7 +1660,7 @@ mod tests {
                 ProfileIdentity::new(
                     ScanConfig::builder().recursive(true).build(),
                     MAX_SETTLE,
-                    NO_EVENTS,
+                    EVENTS_COMPLETE,
                 ),
                 SETTLE,
                 None,
@@ -1830,7 +1876,7 @@ mod tests {
         // has already disarmed the Verifying slot via `take_owner_probe`. Mirror that consume.
         let _ = e.take_owner_probe(pid);
 
-        e.retry_drives_batching(pid, now, &mut out);
+        e.retry_drives_batching(pid, true, now, &mut out);
 
         assert!(out.probe_ops().is_empty());
         let phase = match e.profiles.get(pid).unwrap().state() {
@@ -2182,12 +2228,13 @@ mod tests {
     }
 
     // ---------------------------------------------------------------------------
-    // pre_fire_target — the (anchor_kind, intent) probe-target rule.
+    // pre_fire_target — the (anchor_kind, epistemics) probe-target rule.
     //
-    // Standard target = the live slot at the component-LCA of `dirty`'s captured *paths* (history,
-    // not surviving slot ids), descended from the always-live anchor, a File leaf promoted to its
-    // parent Dir, anchor fallback on any resolution miss. Locks the contract independent of
-    // `transition_to_verifying`'s body.
+    // Events-complete Standard target = the live slot at the component-LCA of `dirty`'s captured
+    // *paths* (history, not surviving slot ids), descended from the always-live anchor, a File
+    // leaf promoted to its parent Dir, anchor fallback on any resolution miss. Seed and
+    // events-incomplete Standard (`!event_chains_prove_quiescence`) target the anchor. Locks the
+    // contract independent of `transition_to_verifying`'s body.
     // ---------------------------------------------------------------------------
 
     use crate::burst::pre_fire_target;
@@ -2196,8 +2243,12 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    /// Build a tree-shaped Engine: anchor `/root`, two children `a` and `b`.
-    fn engine_with_two_children() -> (
+    /// Build a tree-shaped Engine: anchor `/root`, two children `a` and `b`, the Profile's mask
+    /// chosen by the caller — [`EVENTS_COMPLETE`] for the LCA / chains pins, [`NO_EVENTS`] for the
+    /// anchor + `WholeSubtree` epistemic-posture pins.
+    fn engine_with_two_children_masked(
+        mask: ClassSet,
+    ) -> (
         Engine,
         specter_core::ProfileId,
         specter_core::ResourceId,
@@ -2224,13 +2275,24 @@ mod tests {
                 ProfileIdentity::new(
                     ScanConfig::builder().recursive(true).build(),
                     MAX_SETTLE,
-                    NO_EVENTS,
+                    mask,
                 ),
                 SETTLE,
                 None,
             ),
         );
         (e, pid, root, a, b)
+    }
+
+    /// [`engine_with_two_children_masked`] with the events-complete mask — the common case.
+    fn engine_with_two_children() -> (
+        Engine,
+        specter_core::ProfileId,
+        specter_core::ResourceId,
+        specter_core::ResourceId,
+        specter_core::ResourceId,
+    ) {
+        engine_with_two_children_masked(EVENTS_COMPLETE)
     }
 
     /// Build a `PreFireBurst` shell for direct `pre_fire_target` calls. `dirty` is the only field
@@ -2314,7 +2376,7 @@ mod tests {
                 ProfileIdentity::new(
                     ScanConfig::builder().recursive(true).build(),
                     MAX_SETTLE,
-                    NO_EVENTS,
+                    EVENTS_COMPLETE,
                 ),
                 SETTLE,
                 None,
@@ -2386,7 +2448,7 @@ mod tests {
                 ProfileIdentity::new(
                     ScanConfig::builder().recursive(true).build(),
                     MAX_SETTLE,
-                    NO_EVENTS,
+                    EVENTS_COMPLETE,
                 ),
                 SETTLE,
                 None,
@@ -2435,7 +2497,7 @@ mod tests {
                         .max_depth(Some(2))
                         .build(),
                     MAX_SETTLE,
-                    NO_EVENTS,
+                    EVENTS_COMPLETE,
                 ),
                 SETTLE,
                 None,
@@ -2468,7 +2530,7 @@ mod tests {
                 ProfileIdentity::new(
                     ScanConfig::builder().recursive(false).build(),
                     MAX_SETTLE,
-                    NO_EVENTS,
+                    EVENTS_COMPLETE,
                 ),
                 SETTLE,
                 None,
@@ -2547,6 +2609,22 @@ mod tests {
         );
     }
 
+    #[test]
+    fn pre_fire_target_events_incomplete_standard_returns_anchor() {
+        // An events-incomplete Standard burst must not frame its samples at the dirty-LCA: the
+        // hash channel compares whole-proof-object reads, so the target rule collapses to the
+        // anchor — the same arm Seed takes (`event_chains_prove_quiescence` fails for both). The
+        // deep single-dirty twin of `pre_fire_target_standard_single_dirty_deep_returns_self`,
+        // which pins the LCA on the events-complete control.
+        let (e, pid, root, a, _b) = engine_with_two_children_masked(NO_EVENTS);
+        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(a, "/root/a")]));
+        assert_eq!(
+            pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree),
+            root,
+            "events-incomplete Standard targets the anchor, not the dirty-LCA",
+        );
+    }
+
     /// Build an Engine with a File-anchored Profile under a parent dir. `parent/main.rs` (file) is
     /// the anchor; the parent dir exists but is outside the Profile's coverage. Mirrors the
     /// production `attach_sub` flow's anchor-classification step by stamping `Profile.kind =
@@ -2573,7 +2651,7 @@ mod tests {
                 ProfileIdentity::new(
                     ScanConfig::builder().recursive(false).build(),
                     MAX_SETTLE,
-                    NO_EVENTS,
+                    EVENTS_COMPLETE,
                 ),
                 SETTLE,
                 Some(ResourceKind::File),
@@ -2707,6 +2785,57 @@ mod tests {
     }
 
     #[test]
+    fn transition_to_verifying_events_incomplete_standard_emits_anchor_whole_subtree() {
+        // The full emission shape for an events-incomplete Standard burst: target = anchor AND
+        // obligation = WholeSubtree, despite a dirty set confined to one deep child. Both halves
+        // are individually necessary for the hash channel's soundness — `Chains` alone Arc-clones
+        // every off-chain unchanged-mtime frame from the stale baseline regardless of frame
+        // width, and an LCA frame leaves out-of-LCA regions out of frame entirely — so the two
+        // samples the verdict floor compares are full fresh reads of the proof object. (The
+        // events-complete control keeps dirty-LCA + Chains:
+        // `transition_to_verifying_standard_uses_lca`.)
+        let (mut e, pid, root, a, _b) = engine_with_two_children_masked(NO_EVENTS);
+        let ap = rpath(&e, a);
+        let now = Instant::now();
+        let mut out = StepOutput::default();
+        e.start_standard_burst(pid, a, &ap, now, &mut out);
+
+        let mut probe_out = StepOutput::default();
+        e.transition_to_verifying(pid, &mut probe_out);
+
+        let req = probe_out
+            .probe_ops()
+            .iter()
+            .find_map(|op| match op {
+                ProbeOp::Probe { request } => Some(request),
+                ProbeOp::Cancel { .. } => None,
+            })
+            .expect("Standard probe emitted");
+        let anchor_path = e.tree.path_of(root).expect("anchor path resolves");
+        match req {
+            ProbeRequest::Subtree {
+                target_path,
+                obligation,
+                ..
+            } => {
+                assert_eq!(
+                    *target_path, anchor_path,
+                    "events-incomplete Standard roots the sample at the anchor, \
+                     not the dirty-LCA",
+                );
+                assert!(
+                    matches!(obligation, ProofObligation::WholeSubtree),
+                    "events-incomplete Standard obligates the whole subtree — \
+                     no off-chain frame may be cloned from the stale baseline; \
+                     got {obligation:?}",
+                );
+            }
+            other => panic!("expected ProbeRequest::Subtree; got {other:?}"),
+        }
+        let _ = e.cancel_all_in_flight_probes();
+    }
+
+    #[test]
     fn transition_to_verifying_ships_anchor_basis_for_sub_anchor_lca() {
         // Two dirty grandchildren /root/sub/{a,b} → component-LCA /root/sub, strictly below the
         // anchor /root. The emitted Subtree probe ships target_path = /root/sub (recursion root)
@@ -2739,7 +2868,7 @@ mod tests {
                 ProfileIdentity::new(
                     ScanConfig::builder().recursive(true).build(),
                     MAX_SETTLE,
-                    NO_EVENTS,
+                    EVENTS_COMPLETE,
                 ),
                 SETTLE,
                 None,

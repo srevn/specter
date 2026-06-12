@@ -558,7 +558,11 @@ impl Engine {
         }
 
         // Witness selection. The hash channel engages iff the burst owes a proof AND the events
-        // stream is insufficient — both captured in the fold context above.
+        // stream is insufficient — both captured in the fold context above. The emission-time twin
+        // is `Profile::event_chains_prove_quiescence` (the probe target / obligation predicate):
+        // `!events_witness` there forces anchor-rooted `WholeSubtree` samples, so a channel
+        // engaged here always compares two full fresh reads of the proof object — by shared
+        // source, not by runtime tripwire.
         let response_hash = snap.hash();
         let needs_hash_channel = ctx.owes_proof && !ctx.events_witness;
 
@@ -1937,10 +1941,12 @@ impl Engine {
     /// - [`QuiescenceVerdict::Retry`] — non-firing, non-terminal: the walker certified but the hash
     ///   channel observed `prior != Some(response)` (events-incomplete fire-bearing burst), or the
     ///   walker refused on some chain (transient non-observation — `EACCES`, a chmod-000 chain).
-    ///   Both origins route through [`Engine::retry_drives_batching`]; never commit (the prior
-    ///   carrier value is the last walker-certified sample, not a quiescent one; an unread region
-    ///   must not poison `current`). The bounded `BurstDeadline` ceiling eventually surfaces a
-    ///   `Stable(Forced)` (channel-disagreement path) or `Abandon` (walker-refused path) terminal.
+    ///   Both origins route through [`Engine::retry_drives_batching`], which counts the window
+    ///   toward the mask-blindspot streak iff the verdict's `observed_motion` bit is set (only the
+    ///   disagreement origin observed anything); never commit (the prior carrier value is the last
+    ///   walker-certified sample, not a quiescent one; an unread region must not poison
+    ///   `current`). The bounded `BurstDeadline` ceiling eventually surfaces a `Stable(Forced)`
+    ///   (channel-disagreement path) or `Abandon` (walker-refused path) terminal.
     /// - [`QuiescenceVerdict::Abandon`] — the bounded ceiling already fired and the probe could not
     ///   discharge its obligation. Surface `first_unread` via
     ///   [`Diagnostic::QuiescenceCeilingUnreadable`] and finish the burst **without** committing —
@@ -2001,20 +2007,22 @@ impl Engine {
                 }
                 self.fire_or_seal(profile_id, snapshot, target, true, intent, now, out);
             }
-            QuiescenceVerdict::Retry => {
-                // Two operationally-identical fold origins collapse to this verdict: the hash
+            QuiescenceVerdict::Retry { observed_motion } => {
+                // Two operationally-near-identical fold origins collapse to this verdict: the hash
                 // channel observed `prior != Some(response)` (the tree is moving under the verify
-                // window), or the walker refused on some chain (transient non-observation —
-                // `EACCES`, a chmod-000 chain). A third inflow reaches `retry_drives_batching`
-                // without ever folding a verdict — an unforced transient probe failure routes
-                // through `CertifiedResponse::Failed` (`dispatch_pre_fire_failed`), not this arm —
-                // so the two origins here are the *verdict's*, not the helper's. Re-arm the settle
-                // window for another sample; never commit (the prior carrier value is the last
-                // walker-certified sample, not a quiescent one; an unread region must not poison
-                // `current`). The bounded `BurstDeadline` ceiling eventually surfaces the
-                // operator-visible terminal — `Stable(Forced)` on persistent disagreement,
-                // `Abandon` on a persistent unread chain.
-                self.retry_drives_batching(profile_id, now, out);
+                // window — `observed_motion: true`, counted toward the mask-blindspot streak), or
+                // the walker refused on some chain (transient non-observation — `EACCES`, a
+                // chmod-000 chain — `false`, the streak holds). A third inflow reaches
+                // `retry_drives_batching` without ever folding a verdict — an unforced transient
+                // probe failure routes through `CertifiedResponse::Failed`
+                // (`dispatch_pre_fire_failed`), not this arm — so the two origins here are the
+                // *verdict's*, not the helper's. Re-arm the settle window for another sample;
+                // never commit (the prior carrier value is the last walker-certified sample, not
+                // a quiescent one; an unread region must not poison `current`). The bounded
+                // `BurstDeadline` ceiling eventually surfaces the operator-visible terminal —
+                // `Stable(Forced)` on persistent disagreement, `Abandon` on a persistent unread
+                // chain.
+                self.retry_drives_batching(profile_id, observed_motion, now, out);
             }
             QuiescenceVerdict::Abandon { first_unread } => {
                 // Bounded terminal: the ceiling already fired and the walker still refused. No
@@ -2288,7 +2296,11 @@ impl Engine {
         match failure {
             ProbeFailure::Anchor { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
             ProbeFailure::Transient { .. } if forced => self.finish_burst_to_idle(profile_id, out),
-            ProbeFailure::Transient { .. } => self.retry_drives_batching(profile_id, now, out),
+            // A failed probe observed nothing — `observed_motion = false` holds the
+            // mask-blindspot streak (FD pressure must not masquerade as motion).
+            ProbeFailure::Transient { .. } => {
+                self.retry_drives_batching(profile_id, false, now, out);
+            }
         }
     }
 
@@ -2315,8 +2327,10 @@ impl Engine {
     ///   walker refused on some chain (transient non-observation — `EACCES`, a chmod-000 chain).
     ///   Never commit (the prior is the last walker-certified sample, not a quiescent one; an
     ///   unread region must not poison `current`); settle-space the next sample via
-    ///   [`Engine::transition_to_settling`]. The bounded `RebaseCeiling` eventually surfaces a
-    ///   `Stable(Forced)` / `Abandon` terminal if the failing condition persists.
+    ///   [`Engine::transition_to_settling`], which counts the window toward the mask-blindspot
+    ///   streak iff the verdict's `observed_motion` bit is set. The bounded `RebaseCeiling`
+    ///   eventually surfaces a `Stable(Forced)` / `Abandon` terminal if the failing condition
+    ///   persists.
     /// - [`QuiescenceVerdict::Abandon`] — ceiling reached on an unread response. Refuse to rebase
     ///   blind: surface [`Diagnostic::RebaseCeilingUnreadable`] and finish without committing — the
     ///   prior baseline stays in place. Safe to keep it on a recovery: the certified-recovery
@@ -2400,24 +2414,33 @@ impl Engine {
                         // records the forced fallback downstream (the principled asymmetry with the
                         // pre-fire mirror). A disagreement at the tail of a persistent event-silent
                         // retry streak upgrades the generic carrying-the-bit form to the
-                        // mask-blindspot hint, exactly as on the pre-fire ceiling.
+                        // mask-blindspot hint, exactly as on the pre-fire ceiling — the streak is
+                        // read only under the disagreement bit, mirroring the pre-fire arm.
                         let intent = self.rebase_burst_intent(profile_id);
-                        let retries = self
-                            .profiles
-                            .get(profile_id)
-                            .and_then(Profile::post_fire_burst)
-                            .map_or(0, |post| post.retry_streak);
-                        if hash_channel_disagreed && retries >= CHANGE_OUTSIDE_MASK_RETRY_FLOOR {
-                            out.diagnostics.push(Diagnostic::ChangeOutsideEventMask {
-                                profile: profile_id,
-                                intent,
-                                retries,
-                            });
+                        if hash_channel_disagreed {
+                            let retries = self
+                                .profiles
+                                .get(profile_id)
+                                .and_then(Profile::post_fire_burst)
+                                .map_or(0, |post| post.retry_streak);
+                            if retries >= CHANGE_OUTSIDE_MASK_RETRY_FLOOR {
+                                out.diagnostics.push(Diagnostic::ChangeOutsideEventMask {
+                                    profile: profile_id,
+                                    intent,
+                                    retries,
+                                });
+                            } else {
+                                out.diagnostics.push(Diagnostic::RebaseCeilingForced {
+                                    profile: profile_id,
+                                    intent,
+                                    observed_change: true,
+                                });
+                            }
                         } else {
                             out.diagnostics.push(Diagnostic::RebaseCeilingForced {
                                 profile: profile_id,
                                 intent,
-                                observed_change: hash_channel_disagreed,
+                                observed_change: false,
                             });
                         }
                         self.finish_burst_to_idle(profile_id, out);
@@ -2425,15 +2448,17 @@ impl Engine {
                 }
             }
 
-            QuiescenceVerdict::Retry => {
-                // Two operationally-identical origins collapse here: the hash channel observed
-                // `prior != Some(response)` (the post-command tree is moving under the rebase
-                // loop), or the walker refused on some chain (transient non-observation). Never
-                // commit (the prior carrier value is the last walker-certified sample, not a
-                // quiescent one; an unread region must not poison `current`). Settle-space the next
-                // sample via Rebasing → Settling; the `RebaseCeiling` (armed at the loop's start)
-                // eventually surfaces the operator-visible terminal.
-                self.transition_to_settling(profile_id, now, out);
+            QuiescenceVerdict::Retry { observed_motion } => {
+                // Two operationally-near-identical origins collapse here: the hash channel
+                // observed `prior != Some(response)` (the post-command tree is moving under the
+                // rebase loop — `observed_motion: true`, counted toward the mask-blindspot
+                // streak), or the walker refused on some chain (transient non-observation —
+                // `false`, the streak holds). Never commit (the prior carrier value is the last
+                // walker-certified sample, not a quiescent one; an unread region must not poison
+                // `current`). Settle-space the next sample via Rebasing → Settling; the
+                // `RebaseCeiling` (armed at the loop's start) eventually surfaces the
+                // operator-visible terminal.
+                self.transition_to_settling(profile_id, observed_motion, now, out);
             }
 
             QuiescenceVerdict::Abandon { first_unread } => {
@@ -2504,7 +2529,11 @@ impl Engine {
         match failure {
             ProbeFailure::Anchor { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
             ProbeFailure::Transient { .. } if forced => self.finish_burst_to_idle(profile_id, out),
-            ProbeFailure::Transient { .. } => self.transition_to_settling(profile_id, now, out),
+            // A failed probe observed nothing — `observed_motion = false` holds the
+            // mask-blindspot streak, mirroring the pre-fire Transient arm.
+            ProbeFailure::Transient { .. } => {
+                self.transition_to_settling(profile_id, false, now, out);
+            }
         }
     }
 

@@ -6139,12 +6139,13 @@ fn pre_fire_forced_ceiling_after_event_silent_retry_streak_emits_mask_hint() {
         burst_start,
     );
 
-    // `floor` Retry rounds: each settle expiry drives a verify whose sample hashes differently from
-    // the carrier's prior (distinct sizes ⇒ distinct leaf/dir hashes), so every round folds Retry
-    // and `retry_drives_batching` bumps the streak — round 1 via `prior = None`, the rest via
-    // concrete disagreement. No FsEvent arrives anywhere in the loop: the streak never resets.
+    // One priming round plus `floor` disagreement rounds: each settle expiry drives a verify whose
+    // sample hashes differently from the carrier's prior (distinct sizes ⇒ distinct leaf/dir
+    // hashes). The first round folds `Retry { observed_motion: false }` (`prior = None` is absence
+    // of confirmation) and holds the streak; every subsequent round observes concrete disagreement
+    // and bumps it. No FsEvent arrives anywhere in the loop: the streak never resets.
     let mut at = burst_start;
-    for round in 0..floor {
+    for round in 0..=floor {
         at += SETTLE * 2;
         crate::testkit::drain_due(&mut e, at);
         let corr = e
@@ -6192,7 +6193,7 @@ fn pre_fire_forced_ceiling_after_event_silent_retry_streak_emits_mask_hint() {
 
     // The forced sample still disagrees with the carrier (the storm never quiesced) — the terminal
     // pairs `hash_channel_disagreed = true` with `retry_streak == floor`, selecting the hint.
-    let final_sample = dir_tree_snap(vec![("draft", EntryKind::File, u64::from(floor) + 1)]);
+    let final_sample = dir_tree_snap(vec![("draft", EntryKind::File, u64::from(floor) + 2)]);
     let s_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
@@ -6225,6 +6226,133 @@ fn pre_fire_forced_ceiling_after_event_silent_retry_streak_emits_mask_hint() {
             .iter()
             .all(|d| !matches!(d, Diagnostic::QuiescenceCeilingForcedDespiteChange { .. })),
         "the hint replaces the generic despite-change diagnostic, not alongside it; got {:?}",
+        s_out.diagnostics,
+    );
+}
+
+/// The mask-blindspot streak is disagreement-denominated: a window that observed *nothing* — a
+/// transient probe failure (FD pressure) — holds the streak rather than inflating it. A burst
+/// that suffered `floor` such windows and then one genuine disagreement at the forced ceiling
+/// reports the generic `QuiescenceCeilingForcedDespiteChange`, **not** `ChangeOutsideEventMask`:
+/// the story was pressure, not motion outside the mask. (The walker-refusal Retry origin folds
+/// `observed_motion: false` identically — `quiescence_verdict_folds_three_axes` pins the fold;
+/// this pins the streak consequence through the engine's failure arm.)
+#[test]
+fn pre_fire_forced_ceiling_after_transient_windows_keeps_generic_diagnostic() {
+    let floor = crate::transitions::CHANGE_OUTSIDE_MASK_RETRY_FLOOR;
+    let mut e = Engine::new();
+    let r = e.tree.ensure_root("anchor", ResourceRole::User);
+    e.tree.set_kind(r, ResourceKind::Dir);
+    let now = Instant::now();
+    let (_sid, pid) = crate::testkit::attach_structure_only(&mut e, r, now);
+    let baseline = dir_tree_snap(vec![]);
+    let seed_done = crate::testkit::seed_to_idle(&mut e, pid, &baseline, now);
+
+    let burst_start = seed_done + Duration::from_millis(1);
+    e.step(
+        Input::FsEvent {
+            resource: r,
+            event: FsEvent::StructureChanged,
+        },
+        burst_start,
+    );
+
+    // Round 0 primes the carrier: one Authoritative sample (`prior = None` ⇒ Retry with no motion
+    // observed — streak stays 0, carrier := the sample's hash).
+    let mut at = burst_start + SETTLE * 2;
+    crate::testkit::drain_due(&mut e, at);
+    let corr = e
+        .pending_probe_for(pid)
+        .expect("first Verifying probe in flight");
+    let primed = dir_tree_snap(vec![("draft", EntryKind::File, 1)]);
+    e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: corr,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: primed,
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        at,
+    );
+
+    // `floor` pressure windows: each verify fails Transient (EMFILE), observing nothing — every
+    // window re-batches, none counts toward the streak.
+    for round in 0..floor {
+        at += SETTLE * 2;
+        crate::testkit::drain_due(&mut e, at);
+        let corr = e
+            .pending_probe_for(pid)
+            .expect("settle expiry re-drives the verify after the Transient re-batch");
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: pid,
+                correlation: corr,
+                outcome: ProbeOutcome::Failed(ProbeFailure::Transient { errno: 24 }),
+            }),
+            at,
+        );
+        assert!(
+            out.effects().is_empty(),
+            "round {round}: a failed window must not fire",
+        );
+    }
+
+    // BurstDeadline mid-Batching: `forced = true` + a fresh Verifying probe.
+    let bd_id = match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => pre.burst_deadline,
+        other => panic!("expected Active(PreFire) after the pressure rounds; got {other:?}"),
+    };
+    let bd_out = e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::BurstDeadline,
+            id: bd_id,
+        },
+        burst_start + MAX_SETTLE + Duration::from_millis(1),
+    );
+    let corr_forced = bd_out
+        .probe_ops()
+        .iter()
+        .find_map(|op| match op {
+            ProbeOp::Probe { request } => Some(request.correlation()),
+            ProbeOp::Cancel { .. } => None,
+        })
+        .expect("BurstDeadline drives a fresh forced Verifying probe");
+
+    // The forced sample disagrees with the primed carrier — but the streak witnessed only
+    // pressure, so the terminal pairs `hash_channel_disagreed = true` with `retry_streak == 0`:
+    // the generic despite-change diagnostic, never the mask hint.
+    let final_sample = dir_tree_snap(vec![("draft", EntryKind::File, 2)]);
+    let s_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation: corr_forced,
+            outcome: ProbeOutcome::SubtreeProven {
+                snapshot: final_sample,
+                authority: ProofAuthority::Authoritative,
+            },
+        }),
+        burst_start + MAX_SETTLE + Duration::from_millis(2),
+    );
+
+    assert_eq!(s_out.effects().len(), 1, "the bounded fire is unchanged");
+    assert!(
+        s_out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::QuiescenceCeilingForcedDespiteChange { profile, intent }
+                if *profile == pid && *intent == BurstIntent::Standard,
+        )),
+        "a disagreement tailing a pressure streak keeps the generic diagnostic; got {:?}",
+        s_out.diagnostics,
+    );
+    assert!(
+        s_out
+            .diagnostics
+            .iter()
+            .all(|d| !matches!(d, Diagnostic::ChangeOutsideEventMask { .. })),
+        "FD pressure must not masquerade as motion outside the event mask; got {:?}",
         s_out.diagnostics,
     );
 }
@@ -6266,10 +6394,12 @@ fn post_fire_forced_ceiling_after_retry_streak_emits_mask_hint() {
         at,
     );
 
-    // `floor` Retry loop-backs: each Rebasing sample hashes differently from the carrier's prior
-    // (round 1 via `prior = None`), folding Retry → Settling (streak bump); the settle expiry
-    // re-arms Rebasing for the next sample. No FsEvent is absorbed anywhere: the streak holds.
-    for round in 0..floor {
+    // One priming loop-back plus `floor` disagreement loop-backs: each Rebasing sample hashes
+    // differently from the carrier's prior, folding Retry → Settling; the settle expiry re-arms
+    // Rebasing for the next sample. The first round's `prior = None` folds `observed_motion:
+    // false` and holds the streak; each subsequent round's concrete disagreement bumps it. No
+    // FsEvent is absorbed anywhere: the streak never resets.
+    for round in 0..=floor {
         let corr = e
             .pending_probe_for(pid)
             .expect("Rebasing probe in flight each round");
@@ -6294,7 +6424,7 @@ fn post_fire_forced_ceiling_after_retry_streak_emits_mask_hint() {
         );
         // Settling → Rebasing for the next sample — except after the last round, where the ceiling
         // (not the settle timer) drives the terminal probe below.
-        if round + 1 < floor {
+        if round < floor {
             let settle_id = match e.profiles.get(pid).unwrap().state() {
                 ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {
                     PostFirePhase::Settling { settle_timer } => *settle_timer,
@@ -6336,7 +6466,7 @@ fn post_fire_forced_ceiling_after_retry_streak_emits_mask_hint() {
 
     // The forced sample still disagrees — `hash_channel_disagreed = true` at `retry_streak ==
     // floor` selects the hint over the generic RebaseCeilingForced.
-    let final_sample = dir_tree_snap(vec![("draft", EntryKind::File, u64::from(floor) + 2)]);
+    let final_sample = dir_tree_snap(vec![("draft", EntryKind::File, u64::from(floor) + 3)]);
     let s_out = e.step(
         Input::ProbeResponse(ProbeResponse {
             owner: pid,

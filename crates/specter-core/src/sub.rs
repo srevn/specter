@@ -447,6 +447,11 @@ impl ClassSet {
     /// flushes, async-I/O completions, and `splice(2)` zero-copy paths may not satisfy this on every
     /// supported platform. Workloads with such writers should subscribe to a mask that does *not*
     /// cover [`Self::IN_PLACE_WRITES`] (e.g. `STRUCTURE` only), forcing the hash-channel safety net.
+    ///
+    /// **Even the hash channel proves lstat-identity quiescence, not byte quiescence**: a walk's
+    /// `leaf_hash` folds `(kind, size, mtime, fs_id)`, so a same-size in-place write landing
+    /// inside one mtime-granularity window is invisible to any walk — an inherent platform limit,
+    /// not a mask choice.
     pub const IN_PLACE_WRITES: Self = Self::CONTENT;
 
     /// Classes whose subscription suffices to witness *membership* quiescence over a settle window

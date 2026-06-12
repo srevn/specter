@@ -383,13 +383,21 @@ impl Config {
     /// Touches the filesystem (one `canonicalize_lenient` per dynamic watch); callers are load-time
     /// log sites, never hot paths.
     ///
-    /// One kind today — [`IssueKind::DynamicPrefixDivergesFromCanonical`]: a dynamic pattern's
-    /// literal prefix anchors verbatim (resolving it would desync the anchor from the pattern
-    /// identity the minted Profiles hash over) while static paths canonicalise, so a symlink inside
-    /// the prefix (macOS `/var`, `/tmp`, `/etc`) anchors the pattern on a branch no static watch
-    /// shares and the burst gating between overlapping watches silently never engages. Deliberately
-    /// one line per offending dynamic watch per load — the noise *is* the composition hazard
-    /// surfacing.
+    /// Two kinds today:
+    ///
+    /// - [`IssueKind::DynamicPrefixDivergesFromCanonical`]: a dynamic pattern's literal prefix
+    ///   anchors verbatim (resolving it would desync the anchor from the pattern identity the
+    ///   minted Profiles hash over) while static paths canonicalise, so a symlink inside the
+    ///   prefix (macOS `/var`, `/tmp`, `/etc`) anchors the pattern on a branch no static watch
+    ///   shares and the burst gating between overlapping watches silently never engages.
+    ///   Deliberately one line per offending dynamic watch per load — the noise *is* the
+    ///   composition hazard surfacing.
+    /// - [`IssueKind::EventsIncompleteMask`]: the watch's effective event mask (static `events`,
+    ///   or the dynamic template's) cannot witness its scan shape's quiescence classes, so every
+    ///   fire is proven by the hash channel — at least two consecutive agreeing full subtree
+    ///   walks at the anchor, mtime-skip disabled. A supported, deliberately expensive
+    ///   configuration (the safety net for writers the kernel may not surface as events); the
+    ///   warning makes the cost visible.
     ///
     /// Disabled entries warn too, mirroring the validator's discipline: hazards surface at config
     /// load, not at re-enable time.
@@ -397,6 +405,28 @@ impl Config {
     pub fn warnings(&self) -> Vec<ValidationIssue> {
         let mut found = Vec::new();
         for (i, spec) in self.watches.iter().enumerate() {
+            // The identity the watch's firing Profiles actually run under: a static entry's own
+            // (scan, events); a dynamic entry's template pair (the discovery Sub itself carries
+            // the STRUCTURE constant, which always witnesses its MatchChain shape).
+            let (scan, events) = match &spec.template {
+                Some(t) => (&t.scan, t.events),
+                None => (&spec.scan, spec.events),
+            };
+            if !events.contains(scan.quiescence_witness_classes()) {
+                found.push(ValidationIssue::new(
+                    Some(i),
+                    "events",
+                    IssueKind::EventsIncompleteMask,
+                    "events mask cannot witness this scan shape's quiescence classes \
+                     (for a subtree watch: content), so settle-window silence proves nothing \
+                     and every fire requires two consecutive agreeing full subtree walks at \
+                     the anchor with mtime-skip disabled; intended for mmap/async-I/O/splice \
+                     writers the kernel may not surface as events — add \"content\" to events \
+                     if no such writers touch this tree"
+                        .to_owned(),
+                ));
+            }
+
             // Dynamic watches only — `spec.path` is the pattern's literal prefix, verbatim by
             // `into_discovery_spec`; static paths canonicalised at validation and cannot diverge.
             let Some(pattern) = spec.scan.match_chain() else {

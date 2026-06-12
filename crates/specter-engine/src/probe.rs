@@ -432,13 +432,15 @@ impl Engine {
     /// 2. **Render the wire** via `&self.tree`. Descent carries the prefix path plus the awaited
     ///    head segment; Verify / Rebase kind-dispatch — `Some(File)` ⇒ `AnchorFile`, else ⇒
     ///    `Subtree` with the Profile's `(config, config_hash)`, `baseline_subtree`, and the
-    ///    per-carrier [`specter_core::ProofObligation`] (Standard ⇒ `Chains` over the
-    ///    [`specter_core::NonEmptyChainSet`] from the persisting `dirty`'s captured paths,
-    ///    degrading to `WholeSubtree` when the projection is empty — production never reaches that
-    ///    arm but the type wrapper makes a silently-chainless `Chains` unrepresentable; Seed and
-    ///    Rebase ⇒ `WholeSubtree` — no trustworthy prior — built lazily, never for a File anchor).
-    ///    The kind rule lives here exactly once, so the prior positional constructors' fan-out
-    ///    dissolves into struct literals.
+    ///    per-carrier [`specter_core::ProofObligation`], keyed on
+    ///    [`specter_core::Profile::event_chains_prove_quiescence`]: an events-complete Standard
+    ///    burst ⇒ `Chains` over the [`specter_core::NonEmptyChainSet`] from the persisting
+    ///    `dirty`'s captured paths (degrading to `WholeSubtree` when the projection is empty —
+    ///    production never reaches that arm but the type wrapper makes a silently-chainless
+    ///    `Chains` unrepresentable); Seed, events-incomplete Standard, and Rebase ⇒ `WholeSubtree`
+    ///    — no trustworthy prior, or a stream that cannot witness in-place writes — built lazily,
+    ///    never for a File anchor. The kind rule lives here exactly once, so the prior positional
+    ///    constructors' fan-out dissolves into struct literals.
     fn probe_emission_request(&self, owner: ProfileId) -> Option<ProbeRequest> {
         // `Copy` carrier classification: which carrier, and — for the pre-fire carrier — the target +
         // `forced` + `intent` + a `Copy` borrow of the `dirty` provenance, all read off state.
@@ -458,14 +460,16 @@ impl Engine {
                 segment: &'a CompactString,
             },
             /// Profile `Verifying`. `target` = the variant payload's `target` (the live id
-            /// `pre_fire_target` resolved from the captured paths' LCA, immutable for the Verifying
-            /// variant's lifetime), `forced` = `pre.forced`, `intent` selects the obligation kind,
-            /// and `dirty` is a `Copy` borrow of the burst's [`DirtyProvenance`] — the obligation
-            /// source for the Standard arm. Seed ⇒ `WholeSubtree` (no trustworthy prior); Standard
-            /// ⇒ `Chains` from `dirty`'s captured paths, read in the render pass (`chains()`
-            /// allocates, so the obligation stays lazy — never built for a `File` anchor). The
-            /// *persisting* `dirty` outlives this probe across re-batching, so the borrow is sound
-            /// for the resolution.
+            /// `pre_fire_target` resolved, immutable for the Verifying variant's lifetime),
+            /// `forced` = `pre.forced`, `intent` feeds the obligation predicate
+            /// ([`Profile::event_chains_prove_quiescence`] — the same rule that resolved the
+            /// target, so the two cannot diverge), and `dirty` is a `Copy` borrow of the burst's
+            /// [`DirtyProvenance`] — the obligation source for the chains arm. Events-complete
+            /// Standard ⇒ `Chains` from `dirty`'s captured paths, read in the render pass
+            /// (`chains()` allocates, so the obligation stays lazy — never built for a `File`
+            /// anchor); Seed and events-incomplete Standard ⇒ `WholeSubtree` (no trustworthy
+            /// prior, or a stream that cannot witness in-place writes). The *persisting* `dirty`
+            /// outlives this probe across re-batching, so the borrow is sound for the resolution.
             PreFire {
                 target: ResourceId,
                 forced: bool,
@@ -553,32 +557,36 @@ impl Engine {
                         .current_dir()
                         .and_then(|root| subtree_at_dir(root, anchor, target, &self.tree));
                     let obligation = match carrier {
-                        // Rebase / Seed: no trustworthy prior exists, so nothing under the anchor
-                        // may be skipped — the whole subtree is unproven until freshly read. Rebase
-                        // because the command just mutated the tree (an in-place descendant edit
-                        // need not bump an ancestor mtime, so a chains-only skip would certify a
-                        // false quiet); Seed because it has never observed the tree.
-                        Carrier::Rebase
-                        | Carrier::PreFire {
-                            intent: BurstIntent::Seed,
-                            ..
-                        } => ProofObligation::WholeSubtree,
-                        // Standard: the event-dirty root→leaf chains, the captured paths off the
-                        // carrier's `Copy` borrow of the *persisting* `dirty` (the burst outlives
-                        // this probe across re-batching). Every captured path is at-or-under
-                        // `target` by construction (`pre_fire_target` resolved the captured paths'
-                        // LCA), so no subtree filter is needed. `NonEmptyChainSet::new` rejects an
-                        // empty projection — degrade to `WholeSubtree` so the walker proves the
-                        // whole subtree rather than silently certifying Authoritative against a
-                        // chain-less obligation. Production never reaches the `None` arm (a
-                        // Standard burst notes its trigger), but the type wrapper makes the
-                        // silent-skip failure mode structurally unrepresentable regardless.
-                        Carrier::PreFire {
-                            intent: BurstIntent::Standard,
-                            dirty,
-                            ..
-                        } => NonEmptyChainSet::new(dirty.chains())
-                            .map_or(ProofObligation::WholeSubtree, ProofObligation::Chains),
+                        // Rebase: no trustworthy prior exists — the command just mutated the tree
+                        // (an in-place descendant edit need not bump an ancestor mtime, so a
+                        // chains-only skip would certify a false quiet). Nothing under the anchor
+                        // may be skipped until freshly read.
+                        Carrier::Rebase => ProofObligation::WholeSubtree,
+                        // Pre-fire: keyed on the same predicate that resolved the probe target
+                        // (`pre_fire_target`), so target and obligation cannot diverge. The chains
+                        // arm — events-complete Standard — re-proves the event-dirty root→leaf
+                        // chains, the captured paths off the carrier's `Copy` borrow of the
+                        // *persisting* `dirty` (the burst outlives this probe across re-batching).
+                        // Every captured path is at-or-under `target` by construction (the target
+                        // is the captured paths' LCA), so no subtree filter is needed.
+                        // `NonEmptyChainSet::new` rejects an empty projection — degrade to
+                        // `WholeSubtree` so the walker proves the whole subtree rather than
+                        // silently certifying Authoritative against a chain-less obligation.
+                        // Production never reaches the `None` arm (a Standard burst notes its
+                        // trigger), but the type wrapper makes the silent-skip failure mode
+                        // structurally unrepresentable regardless. The `WholeSubtree` arm covers
+                        // the two emission-equivalent epistemic states: Seed (no trusted prior)
+                        // and events-incomplete Standard (the stream cannot witness in-place
+                        // writes, so a chains walk would clone exactly the frames the hash-channel
+                        // samples must freshly observe).
+                        Carrier::PreFire { intent, dirty, .. } => {
+                            if p.event_chains_prove_quiescence(intent) {
+                                NonEmptyChainSet::new(dirty.chains())
+                                    .map_or(ProofObligation::WholeSubtree, ProofObligation::Chains)
+                            } else {
+                                ProofObligation::WholeSubtree
+                            }
+                        }
                         // Descent emits ProbeRequest::Descent in the outer arm and never reaches
                         // the Subtree obligation builder.
                         Carrier::Descent { .. } => unreachable!(

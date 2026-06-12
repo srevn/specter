@@ -84,14 +84,25 @@ pub enum IssueKind {
     InvalidPattern,
     /// A dynamic `[[watch]]` pattern's literal prefix resolves to a different path than its
     /// verbatim spelling — a symlink sits inside the prefix (on macOS `/var`, `/tmp`, `/etc` all
-    /// qualify). Advisory, never fatal: the only kind [`crate::Config::warnings`] emits and
-    /// `validate` never does. Dynamic prefixes deliberately stay verbatim (the pattern source folds
+    /// qualify). Advisory, never fatal: emitted by [`crate::Config::warnings`], never by
+    /// `validate`. Dynamic prefixes deliberately stay verbatim (the pattern source folds
     /// into the minted Profiles' identity hash; resolving would desync the anchor from the pattern)
     /// while static paths canonicalise, so a static watch and a dynamic watch meant to cover one
     /// tree anchor different Tree branches and the burst gating between them silently never
     /// engages. The detail carries the remedy: write the canonical prefix into the pattern if
     /// composition with static watches matters.
     DynamicPrefixDivergesFromCanonical,
+    /// The watch's effective event mask (the static entry's `events`, or a dynamic entry's
+    /// template `events`) does not cover the classes its scan shape needs to witness quiescence
+    /// over a settle window — for a subtree watch, CONTENT. Advisory, never fatal: emitted by
+    /// [`crate::Config::warnings`], never by `validate`. The configuration is documented and
+    /// intended (the hash-channel safety net for `mmap` / async-I/O / `splice(2)` writers whose
+    /// in-place writes the kernel may not surface as events), but its price is structural: every
+    /// fire must prove quiescence through two consecutive agreeing full subtree walks at the
+    /// anchor with mtime-skip disabled, instead of one event-scoped walk. The warning makes that
+    /// cost visible at config load; the detail carries the trade-off and the opt-out (add
+    /// `"content"` to `events` when no such writers exist).
+    EventsIncompleteMask,
     /// `actions[i].timeout` is set on an action variant that doesn't support a top-level timeout.
     /// v1: only `exec` accepts it. Future variants (`pipe`, `conditional`) set timeouts on their
     /// stages / predicate, not on the action itself; this kind catches the "operator misread the
@@ -252,6 +263,7 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::InvalidName => "invalid-name",
         IssueKind::InvalidPattern => "invalid-pattern",
         IssueKind::DynamicPrefixDivergesFromCanonical => "dynamic-prefix-diverges-from-canonical",
+        IssueKind::EventsIncompleteMask => "events-incomplete-mask",
         IssueKind::TimeoutNotApplicable => "timeout-not-applicable",
         IssueKind::TimeoutZero => "timeout-zero",
         IssueKind::ConditionalIncomplete => "conditional-incomplete",

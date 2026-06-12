@@ -251,6 +251,36 @@ fn warnings_flag_dynamic_prefix_diverging_from_canonical() {
     );
 }
 
+/// [`Config::warnings`], the events-incomplete advisory: a mask that cannot witness its scan
+/// shape's quiescence classes engages the hash-channel safety net (two consecutive agreeing full
+/// subtree walks per fire), which is supported but expensive — the warning surfaces the cost. The
+/// checked identity is the one the firing Profiles run under: a static entry's own `events`, a
+/// dynamic entry's template `events`. The scope-conditional default mask carries CONTENT and stays
+/// silent.
+#[test]
+fn warnings_flag_events_incomplete_mask() {
+    let toml = format!(
+        "[[watch]]\nname = \"structure-only\"\npath = \"{ROOT}\"\n\
+         actions = [{{ exec = [\"echo\"] }}]\nevents = [\"structure\"]\n\
+         [[watch]]\nname = \"defaulted\"\npath = \"{ROOT}\"\n\
+         actions = [{{ exec = [\"echo\"] }}]\n\
+         [[watch]]\nname = \"dynamic\"\npath = \"{ROOT}*/log\"\n\
+         actions = [{{ exec = [\"echo\"] }}]\nevents = [\"structure\"]",
+    );
+    let warnings = Config::from_str(&toml).unwrap().warnings();
+    assert_eq!(
+        warnings.len(),
+        2,
+        "the explicit structure-only static mask and the structure-only template warn; \
+         the CONTENT-bearing default is silent: {warnings:?}",
+    );
+    for (w, idx) in warnings.iter().zip([0usize, 2]) {
+        assert_eq!(w.kind, IssueKind::EventsIncompleteMask);
+        assert_eq!(w.watch_index, Some(idx));
+        assert_eq!(w.field, "events");
+    }
+}
+
 #[test]
 fn kitchen_sink_collects_five_distinct_issues() {
     let toml = "[[watch]]\nname = \"\"\npath = \"src\"\nactions = [{ exec = [] }]\nsettle = \"0ms\"\nmax_depth = 0";
