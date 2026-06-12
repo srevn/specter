@@ -18,7 +18,7 @@ use std::collections::BTreeMap;
 /// entry are invisible to the diff (the entry isn't in either filtered set) — they apply on the
 /// next `false → true` transition via the fresh attach.
 ///
-/// Modified entries are partitioned by [`SubSpec::requires_new_profile`]:
+/// Modified entries are partitioned by `SubSpec::requires_new_profile`:
 ///
 /// - **`modified_identity`** — path / scan / max_settle / events differ, **or either spec is
 ///   template-bearing**: any field change on a discovery spec is a wholesale replace (minted Subs

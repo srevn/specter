@@ -373,7 +373,7 @@ impl Engine {
                                 self.dispatch_rebase_vanished(profile_id, out);
                             }
                             CertifiedResponse::Failed(failure) => {
-                                self.dispatch_rebase_failed(profile_id, failure, out);
+                                self.dispatch_rebase_failed(profile_id, failure, forced, now, out);
                             }
                             CertifiedResponse::Regressed => {}
                         }
@@ -673,8 +673,12 @@ impl Engine {
                 BurstIntent::Standard => self.dispatch_standard_vanished(profile_id, out),
             },
             CertifiedResponse::Failed(failure) => match intent {
-                BurstIntent::Seed => self.dispatch_seed_failed(profile_id, failure, out),
-                BurstIntent::Standard => self.dispatch_standard_failed(profile_id, failure, out),
+                BurstIntent::Seed => {
+                    self.dispatch_seed_failed(profile_id, failure, forced, now, out);
+                }
+                BurstIntent::Standard => {
+                    self.dispatch_standard_failed(profile_id, failure, forced, now, out);
+                }
             },
             CertifiedResponse::Regressed => {}
         }
@@ -2118,20 +2122,33 @@ impl Engine {
         self.finalize_anchor_lost_and_descend(profile_id, out);
     }
 
-    /// (Seed, Failed).
+    /// (Seed, Failed). The pre-fire failure fork — the two `ProbeFailure` classes are different
+    /// epistemic events and take different consequences:
     ///
-    /// Symmetric with `dispatch_standard_failed`: the probe failed at the anchor; the coordinator
-    /// releases the anchor's `watch_demand` contribution.
+    /// - [`ProbeFailure::Anchor`] — path-fatal at the anchor root (`EACCES` / `ELOOP` / `ENOTDIR` /
+    ///   `EIO`). The anchor's *identity* is in question, so release its `watch_demand` via bare
+    ///   [`Self::finalize_anchor_lost`], **not** the descend wrapper: a read error against an
+    ///   anchor that typically still exists on disk (a chmod-000 chain) would loop probe → fail
+    ///   tightly if descended. The Profile parks Idle-anchorless and the event-scan arm
+    ///   ([`Self::start_pending_recovery`]) retries on the parent's next `StructureChanged`.
+    /// - [`ProbeFailure::Transient`] — FD / kernel-resource pressure (`EMFILE` / `ENFILE` /
+    ///   `ENOSPC` / `EAGAIN`). The probe observed *nothing* — it says nothing about the anchor's
+    ///   identity, so tearing the anchor down (the old uniform-`Failed` behaviour) discarded a
+    ///   healthy baseline exactly when the daemon was busiest. This is the epistemic twin of an
+    ///   `Undischarged` proof ("couldn't observe," not "couldn't find"), so it takes the same
+    ///   consequence the verdict floor gives `Undischarged`: re-batch for another window
+    ///   ([`Self::retry_drives_batching`]) while the `BurstDeadline` holds (`!forced`), or finish
+    ///   to Idle once it forces. The anchor watch and any baseline are **retained** — recovery is
+    ///   the anchor's own next event, no wait on the parent.
     ///
-    /// Deliberately bare [`Self::finalize_anchor_lost`], **not** the descend wrapper: `Failed` is a
-    /// read error against an anchor that typically still exists on disk (transient `EACCES`, a
-    /// chmod-000 chain), so an immediate descent would loop probe → fail tightly against the same
-    /// condition. The Profile parks Idle-anchorless and the event-scan arm
-    /// ([`Self::start_pending_recovery`]) retries on the parent's next `StructureChanged`.
+    /// The diagnostic is emitted on every window, retry included: transient pressure is the
+    /// daemon's own health signal — bounded by the ceiling, and silence would hide it.
     fn dispatch_seed_failed(
         &mut self,
         profile_id: ProfileId,
         failure: ProbeFailure,
+        forced: bool,
+        now: Instant,
         out: &mut StepOutput,
     ) {
         if self.profiles.get(profile_id).is_none() {
@@ -2142,7 +2159,11 @@ impl Engine {
             intent: BurstIntent::Seed,
             failure,
         });
-        self.finalize_anchor_lost(profile_id, out);
+        match failure {
+            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost(profile_id, out),
+            ProbeFailure::Transient { .. } if forced => self.finish_burst_to_idle(profile_id, out),
+            ProbeFailure::Transient { .. } => self.retry_drives_batching(profile_id, now, out),
+        }
     }
 
     /// (Standard, Vanished).
@@ -2169,14 +2190,18 @@ impl Engine {
         self.finalize_anchor_lost_and_descend(profile_id, out);
     }
 
-    /// (Standard, Failed).
-    ///
-    /// Bare [`Self::finalize_anchor_lost`] — unlike the `Vanished` sibling, no immediate descent;
-    /// see `dispatch_seed_failed` for the tight-loop rationale.
+    /// (Standard, Failed). Identical to [`Self::dispatch_seed_failed`] modulo the diagnostic
+    /// `intent`: `Anchor` releases the anchor via bare [`Self::finalize_anchor_lost`] (no descent —
+    /// the tight-loop rationale on `dispatch_seed_failed`); `Transient` mirrors the `Undischarged`
+    /// consequence — [`Self::retry_drives_batching`] while `!forced`, finish-to-Idle once forced,
+    /// the anchor watch and baseline retained throughout. See `dispatch_seed_failed` for the full
+    /// reasoning.
     fn dispatch_standard_failed(
         &mut self,
         profile_id: ProfileId,
         failure: ProbeFailure,
+        forced: bool,
+        now: Instant,
         out: &mut StepOutput,
     ) {
         if self.profiles.get(profile_id).is_none() {
@@ -2187,7 +2212,11 @@ impl Engine {
             intent: BurstIntent::Standard,
             failure,
         });
-        self.finalize_anchor_lost(profile_id, out);
+        match failure {
+            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost(profile_id, out),
+            ProbeFailure::Transient { .. } if forced => self.finish_burst_to_idle(profile_id, out),
+            ProbeFailure::Transient { .. } => self.retry_drives_batching(profile_id, now, out),
+        }
     }
 
     /// (Rebase, Ok). The shared certifier folded the quiescence verdict over the *post-command* tree
@@ -2373,15 +2402,21 @@ impl Engine {
         self.finalize_anchor_lost_and_descend(profile_id, out);
     }
 
-    /// (Rebase, Failed). Probe failed at the anchor between fire and rebase. Narrate, then bare
-    /// [`Self::finalize_anchor_lost`] — unlike the `Vanished` sibling, no immediate descent; see
-    /// `dispatch_seed_failed` for the tight-loop rationale. Diagnostic carries the burst's actual
-    /// intent (Standard fallback on the same defensive path noted on the `Vanished` sibling; read
-    /// before the call for the same reason).
+    /// (Rebase, Failed). Probe failed at the anchor between fire and rebase — the post-fire mirror of
+    /// [`Self::dispatch_seed_failed`]. `Anchor` releases anchor via [`Self::finalize_anchor_lost`]
+    /// (no descent — the tight-loop rationale on `dispatch_seed_failed`). `Transient` mirrors the
+    /// post-fire `Undischarged` consequence: settle-space the next sample through `Rebasing →
+    /// Settling` ([`Self::transition_to_settling`]) while the `RebaseCeiling` holds (`!forced`), or
+    /// finish to Idle once it forces — the prior baseline **frozen** in place, never rebased blind
+    /// (the same refusal the `RebaseCeilingUnreadable` / `Abandon` arm carries). Diagnostic carries
+    /// the burst's actual intent (Standard fallback on the same defensive path noted on the
+    /// `Vanished` sibling; read before the consequence for the same reason).
     fn dispatch_rebase_failed(
         &mut self,
         profile_id: ProfileId,
         failure: ProbeFailure,
+        forced: bool,
+        now: Instant,
         out: &mut StepOutput,
     ) {
         if self.profiles.get(profile_id).is_none() {
@@ -2393,7 +2428,11 @@ impl Engine {
             intent,
             failure,
         });
-        self.finalize_anchor_lost(profile_id, out);
+        match failure {
+            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost(profile_id, out),
+            ProbeFailure::Transient { .. } if forced => self.finish_burst_to_idle(profile_id, out),
+            ProbeFailure::Transient { .. } => self.transition_to_settling(profile_id, now, out),
+        }
     }
 
     /// Resolve the intent of the burst owning the in-flight Rebase probe. Returns

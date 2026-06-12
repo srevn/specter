@@ -283,10 +283,11 @@ pub enum ProofAuthority {
 
 /// Typed failure stamped on [`ProbeOutcome::Failed`].
 ///
-/// The engine routes `Failed` uniformly today (log + teardown), but the variant names the routing
-/// target so a future retry path can fork at the dispatch site without re-classifying errnos inside
-/// the engine. Backends translate libc errnos to this variant once, at the trait boundary in
-/// `specter-sensor`; the engine stays free of kernel vocabulary.
+/// The engine forks on the variant at the dispatch site: `Anchor` tears the anchor watch down,
+/// `Transient` retries the window (the consequence the verdict floor gives an `Undischarged` proof
+/// — see the variant docs). Backends translate libc errnos to this variant once, at the trait
+/// boundary in `specter-sensor`, so the fork never re-classifies a raw errno inside the engine; the
+/// engine stays free of kernel vocabulary.
 ///
 /// Cross-crate dual of [`WatchFailure`]. Naming follows the same rule — each variant carries "what
 /// the engine should do," not the kernel's error-class name. `errno` is diagnostic context
@@ -307,8 +308,13 @@ pub enum ProbeFailure {
     /// ceiling was hit at the root-`lstat` syscall, or the walker retried into a transient
     /// rate-limit (`EMFILE` / `ENFILE` / `ENOSPC` / `EAGAIN`).
     ///
-    /// v1 dispatches identically to [`Self::Anchor`]; the variant names the routing target for a
-    /// future retry path. Calling it out at the trait boundary keeps the sensor's kernel-vocabulary
+    /// The probe observed *nothing* — and says nothing about the anchor's identity. This is the
+    /// epistemic twin of an [`ProofAuthority::Undischarged`] proof ("couldn't observe," not "couldn't
+    /// find"), so the engine routes it to the same consequence the verdict floor gives
+    /// `Undischarged`: retry the window while the burst deadline holds, finish to Idle once it forces
+    /// — the anchor watch and baseline retained throughout (FD pressure is not anchor loss, and it
+    /// correlates with the daemon's own load, so the recovery cannot depend on tearing the watch
+    /// down). Calling the class out at the trait boundary keeps the sensor's kernel-vocabulary
     /// classifier the single source — the engine never re-derives the retry signal from a raw `i32`.
     Transient { errno: i32 },
 }

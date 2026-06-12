@@ -538,13 +538,18 @@ impl Engine {
         }
     }
 
-    /// Sole caller: [`Engine::dispatch_quiescence_ok`]'s [`specter_core::QuiescenceVerdict::Retry`]
-    /// arm — a verify just responded non-terminally (either the hash channel observed `prior !=
-    /// Some(response)`, or the walker refused on some chain with a transient non-observation —
-    /// `EACCES`, a chmod-000 chain) and the burst-deadline ceiling has not yet fired, so the engine
-    /// retries through a fresh settle window. The verify slot was already disarmed at the top of
-    /// `on_profile_probe_response`; no Cancel needed. Arms a fresh settle timer and writes `phase =
-    /// Batching { settle_timer }`.
+    /// Two callers, both a pre-fire verify that responded non-terminally with the burst-deadline
+    /// ceiling not yet fired, so the engine retries through a fresh settle window:
+    ///
+    /// - [`Engine::dispatch_quiescence_ok`]'s [`specter_core::QuiescenceVerdict::Retry`] arm — the
+    ///   hash channel observed `prior != Some(response)`, or the walker refused on some chain with
+    ///   a transient non-observation (`EACCES`, a chmod-000 chain).
+    /// - the pre-fire [`specter_core::ProbeFailure::Transient`] arm in
+    ///   `dispatch_{seed,standard}_failed` — the probe failed entirely (FD pressure), the epistemic
+    ///   twin of the `Undischarged` Retry: it observed nothing, so it re-batches identically.
+    ///
+    /// Either way the verify slot was already disarmed at the top of `on_profile_probe_response`;
+    /// no Cancel needed. Arms a fresh settle timer and writes `phase = Batching { settle_timer }`.
     ///
     /// **`dirty` preserved; no re-commit.** The next verify re-targets and re-obligates per the
     /// carrier's own rule — a Standard burst the component-LCA of the preserved `dirty` captured
@@ -555,11 +560,11 @@ impl Engine {
     /// baseline). The next verify either certifies authoritatively (fire-or-pin) or remains
     /// undischarged (re-enter this helper) until the `BurstDeadline` surfaces the terminal.
     ///
-    /// **Reachability.** This helper runs *only* on the [`specter_core::QuiescenceVerdict::Retry`]
-    /// dispatch arm; an `FsEvent` arriving during the verify routes through
-    /// `event_drives_batching`, which Cancels and disarms the verify slot first. The `forced`
-    /// (terminal) cases in the dispatcher bypass this helper — `Stable(Forced)` fires through, and
-    /// `Abandon` surfaces the operator-visible `QuiescenceCeilingUnreadable` and finishes.
+    /// **Reachability.** This helper runs *only* on the non-terminal retry arms above; an `FsEvent`
+    /// arriving during the verify routes through `event_drives_batching`, which Cancels and disarms
+    /// the verify slot first. The `forced` (terminal) cases bypass this helper — `Stable(Forced)`
+    /// fires through, `Abandon` and a forced `Transient` surface the operator-visible terminal
+    /// (`QuiescenceCeilingUnreadable` / `ProbeFailed`) and finish.
     ///
     /// **`last_event_time` pinned to `Some(now)`.** The verify just responded, so `now` is the
     /// timestamp of the latest observation that drove a transition on this burst. Pinning here
@@ -1052,8 +1057,12 @@ impl Engine {
     /// (`Awaiting → Rebasing`), so this is the *only* post-fire `Settling` entry — the spacing half
     /// of the bounded `Rebasing ⇄ Settling` loop, not a debounce of the fire's own events.
     ///
-    /// **Sole caller.** `dispatch_rebase_ok::Retry`. The loop ceiling was armed once at the
-    /// `Awaiting → Rebasing` entry ([`Self::arm_rebase_loop_ceiling`]); no re-arm here.
+    /// **Two callers.** `dispatch_rebase_ok::Retry` (hash-channel disagreement / walker refusal)
+    /// and the post-fire [`specter_core::ProbeFailure::Transient`] arm in `dispatch_rebase_failed`
+    /// (the probe failed entirely under FD pressure — the epistemic twin of the Undischarged Retry,
+    /// it loops back identically). Both run with the rebase slot already disarmed at the top of
+    /// `on_profile_probe_response`. The loop ceiling was armed once at the `Awaiting → Rebasing`
+    /// entry ([`Self::arm_rebase_loop_ceiling`]); no re-arm here.
     ///
     /// Writes `phase = Settling { settle_timer }`, pins `last_event_time = Some(now)` (the
     /// unfavorable-response instant), and arms a fresh [`TimerKind::PostFireSettle`] timer. Ceiling

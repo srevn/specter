@@ -10,18 +10,16 @@ use crate::sub::{SubAttachRequest, SubRegistryDiff};
 
 /// Normalized filesystem event. `kqueue` / `inotify` / `FSEvents` flags fold into these six.
 ///
-/// Identity events ([`Removed`] / [`Renamed`] / [`Revoked`]) are slot- level: they fire on the
-/// watched inode itself. Backends emit them via `IN_DELETE_SELF` / `IN_MOVE_SELF` / `IN_UNMOUNT`
-/// (inotify) or `NOTE_DELETE` / `NOTE_RENAME` / `NOTE_REVOKE` (kqueue) on the watched resource — they
-/// never name a child, even when the kernel could (inotify's `IN_CREATE` etc. carry a basename; v1
-/// throws it away and folds into [`StructureChanged`] so the engine probes the parent for the delta).
+/// Identity events ([`Self::Removed`] / [`Self::Renamed`] / [`Self::Revoked`]) are slot-level: they
+/// fire on the watched inode itself. Backends emit them via `IN_DELETE_SELF` / `IN_MOVE_SELF` /
+/// `IN_UNMOUNT` (inotify) or `NOTE_DELETE` / `NOTE_RENAME` / `NOTE_REVOKE` (kqueue) on the watched
+/// resource — they never name a child, even when the kernel could (inotify's `IN_CREATE` etc. carry
+/// a basename; v1 throws it away and folds into [`Self::StructureChanged`] so the engine probes the
+/// parent for the delta).
 ///
 /// Name-bearing structure events (`IN_CREATE` / `IN_DELETE` / `IN_MOVED_*` on inotify; `NOTE_WRITE`
-/// on a kqueue Dir) collapse into [`StructureChanged`] — the engine probes the parent on each such
-/// event to discover what changed by name.
-///
-/// [`Removed`]: Self::Removed [`Renamed`]: Self::Renamed [`Revoked`]: Self::Revoked
-/// [`StructureChanged`]: Self::StructureChanged
+/// on a kqueue Dir) collapse into [`Self::StructureChanged`] — the engine probes the parent on each
+/// such event to discover what changed by name.
 #[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub enum FsEvent {
     #[default]
@@ -55,15 +53,13 @@ impl FsEvent {
 
 /// Scope of a sensor overflow signal.
 ///
-/// inotify's `IN_Q_OVERFLOW` is queue-wide ([`Global`]); FSEvents emits per-stream overflow
-/// ([`Resource`]). The v1 inotify backend always emits `Global`; kqueue never emits overflow under
-/// v1 (`EV_CLEAR` coalesces but never silently drops at the kernel level).
+/// inotify's `IN_Q_OVERFLOW` is queue-wide ([`Self::Global`]); FSEvents emits per-stream overflow
+/// ([`Self::Resource`]). The v1 inotify backend always emits `Global`; kqueue never emits overflow
+/// under v1 (`EV_CLEAR` coalesces but never silently drops at the kernel level).
 ///
 /// Carried on the sensor → engine path in two places: in the per-`drain_ready` drain
 /// (`specter-sensor::WatcherEvent::Overflow`) and in the engine input variant the bin lifts it into
 /// ([`Input::SensorOverflow`]).
-///
-/// [`Global`]: Self::Global [`Resource`]: Self::Resource
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum OverflowScope {
     /// Per-watched-resource scope. FSEvents reports overflow per active stream; the v1 inotify

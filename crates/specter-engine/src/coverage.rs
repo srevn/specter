@@ -75,11 +75,11 @@ pub(crate) fn descends_at(config: &ScanConfig, depth: u32) -> bool {
 }
 
 /// True iff `profile` would scan `target` given its `ScanConfig` — the boolean projection of
-/// [`classify`] (`!= Outside`) at the Tree's current view of the target's kind.
+/// `classify` (`!= Outside`) at the Tree's current view of the target's kind.
 ///
-/// The chain queries ([`nearest_covering_ancestor`] / [`chain_reaches`]) and cross-crate consumers
-/// read coverage at this granularity. Live observation is the only kind authority available here,
-/// so the unprobed-slot collapse to File-shape ([`Resource::kind_or_file`]) is applied inline.
+/// The chain queries (`nearest_covering_ancestor` / `chain_reaches`) and cross-crate consumers read
+/// coverage at this granularity. Live observation is the only kind authority available here, so the
+/// unprobed-slot collapse to File-shape ([`Resource::kind_or_file`]) is applied inline.
 #[must_use]
 pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut PathBuf) -> bool {
     let target_kind = tree

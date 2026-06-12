@@ -195,9 +195,12 @@ pub enum Diagnostic {
         profile: ProfileId,
         intent: BurstIntent,
     },
-    /// Probe returned [`crate::op::ProbeOutcome::Failed`]. Treated identically to `Vanished`; the
-    /// variant preserves the typed [`ProbeFailure`] routing target + intent. Operator-visible errno
-    /// reads off `failure.errno()` at the IPC seam.
+    /// Probe returned [`crate::op::ProbeOutcome::Failed`]. The engine forks on the typed
+    /// [`ProbeFailure`]: `Anchor` tears the anchor watch down (like `Vanished`), `Transient` (FD
+    /// pressure) retries the window and finishes only when the deadline forces — so a `Transient`
+    /// diagnostic can recur across a burst's retry windows, each one an honest pressure signal
+    /// bounded by the ceiling. The variant preserves the routing target + intent; operator-visible
+    /// errno reads off `failure.errno()` at the IPC seam.
     ProbeFailed {
         profile: ProfileId,
         intent: BurstIntent,

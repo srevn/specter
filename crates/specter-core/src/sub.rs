@@ -839,7 +839,7 @@ impl SubRegistry {
     /// Record that `sub` emitted an Effect — the B1-dedup / SeedDrift fire-history mark, written by
     /// `emit_effects`' SubtreeRoot arm on a successful push. Idempotent. A stale `SubId` (the Sub
     /// detached between the emit decision and here) is a silent no-op: the flag already died with
-    /// the slotmap entry. A `Mint` hit is a debug-loud no-op (see [`Self::spawn_history_mut`]).
+    /// the slotmap entry. A `Mint` hit is a debug-loud no-op (see `spawn_history_mut`).
     pub fn mark_fired(&mut self, sub: SubId) {
         if let Some(h) = self.spawn_history_mut(sub, "mark_fired") {
             h.has_fired = true;

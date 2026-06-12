@@ -1907,12 +1907,11 @@ impl DescentState {
 ///
 /// **Representation.** Components are stored *reverse* of descent order: the logical head (next to
 /// consume) is the `Vec`'s last element. The only mutated end is therefore the `Vec`'s O(1) tail —
-/// [`advance`] is a `pop`, [`prepend`] a `push` — instead of the O(N) front shifts a forward-order
-/// `Vec` forces (`advance` runs every forward descent step). The reversal is an internal detail:
-/// every accessor keeps its logical-order signature and semantics; [`iter`](Self::iter) and the
-/// [`Debug`] impl present descent order so diagnostics and tests are unaffected.
-///
-/// [`advance`]: Self::advance [`prepend`]: Self::prepend
+/// [`advance`](Self::advance) is a `pop`, [`prepend`](Self::prepend) a `push` — instead of the O(N)
+/// front shifts a forward-order `Vec` forces (`advance` runs every forward descent step). The
+/// reversal is an internal detail: every accessor keeps its logical-order signature and semantics;
+/// [`iter`](Self::iter) and the [`Debug`] impl present descent order so diagnostics and tests are
+/// unaffected.
 #[derive(Eq, PartialEq)]
 pub struct DescentRemaining {
     /// Reversed: `inner.last()` is the logical head. Never empty.

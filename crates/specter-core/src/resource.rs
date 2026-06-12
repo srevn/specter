@@ -381,11 +381,9 @@ impl Resource {
     /// Read-only view of the per-Resource contributions map.
     ///
     /// Sole mutators are [`Self::insert_contribution`], [`Self::remove_contribution`], and
-    /// [`Self::clear_contributions`]. The engine's [`add_watch`] / [`sub_watch`] helpers and
-    /// [`crate::Tree::vacate`]'s protocol terminus are the legitimate production callers.
-    ///
-    /// [`add_watch`]: ../../specter_engine/refcounts/fn.add_watch.html [`sub_watch`]:
-    /// ../../specter_engine/refcounts/fn.sub_watch.html
+    /// [`Self::clear_contributions`]. The engine's `add_watch` / `sub_watch` helpers (in
+    /// `specter-engine`'s `refcounts`) and [`crate::Tree::vacate`]'s protocol terminus are the
+    /// legitimate production callers.
     #[must_use]
     pub const fn contributions(&self) -> &BTreeMap<ContribKey, ClassSet> {
         &self.contributions

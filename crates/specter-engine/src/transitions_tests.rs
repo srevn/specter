@@ -4319,6 +4319,284 @@ fn dispatch_rebase_failed_clears_profile_kind() {
     );
 }
 
+// ---- ProbeFailure::Transient fork ----
+//
+// A `Transient` probe failure (FD / kernel-resource pressure — `EMFILE`, errno 24) is the epistemic
+// twin of an `Undischarged` proof: the probe observed nothing, so the engine takes the same
+// consequence the verdict floor gives `Undischarged` — retry the window while the deadline holds,
+// finish to Idle once it forces — never tearing the anchor down (the old uniform-`Failed` teardown).
+// `Anchor` failures keep that teardown, pinned by the `*_clears_profile_kind` tests above.
+
+/// (Standard, Transient). FD pressure on a Standard verify re-batches for another window
+/// (`!forced`) — the anchor watch and baseline retained, the pressure surfaced — then, once the
+/// `BurstDeadline` forces, finishes to Idle with the anchor watch and baseline **still** retained
+/// (unlike the old uniform-`Failed` teardown), so the anchor's own next event re-bursts without
+/// waiting on the parent. Pins both Standard-route Transient arms in one lifecycle; the retained
+/// baseline is the central regression guard a baseline-less Seed cannot assert.
+#[test]
+fn standard_transient_retries_then_forced_finishes_retaining_anchor() {
+    let (mut e, pid, _sid, root, now) = engine_with_attached_sub();
+    let correlation = drive_to_standard_verifying(&mut e, pid, root, now);
+    let baseline = baseline_hash(&e, pid);
+    assert!(
+        baseline.is_some(),
+        "the Standard burst inherits the Seed baseline"
+    );
+
+    // !forced: re-batch for another window; baseline + anchor watch retained, pressure surfaced.
+    let retry_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation,
+            outcome: ProbeOutcome::Failed(ProbeFailure::Transient { errno: 24 }),
+        }),
+        now + SETTLE,
+    );
+    match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => assert!(
+            matches!(pre.phase, PreFirePhase::Batching { .. }),
+            "Transient !forced re-batches for another window; got {:?}",
+            pre.phase,
+        ),
+        other => panic!("expected Active(PreFire(Batching)); got {other:?}"),
+    }
+    assert_eq!(
+        baseline_hash(&e, pid),
+        baseline,
+        "the retry never tears down the baseline",
+    );
+    assert_eq!(
+        e.tree.get(root).unwrap().watch_demand(),
+        1,
+        "FD pressure is not anchor loss — the anchor watch is retained",
+    );
+    assert!(
+        retry_out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ProbeFailed { profile, intent, failure }
+                if *profile == pid
+                    && *intent == BurstIntent::Standard
+                    && matches!(failure, ProbeFailure::Transient { errno: 24 }),
+        )),
+        "the pressure signal is surfaced on the retry window; got {:?}",
+        retry_out.diagnostics,
+    );
+
+    // forced: the BurstDeadline forces the next window's response to the bounded terminal (set-only
+    // while a probe is in flight — the re-verify the settle expiry drove carries forced=true).
+    let deadline = now + MAX_SETTLE + Duration::from_millis(1);
+    while let Some(entry) = e.pop_expired(deadline) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            deadline,
+        );
+    }
+    let correlation = e
+        .pending_probe_for(pid)
+        .expect("the forced re-verify is in flight");
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation,
+            outcome: ProbeOutcome::Failed(ProbeFailure::Transient { errno: 24 }),
+        }),
+        deadline,
+    );
+
+    assert!(
+        matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
+        "forced Transient is the bounded terminal — the burst finishes",
+    );
+    assert_eq!(
+        baseline_hash(&e, pid),
+        baseline,
+        "the terminal retains the baseline — FD pressure said nothing about the tree",
+    );
+    assert_eq!(
+        e.tree.get(root).unwrap().watch_demand(),
+        1,
+        "the terminal retains the anchor watch — recovery is the anchor's own next event",
+    );
+}
+
+/// (Seed, Transient). A cold Seed under FD pressure re-batches with no baseline established
+/// (`!forced`), then — once the `BurstDeadline` forces — finishes to Idle still baseline-less but
+/// with the anchor watch retained: the next event at the anchor re-seeds. Pins both Seed-route
+/// Transient arms in one lifecycle.
+#[test]
+fn seed_transient_retries_then_forced_finishes_without_baseline() {
+    let (mut e, pid, _sid, root, now) = engine_with_attached_sub();
+    // Cold-arm Seed: Verifying-first with a probe in flight, no baseline yet.
+    let correlation = e.pending_probe_for(pid).expect("cold Seed Verifying probe");
+    assert_eq!(baseline_hash(&e, pid), None, "a fresh Seed has no baseline");
+
+    // !forced: re-batch, still baseline-less, anchor watch retained.
+    let retry_out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation,
+            outcome: ProbeOutcome::Failed(ProbeFailure::Transient { errno: 24 }),
+        }),
+        now,
+    );
+    match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PreFire(pre), _) => {
+            assert_eq!(
+                pre.intent,
+                BurstIntent::Seed,
+                "the Seed intent is preserved across the retry",
+            );
+            assert!(
+                matches!(pre.phase, PreFirePhase::Batching { .. }),
+                "Seed Transient !forced re-batches; got {:?}",
+                pre.phase,
+            );
+        }
+        other => panic!("expected Active(PreFire(Batching)); got {other:?}"),
+    }
+    assert_eq!(
+        baseline_hash(&e, pid),
+        None,
+        "the retry establishes no baseline",
+    );
+    assert!(
+        retry_out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ProbeFailed { profile, intent, .. }
+                if *profile == pid && *intent == BurstIntent::Seed,
+        )),
+        "the Seed retry surfaces the pressure signal; got {:?}",
+        retry_out.diagnostics,
+    );
+
+    // forced: the BurstDeadline forces the next window's response to terminal.
+    let deadline = now + MAX_SETTLE + Duration::from_millis(1);
+    while let Some(entry) = e.pop_expired(deadline) {
+        e.step(
+            Input::TimerExpired {
+                profile: entry.profile,
+                kind: entry.kind,
+                id: entry.id,
+            },
+            deadline,
+        );
+    }
+    let correlation = e
+        .pending_probe_for(pid)
+        .expect("the forced re-verify is in flight");
+    let _ = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation,
+            outcome: ProbeOutcome::Failed(ProbeFailure::Transient { errno: 24 }),
+        }),
+        deadline,
+    );
+
+    assert!(
+        matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
+        "forced Transient finishes the Seed burst",
+    );
+    assert_eq!(
+        baseline_hash(&e, pid),
+        None,
+        "a Seed that never observed pins no baseline",
+    );
+    assert_eq!(
+        e.tree.get(root).unwrap().watch_demand(),
+        1,
+        "the anchor watch is retained — the anchor's next event re-seeds",
+    );
+}
+
+/// (Rebase, Transient, `!forced`). FD pressure on a rebase loops back through `Rebasing → Settling`
+/// — the post-fire mirror of the Undischarged Retry — bounded by the already-armed `RebaseCeiling`.
+#[test]
+fn rebase_transient_not_forced_settles() {
+    let (mut e, pid, sid, root, now) = engine_with_attached_sub();
+    let correlation = drive_to_rebasing(&mut e, pid, sid, root, now);
+
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation,
+            outcome: ProbeOutcome::Failed(ProbeFailure::Transient { errno: 24 }),
+        }),
+        now + SETTLE * 4,
+    );
+
+    match e.profiles.get(pid).unwrap().state() {
+        ProfileState::Active(ActiveBurst::PostFire(post), _) => assert!(
+            matches!(post.phase, PostFirePhase::Settling { .. }),
+            "Transient !forced settle-spaces the next rebase sample; got {:?}",
+            post.phase,
+        ),
+        other => panic!("expected Active(PostFire(Settling)); got {other:?}"),
+    }
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ProbeFailed { profile, failure, .. }
+                if *profile == pid && matches!(failure, ProbeFailure::Transient { errno: 24 }),
+        )),
+        "the rebase pressure signal is surfaced; got {:?}",
+        out.diagnostics,
+    );
+}
+
+/// (Rebase, Transient, `forced`). Once the `RebaseCeiling` forces, FD pressure finishes the burst
+/// with the prior baseline frozen in place — never rebased blind, mirroring the
+/// `RebaseCeilingUnreadable` refusal.
+#[test]
+fn rebase_transient_forced_finishes_with_baseline_frozen() {
+    let (mut e, pid, sid, root, now) = engine_with_attached_sub();
+    let correlation = drive_to_rebasing(&mut e, pid, sid, root, now);
+    let baseline_before = baseline_hash(&e, pid);
+
+    // Latch the ceiling while the rebase probe is in flight (set-only — the in-flight response
+    // carries the terminal as forced=true).
+    let ceiling = rebase_ceiling_timer(&e, pid);
+    e.step(
+        Input::TimerExpired {
+            profile: pid,
+            kind: TimerKind::RebaseCeiling,
+            id: ceiling,
+        },
+        now + SETTLE * 4,
+    );
+
+    let out = e.step(
+        Input::ProbeResponse(ProbeResponse {
+            owner: pid,
+            correlation,
+            outcome: ProbeOutcome::Failed(ProbeFailure::Transient { errno: 24 }),
+        }),
+        now + SETTLE * 5,
+    );
+
+    assert!(
+        matches!(e.profiles.get(pid).unwrap().state(), ProfileState::Idle),
+        "forced Transient is the post-fire terminal — the burst finishes",
+    );
+    assert_eq!(
+        baseline_hash(&e, pid),
+        baseline_before,
+        "the terminal never rebases blind — the prior baseline is frozen",
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::ProbeFailed { profile, .. } if *profile == pid,
+        )),
+        "the forced rebase terminal surfaces the pressure signal; got {:?}",
+        out.diagnostics,
+    );
+}
+
 #[test]
 fn finalize_anchor_lost_clears_profile_kind() {
     // Anchor terminal event during a materialised burst.
