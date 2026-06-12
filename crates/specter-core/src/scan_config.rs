@@ -126,14 +126,6 @@ pub enum ScanConfig {
     /// (`match_chain().map(Arc::clone)`) and walks termini while mutating the engine — a refcount
     /// bump per pass instead of re-cloning the parsed components and their compiled matchers.
     MatchChain(Arc<PatternSpec>),
-    /// Admit-every-dirent, single level — the descent probe's preset. Descent searches for the next
-    /// path component of a not-yet-existing anchor, so the user-facing filters (which would mask
-    /// the very segment being searched for) deliberately collapse to no-ops. Prober-internal: it
-    /// anchors no Profile and never travels the wire. The sensor does wrap it in a transient
-    /// [`ProfileIdentity`] once per descent probe — purely to derive the snapshot's `captured_with`
-    /// stamp (the canonical descent-shape hash) — but that hash keys no Profile, so the
-    /// partitioning invariant holds.
-    Descent,
 }
 
 impl ScanConfig {
@@ -158,7 +150,7 @@ impl ScanConfig {
     /// (last-segment basename test), `exclude` (full-`rel` test), and `pattern` (final-`File` only
     /// — directories are always covered; we descend through them); `MatchChain` tests the last
     /// segment against its positional component and applies the chain kind rule (mid-chain must be
-    /// Dir; the terminus admits any kind); `Descent` admits one level.
+    /// Dir; the terminus admits any kind).
     ///
     /// `ResourceKind::Unknown` is collapsed by upstream callers (`Resource::kind_or_file`,
     /// `From<EntryKind>`) before reaching this method, so `kind != Dir` here means the same thing
@@ -173,8 +165,7 @@ impl ScanConfig {
     /// don't need a `ResourceKind`: `max_depth`, `recursive`, `hidden`, and `exclude`. For
     /// `MatchChain`, the positional segment test — the last segment of `rel` against the pattern
     /// component at `depth` (the depth bound is [`PatternSpec::matches_at`]'s own totality:
-    /// out-of-range depths are `false`). For `Descent`, admits one level (the walk never descends,
-    /// so only depths 0 and 1 are queried).
+    /// out-of-range depths are `false`).
     ///
     /// Exists for the walker, which doesn't know `is_dir` until after the per-dirent `lstat`. Calling
     /// [`Self::accepts`] there with a guessed kind would either skip a covered Dir (guess `File` +
@@ -233,7 +224,6 @@ impl ScanConfig {
                 .file_name()
                 .and_then(|n| n.to_str())
                 .is_some_and(|seg| spec.matches_at(depth, seg)),
-            Self::Descent => depth <= 1,
         }
     }
 
@@ -243,7 +233,6 @@ impl ScanConfig {
     /// `covers` checks them as intermediate prefixes). For `MatchChain`, the positional kind rule —
     /// an intermediate chain position names a directory the walk descends through, so a mid-chain
     /// non-dir is out of scope; the terminus admits any kind (a match terminates there regardless).
-    /// `Descent` admits every kind.
     ///
     /// One home for both consumers: [`Self::accepts`] passes `kind == Dir`, and the walker calls
     /// this directly post-`lstat` with the freshly-observed `is_dir` — the two agree because
@@ -263,7 +252,6 @@ impl ScanConfig {
                 is_dir || pattern.as_ref().is_none_or(|pat| pat.matches_path(rel))
             }
             Self::MatchChain(spec) => is_dir || depth >= spec.terminus_depth(),
-            Self::Descent => true,
         }
     }
 
@@ -280,7 +268,6 @@ impl ScanConfig {
     /// - `MatchChain` descends strictly above the terminus depth, device-blind: the walk is bounded
     ///   by the chain length (no runaway-cost concern), and chain positions may legitimately sit on
     ///   distinct mounts (one matched volume per level).
-    /// - `Descent` never descends.
     ///
     /// Negation drives `DirChild::Uncovered(fs_id)` emission in the walker — uncovered-by-mount,
     /// beyond-`max_depth`, and the chain terminus all fall out of the same edge.
@@ -293,7 +280,6 @@ impl ScanConfig {
                 ..
             } => *recursive && child_depth < max_depth.unwrap_or(u32::MAX) && same_device,
             Self::MatchChain(spec) => child_depth < spec.terminus_depth(),
-            Self::Descent => false,
         }
     }
 
@@ -304,7 +290,7 @@ impl ScanConfig {
     pub fn exclude_globs(&self) -> &[GlobPattern] {
         match self {
             Self::Subtree { exclude, .. } => exclude,
-            Self::MatchChain(_) | Self::Descent => &[],
+            Self::MatchChain(_) => &[],
         }
     }
 
@@ -318,7 +304,7 @@ impl ScanConfig {
     pub const fn match_chain(&self) -> Option<&Arc<PatternSpec>> {
         match self {
             Self::MatchChain(spec) => Some(spec),
-            Self::Subtree { .. } | Self::Descent => None,
+            Self::Subtree { .. } => None,
         }
     }
 
@@ -329,10 +315,7 @@ impl ScanConfig {
     /// The scan shape determines the proof object, and the proof object determines which change
     /// classes could cross a settle window invisibly:
     /// - `Subtree` proves a content hash ⇒ [`ClassSet::IN_PLACE_WRITES`]: in-place writes are the
-    ///   one change kind that moves `leaf_hash` without a point event. `Descent` takes the same
-    ///   conservative arm — total by the same convention as its hash arm (a descent is
-    ///   prober-internal and never wrapped in a `ProfileIdentity`, so the arm is never consulted in
-    ///   production).
+    ///   one change kind that moves `leaf_hash` without a point event.
     /// - `MatchChain` proves a match set ⇒ [`ClassSet::MEMBERSHIP_CHANGES`]: membership changes are
     ///   STRUCTURE point events; no in-place-write analog exists for set membership (the
     ///   leaf-content residual is documented at that constant).
@@ -344,14 +327,14 @@ impl ScanConfig {
     #[must_use]
     pub const fn quiescence_witness_classes(&self) -> ClassSet {
         match self {
-            Self::Subtree { .. } | Self::Descent => ClassSet::IN_PLACE_WRITES,
+            Self::Subtree { .. } => ClassSet::IN_PLACE_WRITES,
             Self::MatchChain(_) => ClassSet::MEMBERSHIP_CHANGES,
         }
     }
 }
 
-/// Builder for [`ScanConfig::Subtree`] — the user-facing shape; the other variants are presets
-/// constructed directly.
+/// Builder for [`ScanConfig::Subtree`] — the user-facing shape; the `MatchChain` shape is
+/// constructed directly by config lowering from a dynamic `[[watch]]` glob.
 ///
 /// Canonicalises `exclude` on `build()` — sort by source, then drop adjacent duplicates — so equal
 /// logical configs are byte-equal under `compute_config_hash`, which reads the list in that already
@@ -542,19 +525,11 @@ pub(crate) fn compute_config_hash(
                 }
             }
         }
-        // Hashed once per descent probe by the sensor, which stamps the resulting digest onto every
-        // descent snapshot's `captured_with`. A `Descent` anchors no Profile, so this stamp keys no
-        // partition — and because it folds through the same kernel on a shape no Profile carries,
-        // it can never collide with a live Profile's `config_hash`. The arm carries its own
-        // discriminant byte (not `unreachable!`) precisely because this is a real path.
-        ScanConfig::Descent => {
-            h.put_u8(1);
-        }
         // Parse purity makes `source` the complete encoding: equal source ⇒ byte-equal
         // decomposition (`components` and `literal_prefix_len` are deterministic functions of it),
         // so folding the source string folds the whole positional predicate.
         ScanConfig::MatchChain(spec) => {
-            h.put_u8(2);
+            h.put_u8(1);
             h.put_str(spec.source());
         }
     }
@@ -576,7 +551,7 @@ pub(crate) fn compute_config_hash(
 /// agrees with its preimage" is thereby a structural property, not a documented convention — no
 /// construction or mutation path can produce an identity whose `hash` disagrees with its axes, so
 /// every downstream carrier (the Profile, each `MintTemplate` identity clone, the reconcile
-/// capture, the descent stamp) reads the same precomputed key instead of re-deriving it.
+/// capture) reads the same precomputed key instead of re-deriving it.
 ///
 /// `config` sits behind an `Arc`: an identity is frozen at construction and then travels — onto the
 /// Profile, into every `MintTemplate` identity clone at mint time, and (the config half alone) onto
@@ -594,8 +569,8 @@ pub struct ProfileIdentity {
 
 impl ProfileIdentity {
     /// Freeze the three identity axes and seal their canonical hash in one step. Every producer
-    /// holds a plain [`ScanConfig`] (builder output, config lowering, the descent stamp); the
-    /// single wrap here keeps `Arc::new` out of the call sites.
+    /// holds a plain [`ScanConfig`] (builder output, config lowering); the single wrap here keeps
+    /// `Arc::new` out of the call sites.
     #[must_use]
     pub fn new(config: ScanConfig, max_settle: Duration, events: ClassSet) -> Self {
         // Fold-completeness ratchet, identity tier: a new axis on `ProfileIdentity` is a compile
@@ -1000,11 +975,8 @@ mod tests {
     #[test]
     fn hash_distinguishes_scan_shape() {
         let subtree_h = compute_config_hash(&ScanConfig::builder().build(), SETTLE, NO_EVENTS);
-        let descent_h = compute_config_hash(&ScanConfig::Descent, SETTLE, NO_EVENTS);
         let chain_h = compute_config_hash(&chain("/srv/*/log"), SETTLE, NO_EVENTS);
-        assert_ne!(subtree_h, descent_h);
         assert_ne!(subtree_h, chain_h);
-        assert_ne!(descent_h, chain_h);
     }
 
     /// Two positional sources digest apart — `source` is `MatchChain`'s complete encoding (parse

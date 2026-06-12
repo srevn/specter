@@ -523,8 +523,8 @@ impl Engine {
             .and_then(Profile::pre_fire_burst_mut)
         {
             pre.last_event_time = Some(now);
-            // A delivered in-mask event explains any sample-to-sample motion, so the
-            // mask-blindspot streak breaks here — only event-*silent* retry windows count.
+            // A delivered in-mask event explains any sample-to-sample motion, so the mask-blindspot
+            // streak breaks here — only event-*silent* retry windows count.
             pre.retry_streak = 0;
             pre.dirty.note(event_resource, Arc::clone(event_path));
             if let Some(timer_id) = new_settle_timer {
@@ -1098,8 +1098,8 @@ impl Engine {
             );
             post.phase = PostFirePhase::Settling { settle_timer };
             post.last_event_time = Some(now);
-            // One more rebase window that was event-silent yet did not certify — the post-fire
-            // half of the mask-blindspot streak (`Diagnostic::ChangeOutsideEventMask`).
+            // One more rebase window that was event-silent yet did not certify — the post-fire half
+            // of the mask-blindspot streak (`Diagnostic::ChangeOutsideEventMask`).
             post.retry_streak = post.retry_streak.saturating_add(1);
         }
     }

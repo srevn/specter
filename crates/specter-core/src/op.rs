@@ -200,11 +200,12 @@ pub enum ProbeRequest {
         /// freshest possible snapshot regardless of cost.
         forced: bool,
     },
-    /// Pending-descent prefix probe. Walker enumerates one level of `target_path` (no recursion, no
-    /// exclude/pattern, hidden=true) and returns `ProbeOutcome::DirEnumerated(arc)` containing the
+    /// Pending-descent prefix probe. Walker enumerates one level of `target_path` — every dirent
+    /// admitted, no recursion — and returns `ProbeOutcome::DirEnumerated(arc)` containing the
     /// prefix's direct children — descent dispatch reads `arc.entries.get(name)` and discards the
-    /// snapshot (it is never spliced into `Profile.current`). No `obligation` (a structural query
-    /// is not a quiescence observation).
+    /// snapshot (it is never spliced into `Profile.current`). No `obligation` (a structural query is
+    /// not a quiescence observation), and no `ScanConfig`: the Profile's user-facing filters would
+    /// mask the very segment descent is searching for, so the admit-all policy lives walker-side.
     Descent {
         /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and used
         /// by the Sensor's expectation-map insertion.

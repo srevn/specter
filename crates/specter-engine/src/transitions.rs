@@ -1820,11 +1820,11 @@ impl Engine {
     ///   the Draining gate via the `forced` disjunct in [`Engine::gated_fire`]. On
     ///   `hash_channel_disagreed = true` (strong signal — the hash channel observed `prior !=
     ///   response` before the ceiling expired) the dispatch emits
-    ///   [`Diagnostic::QuiescenceCeilingForcedDespiteChange`] — or, when the burst's
-    ///   `retry_streak` sits at-or-above [`CHANGE_OUTSIDE_MASK_RETRY_FLOOR`], its mask-blindspot
-    ///   upgrade [`Diagnostic::ChangeOutsideEventMask`]; the quiet `false` case stays silent
-    ///   — a forced *fire* carries the bit on its [`specter_core::Effect`], and a forced silent
-    ///   seal ([`Consequence::SilentPin`]) observed no change worth flagging.
+    ///   [`Diagnostic::QuiescenceCeilingForcedDespiteChange`] — or, when the burst's `retry_streak`
+    ///   sits at-or-above [`CHANGE_OUTSIDE_MASK_RETRY_FLOOR`], its mask-blindspot upgrade
+    ///   [`Diagnostic::ChangeOutsideEventMask`]; the quiet `false` case stays silent — a forced
+    ///   *fire* carries the bit on its [`specter_core::Effect`], and a forced silent seal
+    ///   ([`Consequence::SilentPin`]) observed no change worth flagging.
     /// - [`QuiescenceVerdict::Retry`] — non-firing, non-terminal: the walker certified but the hash
     ///   channel observed `prior != Some(response)` (events-incomplete fire-bearing burst), or the
     ///   walker refused on some chain (transient non-observation — `EACCES`, a chmod-000 chain).
@@ -1865,10 +1865,10 @@ impl Engine {
                 // concrete prior/response disagreement before the deadline expired; the quiet
                 // `false` case stays silent — a forced fire carries the bit on its `Effect`, a
                 // forced silent seal observed no change worth flagging. A disagreement at the tail
-                // of a persistent event-silent retry streak upgrades to the mask-blindspot hint:
-                // N quiet windows that each hashed differently witness motion outside the
-                // Profile's `events` mask, not a slow writer the deadline caught. The fire-or-seal
-                // routing is identical either way; on the firing arms `forced = true` triggers the
+                // of a persistent event-silent retry streak upgrades to the mask-blindspot hint: N
+                // quiet windows that each hashed differently witness motion outside the Profile's
+                // `events` mask, not a slow writer the deadline caught. The fire-or-seal routing is
+                // identical either way; on the firing arms `forced = true` triggers the
                 // Draining-gate bypass in `gated_fire`.
                 if hash_channel_disagreed {
                     let retries = self
@@ -2292,10 +2292,10 @@ impl Engine {
                     } => {
                         // Bounded terminal: the `RebaseCeiling` already fired but the walker
                         // certified anyway. Emit one diagnostic unconditionally — no `Effect`
-                        // records the forced fallback downstream (the principled asymmetry with
-                        // the pre-fire mirror). A disagreement at the tail of a persistent
-                        // event-silent retry streak upgrades the generic carrying-the-bit form to
-                        // the mask-blindspot hint, exactly as on the pre-fire ceiling.
+                        // records the forced fallback downstream (the principled asymmetry with the
+                        // pre-fire mirror). A disagreement at the tail of a persistent event-silent
+                        // retry streak upgrades the generic carrying-the-bit form to the
+                        // mask-blindspot hint, exactly as on the pre-fire ceiling.
                         let intent = self.rebase_burst_intent(profile_id);
                         let retries = self
                             .profiles

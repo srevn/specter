@@ -324,14 +324,14 @@ pub struct PreFireBurst {
     /// Consecutive [`QuiescenceVerdict::Retry`] re-entries (hash-channel disagreement or transient
     /// walker refusal) with no intervening driving event. Born `0`; `retry_drives_batching`
     /// increments at every Retry re-Batch, `event_drives_batching` zeroes on every driving
-    /// `FsEvent` — a delivered in-mask event explains the observed motion and breaks the streak,
-    /// so a surviving streak witnesses event-*silent* windows that nevertheless kept hashing
+    /// `FsEvent` — a delivered in-mask event explains the observed motion and breaks the streak, so
+    /// a surviving streak witnesses event-*silent* windows that nevertheless kept hashing
     /// differently. Read once, at the forced-ceiling terminal with the disagreement bit set: a
-    /// streak at-or-above the engine's hint floor upgrades the generic despite-change diagnostic
-    /// to [`crate::Diagnostic::ChangeOutsideEventMask`] (the proof object is moving via change
-    /// classes outside the Profile's `events` mask). Dropped by omission at
-    /// [`Self::into_post_fire`]: the rebase loop counts its own windows over the post-command
-    /// tree ([`PostFireBurst::retry_streak`]).
+    /// streak at-or-above the engine's hint floor upgrades the generic despite-change diagnostic to
+    /// [`crate::Diagnostic::ChangeOutsideEventMask`] (the proof object is moving via change classes
+    /// outside the Profile's `events` mask). Dropped by omission at [`Self::into_post_fire`]: the
+    /// rebase loop counts its own windows over the post-command tree
+    /// ([`PostFireBurst::retry_streak`]).
     pub retry_streak: u32,
     /// Pre-fire N=2 sample carrier — see [`CertifiedSample`] for the sealed single-writer contract.
     /// Engaged (read at the verdict floor) only when the burst owes quiescence proof (Standard,
@@ -490,12 +490,12 @@ pub struct PostFireBurst {
     /// **Reader.** `handle_post_fire_settle_expired` consumes the timestamp to decide reschedule vs
     /// transition, mirroring `on_settle_expired`'s pre-fire fork.
     pub last_event_time: Option<Instant>,
-    /// Consecutive rebase-loop [`QuiescenceVerdict::Retry`] re-entries with no intervening
-    /// absorbed event — the post-fire mirror of [`PreFireBurst::retry_streak`], counting this
-    /// loop's own windows over the post-command tree. Born `0`; `transition_to_settling`
-    /// increments at every Retry loop-back, `absorb_event_into_fire_tail` zeroes on every absorbed
-    /// `FsEvent`. Read once, at the `RebaseCeiling` forced terminal with the disagreement bit set,
-    /// for the same [`crate::Diagnostic::ChangeOutsideEventMask`] upgrade. Dropped by omission at
+    /// Consecutive rebase-loop [`QuiescenceVerdict::Retry`] re-entries with no intervening absorbed
+    /// event — the post-fire mirror of [`PreFireBurst::retry_streak`], counting this loop's own
+    /// windows over the post-command tree. Born `0`; `transition_to_settling` increments at every
+    /// Retry loop-back, `absorb_event_into_fire_tail` zeroes on every absorbed `FsEvent`. Read
+    /// once, at the `RebaseCeiling` forced terminal with the disagreement bit set, for the same
+    /// [`crate::Diagnostic::ChangeOutsideEventMask`] upgrade. Dropped by omission at
     /// [`Self::into_pre_fire_residual`].
     pub retry_streak: u32,
     /// The rebase-loop ceiling lifecycle — the post-fire mirror of [`PreFireBurst::forced`] + the
@@ -657,10 +657,10 @@ pub enum QuiescenceWitness {
 /// - [`Self::Forced`] — `BurstDeadline` / `RebaseCeiling` fallback fired. Fire / rebase anyway
 ///   against the freshest observation. The dispatch maps `hash_channel_disagreed` to a diagnostic
 ///   asymmetrically: post-fire always emits a forced-ceiling diagnostic — the generic
-///   [`crate::Diagnostic::RebaseCeilingForced`] carrying the bit as `observed_change` (loud on
-///   both — no `Effect` records the forced fallback downstream); pre-fire diagnoses only on `true`
-///   and stays silent on `false` because `forced` already propagates onto `Effect.forced`. On
-///   either side, a `true` bit at the tail of a persistent event-silent retry streak (the burst's
+///   [`crate::Diagnostic::RebaseCeilingForced`] carrying the bit as `observed_change` (loud on both
+///   — no `Effect` records the forced fallback downstream); pre-fire diagnoses only on `true` and
+///   stays silent on `false` because `forced` already propagates onto `Effect.forced`. On either
+///   side, a `true` bit at the tail of a persistent event-silent retry streak (the burst's
 ///   `retry_streak` at-or-above the engine's hint floor) upgrades the generic diagnostic to
 ///   [`crate::Diagnostic::ChangeOutsideEventMask`].
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -814,13 +814,12 @@ impl PreFireBurst {
     /// Construct a pre-fire burst — the single construction seam.
     ///
     /// Born fresh, always: `forced` is `false` (the force-fire flag flips in-life only on
-    /// `BurstDeadline` expiry, via the engine's cat-a `force_pending`), `last_certified_hash`
-    /// opens `CertifiedSample::fresh` (sole in-life writer: the cat-(b)
+    /// `BurstDeadline` expiry, via the engine's cat-a `force_pending`), `last_certified_hash` opens
+    /// `CertifiedSample::fresh` (sole in-life writer: the cat-(b)
     /// [`Self::advance_certified_sample`]), and `retry_streak` opens `0` (cat-a writers only:
-    /// `retry_drives_batching` increments, `event_drives_batching` zeroes). Those
-    /// invariant-bearing fields take no parameter precisely because *no* construction path may
-    /// seed them — the no-bypass discipline applied to construction, mirroring
-    /// [`PostFireBurst::new`].
+    /// `retry_drives_batching` increments, `event_drives_batching` zeroes). Those invariant-bearing
+    /// fields take no parameter precisely because *no* construction path may seed them — the
+    /// no-bypass discipline applied to construction, mirroring [`PostFireBurst::new`].
     ///
     /// `fold_latched` *is* a parameter — the operator's birth consult
     /// ([`Profile::absorb_window_live`] at the burst's birth instant), a computed construction value
@@ -1089,9 +1088,9 @@ impl PostFireBurst {
     /// `transition_to_verifying` constructs a [`PreFirePhase::Verifying`] with a freshly computed
     /// target, exactly as in a fresh `start_standard_burst`. The post-fire `forced` ceiling latch,
     /// `rebase_ceiling` timer lifecycle, `last_certified_hash` N=2 sample carrier, and
-    /// `retry_streak` window counter are dropped by omission — all four are post-fire-only and
-    /// tied to the now-discarded post-fire sample sequence; the restarted pre-fire burst opens its
-    /// own fresh `burst_deadline`, fresh `last_certified_hash: None`, and fresh `retry_streak: 0`,
+    /// `retry_streak` window counter are dropped by omission — all four are post-fire-only and tied
+    /// to the now-discarded post-fire sample sequence; the restarted pre-fire burst opens its own
+    /// fresh `burst_deadline`, fresh `last_certified_hash: None`, and fresh `retry_streak: 0`,
     /// exactly as a fresh `start_standard_burst`.
     ///
     /// `fold_latched` is **threaded, not dropped** — it is a fresh birth consult (a construction

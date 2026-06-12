@@ -1937,8 +1937,7 @@ fn match_chain_depth_stays_anchor_relative_when_rooted_below_anchor() {
 //
 // `run_probe` is the variant-dispatch glue between `WorkerProber` and the three walker entry
 // points. The cases below pin that each variant reaches the right walker, and that `Descent` walks
-// the admit-all single-level `ScanConfig::Descent` shape regardless of any config baked into the
-// request — the variant carries no `ScanConfig`.
+// the walker's admit-all single-level descent policy — the variant carries no `ScanConfig`.
 
 #[test]
 fn run_probe_dispatches_anchor_file_to_probe_anchor_file() {
@@ -1987,14 +1986,18 @@ fn run_probe_dispatches_descent_to_probe_descent() {
 }
 
 #[test]
-fn probe_descent_admits_every_dirent() {
+fn probe_descent_admits_every_dirent_and_never_descends() {
     let tmp = TempDir::new().unwrap();
     // `.hidden` would be filtered by a Subtree default (`hidden=false`); `foo.tmp` would be
-    // filtered by an exclude/pattern. The `Descent` scan shape admits every dirent — descent is
-    // searching for the next path segment — so every direct child must surface.
+    // filtered by an exclude/pattern. The descent policy admits every dirent — descent is searching
+    // for the next path segment — so every direct child must surface.
     std::fs::write(tmp.path().join(".hidden"), b"x").unwrap();
     std::fs::write(tmp.path().join("foo.tmp"), b"x").unwrap();
     std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
+    // A Dir child surfaces as a dirent but is never recursed into: descent is a one-level
+    // structural query, so the entry stays `Uncovered` and the grandchild is invisible.
+    std::fs::create_dir(tmp.path().join("subdir")).unwrap();
+    std::fs::write(tmp.path().join("subdir").join("grandchild"), b"x").unwrap();
 
     let outcome = probe_descent(tmp.path());
     let ProbeOutcome::DirEnumerated(arc) = outcome else {
@@ -2003,6 +2006,13 @@ fn probe_descent_admits_every_dirent() {
     assert!(arc.entries().contains_key(".hidden"));
     assert!(arc.entries().contains_key("foo.tmp"));
     assert!(arc.entries().contains_key("main.c"));
+    assert!(
+        matches!(
+            arc.entries().get("subdir"),
+            Some(ChildEntry::Dir(DirChild::Uncovered(_))),
+        ),
+        "descent never descends: a Dir child is observed but unexplored",
+    );
 }
 
 // ---------------------------------------------------------------- pool: run_worker

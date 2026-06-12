@@ -173,11 +173,11 @@ pub(crate) fn classify(
     classify_chain(profile.config(), &rev, target_kind, scratch)
 }
 
-/// Fold the admission predicate over one anchor → target segment chain, then refine the admitted
-/// case by the recursion edge — the classification kernel shared by [`classify`],
-/// [`covering_profiles`], and [`nearest_covering_ancestor`]. The chain is **target-to-root order**
-/// (the natural order an upward Tree walk collects; the fold iterates it reversed), and **non-empty**
-/// — depth 0 is each caller's own anchor arm, [`CoverageClass::Interior`] unconditionally.
+/// Fold the admission predicate over one anchor → target segment chain, then refine the admitted case
+/// by the recursion edge — the classification kernel shared by [`classify`], [`covering_profiles`],
+/// and [`nearest_covering_ancestor`]. The chain is **target-to-root order** (the natural order an
+/// upward Tree walk collects; the fold iterates it reversed), and **non-empty** — depth 0 is each
+/// caller's own anchor arm, [`CoverageClass::Interior`] unconditionally.
 ///
 /// Intermediate prefixes test as [`ResourceKind::Dir`] (the Tree invariant: a non-Dir parent has no
 /// children); the final prefix — the deepest segment, `chain_rev[0]` — tests as `target_kind`.
@@ -240,12 +240,11 @@ fn classify_chain(
 /// caller-threaded for the same reason (see the module doc).
 ///
 /// **Pure, never cached.** The result is a total function of `(tree, profiles, child)` — no peer
-/// state, no stored edge (`scratch` is workspace, not state: its contents never survive
-/// observably). It is not cached into a per-Profile `parent_profile` edge: a refcount keyed on a
-/// recomputable derivation cannot be kept balanced across mid-burst topology moves. The derivation
-/// stands alone: [`chain_reaches`] climbs it hop-by-hop and [`has_active_standard_descendant`]
-/// evaluates the reconfirm predicate fresh from it. `pub(crate)` — engine-internal; no cross-crate
-/// consumer.
+/// state, no stored edge (`scratch` is workspace, not state: its contents never survive observably).
+/// It is not cached into a per-Profile `parent_profile` edge: a refcount keyed on a recomputable
+/// derivation cannot be kept balanced across mid-burst topology moves. The derivation stands alone:
+/// [`chain_reaches`] climbs it hop-by-hop and [`has_active_standard_descendant`] evaluates the
+/// reconfirm predicate fresh from it. `pub(crate)` — engine-internal; no cross-crate consumer.
 ///
 /// Each `child → result` step is a strict Resource-ancestor move (the ascent starts at
 /// `child.resource`'s parent, and the same-Resource co-anchor case is excluded), so iterating it
@@ -352,8 +351,8 @@ pub(crate) fn covering_profiles(
         if cur.is_some() {
             match tree.name(rid) {
                 Some(name) => segs.push(name),
-                // A live slot always carries its segment; a miss means nothing above could
-                // classify across the gap — stop ascending.
+                // A live slot always carries its segment; a miss means nothing above could classify
+                // across the gap — stop ascending.
                 None => break,
             }
         }

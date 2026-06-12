@@ -490,24 +490,22 @@ pub enum Diagnostic {
         first_unread: Arc<Path>,
         intent: BurstIntent,
     },
-    /// Both forced-ceiling terminals' mask-blindspot refinement: the hash channel observed
-    /// concrete disagreement (`prior != response`) at the final sample — as on
-    /// [`Self::QuiescenceCeilingForcedDespiteChange`] / [`Self::RebaseCeilingForced`] — at the
-    /// tail of `retries` consecutive Retry windows during which **not one mask-admitted event
-    /// arrived** (any in-mask event resets the burst's streak counter). Settle windows the events
-    /// stream swore were quiet kept hashing differently, so the proof object is moving via change
-    /// classes outside the Profile's subscribed `events` mask; the streak is the witness. The
-    /// canonical shape: `events = STRUCTURE` over files written in place (mmap writers, touch
-    /// storms) — mtime folds into `leaf_hash`, so every sample differs while STRUCTURE stays
-    /// silent. The remedy is config-side: widen `events` to the classes that actually move the
-    /// tree.
+    /// Both forced-ceiling terminals' mask-blindspot refinement: the hash channel observed concrete
+    /// disagreement (`prior != response`) at the final sample — as on
+    /// [`Self::QuiescenceCeilingForcedDespiteChange`] / [`Self::RebaseCeilingForced`] — at the tail
+    /// of `retries` consecutive Retry windows during which **not one mask-admitted event arrived**
+    /// (any in-mask event resets the burst's streak counter). Settle windows the events stream
+    /// swore were quiet kept hashing differently, so the proof object is moving via change classes
+    /// outside the Profile's subscribed `events` mask; the streak is the witness. The canonical
+    /// shape: `events = STRUCTURE` over files written in place (mmap writers, touch storms) — mtime
+    /// folds into `leaf_hash`, so every sample differs while STRUCTURE stays silent. The remedy is
+    /// config-side: widen `events` to the classes that actually move the tree.
     ///
     /// Emitted **instead of** the generic ceiling diagnostic, at both terminals (the pre-fire
-    /// `BurstDeadline` and the post-fire `RebaseCeiling` — `intent` plus the engine's dispatch
-    /// site distinguish them in logs exactly as for the generic pair). Reachable only when the
-    /// hash channel was engaged — an events-incomplete mask is a precondition of both the
-    /// disagreement bit and the channel itself — so an events-reliable Profile can never receive a
-    /// false hint.
+    /// `BurstDeadline` and the post-fire `RebaseCeiling` — `intent` plus the engine's dispatch site
+    /// distinguish them in logs exactly as for the generic pair). Reachable only when the hash
+    /// channel was engaged — an events-incomplete mask is a precondition of both the disagreement
+    /// bit and the channel itself — so an events-reliable Profile can never receive a false hint.
     ChangeOutsideEventMask {
         profile: ProfileId,
         intent: BurstIntent,

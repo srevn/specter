@@ -451,9 +451,9 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
         .expect("descent probe in flight at the prefix");
 
     // `AnchorOk` from a Descent probe is structurally impossible from the production walker —
-    // `probe_descent` calls `probe_subtree`, whose root-`lstat` rejects non-Dir paths via
-    // `Vanished`. We synthesise the breach to exercise the walker-contract debug_assert in
-    // `walker_contract_violated_descent`.
+    // `probe_descent`'s root `lstat` rejects non-Dir paths via `Vanished`, and a Dir walk can only
+    // yield `DirEnumerated`. We synthesise the breach to exercise the walker-contract debug_assert
+    // in `walker_contract_violated_descent`.
     let leaf = file_tree_snap(EntryKind::File, 0, UNIX_EPOCH, 1);
     let _ = e.step(
         Input::ProbeResponse(ProbeResponse {
@@ -5803,10 +5803,10 @@ fn post_fire_forced_ceiling_observed_change_tracks_carrier_disagreement() {
 /// The mask-blindspot upgrade at the pre-fire ceiling: a touch-storm under `events = STRUCTURE`.
 /// Every settle window is event-silent (no STRUCTURE event ever arrives, so `retry_streak` never
 /// resets) yet every sample hashes differently — in-place writes / mtime churn fold into
-/// `leaf_hash` while the subscribed class stays quiet. After
-/// `CHANGE_OUTSIDE_MASK_RETRY_FLOOR` consecutive Retry windows, the forced-ceiling disagreement
-/// emits `ChangeOutsideEventMask` (carrying the streak) **instead of** the generic
-/// `QuiescenceCeilingForcedDespiteChange`; the bounded fire itself is unchanged.
+/// `leaf_hash` while the subscribed class stays quiet. After `CHANGE_OUTSIDE_MASK_RETRY_FLOOR`
+/// consecutive Retry windows, the forced-ceiling disagreement emits `ChangeOutsideEventMask`
+/// (carrying the streak) **instead of** the generic `QuiescenceCeilingForcedDespiteChange`; the
+/// bounded fire itself is unchanged.
 #[test]
 fn pre_fire_forced_ceiling_after_event_silent_retry_streak_emits_mask_hint() {
     let floor = crate::transitions::CHANGE_OUTSIDE_MASK_RETRY_FLOOR;
@@ -5827,10 +5827,10 @@ fn pre_fire_forced_ceiling_after_event_silent_retry_streak_emits_mask_hint() {
         burst_start,
     );
 
-    // `floor` Retry rounds: each settle expiry drives a verify whose sample hashes differently
-    // from the carrier's prior (distinct sizes ⇒ distinct leaf/dir hashes), so every round folds
-    // Retry and `retry_drives_batching` bumps the streak — round 1 via `prior = None`, the rest
-    // via concrete disagreement. No FsEvent arrives anywhere in the loop: the streak never resets.
+    // `floor` Retry rounds: each settle expiry drives a verify whose sample hashes differently from
+    // the carrier's prior (distinct sizes ⇒ distinct leaf/dir hashes), so every round folds Retry
+    // and `retry_drives_batching` bumps the streak — round 1 via `prior = None`, the rest via
+    // concrete disagreement. No FsEvent arrives anywhere in the loop: the streak never resets.
     let mut at = burst_start;
     for round in 0..floor {
         at += SETTLE * 2;
@@ -5980,8 +5980,8 @@ fn post_fire_forced_ceiling_after_retry_streak_emits_mask_hint() {
                 .all(|d| !matches!(d, Diagnostic::RebaseCeilingForced { .. })),
             "round {round}: Retry before the ceiling emits no forced diagnostic",
         );
-        // Settling → Rebasing for the next sample — except after the last round, where the
-        // ceiling (not the settle timer) drives the terminal probe below.
+        // Settling → Rebasing for the next sample — except after the last round, where the ceiling
+        // (not the settle timer) drives the terminal probe below.
         if round + 1 < floor {
             let settle_id = match e.profiles.get(pid).unwrap().state() {
                 ProfileState::Active(ActiveBurst::PostFire(post), _) => match &post.phase {

@@ -374,8 +374,9 @@ impl crate::Engine {
         let next_segment = descent.remaining_components().head().clone();
         let is_terminal = descent.remaining_components().is_terminal();
 
-        // Descent probes walk the single-level `ScanConfig::Descent` shape, so the response is a
-        // one-level Dir snapshot — look up the next segment by name in the BTreeMap directly.
+        // Descent probes are single-level enumerations (the walker's descent policy admits every
+        // dirent and never descends), so the response is a one-level Dir snapshot — look up the
+        // next segment by name in the BTreeMap directly.
         let entry_kind = match snapshot.entries().get(next_segment.as_str()) {
             Some(child) => child.kind(),
             None => {
@@ -1350,10 +1351,9 @@ mod tests {
     }
 
     /// Descent probes ride a dedicated `ProbeRequest::Descent` variant — the engine ships only
-    /// `(profile, correlation, target_path)`, leaving the admit-all single-level scan shape
-    /// (`ScanConfig::Descent`) entirely to the walker. Since the engine carries no scan-config on
-    /// the wire, the shape's correctness lives in the sensor's walker tests; this engine test pins
-    /// the variant choice.
+    /// `(profile, correlation, target_path)`, leaving the admit-all single-level enumeration policy
+    /// entirely to the walker. Since the engine carries no scan-config on the wire, the policy's
+    /// correctness lives in the sensor's walker tests; this engine test pins the variant choice.
     #[test]
     fn descent_probe_uses_descent_variant() {
         let mut e = Engine::new();
