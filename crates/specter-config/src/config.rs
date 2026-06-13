@@ -27,12 +27,12 @@ pub(crate) const DEFAULT_MAX_SETTLE: Duration = Duration::from_hours(1);
 const MAX_SETTLE_FLOOR_FACTOR: u32 = 4;
 /// Debounce window of a discovery Sub's own Profile — the walk that observes chain membership, not
 /// the user's reaction. Pinned to a constant (never the user's `settle`) so a `settle = "30s"`
-/// reaction debounce cannot become 30 s of promotion latency, and so one pattern always maps to one
+/// reaction debounce cannot become 30 s of mint latency, and so one pattern always maps to one
 /// discovery Profile (`Profile.settle = min over attached Subs` is constant-stable when every
 /// template carries the same pair). 150 ms coalesces an untar-style membership burst into one
 /// reconcile.
 const DISCOVERY_SETTLE: Duration = Duration::from_millis(150);
-/// Forced-fire ceiling of a discovery Profile — bounds promotion latency under sustained chain
+/// Forced-fire ceiling of a discovery Profile — bounds mint latency under sustained chain
 /// churn. See [`DISCOVERY_SETTLE`] for why the pair is constant.
 const DISCOVERY_MAX_SETTLE: Duration = Duration::from_secs(2);
 // Compile-time pin of the `validate_settle` floor the constants bypass (they never pass through the

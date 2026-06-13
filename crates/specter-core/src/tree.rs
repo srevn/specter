@@ -777,10 +777,10 @@ mod tests {
         }
     }
 
-    /// Role is metadata: a vacated `WatchRootParent` slot with no structural anchors (children,
-    /// profiles, proxy back-refs, contributions) is reapable. The previous behavior — role alone
-    /// pinning the slot — leaked watch-root parent slots after every Profile reap. See
-    /// `has_anchors`'s rustdoc for the contract.
+    /// Role is metadata, not retention: a vacated `WatchRootParent` slot with no structural anchors
+    /// (children, profiles, contributions) is reapable. Were the role tag alone to pin the slot,
+    /// every Profile reap would leak its watch-root parent slot. See `has_anchors`'s rustdoc for
+    /// the contract.
     #[test]
     fn try_reap_succeeds_for_role_only_slot_post_vacate() {
         let mut tree = Tree::new();

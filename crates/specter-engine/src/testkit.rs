@@ -493,7 +493,7 @@ pub fn rebase_post_fire_to_idle(
 /// parks on the standing absence observation).
 ///
 /// Returns the full `StepOutput`: the caller reads the next descent correlation, asserts the
-/// terminal Seed/proxy shape, or asserts no-progress. Descent runs outside the Burst lifecycle, so
+/// terminal Seed shape, or asserts no-progress. Descent runs outside the Burst lifecycle, so
 /// this is a primitive beside [`assert_seed_verifying`], composing neither.
 #[must_use]
 pub fn descent_advance(

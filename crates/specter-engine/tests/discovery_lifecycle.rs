@@ -1541,7 +1541,7 @@ fn absorb_window_is_inert_for_discovery() {
 }
 
 /// `max_settle` ceiling expiry under churn forces the probe and the forced verdict still reconciles
-/// and seals — promotion latency stays bounded.
+/// and seals — mint latency stays bounded.
 #[test]
 fn forced_ceiling_reconciles_and_seals() {
     let mut e = Engine::new();

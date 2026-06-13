@@ -416,7 +416,7 @@ mod tests {
         assert!(matches!(spec.components[1], PatternComponent::Glob(_)));
     }
 
-    /// Consecutive globs build a deeper proxy chain. literal_prefix_len = 2; subsequent globs at
+    /// Consecutive globs build a deeper chain. literal_prefix_len = 2; subsequent globs at
     /// idx 2, 3, etc.
     #[test]
     fn parse_consecutive_globs_after_literal_prefix() {
