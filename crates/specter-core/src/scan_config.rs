@@ -529,7 +529,7 @@ pub(crate) fn compute_config_hash(
         // canonical literal prefix plus the glob tail, and equal source ⇒ byte-equal decomposition
         // within the uniformly re-anchored production population (config lowering always
         // canonicalises then `reanchor`s). Folding the string therefore folds the whole predicate.
-        // `source` is not re-parsed and is not guaranteed to round-trip through `PatternSpec::parse`
+        // `source` isn't re-parsed and is not guaranteed to round-trip through `PatternSpec::parse`
         // (a canonical prefix segment may carry a glob metacharacter); the redundant prefix half is
         // harmless here because the Profile partition key's anchor-resource component independently
         // separates distinct anchors — this fold's job is to separate distinct *tails* under one

@@ -207,9 +207,9 @@ fn duplicate_name_across_enabled_and_disabled_rejected() {
 
 /// Dynamic-prefix canonicalisation, the composition payoff: a dynamic pattern's literal prefix is
 /// symlink-resolved at lowering exactly like a static path, so a dynamic watch and a static watch
-/// over the *same* symlinked tree anchor the same Tree branch (they compose). The
-/// divergent-anchor advisory that the verbatim regime needed has nothing left to report — the only
-/// remaining advisory channel is the events-incomplete mask.
+/// over the *same* symlinked tree anchor the same Tree branch (they compose). The divergent-anchor
+/// advisory that the verbatim regime needed has nothing left to report — the only remaining
+/// advisory channel is the events-incomplete mask.
 #[cfg(unix)]
 #[test]
 fn dynamic_prefix_canonicalises_and_composes_with_static() {

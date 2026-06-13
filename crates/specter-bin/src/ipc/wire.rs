@@ -23,6 +23,16 @@
 //! refuses the change without them; the fourth is pinned by a drift test that fails on either side
 //! diverging from the witness set.
 //!
+//! # Round-trip completeness
+//!
+//! The field-less projection enums (every `Wire*` carrying a snake_case `as_str` — [`WireFsEvent`],
+//! [`WireBurstHelper`], …) each declare a fixed-size `ALL` array of their variants, and the
+//! round-trip tests iterate `ALL` rather than a hand-written variant slice. An adjacent `const`
+//! tripwire keeps `ALL` exhaustive: its match gains one arm per variant, and a newly added
+//! variant's arm indexes one slot past the fixed-size array — a hard `unconditional_panic` compile
+//! error — until `ALL` grows to list it. Coverage therefore cannot silently drop a variant, which a
+//! distant hand-written slice once did.
+//!
 //! `WireTime` owns its own formatting via `humantime::format_rfc3339_seconds` on the outgoing path
 //! and validates via `humantime::parse_rfc3339` on the incoming path: every wire value is RFC 3339
 //! by construction in *both* directions. Pre-epoch `SystemTime` is clamped to `UNIX_EPOCH` on the
@@ -1039,6 +1049,9 @@ impl From<BurstIntent> for WireBurstIntent {
 }
 
 impl WireBurstIntent {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 2] = [Self::Standard, Self::Seed];
+
     /// Wire-form token — mirrors the snake_case serde rename. Exhaustive `match` so a new variant
     /// without a paired arm fails to compile, keeping the textual vocabulary single-source against
     /// the per-enum drift test. Mirrors [`super::protocol::WireErrorCode::as_str`]'s convention;
@@ -1052,6 +1065,18 @@ impl WireBurstIntent {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireBurstIntent) -> WireBurstIntent {
+        match v {
+            WireBurstIntent::Standard => WireBurstIntent::ALL[0],
+            WireBurstIntent::Seed => WireBurstIntent::ALL[1],
+        }
+    }
+    const _: fn(WireBurstIntent) -> WireBurstIntent = all_complete;
+};
 
 impl std::fmt::Display for WireBurstIntent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1084,6 +1109,16 @@ impl From<FsEvent> for WireFsEvent {
 }
 
 impl WireFsEvent {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 6] = [
+        Self::ContentChanged,
+        Self::MetadataChanged,
+        Self::StructureChanged,
+        Self::Renamed,
+        Self::Removed,
+        Self::Revoked,
+    ];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::ContentChanged => "content_changed",
@@ -1095,6 +1130,22 @@ impl WireFsEvent {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireFsEvent) -> WireFsEvent {
+        match v {
+            WireFsEvent::ContentChanged => WireFsEvent::ALL[0],
+            WireFsEvent::MetadataChanged => WireFsEvent::ALL[1],
+            WireFsEvent::StructureChanged => WireFsEvent::ALL[2],
+            WireFsEvent::Renamed => WireFsEvent::ALL[3],
+            WireFsEvent::Removed => WireFsEvent::ALL[4],
+            WireFsEvent::Revoked => WireFsEvent::ALL[5],
+        }
+    }
+    const _: fn(WireFsEvent) -> WireFsEvent = all_complete;
+};
 
 impl std::fmt::Display for WireFsEvent {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1180,6 +1231,9 @@ impl From<ReapTrigger> for WireReapTrigger {
 }
 
 impl WireReapTrigger {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 2] = [Self::Immediate, Self::DeferredFromBurst];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Immediate => "immediate",
@@ -1187,6 +1241,18 @@ impl WireReapTrigger {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireReapTrigger) -> WireReapTrigger {
+        match v {
+            WireReapTrigger::Immediate => WireReapTrigger::ALL[0],
+            WireReapTrigger::DeferredFromBurst => WireReapTrigger::ALL[1],
+        }
+    }
+    const _: fn(WireReapTrigger) -> WireReapTrigger = all_complete;
+};
 
 impl std::fmt::Display for WireReapTrigger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1213,6 +1279,9 @@ impl From<ResourceKind> for WireResourceKind {
 }
 
 impl WireResourceKind {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 3] = [Self::File, Self::Dir, Self::Unknown];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -1221,6 +1290,19 @@ impl WireResourceKind {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireResourceKind) -> WireResourceKind {
+        match v {
+            WireResourceKind::File => WireResourceKind::ALL[0],
+            WireResourceKind::Dir => WireResourceKind::ALL[1],
+            WireResourceKind::Unknown => WireResourceKind::ALL[2],
+        }
+    }
+    const _: fn(WireResourceKind) -> WireResourceKind = all_complete;
+};
 
 /// Mirror of [`specter_core::EntryKind`] — the snapshot-side kind, distinct from
 /// [`WireResourceKind`] (the Tree-slot kind) because the Tree projection folds `Symlink`/`Other`
@@ -1247,6 +1329,9 @@ impl From<EntryKind> for WireEntryKind {
 }
 
 impl WireEntryKind {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 4] = [Self::File, Self::Dir, Self::Symlink, Self::Other];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::File => "file",
@@ -1256,6 +1341,20 @@ impl WireEntryKind {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireEntryKind) -> WireEntryKind {
+        match v {
+            WireEntryKind::File => WireEntryKind::ALL[0],
+            WireEntryKind::Dir => WireEntryKind::ALL[1],
+            WireEntryKind::Symlink => WireEntryKind::ALL[2],
+            WireEntryKind::Other => WireEntryKind::ALL[3],
+        }
+    }
+    const _: fn(WireEntryKind) -> WireEntryKind = all_complete;
+};
 
 impl std::fmt::Display for WireEntryKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1288,6 +1387,9 @@ impl From<ClaimKind> for WireClaimKind {
 }
 
 impl WireClaimKind {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 3] = [Self::Anchor, Self::WatchRootParent, Self::DescentPrefix];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Anchor => "anchor",
@@ -1296,6 +1398,19 @@ impl WireClaimKind {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireClaimKind) -> WireClaimKind {
+        match v {
+            WireClaimKind::Anchor => WireClaimKind::ALL[0],
+            WireClaimKind::WatchRootParent => WireClaimKind::ALL[1],
+            WireClaimKind::DescentPrefix => WireClaimKind::ALL[2],
+        }
+    }
+    const _: fn(WireClaimKind) -> WireClaimKind = all_complete;
+};
 
 impl std::fmt::Display for WireClaimKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1322,6 +1437,13 @@ impl From<SpliceFailureCause> for WireSpliceFailureCause {
 }
 
 impl WireSpliceFailureCause {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 3] = [
+        Self::TargetOutsideAnchorSubtree,
+        Self::SlotReapedMidGraft,
+        Self::IntermediateUncovered,
+    ];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::TargetOutsideAnchorSubtree => "target_outside_anchor_subtree",
@@ -1330,6 +1452,19 @@ impl WireSpliceFailureCause {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireSpliceFailureCause) -> WireSpliceFailureCause {
+        match v {
+            WireSpliceFailureCause::TargetOutsideAnchorSubtree => WireSpliceFailureCause::ALL[0],
+            WireSpliceFailureCause::SlotReapedMidGraft => WireSpliceFailureCause::ALL[1],
+            WireSpliceFailureCause::IntermediateUncovered => WireSpliceFailureCause::ALL[2],
+        }
+    }
+    const _: fn(WireSpliceFailureCause) -> WireSpliceFailureCause = all_complete;
+};
 
 impl std::fmt::Display for WireSpliceFailureCause {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1360,6 +1495,15 @@ impl From<DetachReason> for WireDetachReason {
 }
 
 impl WireDetachReason {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 5] = [
+        Self::ConfigDiffRemoved,
+        Self::ConfigDiffIdentityChanged,
+        Self::IpcDisabled,
+        Self::MatchVanished,
+        Self::DiscoverySourceDetached,
+    ];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::ConfigDiffRemoved => "config_diff_removed",
@@ -1370,6 +1514,21 @@ impl WireDetachReason {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireDetachReason) -> WireDetachReason {
+        match v {
+            WireDetachReason::ConfigDiffRemoved => WireDetachReason::ALL[0],
+            WireDetachReason::ConfigDiffIdentityChanged => WireDetachReason::ALL[1],
+            WireDetachReason::IpcDisabled => WireDetachReason::ALL[2],
+            WireDetachReason::MatchVanished => WireDetachReason::ALL[3],
+            WireDetachReason::DiscoverySourceDetached => WireDetachReason::ALL[4],
+        }
+    }
+    const _: fn(WireDetachReason) -> WireDetachReason = all_complete;
+};
 
 impl std::fmt::Display for WireDetachReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1412,6 +1571,21 @@ impl From<BurstHelper> for WireBurstHelper {
 }
 
 impl WireBurstHelper {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 11] = [
+        Self::StartSeedBurst,
+        Self::StartStandardBurst,
+        Self::EventDrivesBatching,
+        Self::RetryDrivesBatching,
+        Self::TransitionToVerifying,
+        Self::TransitionToDraining,
+        Self::TransitionToAwaiting,
+        Self::TransitionToRebasing,
+        Self::TransitionToSettling,
+        Self::AbsorbEventIntoFireTail,
+        Self::RestartBurstFromFireTailResidual,
+    ];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::StartSeedBurst => "start_seed_burst",
@@ -1428,6 +1602,27 @@ impl WireBurstHelper {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireBurstHelper) -> WireBurstHelper {
+        match v {
+            WireBurstHelper::StartSeedBurst => WireBurstHelper::ALL[0],
+            WireBurstHelper::StartStandardBurst => WireBurstHelper::ALL[1],
+            WireBurstHelper::EventDrivesBatching => WireBurstHelper::ALL[2],
+            WireBurstHelper::RetryDrivesBatching => WireBurstHelper::ALL[3],
+            WireBurstHelper::TransitionToVerifying => WireBurstHelper::ALL[4],
+            WireBurstHelper::TransitionToDraining => WireBurstHelper::ALL[5],
+            WireBurstHelper::TransitionToAwaiting => WireBurstHelper::ALL[6],
+            WireBurstHelper::TransitionToRebasing => WireBurstHelper::ALL[7],
+            WireBurstHelper::TransitionToSettling => WireBurstHelper::ALL[8],
+            WireBurstHelper::AbsorbEventIntoFireTail => WireBurstHelper::ALL[9],
+            WireBurstHelper::RestartBurstFromFireTailResidual => WireBurstHelper::ALL[10],
+        }
+    }
+    const _: fn(WireBurstHelper) -> WireBurstHelper = all_complete;
+};
 
 impl std::fmt::Display for WireBurstHelper {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1458,6 +1653,15 @@ impl From<ProfileStateDiscriminant> for WireProfileStateDiscriminant {
 }
 
 impl WireProfileStateDiscriminant {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 5] = [
+        Self::Idle,
+        Self::Parked,
+        Self::Pending,
+        Self::ActivePreFire,
+        Self::ActivePostFire,
+    ];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -1468,6 +1672,21 @@ impl WireProfileStateDiscriminant {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireProfileStateDiscriminant) -> WireProfileStateDiscriminant {
+        match v {
+            WireProfileStateDiscriminant::Idle => WireProfileStateDiscriminant::ALL[0],
+            WireProfileStateDiscriminant::Parked => WireProfileStateDiscriminant::ALL[1],
+            WireProfileStateDiscriminant::Pending => WireProfileStateDiscriminant::ALL[2],
+            WireProfileStateDiscriminant::ActivePreFire => WireProfileStateDiscriminant::ALL[3],
+            WireProfileStateDiscriminant::ActivePostFire => WireProfileStateDiscriminant::ALL[4],
+        }
+    }
+    const _: fn(WireProfileStateDiscriminant) -> WireProfileStateDiscriminant = all_complete;
+};
 
 impl std::fmt::Display for WireProfileStateDiscriminant {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1509,6 +1728,19 @@ impl From<StateLabel> for WireStateLabel {
 }
 
 impl WireStateLabel {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 9] = [
+        Self::Idle,
+        Self::Parked,
+        Self::Pending,
+        Self::Batching,
+        Self::Verifying,
+        Self::Draining,
+        Self::Awaiting,
+        Self::Rebasing,
+        Self::Settling,
+    ];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Idle => "idle",
@@ -1523,6 +1755,25 @@ impl WireStateLabel {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireStateLabel) -> WireStateLabel {
+        match v {
+            WireStateLabel::Idle => WireStateLabel::ALL[0],
+            WireStateLabel::Parked => WireStateLabel::ALL[1],
+            WireStateLabel::Pending => WireStateLabel::ALL[2],
+            WireStateLabel::Batching => WireStateLabel::ALL[3],
+            WireStateLabel::Verifying => WireStateLabel::ALL[4],
+            WireStateLabel::Draining => WireStateLabel::ALL[5],
+            WireStateLabel::Awaiting => WireStateLabel::ALL[6],
+            WireStateLabel::Rebasing => WireStateLabel::ALL[7],
+            WireStateLabel::Settling => WireStateLabel::ALL[8],
+        }
+    }
+    const _: fn(WireStateLabel) -> WireStateLabel = all_complete;
+};
 
 impl std::fmt::Display for WireStateLabel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1550,6 +1801,9 @@ impl From<EffectScope> for WireEffectScope {
 }
 
 impl WireEffectScope {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 2] = [Self::SubtreeRoot, Self::PerStableFile];
+
     /// Wire-form token — snake_case, mirroring the serde rename. The `show -o human` renderer
     /// carries its own hyphenated label table (`subtree-root` / `per-stable-file`) for the detail
     /// block; that view-local divergence stays in `show.rs`. This `as_str` is the uniform wire
@@ -1561,6 +1815,18 @@ impl WireEffectScope {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireEffectScope) -> WireEffectScope {
+        match v {
+            WireEffectScope::SubtreeRoot => WireEffectScope::ALL[0],
+            WireEffectScope::PerStableFile => WireEffectScope::ALL[1],
+        }
+    }
+    const _: fn(WireEffectScope) -> WireEffectScope = all_complete;
+};
 
 impl std::fmt::Display for WireEffectScope {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1591,6 +1857,9 @@ impl From<&Reaction> for WireReactionKind {
 }
 
 impl WireReactionKind {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 2] = [Self::Spawn, Self::Mint];
+
     /// Wire-form token — snake_case, mirroring the serde rename. The `list -o human` REACTION
     /// column renders it verbatim through `Display`.
     pub(crate) const fn as_str(self) -> &'static str {
@@ -1600,6 +1869,18 @@ impl WireReactionKind {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireReactionKind) -> WireReactionKind {
+        match v {
+            WireReactionKind::Spawn => WireReactionKind::ALL[0],
+            WireReactionKind::Mint => WireReactionKind::ALL[1],
+        }
+    }
+    const _: fn(WireReactionKind) -> WireReactionKind = all_complete;
+};
 
 impl std::fmt::Display for WireReactionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1628,6 +1909,9 @@ impl From<AbsorbMode> for WireAbsorbMode {
 }
 
 impl WireAbsorbMode {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 2] = [Self::ConsumeOnFirst, Self::PersistUntil];
+
     /// Wire-form token — snake_case, mirroring the serde rename. The `show -o human` renderer
     /// carries its own table for the `absorbing until …` line (hyphenated `consume-on-first` / bare
     /// `persist`); that view-local divergence stays in `show.rs`. This `as_str` is the uniform wire
@@ -1639,6 +1923,18 @@ impl WireAbsorbMode {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireAbsorbMode) -> WireAbsorbMode {
+        match v {
+            WireAbsorbMode::ConsumeOnFirst => WireAbsorbMode::ALL[0],
+            WireAbsorbMode::PersistUntil => WireAbsorbMode::ALL[1],
+        }
+    }
+    const _: fn(WireAbsorbMode) -> WireAbsorbMode = all_complete;
+};
 
 impl std::fmt::Display for WireAbsorbMode {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -1683,6 +1979,9 @@ pub(crate) enum WireReloadTrigger {
 }
 
 impl WireReloadTrigger {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 4] = [Self::Sighup, Self::Auto, Self::Ipc, Self::Startup];
+
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
             Self::Sighup => "sighup",
@@ -1692,6 +1991,20 @@ impl WireReloadTrigger {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireReloadTrigger) -> WireReloadTrigger {
+        match v {
+            WireReloadTrigger::Sighup => WireReloadTrigger::ALL[0],
+            WireReloadTrigger::Auto => WireReloadTrigger::ALL[1],
+            WireReloadTrigger::Ipc => WireReloadTrigger::ALL[2],
+            WireReloadTrigger::Startup => WireReloadTrigger::ALL[3],
+        }
+    }
+    const _: fn(WireReloadTrigger) -> WireReloadTrigger = all_complete;
+};
 
 impl std::fmt::Display for WireReloadTrigger {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -2136,8 +2449,8 @@ mod tests {
     /// Drift guard for the snake-rename'd wire enums — exercises the same invariant as
     /// [`super::super::protocol::tests::wire_error_code_round_trips_every_variant`]: serialize →
     /// strip quotes → expect `as_str`; `Display` → expect `as_str`; deserialize round-trips
-    /// identically. The variant slice is hand-written; compile-time exhaustiveness comes from
-    /// `as_str`'s match — a new variant lands a missing arm there before this slice could go stale.
+    /// identically. Each caller passes its enum's `ALL` array — complete by the per-enum tripwire
+    /// (a new variant fails to compile until it joins `ALL`), so coverage never silently drops one.
     fn assert_snake_round_trip<E>(variants: &[E], as_str: fn(E) -> &'static str)
     where
         E: Copy
@@ -2170,188 +2483,80 @@ mod tests {
 
     #[test]
     fn wire_burst_intent_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[WireBurstIntent::Standard, WireBurstIntent::Seed],
-            WireBurstIntent::as_str,
-        );
+        assert_snake_round_trip(&WireBurstIntent::ALL, WireBurstIntent::as_str);
     }
 
     #[test]
     fn wire_fs_event_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WireFsEvent::ContentChanged,
-                WireFsEvent::MetadataChanged,
-                WireFsEvent::StructureChanged,
-                WireFsEvent::Renamed,
-                WireFsEvent::Removed,
-                WireFsEvent::Revoked,
-            ],
-            WireFsEvent::as_str,
-        );
+        assert_snake_round_trip(&WireFsEvent::ALL, WireFsEvent::as_str);
     }
 
     #[test]
     fn wire_reap_trigger_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WireReapTrigger::Immediate,
-                WireReapTrigger::DeferredFromBurst,
-            ],
-            WireReapTrigger::as_str,
-        );
+        assert_snake_round_trip(&WireReapTrigger::ALL, WireReapTrigger::as_str);
     }
 
     #[test]
     fn wire_resource_kind_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WireResourceKind::File,
-                WireResourceKind::Dir,
-                WireResourceKind::Unknown,
-            ],
-            WireResourceKind::as_str,
-        );
+        assert_snake_round_trip(&WireResourceKind::ALL, WireResourceKind::as_str);
     }
 
     #[test]
     fn wire_entry_kind_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WireEntryKind::File,
-                WireEntryKind::Dir,
-                WireEntryKind::Symlink,
-                WireEntryKind::Other,
-            ],
-            WireEntryKind::as_str,
-        );
+        assert_snake_round_trip(&WireEntryKind::ALL, WireEntryKind::as_str);
     }
 
     #[test]
     fn wire_claim_kind_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WireClaimKind::Anchor,
-                WireClaimKind::WatchRootParent,
-                WireClaimKind::DescentPrefix,
-            ],
-            WireClaimKind::as_str,
-        );
+        assert_snake_round_trip(&WireClaimKind::ALL, WireClaimKind::as_str);
     }
 
     #[test]
     fn wire_splice_failure_cause_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WireSpliceFailureCause::TargetOutsideAnchorSubtree,
-                WireSpliceFailureCause::SlotReapedMidGraft,
-                WireSpliceFailureCause::IntermediateUncovered,
-            ],
-            WireSpliceFailureCause::as_str,
-        );
+        assert_snake_round_trip(&WireSpliceFailureCause::ALL, WireSpliceFailureCause::as_str);
     }
 
     #[test]
     fn wire_detach_reason_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WireDetachReason::ConfigDiffRemoved,
-                WireDetachReason::ConfigDiffIdentityChanged,
-                WireDetachReason::IpcDisabled,
-                WireDetachReason::MatchVanished,
-                WireDetachReason::DiscoverySourceDetached,
-            ],
-            WireDetachReason::as_str,
-        );
+        assert_snake_round_trip(&WireDetachReason::ALL, WireDetachReason::as_str);
     }
 
     #[test]
     fn wire_burst_helper_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WireBurstHelper::StartSeedBurst,
-                WireBurstHelper::StartStandardBurst,
-                WireBurstHelper::EventDrivesBatching,
-                WireBurstHelper::RetryDrivesBatching,
-                WireBurstHelper::TransitionToVerifying,
-                WireBurstHelper::TransitionToDraining,
-                WireBurstHelper::TransitionToAwaiting,
-                WireBurstHelper::TransitionToRebasing,
-                WireBurstHelper::TransitionToSettling,
-                WireBurstHelper::AbsorbEventIntoFireTail,
-                WireBurstHelper::RestartBurstFromFireTailResidual,
-            ],
-            WireBurstHelper::as_str,
-        );
+        assert_snake_round_trip(&WireBurstHelper::ALL, WireBurstHelper::as_str);
     }
 
     #[test]
     fn wire_profile_state_discriminant_round_trips_every_variant() {
         assert_snake_round_trip(
-            &[
-                WireProfileStateDiscriminant::Idle,
-                WireProfileStateDiscriminant::Parked,
-                WireProfileStateDiscriminant::Pending,
-                WireProfileStateDiscriminant::ActivePreFire,
-                WireProfileStateDiscriminant::ActivePostFire,
-            ],
+            &WireProfileStateDiscriminant::ALL,
             WireProfileStateDiscriminant::as_str,
         );
     }
 
     #[test]
     fn wire_state_label_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WireStateLabel::Idle,
-                WireStateLabel::Parked,
-                WireStateLabel::Pending,
-                WireStateLabel::Batching,
-                WireStateLabel::Verifying,
-                WireStateLabel::Draining,
-                WireStateLabel::Awaiting,
-                WireStateLabel::Rebasing,
-                WireStateLabel::Settling,
-            ],
-            WireStateLabel::as_str,
-        );
+        assert_snake_round_trip(&WireStateLabel::ALL, WireStateLabel::as_str);
     }
 
     #[test]
     fn wire_effect_scope_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[WireEffectScope::SubtreeRoot, WireEffectScope::PerStableFile],
-            WireEffectScope::as_str,
-        );
+        assert_snake_round_trip(&WireEffectScope::ALL, WireEffectScope::as_str);
     }
 
     #[test]
     fn wire_absorb_mode_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[WireAbsorbMode::ConsumeOnFirst, WireAbsorbMode::PersistUntil],
-            WireAbsorbMode::as_str,
-        );
+        assert_snake_round_trip(&WireAbsorbMode::ALL, WireAbsorbMode::as_str);
     }
 
     #[test]
     fn wire_reaction_kind_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[WireReactionKind::Spawn, WireReactionKind::Mint],
-            WireReactionKind::as_str,
-        );
+        assert_snake_round_trip(&WireReactionKind::ALL, WireReactionKind::as_str);
     }
 
     #[test]
     fn wire_reload_trigger_round_trips_every_variant() {
-        assert_snake_round_trip(
-            &[
-                WireReloadTrigger::Sighup,
-                WireReloadTrigger::Auto,
-                WireReloadTrigger::Ipc,
-                WireReloadTrigger::Startup,
-            ],
-            WireReloadTrigger::as_str,
-        );
+        assert_snake_round_trip(&WireReloadTrigger::ALL, WireReloadTrigger::as_str);
     }
 
     /// [`KNOWN_WIRE_VARIANTS`] aligns with [`WireDiagnostic::variant_name`] and the

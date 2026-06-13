@@ -28,12 +28,12 @@ use std::path::{Component, Path, PathBuf};
 ///
 /// Equality is over `source` only, and `source` is the sole axis the Profile-identity hash folds
 /// (`compute_config_hash`'s `MatchChain` arm). For a parsed spec the `components` and
-/// `literal_prefix_len` fields are a deterministic function of `source` (the parser is pure), so two
-/// `PatternSpec`s with equal `source` have byte-equal decompositions. [`Self::reanchor`] rebuilds
-/// `source` from a resolved prefix while keeping the decomposition consistent with it, so the
-/// equality/identity contract holds across the whole (uniformly re-anchored) production population;
-/// what it gives up is the round-trip — a re-anchored `source` is display / identity only and must
-/// never be fed back through [`Self::parse`] (see the method's contract).
+/// `literal_prefix_len` fields are a deterministic function of `source` (the parser is pure), so
+/// two `PatternSpec`s with equal `source` have byte-equal decompositions. [`Self::reanchor`]
+/// rebuilds `source` from a resolved prefix while keeping the decomposition consistent with it, so
+/// the equality/identity contract holds across the whole (uniformly re-anchored) production
+/// population; what it gives up is the round-trip — a re-anchored `source` is display / identity
+/// only and must never be fed back through [`Self::parse`] (see the method's contract).
 #[derive(Clone, Debug)]
 pub struct PatternSpec {
     source: CompactString,
@@ -134,8 +134,8 @@ impl PatternSpec {
     /// `compute_config_hash`). Display / identity only: never feed it back to [`Self::parse`]. A
     /// [`Self::reanchor`]ed source can carry a glob metacharacter inside a now-literal prefix
     /// segment (a symlink target named `weird[x]`), which `parse` would misclassify as a `Glob` and
-    /// so corrupt `literal_prefix_len`. The one production `parse` caller is the config validator on
-    /// raw user input — keep it the only one.
+    /// so corrupt `literal_prefix_len`. The one production `parse` caller is the config validator
+    /// on raw user input — keep it the only one.
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
@@ -145,17 +145,17 @@ impl PatternSpec {
     /// component at or past `literal_prefix_len` — globs *and* any literal-after-glob segments)
     /// byte-for-byte intact. Consuming; the caller rewraps the result for the `MatchChain` scan.
     ///
-    /// This is the structural half of dynamic-anchor canonicalization. The config layer resolves the
-    /// literal prefix through `canonicalize_lenient` — the same symlink resolution every static path
-    /// gets — and hands the resolved path here, where each prefix component is replaced by its
+    /// This is the structural half of dynamic-anchor canonicalization. The config layer resolves
+    /// the literal prefix through `canonicalize_lenient` — the same symlink resolution every static
+    /// path gets — and hands the resolved path here, where each prefix component is replaced by its
     /// canonical segment. Matching is positional and consults only the tail ([`Self::matches_at`]
-    /// indexes `literal_prefix_len + depth − 1`), so re-siting the anchor cannot change which termini
-    /// match; [`Self::literal_prefix_path`] on the result reconstructs `canonical_prefix` exactly, so
-    /// the discovery anchor *is* the resolved path with no second source.
+    /// indexes `literal_prefix_len + depth − 1`), so re-siting the anchor cannot change which
+    /// termini match; [`Self::literal_prefix_path`] on the result reconstructs `canonical_prefix`
+    /// exactly, so the discovery anchor *is* the resolved path with no second source.
     ///
     /// Each canonical segment is spliced as a [`PatternComponent::Literal`] **unconditionally**,
-    /// never re-classified through [`Self::is_dynamic`]: a symlink target may legitimately contain a
-    /// glob metacharacter (a directory literally named `weird[x]`), and re-parsing the rebuilt
+    /// never re-classified through [`Self::is_dynamic`]: a symlink target may legitimately contain
+    /// a glob metacharacter (a directory literally named `weird[x]`), and re-parsing the rebuilt
     /// `source` would misread it as a `Glob` and corrupt `literal_prefix_len`. The tail's first
     /// component is a `Glob` (the parse invariant: `literal_prefix_len` counts *every* leading
     /// `Literal`), so the result's leading-`Literal` run is exactly the canonical prefix and the
@@ -510,8 +510,8 @@ mod tests {
         assert!(matches!(spec.components[1], PatternComponent::Glob(_)));
     }
 
-    /// Consecutive globs build a deeper chain. literal_prefix_len = 2; subsequent globs at
-    /// idx 2, 3, etc.
+    /// Consecutive globs build a deeper chain. literal_prefix_len = 2; subsequent globs at idx 2,
+    /// 3, etc.
     #[test]
     fn parse_consecutive_globs_after_literal_prefix() {
         let spec = PatternSpec::parse("/data/*/*/log").expect("valid pattern");
@@ -681,8 +681,8 @@ mod tests {
         assert!(matches!(re.components[3], PatternComponent::Glob(_)));
     }
 
-    /// The single `if !source.ends_with('/')` separator rule absorbs the root case: re-anchoring the
-    /// `/*` root pattern onto `/` rebuilds `/*`, never `//*`.
+    /// The single `if !source.ends_with('/')` separator rule absorbs the root case: re-anchoring
+    /// the `/*` root pattern onto `/` rebuilds `/*`, never `//*`.
     #[test]
     fn reanchor_root_prefix_has_no_double_slash() {
         let spec = PatternSpec::parse("/*").expect("valid pattern");

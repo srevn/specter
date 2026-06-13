@@ -77,9 +77,9 @@ pub trait ProbeFailureExt: Sized {
     /// # Preconditions
     ///
     /// Classifies errors from **probe-root syscalls only** — `symlink_metadata(target_path)`
-    /// against the probe's anchor / descent prefix. Mid-walk faults skip-and-continue in
-    /// the walker and never reach this trait. `ENOSPC` here is the process-FD-pressure surface
-    /// (root-`lstat` allocates a brief kernel-internal FD), not "disk full"; mirrors
+    /// against the probe's anchor / descent prefix. Mid-walk faults skip-and-continue in the walker
+    /// and never reach this trait. `ENOSPC` here is the process-FD-pressure surface (root-`lstat`
+    /// allocates a brief kernel-internal FD), not "disk full"; mirrors
     /// [`WatchFailureExt::from_io`]'s `ENOSPC` precondition.
     fn from_io(e: &io::Error) -> Self;
 }

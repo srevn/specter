@@ -32,8 +32,8 @@ const MAX_SETTLE_FLOOR_FACTOR: u32 = 4;
 /// template carries the same pair). 150 ms coalesces an untar-style membership burst into one
 /// reconcile.
 const DISCOVERY_SETTLE: Duration = Duration::from_millis(150);
-/// Forced-fire ceiling of a discovery Profile — bounds mint latency under sustained chain
-/// churn. See [`DISCOVERY_SETTLE`] for why the pair is constant.
+/// Forced-fire ceiling of a discovery Profile — bounds mint latency under sustained chain churn.
+/// See [`DISCOVERY_SETTLE`] for why the pair is constant.
 const DISCOVERY_MAX_SETTLE: Duration = Duration::from_secs(2);
 // Compile-time pin of the `validate_settle` floor the constants bypass (they never pass through the
 // raw-field validator): a drift below `4 × settle` would otherwise only surface as `Profile::new`'s
@@ -383,12 +383,12 @@ impl Config {
     /// Pure: no filesystem access — dynamic prefixes canonicalise at lowering (like static paths),
     /// so anchor divergence is structurally impossible and there is nothing here to resolve.
     ///
-    /// One kind today, [`IssueKind::EventsIncompleteMask`]: the watch's effective event mask (static
-    /// `events`, or the dynamic template's) cannot witness its scan shape's quiescence classes, so
-    /// every fire is proven by the hash channel — at least two consecutive agreeing full subtree
-    /// walks at the anchor, mtime-skip disabled. A supported, deliberately expensive configuration
-    /// (the safety net for writers the kernel may not surface as events); the warning makes the cost
-    /// visible.
+    /// One kind today, [`IssueKind::EventsIncompleteMask`]: the watch's effective event mask
+    /// (static `events`, or the dynamic template's) cannot witness its scan shape's quiescence
+    /// classes, so every fire is proven by the hash channel — at least two consecutive agreeing
+    /// full subtree walks at the anchor, mtime-skip disabled. A supported, deliberately expensive
+    /// configuration (the safety net for writers the kernel may not surface as events); the warning
+    /// makes the cost visible.
     ///
     /// Disabled entries warn too, mirroring the validator's discipline: hazards surface at config
     /// load, not at re-enable time.
@@ -1357,11 +1357,11 @@ impl WatchAttachmentFields {
     ///
     /// The anchor is the pattern's **canonicalised** literal prefix — symlink-resolved at lowering
     /// by [`validate_dynamic_pattern`], like every other watched path. Matching is positional
-    /// ([`PatternSpec::matches_at`] reads only the glob tail, never the prefix), so canonicalisation
-    /// sites the anchor where the kernel's `O_NOFOLLOW` watch opens succeed without changing which
-    /// termini match; the identity hash folds the canonical `source`, so anchor and identity stay
-    /// consistent. `pattern` arrives already re-anchored — `pattern.literal_prefix_path()` is the
-    /// canonical path and the sole source of the anchor.
+    /// ([`PatternSpec::matches_at`] reads only the glob tail, never the prefix), so
+    /// canonicalisation sites the anchor where the kernel's `O_NOFOLLOW` watch opens succeed
+    /// without changing which termini match; the identity hash folds the canonical `source`, so
+    /// anchor and identity stay consistent. `pattern` arrives already re-anchored —
+    /// `pattern.literal_prefix_path()` is the canonical path and the sole source of the anchor.
     fn into_discovery_spec(self, pattern: PatternSpec) -> SubSpec {
         SubSpec {
             name: self.name,
@@ -2356,8 +2356,8 @@ mod tests {
     /// The glob-in-canonical-segment wrinkle, end to end: a real directory literally named
     /// `weird[x]` reached through a symlink lowers its anchor onto `.../weird[x]` with the
     /// metacharacter segment spliced as a `Literal` — never re-parsed into a `Glob` (which would
-    /// shrink `literal_prefix_len` and mis-site the anchor). Pins that the full
-    /// canonicalise → `reanchor` pipeline never feeds `source` back through `parse`.
+    /// shrink `literal_prefix_len` and mis-site the anchor). Pins that the full canonicalise →
+    /// `reanchor` pipeline never feeds `source` back through `parse`.
     #[cfg(unix)]
     #[test]
     fn dynamic_prefix_canonical_glob_metachar_segment_stays_literal() {

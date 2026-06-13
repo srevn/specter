@@ -200,6 +200,20 @@ pub(crate) enum WireErrorCode {
 }
 
 impl WireErrorCode {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive, so
+    /// `tests::wire_error_code_round_trips_every_variant` can never silently skip a code.
+    const ALL: [Self; 9] = [
+        Self::UnknownSub,
+        Self::DynamicSubNoOp,
+        Self::NotDisabled,
+        Self::TomlDisabled,
+        Self::Busy,
+        Self::ResponseTooBig,
+        Self::Malformed,
+        Self::AlreadySubscribed,
+        Self::ShuttingDown,
+    ];
+
     /// Wire-form token for this variant — the same `code` field value the JSON shape carries.
     /// Mirrors the `#[serde(rename_all = "snake_case")]` projection exactly.
     ///
@@ -223,6 +237,25 @@ impl WireErrorCode {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: WireErrorCode) -> WireErrorCode {
+        match v {
+            WireErrorCode::UnknownSub => WireErrorCode::ALL[0],
+            WireErrorCode::DynamicSubNoOp => WireErrorCode::ALL[1],
+            WireErrorCode::NotDisabled => WireErrorCode::ALL[2],
+            WireErrorCode::TomlDisabled => WireErrorCode::ALL[3],
+            WireErrorCode::Busy => WireErrorCode::ALL[4],
+            WireErrorCode::ResponseTooBig => WireErrorCode::ALL[5],
+            WireErrorCode::Malformed => WireErrorCode::ALL[6],
+            WireErrorCode::AlreadySubscribed => WireErrorCode::ALL[7],
+            WireErrorCode::ShuttingDown => WireErrorCode::ALL[8],
+        }
+    }
+    const _: fn(WireErrorCode) -> WireErrorCode = all_complete;
+};
 
 impl std::fmt::Display for WireErrorCode {
     /// Operator-visible rendering — writes the snake_case wire token verbatim via [`Self::as_str`].
@@ -289,6 +322,9 @@ pub(crate) enum DisabledSource {
 }
 
 impl DisabledSource {
+    /// Every variant — the round-trip witness source; the tripwire below keeps it exhaustive.
+    const ALL: [Self; 2] = [Self::Runtime, Self::Toml];
+
     /// Wire-form token — mirrors the snake_case serde rename. Surfaces in `list -o human`'s
     /// `DISABLED` column and `show -o human`'s disabled-arm parenthetical via its
     /// [`Display`](std::fmt::Display) impl; the renderer paths reach the wire form through `{}`
@@ -300,6 +336,18 @@ impl DisabledSource {
         }
     }
 }
+
+// `ALL`-completeness tripwire: a new variant's arm overruns the fixed-size `ALL` (a compile error)
+// until `ALL` lists it. Defined, never called — the body's out-of-bounds index is checked anyway.
+const _: () = {
+    const fn all_complete(v: DisabledSource) -> DisabledSource {
+        match v {
+            DisabledSource::Runtime => DisabledSource::ALL[0],
+            DisabledSource::Toml => DisabledSource::ALL[1],
+        }
+    }
+    const _: fn(DisabledSource) -> DisabledSource = all_complete;
+};
 
 impl std::fmt::Display for DisabledSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -775,23 +823,12 @@ mod tests {
     ///
     /// One iteration pins three surfaces in lockstep: the JSON byte form clients parse, the
     /// `as_str()` table the daemon's Display reaches, and the renderer-visible `"specter <verb>:
-    /// {code}: ..."` line. A hand-edit to any variant — adding one, renaming a tag, drifting the
-    /// as_str arm — fails here loudly, so the round-trip needs no per-variant copy-paste pin.
+    /// {code}: ..."` line. Coverage is `WireErrorCode::ALL`, kept exhaustive by its tripwire — a
+    /// new variant fails that compile check until listed, and a renamed tag or drifted `as_str` arm
+    /// fails this assert — so the round-trip needs no per-variant copy-paste pin.
     #[test]
     fn wire_error_code_round_trips_every_variant() {
-        // Compile-time exhaustive — a new variant without an entry here is a missing-arm match below.
-        const ALL: &[WireErrorCode] = &[
-            WireErrorCode::UnknownSub,
-            WireErrorCode::DynamicSubNoOp,
-            WireErrorCode::NotDisabled,
-            WireErrorCode::TomlDisabled,
-            WireErrorCode::Busy,
-            WireErrorCode::ResponseTooBig,
-            WireErrorCode::Malformed,
-            WireErrorCode::AlreadySubscribed,
-            WireErrorCode::ShuttingDown,
-        ];
-        for &code in ALL {
+        for &code in &WireErrorCode::ALL {
             let json = serde_json::to_string(&code).expect("serialize");
             let stripped = json
                 .strip_prefix('"')
@@ -833,8 +870,7 @@ mod tests {
     /// Mirrors the per-enum drift tests in [`super::super::wire::tests`].
     #[test]
     fn disabled_source_round_trips_every_variant() {
-        const ALL: &[DisabledSource] = &[DisabledSource::Runtime, DisabledSource::Toml];
-        for &src in ALL {
+        for &src in &DisabledSource::ALL {
             let json = serde_json::to_string(&src).expect("serialize");
             let stripped = json
                 .strip_prefix('"')
