@@ -209,9 +209,9 @@ pub struct SubSpec {
     /// `SubId`s on the first post-re-enable reconcile.
     pub enabled: bool,
     /// `Some` ⇒ this spec is a discovery Sub lowered from a dynamic `[[watch]]` block: `scan` is
-    /// `MatchChain`, `path` is the pattern's literal prefix, `settle`/`max_settle`/`events` are the
-    /// discovery constants, and every user knob lives here instead — the identity the minted Subs'
-    /// Profiles run under. `None` for static watches.
+    /// `MatchChain`, `path` is the pattern's canonicalised literal prefix, `settle`/`max_settle`/
+    /// `events` are the discovery constants, and every user knob lives here instead — the identity
+    /// the minted Subs' Profiles run under. `None` for static watches.
     pub template: Option<TemplateSpec>,
 }
 
@@ -380,22 +380,15 @@ impl Config {
     /// what the operator wrote. Pull-computed rather than carried on the value: `Config` stays
     /// exactly the shape the reload diff compares, and the startup load parses before tracing init,
     /// so the bin pulls and logs these once a subscriber exists (startup and every reload pulse).
-    /// Touches the filesystem (one `canonicalize_lenient` per dynamic watch); callers are load-time
-    /// log sites, never hot paths.
+    /// Pure: no filesystem access — dynamic prefixes canonicalise at lowering (like static paths),
+    /// so anchor divergence is structurally impossible and there is nothing here to resolve.
     ///
-    /// Two kinds today:
-    ///
-    /// - [`IssueKind::DynamicPrefixDivergesFromCanonical`]: a dynamic pattern's literal prefix
-    ///   anchors verbatim (resolving it would desync the anchor from the pattern identity the
-    ///   minted Profiles hash over) while static paths canonicalise, so a symlink inside the prefix
-    ///   (macOS `/var`, `/tmp`, `/etc`) anchors the pattern on a branch no static watch shares and
-    ///   the burst gating between overlapping watches silently never engages. Deliberately one line
-    ///   per offending dynamic watch per load — the noise *is* the composition hazard surfacing.
-    /// - [`IssueKind::EventsIncompleteMask`]: the watch's effective event mask (static `events`, or
-    ///   the dynamic template's) cannot witness its scan shape's quiescence classes, so every fire is
-    ///   proven by the hash channel — at least two consecutive agreeing full subtree walks at the
-    ///   anchor, mtime-skip disabled. A supported, deliberately expensive configuration (the safety
-    ///   net for writers the kernel may not surface as events); the warning makes the cost visible.
+    /// One kind today, [`IssueKind::EventsIncompleteMask`]: the watch's effective event mask (static
+    /// `events`, or the dynamic template's) cannot witness its scan shape's quiescence classes, so
+    /// every fire is proven by the hash channel — at least two consecutive agreeing full subtree
+    /// walks at the anchor, mtime-skip disabled. A supported, deliberately expensive configuration
+    /// (the safety net for writers the kernel may not surface as events); the warning makes the cost
+    /// visible.
     ///
     /// Disabled entries warn too, mirroring the validator's discipline: hazards surface at config
     /// load, not at re-enable time.
@@ -422,35 +415,6 @@ impl Config {
                      writers the kernel may not surface as events — add \"content\" to events \
                      if no such writers touch this tree"
                         .to_owned(),
-                ));
-            }
-
-            // Dynamic watches only — `spec.path` is the pattern's literal prefix, verbatim by
-            // `into_discovery_spec`; static paths canonicalised at validation and cannot diverge.
-            let Some(pattern) = spec.scan.match_chain() else {
-                continue;
-            };
-            // Parse already guarantees absolute / no `.` / no `..`, so the only failures left are
-            // I/O faults (EACCES, ELOOP, …) — a runtime concern the descent machinery owns, not a
-            // composition hazard. Skip silently.
-            let Ok(canon) = canonicalize_lenient(&spec.path) else {
-                continue;
-            };
-            if canon != spec.path {
-                found.push(ValidationIssue::new(
-                    Some(i),
-                    "path",
-                    IssueKind::DynamicPrefixDivergesFromCanonical,
-                    format!(
-                        "pattern `{}` anchors at its literal prefix `{}` verbatim, which \
-                         canonicalises to `{}`; static watch paths canonicalise, so a static \
-                         watch on the same tree anchors a different branch and the two never \
-                         compose — write the canonical prefix into the pattern if composition \
-                         with static watches matters",
-                        pattern.source(),
-                        spec.path.display(),
-                        canon.display(),
-                    ),
                 ));
             }
         }
@@ -1182,18 +1146,89 @@ fn validate_static_path(idx: usize, raw_path: &str) -> Result<PathBuf, Validatio
     })
 }
 
-/// Validate a dynamic watch's `path` as a [`PatternSpec`]. The parser itself enforces structural
-/// invariants (absolute, no `**`, no `.`/`..`, no empty segments, no Windows prefix); a parse
-/// failure surfaces as [`IssueKind::InvalidPattern`].
+/// Validate a dynamic watch's `path` as a [`PatternSpec`], resolving its literal-prefix anchor
+/// through the same `canonicalize_lenient` every static path gets. Two stages mirror the static
+/// path's parse-then-resolve shape:
+///
+/// 1. [`PatternSpec::parse`] (pure) enforces the structural invariants (absolute, no `**`, no
+///    `.`/`..`, no empty segments, no Windows prefix); a parse failure is
+///    [`IssueKind::InvalidPattern`].
+/// 2. `canonicalize_lenient` resolves the literal prefix (I/O), and [`PatternSpec::reanchor`]
+///    splices the resolved path back onto the pattern. A resolution fault is **fatal** — exactly
+///    like a static path that cannot canonicalise.
+///
+/// The result's anchor and identity-bearing `source` are both symlink-free, so a dynamic and a
+/// static watch over one tree anchor the same Tree branch and the kernel's unconditional
+/// `O_NOFOLLOW` watch opens (anchor / watch-root parent / descent prefixes) land on real
+/// directories rather than ELOOP-ing on a symlinked prefix component.
 fn validate_dynamic_pattern(idx: usize, raw_path: &str) -> Result<PatternSpec, ValidationIssue> {
-    PatternSpec::parse(raw_path).map_err(|e| {
+    let pattern = PatternSpec::parse(raw_path).map_err(|e| {
         ValidationIssue::new(
             Some(idx),
             "path",
             IssueKind::InvalidPattern,
             format!("`{raw_path}`: {e}"),
         )
-    })
+    })?;
+    let prefix = pattern.literal_prefix_path();
+    let canonical = canonicalize_lenient(&prefix)
+        .map_err(|e| dynamic_prefix_issue(idx, raw_path, &prefix, &e))?;
+    Ok(pattern.reanchor(&canonical))
+}
+
+/// Map a literal-prefix `canonicalize_lenient` fault to a fatal [`ValidationIssue`].
+///
+/// Post-parse only `Inaccessible` and `NonUtf8` are reachable — [`PatternSpec::parse`] already
+/// guaranteed the prefix is absolute, non-empty, and `..`-free — so those two carry pattern-aware
+/// detail and reuse the static path's kinds ([`IssueKind::PathInaccessible`] /
+/// [`IssueKind::NonUtf8Path`]): a dynamic prefix that cannot be canonicalised fails to load,
+/// symmetrically with a static path that cannot. The structurally-unreachable trio is debug-loud
+/// and collapses to `PathInaccessible` carrying the rendered fault, rather than inventing a kind
+/// for a state the parser already excluded.
+fn dynamic_prefix_issue(
+    idx: usize,
+    raw_path: &str,
+    prefix: &Path,
+    err: &PathError,
+) -> ValidationIssue {
+    let shown = prefix.display();
+    let (kind, detail) = match err {
+        PathError::Inaccessible { at, source } => {
+            let detail = if at.as_path() == prefix {
+                format!(
+                    "pattern `{raw_path}` cannot anchor: its literal prefix `{shown}` is \
+                     inaccessible: {source}"
+                )
+            } else {
+                format!(
+                    "pattern `{raw_path}` cannot anchor: its literal prefix `{shown}` is \
+                     inaccessible at `{}`: {source}",
+                    at.display(),
+                )
+            };
+            (IssueKind::PathInaccessible, detail)
+        }
+        PathError::NonUtf8 { resolved } => (
+            IssueKind::NonUtf8Path,
+            format!(
+                "pattern `{raw_path}` cannot anchor: its literal prefix `{shown}` resolves to a \
+                 non-UTF-8 buffer `{}` — engine requires UTF-8",
+                resolved.display(),
+            ),
+        ),
+        // Unreachable after `PatternSpec::parse` (which rejected non-absolute / empty / `..`
+        // prefixes); surface the real fault rather than fabricate a kind, loud in debug.
+        PathError::NotAbsolute | PathError::Empty | PathError::ContainsParentDir => {
+            debug_assert!(false, "canonicalize fault unreachable after parse: {err:?}");
+            (
+                IssueKind::PathInaccessible,
+                format!(
+                    "pattern `{raw_path}` cannot anchor: literal prefix `{shown}` is invalid: {err}"
+                ),
+            )
+        }
+    };
+    ValidationIssue::new(Some(idx), "path", kind, detail)
 }
 
 /// Validate the `[[watch]]` block's scan-config knobs (`recursive`, `hidden`, `max_depth`,
@@ -1320,9 +1355,13 @@ impl WatchAttachmentFields {
     /// flat fields — `to_attach_request` seals them into the template's `SpawnSpec`, the minted
     /// Subs' reaction (the discovery Sub itself spawns nothing).
     ///
-    /// The anchor is the literal prefix **verbatim** — no `canonicalize_lenient`. Parse already
-    /// enforces absolute / no `.` / no `..`, and symlink resolution would desync the anchor from
-    /// the pattern identity (the Profile's `config_hash` folds the pattern source).
+    /// The anchor is the pattern's **canonicalised** literal prefix — symlink-resolved at lowering
+    /// by [`validate_dynamic_pattern`], like every other watched path. Matching is positional
+    /// ([`PatternSpec::matches_at`] reads only the glob tail, never the prefix), so canonicalisation
+    /// sites the anchor where the kernel's `O_NOFOLLOW` watch opens succeed without changing which
+    /// termini match; the identity hash folds the canonical `source`, so anchor and identity stay
+    /// consistent. `pattern` arrives already re-anchored — `pattern.literal_prefix_path()` is the
+    /// canonical path and the sole source of the anchor.
     fn into_discovery_spec(self, pattern: PatternSpec) -> SubSpec {
         SubSpec {
             name: self.name,
@@ -1768,7 +1807,7 @@ mod tests {
     fn enabled_false_round_trips_for_dynamic_watch() {
         // Mirror the static-side round-trip on the dynamic dispatch path (path containing `*?[{`
         // routes to the discovery validator).
-        let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\n\
+        let toml = "[[watch]]\nname = \"logs\"\npath = \"/srv/log/*\"\n\
                     actions = [{ exec = [\"echo\"] }]\nenabled = false\n";
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.watches.len(), 1);
@@ -2314,6 +2353,40 @@ mod tests {
         );
     }
 
+    /// The glob-in-canonical-segment wrinkle, end to end: a real directory literally named
+    /// `weird[x]` reached through a symlink lowers its anchor onto `.../weird[x]` with the
+    /// metacharacter segment spliced as a `Literal` — never re-parsed into a `Glob` (which would
+    /// shrink `literal_prefix_len` and mis-site the anchor). Pins that the full
+    /// canonicalise → `reanchor` pipeline never feeds `source` back through `parse`.
+    #[cfg(unix)]
+    #[test]
+    fn dynamic_prefix_canonical_glob_metachar_segment_stays_literal() {
+        let td = tempfile::tempdir().unwrap();
+        let canon = td.path().canonicalize().unwrap();
+        let weird = canon.join("weird[x]");
+        std::fs::create_dir(&weird).unwrap();
+        let link = canon.join("link");
+        std::os::unix::fs::symlink(&weird, &link).unwrap();
+
+        let toml = format!(
+            "[[watch]]\nname = \"d\"\npath = \"{}/*.log\"\nactions = [{{ exec = [\"echo\"] }}]",
+            link.display(),
+        );
+        let cfg = Config::from_str(&toml).unwrap();
+        let w = &cfg.watches[0];
+
+        // Anchor resolved onto the real `weird[x]` directory — the `[x]` did not split the prefix.
+        assert_eq!(w.path, weird);
+        let ScanConfig::MatchChain(spec) = &w.scan else {
+            panic!("dynamic watch lowers to MatchChain, got {:?}", w.scan);
+        };
+        // The `weird[x]` segment is part of the literal-prefix anchor; only `*.log` is below it.
+        assert_eq!(spec.literal_prefix_path(), weird);
+        assert_eq!(spec.terminus_depth(), 1);
+        assert!(spec.matches_at(1, "access.log"));
+        assert!(!spec.matches_at(1, "access.txt"));
+    }
+
     // ---- @-in-name rejection ----
 
     /// `@` is reserved for the synthesized `<template_name>@<matched_path>` shape of minted Subs. A
@@ -2331,7 +2404,7 @@ mod tests {
     /// of which validator their path routes to.
     #[test]
     fn at_sign_in_dynamic_name_rejected() {
-        let toml = "[[watch]]\nname = \"foo@bar\"\npath = \"/var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
+        let toml = "[[watch]]\nname = \"foo@bar\"\npath = \"/srv/log/*\"\nactions = [{ exec = [\"echo\"] }]";
         assert_only_kind(toml, IssueKind::InvalidName);
     }
 
@@ -2349,7 +2422,7 @@ mod tests {
     #[test]
     fn empty_dynamic_name_emits_empty_name_kind_not_invalid_name() {
         let toml =
-            "[[watch]]\nname = \"\"\npath = \"/var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
+            "[[watch]]\nname = \"\"\npath = \"/srv/log/*\"\nactions = [{ exec = [\"echo\"] }]";
         assert_only_kind(toml, IssueKind::EmptyName);
     }
 
@@ -2370,7 +2443,7 @@ mod tests {
     #[test]
     fn glob_star_path_dispatches_to_dynamic() {
         let toml =
-            "[[watch]]\nname = \"dyn\"\npath = \"/var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
+            "[[watch]]\nname = \"dyn\"\npath = \"/srv/log/*\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.watches.len(), 1);
         let w = &cfg.watches[0];
@@ -2379,7 +2452,7 @@ mod tests {
         let ScanConfig::MatchChain(spec) = &w.scan else {
             panic!("dynamic watch lowers to MatchChain, got {:?}", w.scan);
         };
-        assert_eq!(spec.source(), "/var/log/*");
+        assert_eq!(spec.source(), "/srv/log/*");
     }
 
     /// Path with `?` → dynamic.
@@ -2403,11 +2476,11 @@ mod tests {
     /// anchor is the literal prefix in front of it.
     #[test]
     fn brace_path_dispatches_to_dynamic() {
-        let toml = "[[watch]]\nname = \"dyn\"\npath = \"/var/log/{app,system}/access.log\"\n\
+        let toml = "[[watch]]\nname = \"dyn\"\npath = \"/srv/log/{app,system}/access.log\"\n\
                     actions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         assert!(cfg.watches[0].template.is_some());
-        assert_eq!(cfg.watches[0].path, Path::new("/var/log"));
+        assert_eq!(cfg.watches[0].path, Path::new("/srv/log"));
     }
 
     /// Mixed config — both kinds land in the one `watches` list in source order; the kind
@@ -2503,7 +2576,7 @@ mod tests {
     #[test]
     fn minimal_dynamic_watch_round_trips_with_defaults() {
         let toml =
-            "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\nactions = [{ exec = [\"echo\"] }]";
+            "[[watch]]\nname = \"logs\"\npath = \"/srv/log/*\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         let w = &cfg.watches[0];
         assert_eq!(w.name, "logs");
@@ -2529,7 +2602,7 @@ mod tests {
     /// hand-built [`ProfileIdentity`] over the same knobs — the projection adds nothing.
     #[test]
     fn dynamic_block_lowers_to_discovery_sub_spec() {
-        let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\n\
+        let toml = "[[watch]]\nname = \"logs\"\npath = \"/srv/log/*\"\n\
                     actions = [{ exec = [\"fmt\", \"${specter.path}\"] }]\n\
                     settle = \"300ms\"\nmax_settle = \"1200ms\"\n\
                     scope = \"per-stable-file\"\n\
@@ -2541,14 +2614,14 @@ mod tests {
         let w = &cfg.watches[0];
 
         // Discovery Sub's own identity: constants + MatchChain + literal-prefix anchor.
-        assert_eq!(w.path, Path::new("/var/log"));
+        assert_eq!(w.path, Path::new("/srv/log"));
         assert_eq!(w.settle, Duration::from_millis(150));
         assert_eq!(w.max_settle, Duration::from_secs(2));
         assert_eq!(w.events, ClassSet::STRUCTURE);
         let ScanConfig::MatchChain(spec) = &w.scan else {
             panic!("dynamic watch lowers to MatchChain, got {:?}", w.scan);
         };
-        assert_eq!(spec.source(), "/var/log/*");
+        assert_eq!(spec.source(), "/srv/log/*");
 
         // Reaction spec stays on the Sub.
         assert_eq!(w.scope, EffectScope::PerStableFile);
@@ -2590,7 +2663,7 @@ mod tests {
     /// scope the *minted* Profiles via the template scan.
     #[test]
     fn dynamic_watch_carries_scan_pattern_and_excludes() {
-        let toml = "[[watch]]\nname = \"logs\"\npath = \"/var/log/*\"\n\
+        let toml = "[[watch]]\nname = \"logs\"\npath = \"/srv/log/*\"\n\
                     actions = [{ exec = [\"echo\"] }]\n\
                     pattern = \"*.log\"\n\
                     exclude = [\"*.gz\"]\n";

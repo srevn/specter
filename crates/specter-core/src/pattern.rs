@@ -2,8 +2,12 @@
 //!
 //! `PatternSpec` carries the canonical source string alongside its decomposed
 //! `Vec<PatternComponent>` and the `literal_prefix_len` — the number of leading consecutive
-//! `Literal` segments (root included). These two derived fields are a deterministic function of
-//! `source`, so equality routes through `source` alone.
+//! `Literal` segments (root included). For a parsed spec these two fields are a deterministic
+//! function of `source`, so equality routes through `source` alone. [`PatternSpec::reanchor`]
+//! re-sites the literal prefix onto a filesystem-resolved path and rebuilds `source` from the
+//! splice; the equality/identity contract survives (the decomposition stays consistent with the
+//! rebuilt `source`), but the round-trip does not — a re-anchored `source` is display / identity
+//! only and must never be fed back to [`PatternSpec::parse`].
 //!
 //! The parser screens a few invariants beyond glob compilation:
 //! - **Absolute only.** Patterns must begin with `/`.
@@ -17,14 +21,19 @@
 use crate::scan_config::{ConfigError, GlobPattern};
 use compact_str::CompactString;
 use std::fmt;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 
 /// Decomposed glob path pattern. `components.len() >= 2` post-parse — a synthetic `Literal("/")` at
 /// index 0 plus at least one segment.
 ///
-/// Equality is over `source` only; the `components` and `literal_prefix_len` fields are
-/// deterministic functions of `source` (the parser is pure), so two `PatternSpec`s with equal
-/// `source` strings have byte-equal decompositions.
+/// Equality is over `source` only, and `source` is the sole axis the Profile-identity hash folds
+/// (`compute_config_hash`'s `MatchChain` arm). For a parsed spec the `components` and
+/// `literal_prefix_len` fields are a deterministic function of `source` (the parser is pure), so two
+/// `PatternSpec`s with equal `source` have byte-equal decompositions. [`Self::reanchor`] rebuilds
+/// `source` from a resolved prefix while keeping the decomposition consistent with it, so the
+/// equality/identity contract holds across the whole (uniformly re-anchored) production population;
+/// what it gives up is the round-trip — a re-anchored `source` is display / identity only and must
+/// never be fed back through [`Self::parse`] (see the method's contract).
 #[derive(Clone, Debug)]
 pub struct PatternSpec {
     source: CompactString,
@@ -121,9 +130,94 @@ impl From<ConfigError> for PatternError {
 }
 
 impl PatternSpec {
+    /// The canonical source string — the sole identity key (equality, and the `MatchChain` arm of
+    /// `compute_config_hash`). Display / identity only: never feed it back to [`Self::parse`]. A
+    /// [`Self::reanchor`]ed source can carry a glob metacharacter inside a now-literal prefix
+    /// segment (a symlink target named `weird[x]`), which `parse` would misclassify as a `Glob` and
+    /// so corrupt `literal_prefix_len`. The one production `parse` caller is the config validator on
+    /// raw user input — keep it the only one.
     #[must_use]
     pub fn source(&self) -> &str {
         &self.source
+    }
+
+    /// Re-site the leading literal-prefix run onto `canonical_prefix`, leaving the chain tail (every
+    /// component at or past `literal_prefix_len` — globs *and* any literal-after-glob segments)
+    /// byte-for-byte intact. Consuming; the caller rewraps the result for the `MatchChain` scan.
+    ///
+    /// This is the structural half of dynamic-anchor canonicalization. The config layer resolves the
+    /// literal prefix through `canonicalize_lenient` — the same symlink resolution every static path
+    /// gets — and hands the resolved path here, where each prefix component is replaced by its
+    /// canonical segment. Matching is positional and consults only the tail ([`Self::matches_at`]
+    /// indexes `literal_prefix_len + depth − 1`), so re-siting the anchor cannot change which termini
+    /// match; [`Self::literal_prefix_path`] on the result reconstructs `canonical_prefix` exactly, so
+    /// the discovery anchor *is* the resolved path with no second source.
+    ///
+    /// Each canonical segment is spliced as a [`PatternComponent::Literal`] **unconditionally**,
+    /// never re-classified through [`Self::is_dynamic`]: a symlink target may legitimately contain a
+    /// glob metacharacter (a directory literally named `weird[x]`), and re-parsing the rebuilt
+    /// `source` would misread it as a `Glob` and corrupt `literal_prefix_len`. The tail's first
+    /// component is a `Glob` (the parse invariant: `literal_prefix_len` counts *every* leading
+    /// `Literal`), so the result's leading-`Literal` run is exactly the canonical prefix and the
+    /// `literal_prefix_len < components.len()` invariant carries over from the non-empty tail.
+    ///
+    /// Precondition (caller-guaranteed): `canonical_prefix` is an absolute, UTF-8 path — it is the
+    /// output of `canonicalize_lenient`, whose UTF-8 enforcement and `..`/`.` resolution run before
+    /// this. The non-UTF-8 and non-`RootDir`/`Normal` arms are therefore unreachable; they are loud
+    /// in debug and degrade to the un-re-anchored spec rather than fabricate a corrupt anchor.
+    #[must_use]
+    pub fn reanchor(self, canonical_prefix: &Path) -> Self {
+        let old_prefix_len = self.literal_prefix_len;
+        let tail_len = self.components.len() - old_prefix_len;
+        let mut components = Vec::with_capacity(canonical_prefix.components().count() + tail_len);
+        let mut source = String::new();
+
+        for comp in canonical_prefix.components() {
+            match comp {
+                Component::RootDir => {
+                    components.push(PatternComponent::Literal(CompactString::from("/")));
+                    source.push('/');
+                }
+                Component::Normal(segment) => {
+                    let Some(segment) = segment.to_str() else {
+                        debug_assert!(false, "canonicalize_lenient guarantees a UTF-8 prefix");
+                        return self;
+                    };
+                    if !source.ends_with('/') {
+                        source.push('/');
+                    }
+                    components.push(PatternComponent::Literal(CompactString::from(segment)));
+                    source.push_str(segment);
+                }
+                // A canonical absolute path is `RootDir` then `Normal` segments only —
+                // `canonicalize_lenient` has resolved away every `.`/`..` and there is no Windows
+                // `Prefix` on the unix target. Listed exhaustively so a future `Component` variant
+                // is a compile error here, not a silent skip.
+                Component::Prefix(_) | Component::CurDir | Component::ParentDir => {
+                    debug_assert!(false, "canonical absolute path is RootDir | Normal only");
+                }
+            }
+        }
+
+        let literal_prefix_len = components.len();
+
+        for comp in &self.components[old_prefix_len..] {
+            let segment = match comp {
+                PatternComponent::Literal(s) => s.as_str(),
+                PatternComponent::Glob(g) => g.source(),
+            };
+            if !source.ends_with('/') {
+                source.push('/');
+            }
+            source.push_str(segment);
+            components.push(comp.clone());
+        }
+
+        Self {
+            source: CompactString::from(source),
+            components,
+            literal_prefix_len,
+        }
     }
 
     /// The literal-prefix anchor path: `/` plus the leading consecutive `Literal` segments — where
@@ -558,5 +652,88 @@ mod tests {
         let s = invalid.to_string();
         assert!(s.contains("[bad"), "got `{s}`");
         assert!(s.contains("unbalanced"), "got `{s}`");
+    }
+
+    /// `reanchor` replaces the literal prefix with the resolved path and leaves the glob tail
+    /// untouched: `source`, the anchor, and the chain length all track the new prefix, while
+    /// positional matching (which reads only the tail) is unchanged.
+    #[test]
+    fn reanchor_resites_prefix_and_preserves_tail() {
+        let spec = PatternSpec::parse("/srv/*/log").expect("valid pattern");
+        let re = spec.reanchor(std::path::Path::new("/private/srv"));
+
+        assert_eq!(re.source(), "/private/srv/*/log");
+        assert_eq!(
+            re.literal_prefix_path(),
+            std::path::PathBuf::from("/private/srv"),
+        );
+        // Chain length below the (new) anchor is unchanged — only the prefix moved.
+        assert_eq!(re.terminus_depth(), 2);
+        assert!(re.matches_at(1, "anything")); // depth-1 glob still matches any segment
+        assert!(re.matches_at(2, "log"));
+        assert!(!re.matches_at(2, "other"));
+        // The decomposition is consistent with the rebuilt source: prefix all-`Literal`, tail
+        // starts at the glob.
+        assert!(matches!(
+            re.components[1],
+            PatternComponent::Literal(ref s) if s == "private",
+        ));
+        assert!(matches!(re.components[3], PatternComponent::Glob(_)));
+    }
+
+    /// The single `if !source.ends_with('/')` separator rule absorbs the root case: re-anchoring the
+    /// `/*` root pattern onto `/` rebuilds `/*`, never `//*`.
+    #[test]
+    fn reanchor_root_prefix_has_no_double_slash() {
+        let spec = PatternSpec::parse("/*").expect("valid pattern");
+        let re = spec.reanchor(std::path::Path::new("/"));
+        assert_eq!(re.source(), "/*");
+        assert_eq!(re.literal_prefix_path(), std::path::PathBuf::from("/"));
+        assert_eq!(re.terminus_depth(), 1);
+    }
+
+    /// The glob-in-canonical-segment wrinkle: a resolved prefix segment that literally contains a
+    /// glob metacharacter (a real directory named `weird[x]`, reachable via a symlink target) is
+    /// spliced as a `Literal`, **not** re-parsed into a `Glob`. Re-parsing the rebuilt source would
+    /// misclassify it and shrink `literal_prefix_len`, mis-siting the anchor; the splice keeps the
+    /// anchor and terminus intact.
+    #[test]
+    fn reanchor_canonical_glob_metachar_segment_stays_literal() {
+        let spec = PatternSpec::parse("/link/*.log").expect("valid pattern");
+        let re = spec.reanchor(std::path::Path::new("/weird[x]/real"));
+
+        assert_eq!(re.source(), "/weird[x]/real/*.log");
+        // Anchor is the full canonical prefix — the `[x]` segment did not become a glob boundary.
+        assert_eq!(
+            re.literal_prefix_path(),
+            std::path::PathBuf::from("/weird[x]/real"),
+        );
+        assert_eq!(re.terminus_depth(), 1);
+        assert!(matches!(
+            re.components[1],
+            PatternComponent::Literal(ref s) if s == "weird[x]",
+        ));
+        assert!(matches!(
+            re.components[2],
+            PatternComponent::Literal(ref s) if s == "real",
+        ));
+        // The one tail component is still the glob; it matches `*.log` termini.
+        assert!(re.matches_at(1, "access.log"));
+        assert!(!re.matches_at(1, "access.txt"));
+    }
+
+    /// A literal segment *after* a glob lives in the tail (not the literal prefix), so `reanchor`
+    /// preserves it verbatim while re-siting only the leading prefix.
+    #[test]
+    fn reanchor_preserves_literal_after_glob_in_tail() {
+        let spec = PatternSpec::parse("/data/*/build/*/out").expect("valid pattern");
+        assert_eq!(spec.literal_prefix_len, 2);
+        let re = spec.reanchor(std::path::Path::new("/mnt/data"));
+
+        assert_eq!(re.source(), "/mnt/data/*/build/*/out");
+        assert_eq!(re.literal_prefix_len, 3); // `/`, `mnt`, `data`
+        assert_eq!(re.terminus_depth(), 4);
+        assert!(re.matches_at(2, "build"));
+        assert!(re.matches_at(4, "out"));
     }
 }

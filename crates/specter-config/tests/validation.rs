@@ -205,14 +205,14 @@ fn duplicate_name_across_enabled_and_disabled_rejected() {
     assert_kinds(&toml, &[IssueKind::DuplicateName]);
 }
 
-/// [`Config::warnings`], the advisory channel: a symlink inside a dynamic pattern's literal prefix
-/// diverges from canonical and warns (the prefix anchors verbatim while static paths canonicalise),
-/// the same pattern written against the canonical prefix is silent, and a static watch through the
-/// same symlink is silent (it already canonicalised at validation — the asymmetry the warning
-/// exists to surface).
+/// Dynamic-prefix canonicalisation, the composition payoff: a dynamic pattern's literal prefix is
+/// symlink-resolved at lowering exactly like a static path, so a dynamic watch and a static watch
+/// over the *same* symlinked tree anchor the same Tree branch (they compose). The
+/// divergent-anchor advisory that the verbatim regime needed has nothing left to report — the only
+/// remaining advisory channel is the events-incomplete mask.
 #[cfg(unix)]
 #[test]
-fn warnings_flag_dynamic_prefix_diverging_from_canonical() {
+fn dynamic_prefix_canonicalises_and_composes_with_static() {
     let td = tempfile::tempdir().unwrap();
     let canon_root = td.path().canonicalize().unwrap();
     let target = canon_root.join("target");
@@ -220,35 +220,51 @@ fn warnings_flag_dynamic_prefix_diverging_from_canonical() {
     let link = canon_root.join("link");
     std::os::unix::fs::symlink(&target, &link).unwrap();
 
-    let offending = format!(
+    let toml = format!(
         "[[watch]]\nname = \"dynamic\"\npath = \"{link}/*/log\"\nactions = [{{ exec = [\"echo\"] }}]\n\
          [[watch]]\nname = \"static\"\npath = \"{link}\"\nactions = [{{ exec = [\"echo\"] }}]",
         link = link.display(),
     );
-    let warnings = Config::from_str(&offending).unwrap().warnings();
+    let cfg = Config::from_str(&toml).unwrap();
+
+    // Both anchors resolved through the symlink onto the same canonical branch.
     assert_eq!(
-        warnings.len(),
-        1,
-        "the dynamic entry warns; the static sibling through the same symlink is silent: \
-         {warnings:?}",
+        cfg.watches[0].path, target,
+        "the dynamic pattern's literal prefix resolves to the link target",
     );
-    let w = &warnings[0];
-    assert_eq!(w.kind, IssueKind::DynamicPrefixDivergesFromCanonical);
-    assert_eq!(w.watch_index, Some(0));
-    assert!(
-        w.detail.contains(&target.display().to_string()),
-        "detail names the canonical prefix (the remedy): {}",
-        w.detail,
+    assert_eq!(
+        cfg.watches[1].path, target,
+        "the static sibling resolves to the same target — they compose",
     );
 
-    let canonical = format!(
-        "[[watch]]\nname = \"dynamic\"\npath = \"{target}/*/log\"\nactions = [{{ exec = [\"echo\"] }}]",
-        target = target.display(),
-    );
+    // Nothing diverges, so the once-divergent advisory is silent; the default mask witnesses
+    // CONTENT, so the events advisory stays silent too.
     assert!(
-        Config::from_str(&canonical).unwrap().warnings().is_empty(),
-        "a canonical prefix produces no advisory",
+        cfg.warnings().is_empty(),
+        "canonical anchors produce no advisory: {:?}",
+        cfg.warnings(),
     );
+}
+
+/// A dynamic pattern whose literal prefix genuinely faults — here ENOTDIR, the prefix traversing a
+/// regular file — fails to load with the same fatal [`IssueKind::PathInaccessible`] a static path
+/// produces. Canonicalisation is symmetric across the static/dynamic split: a prefix that cannot
+/// resolve is a load error, not a silent runtime park.
+#[cfg(unix)]
+#[test]
+fn dynamic_prefix_inaccessible_is_fatal() {
+    let td = tempfile::tempdir().unwrap();
+    let file = td.path().join("not-a-dir");
+    std::fs::write(&file, b"x").unwrap();
+    // Literal prefix `<file>/sub` descends through a regular file → ENOTDIR (non-`NotFound`).
+    let toml = format!(
+        "[[watch]]\nname = \"d\"\npath = \"{}/sub/*.log\"\nactions = [{{ exec = [\"echo\"] }}]",
+        file.display(),
+    );
+    let errors = validation_errors(Config::from_str(&toml).unwrap_err());
+    assert_eq!(errors.len(), 1, "got {errors:?}");
+    assert_eq!(errors[0].kind, IssueKind::PathInaccessible);
+    assert_eq!(errors[0].field, "path");
 }
 
 /// [`Config::warnings`], the events-incomplete advisory: a mask that cannot witness its scan shape's

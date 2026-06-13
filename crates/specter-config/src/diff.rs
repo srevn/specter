@@ -408,7 +408,7 @@ mod tests {
     fn discovery_added_populates_added_in_source_order() {
         let old = cfg(&[]);
         let new_blocks = [
-            dyn_block("logs", "/var/log/*", "echo"),
+            dyn_block("logs", "/srv/log/*", "echo"),
             dyn_block("sites", "/srv/*/site", "fmt"),
         ];
         let refs: Vec<&str> = new_blocks.iter().map(String::as_str).collect();
@@ -428,7 +428,7 @@ mod tests {
     /// detach cascade reaps the minted set from the template Sub.
     #[test]
     fn discovery_removed_populates_removed_with_name() {
-        let old_blocks = [dyn_block("logs", "/var/log/*", "echo")];
+        let old_blocks = [dyn_block("logs", "/srv/log/*", "echo")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&[]);
 
@@ -445,8 +445,8 @@ mod tests {
     /// program; an in-place rebind would strand them, so any discovery edit is a wholesale replace.
     #[test]
     fn discovery_command_change_lands_in_modified_identity() {
-        let old_blocks = [dyn_block("logs", "/var/log/*", "echo")];
-        let new_blocks = [dyn_block("logs", "/var/log/*", "fmt")];
+        let old_blocks = [dyn_block("logs", "/srv/log/*", "echo")];
+        let new_blocks = [dyn_block("logs", "/srv/log/*", "fmt")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
@@ -463,8 +463,8 @@ mod tests {
     /// which reaps the old minted set and re-mints against the new pattern.
     #[test]
     fn discovery_pattern_change_lands_in_modified_identity() {
-        let old_blocks = [dyn_block("logs", "/var/log/*.log", "echo")];
-        let new_blocks = [dyn_block("logs", "/var/log/*.json", "echo")];
+        let old_blocks = [dyn_block("logs", "/srv/log/*.log", "echo")];
+        let new_blocks = [dyn_block("logs", "/srv/log/*.json", "echo")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
@@ -473,7 +473,7 @@ mod tests {
         let ScanConfig::MatchChain(spec) = d.modified_identity[0].identity.config() else {
             panic!("discovery request carries MatchChain");
         };
-        assert_eq!(spec.source(), "/var/log/*.json");
+        assert_eq!(spec.source(), "/srv/log/*.json");
     }
 
     /// A user-`settle`-only change on a dynamic watch classifies `modified_identity` — the user's
@@ -481,8 +481,8 @@ mod tests {
     /// never carry it. Wholesale before the unification, identity now; never an in-place rebind.
     #[test]
     fn discovery_settle_change_lands_in_modified_identity() {
-        let old_blocks = [dyn_block_full("logs", "/var/log/*", "echo", "200ms")];
-        let new_blocks = [dyn_block_full("logs", "/var/log/*", "echo", "500ms")];
+        let old_blocks = [dyn_block_full("logs", "/srv/log/*", "echo", "200ms")];
+        let new_blocks = [dyn_block_full("logs", "/srv/log/*", "echo", "500ms")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
@@ -495,7 +495,7 @@ mod tests {
     /// `TemplateSpec` is structural, so re-parsing the same TOML is diff-invisible.
     #[test]
     fn discovery_identical_configs_yield_empty_diff() {
-        let blocks = [dyn_block("logs", "/var/log/*", "echo")];
+        let blocks = [dyn_block("logs", "/srv/log/*", "echo")];
         let refs: Vec<&str> = blocks.iter().map(String::as_str).collect();
         let a = cfg(&refs);
         let b = cfg(&refs);
@@ -640,8 +640,8 @@ mod tests {
     /// name reaches the engine as a plain detach whose cascade reaps the minted set.
     #[test]
     fn discovery_enabled_flip_yields_removed_then_added() {
-        let on = dyn_block_with_enabled("logs", "/var/log/*", "echo", true);
-        let off = dyn_block_with_enabled("logs", "/var/log/*", "echo", false);
+        let on = dyn_block_with_enabled("logs", "/srv/log/*", "echo", true);
+        let off = dyn_block_with_enabled("logs", "/srv/log/*", "echo", false);
         let d = diff(&cfg(&[on.as_str()]), &cfg(&[off.as_str()]));
         assert_eq!(d.removed, vec![CompactString::from("logs")]);
         assert!(d.added.is_empty());
