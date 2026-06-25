@@ -1477,5 +1477,5 @@ fn compose_rel(prefix: &str, name: &CompactString) -> CompactString {
 }
 
 #[cfg(test)]
-#[path = "tree_tests.rs"]
+#[path = "tests.rs"]
 mod tests;
