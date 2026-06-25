@@ -18,8 +18,11 @@ inverts that contract:
 - **Self-event absorption** — the reaction itself usually writes inside
   the watched tree; Specter folds those events into the post-fire rebase
   rather than treating them as a fresh burst.
-- **Hot config reload** — SIGHUP, an operator IPC verb, or
-  edit-and-save against a watched config path.
+- **Hot config reload** — SIGHUP, an operator IPC verb, or edit-and-save
+  against a watched config path.
+- **Watching non-existent paths** — watched paths (and discovery pattern
+  anchors) do not need to exist at startup; Specter dynamically probes and
+  descends parent directories to install watches as components materialize.
 - **Operator control surface** — nine client verbs over a UNIX socket
   (`status`, `list`, `show`, `disable`, `enable`, `absorb`, `reload`,
   `tail`, `wait`) for live inspection and runtime overrides.
