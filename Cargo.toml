@@ -21,7 +21,7 @@ debug       = false
 # core
 slotmap     = "1"
 globset     = "0.4"
-compact_str = { version = "0.9", features = ["serde"] }
+compact_str = { version = "0.10", features = ["serde"] }
 smallvec    = "1"
 siphasher   = "1"
 
