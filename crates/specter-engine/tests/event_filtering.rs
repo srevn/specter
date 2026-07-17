@@ -962,7 +962,10 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         ProfileState::Pending(_),
     ));
     // watch_root_parent kept; it is the descent prefix now.
-    assert!(e.profiles().get(pid).unwrap().watch_root_parent() == Some(parent));
+    assert_eq!(
+        e.profiles().get(pid).unwrap().watch_root_parent(),
+        Some(parent)
+    );
     let _ = e.cancel_all_in_flight_probes();
 }
 

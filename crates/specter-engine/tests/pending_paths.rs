@@ -637,7 +637,10 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
         e.profiles().get(pid).unwrap().state(),
         ProfileState::Idle,
     ));
-    assert!(e.profiles().get(pid).unwrap().watch_root_parent() == Some(root_dir));
+    assert_eq!(
+        e.profiles().get(pid).unwrap().watch_root_parent(),
+        Some(root_dir)
+    );
 
     // The Seed proof consumed two settle windows; keep instants monotonic for the recovery sequence
     // that follows.
