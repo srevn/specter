@@ -346,7 +346,7 @@ fn flush_literal(parts: &mut smallvec::SmallVec<[ArgPart; 2]>, buf: &mut Compact
 /// Return the byte index just past the UTF-8 character starting at `i`. `s.is_char_boundary` is the
 /// canonical Rust API; we trust the input `s` is valid UTF-8 (it came from a `&str`) so a forward
 /// scan over continuation bytes is sufficient.
-fn next_char_boundary(s: &str, i: usize) -> usize {
+const fn next_char_boundary(s: &str, i: usize) -> usize {
     let bytes = s.as_bytes();
     let mut j = i + 1;
     while j < bytes.len() && (bytes[j] & 0b1100_0000) == 0b1000_0000 {
