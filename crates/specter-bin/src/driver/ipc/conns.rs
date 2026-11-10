@@ -451,7 +451,7 @@ mod tests {
     fn new_conn_starts_in_reqs_with_empty_buffers() {
         let (conn, _peer) = fresh_conn();
         assert!(matches!(conn.role, ConnRole::Reqs));
-        assert!(conn.read_buf.is_empty());
+        assert_eq!(conn.read_buf, [] as [u8; 0]);
         assert!(conn.write_queue.is_empty());
         assert!(!conn.close_after_flush);
         assert_eq!(conn.token, mio::Token(0x100));

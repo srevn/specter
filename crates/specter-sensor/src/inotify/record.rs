@@ -152,7 +152,7 @@ mod tests {
         assert_eq!(r.wd, 5);
         assert_eq!(r.mask, 0x40);
         assert_eq!(r.cookie, 0x1234);
-        assert!(r.name.is_empty());
+        assert_eq!(r.name, []);
     }
 
     #[test]

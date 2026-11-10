@@ -1626,7 +1626,7 @@ mod tests {
         assert_eq!(cfg.log.level, LogLevel::Info);
         assert_eq!(cfg.log.destination, LogDestination::Stderr);
         assert!(cfg.log.path.is_none());
-        assert!(cfg.watches.is_empty());
+        assert_eq!(cfg.watches, [] as [SubSpec; 0]);
     }
 
     #[test]
@@ -1758,7 +1758,7 @@ mod tests {
         };
         assert!(*recursive);
         assert!(!*hidden);
-        assert!(exclude.is_empty());
+        assert_eq!(exclude.as_slice(), []);
         assert!(pattern.is_none());
         assert_eq!(*max_depth, None);
         let SpawnBody::Exec(exec) = w.program.ops()[0].body() else {

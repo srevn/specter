@@ -2185,7 +2185,6 @@ impl DescentRemaining {
     /// Iterate the components in descent (logical) order. For test assertions and diagnostics only
     /// — production code uses [`head`](Self::head) / [`len`](Self::len) /
     /// [`is_terminal`](Self::is_terminal).
-    #[must_use]
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &CompactString> {
         self.inner.iter().rev()
     }
@@ -4046,7 +4045,7 @@ mod tests {
         let detached = profiles.detach(&mut tree, pid);
         assert!(detached.is_some(), "detach yields the removed Profile");
         assert!(profiles.find(r, h).is_none());
-        assert!(tree.get(r).unwrap().profiles().is_empty());
+        assert_eq!(tree.get(r).unwrap().profiles(), []);
     }
 
     #[test]

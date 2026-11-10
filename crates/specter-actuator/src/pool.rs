@@ -378,7 +378,7 @@ impl Drop for SubprocessActuator {
 mod tests {
     use super::RunWiring;
     use crate::env::EnvSnapshot;
-    use crate::testkit::{MockSpawner, SignalRecord};
+    use crate::testkit::{MockSpawner, SignalRecord, SpawnRecord};
     use crate::{EffectCompleteSender, SendError, SubprocessActuator};
     use compact_str::CompactString;
     use crossbeam::channel::{Receiver, Sender, bounded, unbounded};
@@ -633,7 +633,7 @@ mod tests {
 
         /// Block until `MockSpawner` has recorded at least `n` spawns. Times out after `dur`;
         /// returns the actual recorded list.
-        fn wait_for_spawns(&self, n: usize, dur: Duration) -> Vec<crate::testkit::SpawnRecord> {
+        fn wait_for_spawns(&self, n: usize, dur: Duration) -> Vec<SpawnRecord> {
             let deadline = Instant::now() + dur;
             loop {
                 let s = self.spawner.spawns();
@@ -1058,7 +1058,7 @@ mod tests {
             other => panic!("expected EffectComplete::Failed; got {other:?}"),
         }
         // No actual spawn was recorded (inject_spawn_error short-circuits).
-        assert!(h.spawner.spawns().is_empty());
+        assert_eq!(h.spawner.spawns(), [] as [SpawnRecord; 0]);
         h.shutdown();
     }
 

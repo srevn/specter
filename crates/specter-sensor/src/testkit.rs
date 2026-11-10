@@ -405,7 +405,7 @@ mod tests {
         let n = w.drain_ready(&mut out).unwrap();
         assert_eq!(n, 2);
         assert_eq!(out.len(), 2);
-        assert!(w.queued_events.is_empty());
+        assert_eq!(w.queued_events, [] as [(ResourceId, FsEvent); 0]);
         assert!(matches!(
             &out[0],
             WatcherEvent::Fs { resource, event } if *resource == ids[0] && *event == FsEvent::ContentChanged
@@ -454,8 +454,8 @@ mod tests {
                 scope: OverflowScope::Resource(r),
             } if *r == ids[0]
         ));
-        assert!(w.queued_events.is_empty());
-        assert!(w.queued_overflow.is_empty());
+        assert_eq!(w.queued_events, [] as [(ResourceId, FsEvent); 0]);
+        assert_eq!(w.queued_overflow, [] as [OverflowScope; 0]);
     }
 
     #[test]

@@ -1363,7 +1363,7 @@ mod tests {
     #[test]
     fn registry_at_empty_for_unknown_profile() {
         let reg = SubRegistry::new();
-        assert!(reg.at(ProfileId::default()).is_empty());
+        assert_eq!(reg.at(ProfileId::default()), []);
     }
 
     /// After a multi-insert/remove sequence, every key `iter()` yields re-looks-up via `get` to the
@@ -1551,7 +1551,7 @@ mod tests {
         let removed = reg.remove(sid);
         assert!(removed.is_some());
         assert!(reg.get(sid).is_none());
-        assert!(reg.at(pid).is_empty());
+        assert_eq!(reg.at(pid), []);
         assert_eq!(reg.len(), 0);
     }
 

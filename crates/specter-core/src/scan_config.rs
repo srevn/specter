@@ -659,7 +659,7 @@ mod tests {
             panic!("expected InvalidGlob, got {err:?}");
         };
         assert_eq!(source, "[invalid");
-        assert!(!message.is_empty());
+        assert_ne!(message, "");
     }
 
     #[test]
@@ -707,7 +707,7 @@ mod tests {
         };
         assert!(!recursive);
         assert!(!hidden);
-        assert!(exclude.is_empty());
+        assert_eq!(exclude.as_slice(), []);
         assert!(pattern.is_none());
         assert!(max_depth.is_none());
     }

@@ -159,7 +159,7 @@ fn all_defaults_fixture_applies_documented_defaults() {
     assert!(*recursive);
     assert!(!*hidden);
     assert!(pattern.is_none());
-    assert!(exclude.is_empty());
+    assert_eq!(exclude.as_slice(), []);
     assert_eq!(*max_depth, None);
     assert_eq!(w.scope, EffectScope::SubtreeRoot);
     assert_eq!(w.settle, Duration::from_millis(200));

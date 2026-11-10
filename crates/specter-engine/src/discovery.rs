@@ -511,7 +511,10 @@ mod tests {
             collect_chain_termini(&root, 2),
             vec![terminus(&["chain", "log"], EntryKind::Dir)],
         );
-        assert!(collect_chain_termini(&dir_snap(&[]), 1).is_empty());
+        assert_eq!(
+            collect_chain_termini(&dir_snap(&[]), 1),
+            [] as [ChainTerminus; 0]
+        );
     }
 
     /// The ⟺ attach boundary, template direction: a template on a non-chain Profile is

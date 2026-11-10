@@ -140,7 +140,7 @@ mod tests {
         let b = cfg(&[]);
         let d = diff(&a, &b);
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
     }
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(d.added.len(), 2);
         assert_eq!(d.added[0].params.name, "a");
         assert_eq!(d.added[1].params.name, "b");
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
     }
@@ -183,7 +183,7 @@ mod tests {
         let b = cfg(&refs);
         let d = diff(&a, &b);
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
     }
@@ -199,7 +199,7 @@ mod tests {
 
         let d = diff(&old, &new);
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert_eq!(d.modified_params.len(), 1);
         assert_eq!(d.modified_params[0].params.name, "a");
@@ -234,7 +234,7 @@ mod tests {
 
         let d = diff(&old, &new);
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
     }
@@ -267,7 +267,7 @@ mod tests {
 
         let d = diff(&old, &new);
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert_eq!(d.modified_params.len(), 1);
     }
@@ -318,7 +318,7 @@ mod tests {
 
         let d = diff(&old, &new);
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
         assert_eq!(d.modified_identity[0].params.name, "a");
@@ -419,7 +419,7 @@ mod tests {
         assert_eq!(d.added[0].params.name, "logs");
         assert_eq!(d.added[1].params.name, "sites");
         assert!(d.added.iter().all(|r| r.params.is_template()));
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
     }
@@ -452,7 +452,7 @@ mod tests {
 
         let d = diff(&old, &new);
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
         assert_eq!(d.modified_identity[0].params.name, "logs");
@@ -501,7 +501,7 @@ mod tests {
         let b = cfg(&refs);
         let d = diff(&a, &b);
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
     }
@@ -522,7 +522,7 @@ mod tests {
         let d = diff(&old, &new);
 
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
         assert_eq!(d.modified_identity[0].params.name, "foo");
@@ -541,7 +541,7 @@ mod tests {
         let d = diff(&old, &new);
 
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
         assert_eq!(d.modified_identity[0].params.name, "foo");
@@ -616,7 +616,7 @@ mod tests {
         let d = diff(&old, &new);
         assert_eq!(d.added.len(), 1);
         assert_eq!(d.added[0].params.name, "a");
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
     }
@@ -630,7 +630,7 @@ mod tests {
         let new = cfg(&[block_with_enabled("a", "fmt", false).as_str()]);
         let d = diff(&old, &new);
         assert!(d.added.is_empty());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
     }
@@ -652,6 +652,6 @@ mod tests {
         assert_eq!(d.added.len(), 1);
         assert_eq!(d.added[0].params.name, "logs");
         assert!(d.added[0].params.is_template());
-        assert!(d.removed.is_empty());
+        assert_eq!(d.removed, [] as [CompactString; 0]);
     }
 }

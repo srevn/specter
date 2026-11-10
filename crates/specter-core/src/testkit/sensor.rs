@@ -144,7 +144,7 @@ mod tests {
         assert!(sensor.watch_ops.is_empty());
         assert!(sensor.probe_ops.is_empty());
         assert!(sensor.effects.is_empty());
-        assert!(sensor.diagnostics.is_empty());
+        assert_eq!(sensor.diagnostics, [] as [Diagnostic; 0]);
     }
 
     #[test]

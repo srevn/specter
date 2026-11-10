@@ -896,7 +896,7 @@ fn ancestor_rename_reaps_old_minted_and_mints_new() {
         )),
         "non-matching rename reaps without minting",
     );
-    assert!(minted_paths(&gone).is_empty());
+    assert_eq!(minted_paths(&gone), [] as [(SubId, String); 0]);
     assert!(discovery_subs_of(&e, sid).is_empty());
     let _ = e.cancel_all_in_flight_probes();
 }
@@ -1819,7 +1819,7 @@ fn fanout_threshold_warns_exactly_once() {
     assert_eq!(warns(&out), 1, "threshold crossing warns exactly once");
 
     let (out2, _) = burst_and_respond(&mut e, pid, big, &huge, now + Duration::from_millis(10));
-    assert!(minted_paths(&out2).is_empty());
+    assert_eq!(minted_paths(&out2), [] as [(SubId, String); 0]);
     assert_eq!(warns(&out2), 0, "the latch silences later reconciles");
     let _ = e.cancel_all_in_flight_probes();
 }

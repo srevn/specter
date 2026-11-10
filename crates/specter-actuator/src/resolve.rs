@@ -1411,7 +1411,7 @@ mod tests {
             Some(Arc::new(Diff::default())),
         );
         let (cmd, _) = resolve(&e);
-        assert!(cmd.argv.is_empty());
+        assert_eq!(cmd.argv, [] as [String; 0]);
     }
 
     // ---------- diff-derived env vars ----------

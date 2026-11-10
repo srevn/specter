@@ -2134,7 +2134,7 @@ max_settle = "500ms"
 
     let filtered = rig.driver.compute_watch_diff(&new);
     assert!(filtered.added.is_empty());
-    assert!(filtered.removed.is_empty());
+    assert_eq!(filtered.removed, [] as [CompactString; 0]);
     assert!(filtered.modified_identity.is_empty());
     assert!(filtered.modified_params.is_empty());
 }

@@ -578,16 +578,16 @@ mod tests {
         let drained = reactor
             .poll_and_drain(Some(Duration::ZERO))
             .expect("non-blocking poll succeeds");
-        assert!(drained.fs_events.is_empty());
-        assert!(drained.sensor_overflows.is_empty());
+        assert_eq!(drained.fs_events, [] as [(ResourceId, FsEvent); 0]);
+        assert_eq!(drained.sensor_overflows, [] as [OverflowScope; 0]);
         assert!(drained.probe_responses.is_empty());
         assert!(drained.effect_completions.is_empty());
-        assert!(drained.signals.is_empty());
+        assert_eq!(drained.signals, [] as [i32; 0]);
         assert!(!drained.config_event_pulse);
         assert!(!drained.listener_ready);
         assert!(!drained.actuator_gone);
-        assert!(drained.ready_reads.is_empty());
-        assert!(drained.ready_writes.is_empty());
+        assert_eq!(drained.ready_reads, [] as [Token; 0]);
+        assert_eq!(drained.ready_writes, [] as [Token; 0]);
     }
 
     /// Dropping the effect-completion channel's last sender clone surfaces as

@@ -1,5 +1,6 @@
 //! Integration tests: hot-reload diff across config-pair scenarios.
 
+use compact_str::CompactString;
 use specter_config::{Config, diff};
 use std::path::{Path, PathBuf};
 
@@ -25,7 +26,7 @@ fn three_watches_against_minimal_classifies_each_correctly() {
     assert_eq!(going_up.added.len(), 2);
     assert!(going_up.modified_identity.is_empty());
     assert_eq!(going_up.modified_params.len(), 1);
-    assert!(going_up.removed.is_empty());
+    assert_eq!(going_up.removed, [] as [CompactString; 0]);
 
     let going_down = diff(&big, &small);
     assert!(going_down.added.is_empty());
@@ -40,7 +41,7 @@ fn identical_fixture_yields_no_diff() {
     let b = load("three-watches.toml");
     let d = diff(&a, &b);
     assert!(d.added.is_empty());
-    assert!(d.removed.is_empty());
+    assert_eq!(d.removed, [] as [CompactString; 0]);
     assert!(d.modified_identity.is_empty());
     assert!(d.modified_params.is_empty());
 }

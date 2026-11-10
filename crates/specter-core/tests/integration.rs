@@ -172,7 +172,7 @@ fn detach_clears_back_references_on_both_sides() {
             )
             .is_none()
     );
-    assert!(tree.get(r).unwrap().profiles().is_empty());
+    assert_eq!(tree.get(r).unwrap().profiles(), []);
 }
 
 #[test]

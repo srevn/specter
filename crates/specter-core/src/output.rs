@@ -83,7 +83,6 @@ impl ProbeOps {
     }
 
     /// The ops in [`ProfileId`] order.
-    #[must_use]
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = &ProbeOp> {
         self.0.values()
     }
@@ -128,7 +127,6 @@ impl CancelEffects {
 
     /// The profiles in [`ProfileId`] order. Iterates by-value (the id is `Copy`), mirroring
     /// [`BTreeSet::iter`]'s `.copied()` shape without forcing the caller to chain it.
-    #[must_use]
     pub fn iter(&self) -> impl DoubleEndedIterator<Item = ProfileId> + '_ {
         self.0.iter().copied()
     }
