@@ -33,13 +33,14 @@
 //! error — until `ALL` grows to list it. Coverage therefore cannot silently drop a variant, which a
 //! distant hand-written slice once did.
 //!
-//! `WireTime` owns its own formatting via `humantime::format_rfc3339_seconds` on the outgoing path
-//! and validates via `humantime::parse_rfc3339` on the incoming path: every wire value is RFC 3339
-//! by construction in *both* directions. Pre-epoch `SystemTime` is clamped to `UNIX_EPOCH` on the
-//! server-side projection to defuse `humantime`'s pre-epoch panic.
+//! `WireTime` owns one second-resolution RFC 3339 UTC renderer: the outgoing path renders through
+//! it and the incoming path admits only a token it reproduces byte-for-byte, so every wire value
+//! holds the one canonical shape by construction in *both* directions. A `SystemTime` outside the
+//! renderable range (pre-epoch, or past the timestamp ceiling) is clamped on the server-side
+//! projection.
 //!
 //! The inner storage is `Arc<str>`. The fan-out path builds one `WireTime` per `StepOutput` and the
-//! `From<(&Diagnostic, &WireTime)>` projection bumps the refcount per diag — `humantime` formats
+//! `From<(&Diagnostic, &WireTime)>` projection bumps the refcount per diag — the timestamp renders
 //! once per emission regardless of diag count.
 //!
 //! # Field ordering
@@ -62,6 +63,7 @@
 //! stays a bin-internal contract.
 
 use compact_str::CompactString;
+use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use specter_core::{
     AbsorbMode, BurstHelper, BurstIntent, ClaimKind, DetachReason, Diagnostic, EffectScope,
@@ -77,23 +79,27 @@ use super::protocol::WireId;
 
 /// RFC 3339 wall-clock projection at second resolution.
 ///
-/// Second precision matches the `SPECTER_AT` subprocess env ([`specter_actuator`]'s `format_now`)
-/// so operators see one timestamp shape across both surfaces. Sub-second digits would be unread by
-/// every current consumer and precise-but-NTP-inaccurate on the synthesized `last_fired_at`
-/// projection (`project::project_wall`), so the wire disclaims them.
+/// Second precision matches the `SPECTER_TIME` subprocess env ([`specter_actuator`]'s
+/// `format_now`) so operators see one timestamp shape across both surfaces. Sub-second digits would
+/// be unread by every current consumer and precise-but-NTP-inaccurate on the synthesized
+/// `last_fired_at` projection (`project::project_wall`), so the wire disclaims them.
 ///
-/// `humantime::format_rfc3339_seconds` panics on pre-epoch `SystemTime`; the clamp to
-/// [`UNIX_EPOCH`] defuses it. NTP stepping, an operator `date` reset, or container clock skew at
-/// boot can all produce a pre-epoch value in the wild, so the clamp is defense-in-depth, not a
-/// theoretical concern.
+/// The projection clamps into the renderable range. A pre-epoch `SystemTime` clamps to
+/// [`UNIX_EPOCH`]: a Unix wall clock before 1970 is a wedged clock, and years below 0000 have no
+/// RFC 3339 form. NTP stepping, an operator `date` reset, or container clock skew at boot can all
+/// produce a pre-epoch value in the wild, so the floor is defense-in-depth, not a theoretical
+/// concern. A value past [`Timestamp::MAX`] (late 9999) clamps to it — nothing later is
+/// representable.
 ///
 /// # Symmetric validation
 ///
-/// Both [`Serialize`] and [`Deserialize`] are manual and both gate the same RFC 3339 vocabulary.
-/// Serialize writes the inner `&str` verbatim (it is invariant-by-construction UTF-8 RFC 3339
-/// thanks to its `From<SystemTime>` impl). Deserialize takes any JSON string, validates it with
-/// [`humantime::parse_rfc3339`], and stores the validated bytes. A non-RFC-3339 token fails the
-/// boundary — the wire layer cannot accept opaque text masquerading as a timestamp.
+/// Both [`Serialize`] and [`Deserialize`] are manual and both gate the same vocabulary: the one
+/// shape [`render`] produces. Serialize writes the inner `&str` verbatim (it is canonical by
+/// construction thanks to its `From<SystemTime>` impl). Deserialize takes any JSON string, parses it
+/// as a timestamp, and stores the bytes only if [`render`] reproduces them exactly. A token that is
+/// not a timestamp — or another spelling of one (fractional seconds, a numeric offset, lowercase
+/// `t` / `z`) — fails the boundary: the wire layer cannot accept opaque text masquerading as a
+/// timestamp.
 ///
 /// JSON form is a bare quoted string (`"2026-05-23T15:30:00Z"`), not a wrapped object.
 ///
@@ -117,31 +123,53 @@ impl Serialize for WireTime {
 }
 
 impl<'de> Deserialize<'de> for WireTime {
-    /// Parse-on-deserialize: every incoming byte sequence is checked against
-    /// [`humantime::parse_rfc3339`] before it becomes a `WireTime`. The shape mirrors the server-side
-    /// `From` projection so the wire vocabulary is invariant in both directions; a future malformed
-    /// daemon emit or a hostile client cannot smuggle arbitrary text past this gate.
+    /// Parse-on-deserialize: every incoming byte sequence must parse as a timestamp *and* be exactly
+    /// what [`render`] produces for it before it becomes a `WireTime`. The gate reuses the
+    /// server-side `From` projection's renderer, so the wire vocabulary is invariant in both
+    /// directions; a future malformed daemon emit or a hostile client cannot smuggle arbitrary text
+    /// — or a second spelling of a timestamp — past this gate.
     fn deserialize<D: Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
         let raw = String::deserialize(de)?;
-        humantime::parse_rfc3339(&raw)
+        let ts: Timestamp = raw
+            .parse()
             .map_err(|e| serde::de::Error::custom(format!("invalid RFC 3339 timestamp: {e}")))?;
+        let canonical = render(ts);
+        if raw != canonical {
+            return Err(serde::de::Error::custom(format!(
+                "non-canonical RFC 3339 timestamp {raw:?}: expected {canonical:?}"
+            )));
+        }
         Ok(Self(Arc::from(raw)))
     }
 }
 
 impl From<SystemTime> for WireTime {
     fn from(t: SystemTime) -> Self {
-        let clamped = t.max(UNIX_EPOCH);
-        if clamped != t {
-            tracing::warn!(
-                ?t,
-                "specter ipc: pre-epoch SystemTime clamped to UNIX_EPOCH",
-            );
-        }
-        Self(Arc::from(
-            humantime::format_rfc3339_seconds(clamped).to_string(),
-        ))
+        let ts = match Timestamp::try_from(t) {
+            Ok(ts) if ts >= Timestamp::UNIX_EPOCH => ts,
+            _ => {
+                let clamped = if t < UNIX_EPOCH {
+                    Timestamp::UNIX_EPOCH
+                } else {
+                    Timestamp::MAX
+                };
+                tracing::warn!(
+                    ?t,
+                    %clamped,
+                    "specter ipc: SystemTime outside the renderable range clamped",
+                );
+                clamped
+            }
+        };
+        Self(Arc::from(render(ts)))
     }
+}
+
+/// The one shape every [`WireTime`] holds — RFC 3339 UTC at second resolution, fractional seconds
+/// truncated. Shared by the `From<SystemTime>` projection and the [`Deserialize`] gate's
+/// canonical-form check so the two cannot drift.
+fn render(ts: Timestamp) -> String {
+    format!("{ts:.0}")
 }
 
 impl std::fmt::Display for WireTime {
@@ -512,8 +540,8 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
     /// The wall-clock projection is the caller's concern — the fan-out path builds one [`WireTime`]
     /// per `StepOutput` ([`crate::driver::EngineDriver::forward_diagnostics`]) and threads
     /// `&WireTime` through every per-diag construction. Each arm bumps the `Arc<str>` refcount via
-    /// [`Clone`] instead of re-formatting, so `humantime` runs once per emission regardless of diag
-    /// count.
+    /// [`Clone`] instead of re-formatting, so the timestamp renders once per emission regardless of
+    /// diag count.
     fn from((d, at): (&Diagnostic, &WireTime)) -> Self {
         match d {
             Diagnostic::StaleProbeResponse { owner, correlation } => Self::StaleProbeResponse {
@@ -2026,10 +2054,11 @@ mod tests {
     use std::path::Path;
     use std::time::{Duration, UNIX_EPOCH};
 
-    /// Pre-epoch `SystemTime` clamps to `UNIX_EPOCH` and serializes as the epoch literal — does not
-    /// panic. Defends against NTP step-backwards, operator `date` reset, container clock skew.
+    /// A `SystemTime` outside the renderable range clamps instead of failing. Pre-epoch serializes
+    /// as the epoch literal (defends against NTP step-backwards, operator `date` reset, container
+    /// clock skew); a value past the timestamp ceiling serializes as the ceiling.
     #[test]
-    fn wire_time_clamps_pre_epoch_to_unix_epoch() {
+    fn wire_time_clamps_to_renderable_range() {
         let pre = UNIX_EPOCH - Duration::from_secs(1);
         let wire = WireTime::from(pre);
         let json = serde_json::to_string(&wire).unwrap();
@@ -2040,26 +2069,41 @@ mod tests {
             serde_json::to_string(&epoch).unwrap(),
             r#""1970-01-01T00:00:00Z""#
         );
+
+        // 10000-01-01T00:00:00Z — past jiff's `Timestamp::MAX`, which is the rendered ceiling.
+        let post = WireTime::from(UNIX_EPOCH + Duration::from_hours(70_389_528));
+        assert_eq!(
+            serde_json::to_string(&post).unwrap(),
+            r#""9999-12-30T22:00:00Z""#
+        );
     }
 
-    /// `Deserialize` for [`WireTime`] is the symmetric gate — a non-RFC-3339 token is rejected at
-    /// the boundary, not stored as opaque text. Pins that the wire layer validates *both*
-    /// directions of the round-trip. One witness covers the gate; humantime's internal failure
-    /// modes are humantime's contract, not ours.
+    /// `Deserialize` for [`WireTime`] is the symmetric gate — a token that is not a timestamp, or
+    /// a non-canonical spelling of one, is rejected at the boundary rather than stored as opaque
+    /// text. Pins that the wire layer validates *both* directions of the round-trip. One witness
+    /// per rejection branch (parse failure, canonical-form mismatch); the parser's internal failure
+    /// modes are jiff's contract, not ours.
     #[test]
-    fn wire_time_rejects_malformed_string() {
-        let err = serde_json::from_str::<WireTime>(r#""not a date""#)
-            .expect_err("malformed RFC 3339 must be rejected by WireTime::deserialize");
-        let msg = err.to_string();
-        assert!(
-            msg.contains("RFC 3339"),
-            "rejection message should name the format; got {msg:?}",
-        );
+    fn wire_time_rejects_malformed_and_non_canonical() {
+        for (token, branch) in [
+            (r#""not a date""#, "invalid RFC 3339"),
+            // The same instant as the canonical `…Z` form, spelled with a numeric offset.
+            (r#""2026-05-23T15:30:00+00:00""#, "non-canonical RFC 3339"),
+        ] {
+            let Err(err) = serde_json::from_str::<WireTime>(token) else {
+                panic!("{token} must be rejected by WireTime::deserialize");
+            };
+            let msg = err.to_string();
+            assert!(
+                msg.contains(branch),
+                "{token} should be rejected by the {branch:?} branch; got {msg:?}",
+            );
+        }
     }
 
     /// A well-formed RFC 3339 token round-trips through serde with byte-identical output — the
     /// deserialize gate accepts valid input and the Serialize impl preserves the bytes verbatim.
-    /// The server-emit shape is pinned separately by [`wire_time_clamps_pre_epoch_to_unix_epoch`];
+    /// The server-emit shape is pinned separately by [`wire_time_clamps_to_renderable_range`];
     /// this test pins the complementary half (Deserialize ↔ Serialize byte stability).
     #[test]
     fn wire_time_round_trips_rfc3339() {

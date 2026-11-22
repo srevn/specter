@@ -12,6 +12,7 @@ mod action;
 mod cli;
 mod config;
 mod diff;
+mod duration;
 mod error;
 mod file_meta;
 mod path;
@@ -24,6 +25,7 @@ pub use cli::{
 };
 pub use config::{Config, LogConfig, LogDestination, LogLevel, SubSpec, TemplateSpec};
 pub use diff::diff;
+pub use duration::DisplayDuration;
 pub use error::{ConfigError, IssueKind, ValidationIssue};
 pub use file_meta::FileMeta;
 pub use template::{TemplateError, parse_arg};

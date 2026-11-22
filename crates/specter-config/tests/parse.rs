@@ -184,12 +184,12 @@ fn enabled_string_value_yields_parse_error() {
     assert!(matches!(err, ConfigError::Parse { .. }), "got {err:?}");
 }
 
-/// Per-action `timeout` (humantime at the TOML layer) round-trips through validation into
-/// [`ExecAction::timeout`]. Pinned in one test: humantime mapping, per-action threading, AND
-/// omitted-as-`None` are all observable in the same program — the middle step carries `None`, the
-/// outer steps carry distinct durations.
+/// Per-action `timeout` (a duration string at the TOML layer) round-trips through validation into
+/// [`ExecAction::timeout`]. Pinned in one test: string-to-duration mapping, per-action threading,
+/// AND omitted-as-`None` are all observable in the same program — the middle step carries `None`,
+/// the outer steps carry distinct durations.
 #[test]
-fn exec_timeout_threads_per_action_via_humantime_serde() {
+fn exec_timeout_threads_per_action() {
     let toml = "[[watch]]\nname = \"t\"\npath = \"/\"\n\
                 actions = [\n\
                   { exec = [\"a\"], timeout = \"500ms\" },\n\

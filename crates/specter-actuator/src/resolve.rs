@@ -110,6 +110,7 @@
 use crate::env::EnvSnapshot;
 use crate::spawner::EnvVar;
 use compact_str::CompactString;
+use jiff::Timestamp;
 use specter_core::{
     ArgPart, ArgTemplate, Diff, Effect, EffectTarget, ExecAction, Placeholder, ResourceKind,
 };
@@ -522,22 +523,33 @@ fn env_multivalue(p: Placeholder, effect: &Effect, diff: Option<&Diff>) -> Cow<'
     out.map_or(Cow::Borrowed(""), Cow::Owned)
 }
 
-/// Render `now` as RFC 3339 UTC second-precision (`2026-05-10T12:34:56Z`).
+/// Render `now` as RFC 3339 UTC second-precision (`2026-05-10T12:34:56Z`), total over `SystemTime`.
 ///
-/// `humantime::format_rfc3339_seconds` panics on pre-epoch `SystemTime`. Production
-/// `SystemTime::now()` never returns pre-epoch on a sane Unix host, but a hostile clock or a test
-/// fixture can construct one — clamp to the Unix epoch so the spawn path can't panic. The clamp
-/// emits a `tracing::warn!` at the moment it fires so a wedged clock surfaces in the operator's
-/// journal instead of silently rendering `1970-01-01T00:00:00Z` for every spawn.
+/// A pre-epoch reading clamps to the Unix epoch: a Unix wall clock before 1970 is a wedged clock,
+/// not a time worth rendering, and years below 0000 have no RFC 3339 form at all. A reading past
+/// [`Timestamp::MAX`] (late 9999) clamps to it — nothing later is representable. Production
+/// `SystemTime::now()` hits neither edge on a sane host, but a hostile clock or a test fixture can
+/// construct either, and the spawn path must not fail on one. The clamp emits a `tracing::warn!`
+/// at the moment it fires so a wedged clock surfaces in the operator's journal instead of silently
+/// rendering the clamped value for every spawn.
 fn format_now(now: SystemTime) -> String {
-    let clamped = now.max(SystemTime::UNIX_EPOCH);
-    if clamped != now {
-        tracing::warn!(
-            ?now,
-            "system clock pre-epoch; clamping SPECTER_TIME to UNIX_EPOCH",
-        );
-    }
-    humantime::format_rfc3339_seconds(clamped).to_string()
+    let ts = match Timestamp::try_from(now) {
+        Ok(ts) if ts >= Timestamp::UNIX_EPOCH => ts,
+        _ => {
+            let clamped = if now < SystemTime::UNIX_EPOCH {
+                Timestamp::UNIX_EPOCH
+            } else {
+                Timestamp::MAX
+            };
+            tracing::warn!(
+                ?now,
+                %clamped,
+                "system clock outside the renderable range; clamping SPECTER_TIME",
+            );
+            clamped
+        }
+    };
+    format!("{ts:.0}")
 }
 
 /// Unconditional `SPECTER_*` key count emitted by [`build_env`] — every key landing alphabetically
@@ -1011,10 +1023,10 @@ mod tests {
     }
 
     #[test]
-    fn format_now_clamps_pre_epoch() {
-        // humantime::format_rfc3339_seconds panics on pre-epoch SystemTime. Production never sees
-        // pre-epoch on a sane Unix host, but tests can construct one. The resolver clamps to
-        // UNIX_EPOCH so the spawn path can't panic on a hostile clock.
+    fn format_now_clamps_to_renderable_range() {
+        // Production never reads a clock outside the renderable range on a sane Unix host, but
+        // tests can construct one at either edge. The resolver clamps both so the spawn path can't
+        // fail on a hostile clock.
         let pre = SystemTime::UNIX_EPOCH - std::time::Duration::from_secs(1);
         let e = make_effect(
             "x",
@@ -1029,6 +1041,12 @@ mod tests {
         let (cmd, _) = super::resolve_step(&e, exec_of(&e), pre, None, &empty_env())
             .expect("test fixtures don\'t exercise the strict-env failure path");
         assert_eq!(cmd.argv, vec!["1970-01-01T00:00:00Z".to_owned()]);
+
+        // 10000-01-01T00:00:00Z — past jiff's `Timestamp::MAX`, which is the rendered ceiling.
+        let post = SystemTime::UNIX_EPOCH + std::time::Duration::from_hours(70_389_528);
+        let (cmd, _) = super::resolve_step(&e, exec_of(&e), post, None, &empty_env())
+            .expect("test fixtures don\'t exercise the strict-env failure path");
+        assert_eq!(cmd.argv, vec!["9999-12-30T22:00:00Z".to_owned()]);
     }
 
     // ---------- ${specter.parent} ----------

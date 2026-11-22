@@ -133,8 +133,8 @@ impl<W: FsWatcher> EngineDriver<W> {
     /// emission, regardless of per-client delivery cadence. A slow client cannot rewrite history; a
     /// fast client cannot observe a slower client's `at`.
     ///
-    /// **`WireTime` projection is also once per call.** The `humantime::format_rfc3339_seconds`
-    /// allocation runs once here; every per-diag [`crate::ipc::wire::WireDiagnostic::from`]
+    /// **`WireTime` projection is also once per call.** The RFC 3339 render allocation runs once
+    /// here; every per-diag [`crate::ipc::wire::WireDiagnostic::from`]
     /// projection bumps the `Arc<str>` refcount instead of re-formatting. For a high-fanout
     /// `StepOutput` (e.g., a 256-fanout `DiscoveryMinted` burst) this collapses N format calls into
     /// 1 + N atomic refcount bumps.

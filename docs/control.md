@@ -144,10 +144,11 @@ specter absorb my-watch --for 30s    # fold every change for the next 30s
   wide, so the expected change must begin within roughly one settle of
   the signal; if a fold-worthy change never arrives, the window lapses on
   its own and nothing is folded.
-- **`absorb --for <dur>`** holds the window open for `dur` (humantime —
-  `500ms`, `30s`, `1m30s`), folding every change that would have fired in
-  that span. Reach for it when the replication starts after a setup delay
-  longer than the settle window, or spans a run of separate bursts.
+- **`absorb --for <dur>`** holds the window open for `dur` (units up to
+  hours — `500ms`, `30s`, `1m30s`, `2h`), folding every change that would
+  have fired in that span. Reach for it when the replication starts after
+  a setup delay longer than the settle window, or spans a run of separate
+  bursts.
 
 A window is **per-watch-Profile**: watches that share an anchor path and
 scan config fold together (the same grouping that shares a settle

@@ -1,4 +1,5 @@
 use crate::action::{Action, lower_to_program};
+use crate::duration::DisplayDuration;
 use crate::error::{ConfigError, IssueKind, ValidationIssue};
 use crate::file_meta::FileMeta;
 use crate::path::{PathError, canonicalize_lenient};
@@ -960,8 +961,8 @@ fn validate_raw_exec(
 /// yields one [`ValidationIssue`]; the function returns `Err` on any failure so the partial argv
 /// can't reach the engine.
 ///
-/// `timeout` is the operator-supplied per-step deadline (humantime at the TOML layer; [`Duration`]
-/// here). When `Some`, the validated duration is also checked for `> 0` — a zero-duration timeout
+/// `timeout` is the operator-supplied per-step deadline (a duration string at the TOML layer;
+/// [`Duration`] here). When `Some`, the validated duration is also checked for `> 0` — a zero-duration timeout
 /// is rejected as a configuration error: the SIGTERM would fire before the child has any chance to
 /// make progress, which is almost certainly a typo (`"0s"`, `"0ms"`). Operators wanting "no
 /// timeout" omit the field entirely.
@@ -1036,8 +1037,8 @@ fn validate_exec_argv(
 ///   [`IssueKind::SettleTooSmall`] when zero.
 /// - `max_settle` defaults to [`DEFAULT_MAX_SETTLE`] (a flat 1h) when omitted; rejected with
 ///   [`IssueKind::MaxSettleTooSmall`] when below `4 × settle`. There is no upper bound — Instant
-///   arithmetic at the engine layer handles values up to many years; humantime input format makes
-///   magnitude typos obvious at the source.
+///   arithmetic at the engine layer handles values up to many years; the unit-suffixed duration
+///   grammar makes magnitude typos obvious at the source.
 fn validate_settle(
     idx: usize,
     raw_settle: Option<Duration>,
@@ -1063,8 +1064,8 @@ fn validate_settle(
                     IssueKind::MaxSettleTooSmall,
                     format!(
                         "max_settle ({}) must be ≥ 4 × settle ({})",
-                        humantime::format_duration(v),
-                        humantime::format_duration(floor),
+                        DisplayDuration(v),
+                        DisplayDuration(floor),
                     ),
                 ));
             }
@@ -2008,9 +2009,9 @@ mod tests {
     }
 
     #[test]
-    fn humantime_compound_settle_accepted() {
-        // humantime accepts compound forms (`"1m 30s"`); pin the semantics so a parser swap doesn't
-        // regress silently.
+    fn compound_settle_accepted() {
+        // The duration grammar accepts compound forms (`"1m 30s"`); pin the semantics so a parser
+        // swap doesn't regress silently.
         let toml = minimal_toml("settle = \"1m 30s\"\nmax_settle = \"10m\"\n");
         let cfg = Config::from_str(&toml).unwrap();
         assert_eq!(cfg.watches[0].settle, Duration::from_secs(90));

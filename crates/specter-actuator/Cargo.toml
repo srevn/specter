@@ -9,7 +9,7 @@ license.workspace      = true
 specter-core = { path = "../specter-core" }
 compact_str.workspace = true
 crossbeam.workspace   = true
-humantime.workspace   = true
+jiff.workspace        = true
 tracing.workspace = true
 libc.workspace    = true
 nix.workspace     = true

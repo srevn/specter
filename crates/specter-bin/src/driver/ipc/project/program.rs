@@ -12,6 +12,7 @@
 
 use std::fmt::Write as _;
 
+use specter_config::DisplayDuration;
 use specter_core::program::{BranchTarget, ProgramOp, SpawnBody};
 use specter_core::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 
@@ -60,7 +61,8 @@ fn write_body(out: &mut String, body: &SpawnBody) {
 }
 
 /// Argv joined by a single space, then an optional ` (timeout …)` suffix on a per-stage basis.
-/// Default-untimed Execs render unannotated; operators see per-stage timeouts in the pipe form.
+/// Default-untimed Execs render unannotated; operators see per-stage timeouts in the pipe form. The
+/// timeout renders in the config's duration grammar, so it pastes straight back into the TOML.
 fn write_exec(out: &mut String, exec: &ExecAction) {
     for (i, arg) in exec.argv().iter().enumerate() {
         if i > 0 {
@@ -69,7 +71,7 @@ fn write_exec(out: &mut String, exec: &ExecAction) {
         write_template(out, arg);
     }
     if let Some(d) = exec.timeout() {
-        let _ = write!(out, " (timeout {})", humantime::format_duration(d));
+        let _ = write!(out, " (timeout {})", DisplayDuration(d));
     }
 }
 

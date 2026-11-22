@@ -678,10 +678,10 @@ mod tests {
             .find(|l| !l.is_empty())
             .expect("marker first");
         let marker_v: serde_json::Value = serde_json::from_slice(marker_line).expect("marker JSON");
-        let expected_at = humantime::format_rfc3339_seconds(at_drop).to_string();
+        // `at_drop` is epoch + 100 s; the flush instant (epoch + 500 s) would read `00:08:20`.
         assert_eq!(
             marker_v["at"].as_str().expect("at is a string"),
-            expected_at,
+            "1970-01-01T00:01:40Z",
             "marker carries first-drop time, not flush time",
         );
     }

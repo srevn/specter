@@ -309,8 +309,8 @@ impl Hub {
     ///
     /// **Time threads through two channels.** `wire_at` is the pre-formatted RFC 3339 token the
     /// per-diag construction reuses across the StepOutput (built once in
-    /// [`crate::driver::EngineDriver::forward_diagnostics`], passed by reference here so the
-    /// `humantime::format_rfc3339_seconds` allocation is amortized over the whole batch). `at` is
+    /// [`crate::driver::EngineDriver::forward_diagnostics`], passed by reference here so the RFC 3339
+    /// render allocation is amortized over the whole batch). `at` is
     /// the full-precision [`SystemTime`] that [`ConnState::try_dispatch_diag`] needs for the
     /// per-conn `first_dropped_at` back-pressure accounting — distinct timestamps (the marker's own
     /// `WireTime` is built from `first_dropped_at`, not `wire_at`).
@@ -358,7 +358,7 @@ impl Hub {
     /// the no-subscriber common path skips the per-emission [`SystemTime::now`] /
     /// [`WireTime::from`] / [`crate::driver::forward::diag_sub_id`] work entirely. The walk is
     /// bounded above by [`MAX_IPC_CONNS`] enum-discriminator reads — well below the syscall +
-    /// humantime allocation the outer gate would otherwise pay per emission.
+    /// timestamp-render allocation the outer gate would otherwise pay per emission.
     ///
     /// [`Self::dispatch_to_subscribers`] retains the same predicate as a defensive inner
     /// short-circuit; the accessor keeps the rule single-source so the two surfaces cannot drift.

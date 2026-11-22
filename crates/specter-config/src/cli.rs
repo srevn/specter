@@ -1,4 +1,5 @@
 use crate::config::{LogDestination, LogLevel};
+use crate::duration;
 use clap::builder::{
     Styles,
     styling::{AnsiColor, Style},
@@ -235,8 +236,8 @@ pub struct AbsorbArgs {
     pub client: ClientArgs,
 
     /// Window length. Omitted ⇒ a one-shot window covering the next change; `--for <dur>` holds it
-    /// open to absorb a run of changes. humantime format (`500ms`, `30s`, `1m30s`).
-    #[arg(long = "for", value_parser = parse_duration)]
+    /// open to absorb a run of changes. Units up to hours (`500ms`, `30s`, `1m30s`, `2h`).
+    #[arg(long = "for", value_parser = duration::parse)]
     pub for_: Option<Duration>,
 }
 
@@ -272,8 +273,8 @@ pub struct WaitArgs {
     #[arg(long, value_enum, default_value_t = WaitKind::Fire)]
     pub kind: WaitKind,
 
-    /// Time budget. Omitted ⇒ wait indefinitely. humantime format (`500ms`, `30s`, `1m30s`).
-    #[arg(long, value_parser = parse_duration)]
+    /// Time budget. Omitted ⇒ wait indefinitely. Units up to hours (`500ms`, `30s`, `1m30s`, `2h`).
+    #[arg(long, value_parser = duration::parse)]
     pub timeout: Option<Duration>,
 }
 
@@ -308,12 +309,6 @@ pub enum WaitKind {
     /// Match `SubDetached` — the Sub left the engine (IPC `disable`, config-removal, or
     /// `modified_identity` rebind).
     Detach,
-}
-
-/// clap value-parser bridge for [`Duration`] in humantime form. The `String` error path is what
-/// clap's `value_parser` expects — it surfaces in the user's CLI error verbatim.
-fn parse_duration(s: &str) -> Result<Duration, String> {
-    humantime::parse_duration(s).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

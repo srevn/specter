@@ -50,13 +50,13 @@ pub(crate) struct RawWatch {
     /// for cases like `/home/$USER/.config` where the dotfiles ARE the payload.
     #[serde(default)]
     pub hidden: bool,
-    /// Debounce window after the last event. TOML accepts humantime strings (`"200ms"`, `"1s"`,
+    /// Debounce window after the last event. TOML accepts duration strings (`"200ms"`, `"1s"`,
     /// `"1m 30s"`); omitted ⇒ [`crate::config::DEFAULT_SETTLE`].
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "optional_duration")]
     pub settle: Option<Duration>,
-    /// Forced-fire deadline after burst start. TOML accepts humantime strings (`"1h"`, `"30m"`);
+    /// Forced-fire deadline after burst start. TOML accepts duration strings (`"1h"`, `"30m"`);
     /// omitted ⇒ [`crate::config::DEFAULT_MAX_SETTLE`].
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "optional_duration")]
     pub max_settle: Option<Duration>,
     pub scope: Option<String>,
     pub max_depth: Option<u32>,
@@ -110,13 +110,13 @@ pub(crate) struct RawAction {
     /// name is `else` (a Rust keyword); serde renames it to the Rust-side `otherwise` identifier.
     #[serde(default, rename = "else")]
     pub otherwise: Option<Vec<Self>>,
-    /// Per-step deadline in humantime format (`"500ms"`, `"30s"`, `"5m"`). Valid only on
+    /// Per-step deadline as a duration string (`"500ms"`, `"30s"`, `"5m"`). Valid only on
     /// `exec`-bearing actions; validation rejects it on non-exec variants. Pipe stages each set
     /// their own `timeout` on the nested [`RawExec`]; the conditional predicate sets it inside the
     /// `when` table. `None` ⇒ no deadline. Threaded onto [`specter_core::ExecAction::timeout`] and
     /// enforced by the actuator's per-step timer thread: SIGTERM at `now + timeout`, SIGKILL after
     /// the actuator's `shutdown_grace`.
-    #[serde(default, with = "humantime_serde")]
+    #[serde(default, deserialize_with = "optional_duration")]
     pub timeout: Option<Duration>,
 }
 
@@ -168,9 +168,7 @@ impl<'de> serde::de::Visitor<'de> for RawExecVisitor {
                     if timeout.is_some() {
                         return Err(serde::de::Error::duplicate_field("timeout"));
                     }
-                    // Wrapper adapts humantime_serde::deserialize (which takes a Deserializer) to
-                    // MapAccess::next_value (which takes a Deserialize impl).
-                    timeout = Some(map.next_value::<HumantimeDuration>()?.0);
+                    timeout = Some(map.next_value::<DurationToken>()?.0);
                 }
                 // Variant tags valid at the top-level `[[watch.actions]]` row but rejected inside a
                 // nested exec slot (predicate `when`, pipe stage). The `deny_unknown_fields` default
@@ -194,13 +192,38 @@ impl<'de> serde::de::Visitor<'de> for RawExecVisitor {
     }
 }
 
-/// Adapter that routes `Duration` through `humantime_serde` for use inside
-/// `MapAccess::next_value::<T>()` calls where `T: Deserialize`. Equivalent to `#[serde(with =
-/// "humantime_serde")]` on a derived field, but usable from the hand-rolled visitor above.
-struct HumantimeDuration(Duration);
+/// `deserialize_with` bridge for the derived optional duration fields. `#[serde(default)]` covers
+/// the absent key, so a present key always holds a [`DurationToken`].
+fn optional_duration<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Duration>, D::Error> {
+    DurationToken::deserialize(deserializer).map(|token| Some(token.0))
+}
 
-impl<'de> serde::Deserialize<'de> for HumantimeDuration {
+/// One TOML duration string, parsed by [`crate::duration::parse`]. The derived fields (through
+/// [`optional_duration`]) and the hand-rolled [`RawExecVisitor`] (through `next_value`, which takes
+/// a `Deserialize` impl rather than a function) both deserialize through it, so every duration
+/// field accepts exactly one grammar.
+struct DurationToken(Duration);
+
+impl<'de> serde::Deserialize<'de> for DurationToken {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        humantime_serde::deserialize(deserializer).map(HumantimeDuration)
+        deserializer.deserialize_str(DurationTokenVisitor)
+    }
+}
+
+struct DurationTokenVisitor;
+
+impl serde::de::Visitor<'_> for DurationTokenVisitor {
+    type Value = DurationToken;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a duration string such as \"500ms\", \"30s\", or \"1m 30s\"")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<DurationToken, E> {
+        crate::duration::parse(v)
+            .map(DurationToken)
+            .map_err(E::custom)
     }
 }

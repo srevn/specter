@@ -2815,8 +2815,8 @@ fn missed_marker_uses_first_dropped_at_when_flushed() {
         serde_json::from_slice(lines[0]).expect("marker is valid JSON");
     assert_eq!(marker_v["diag"], "_missed");
     assert_eq!(marker_v["count"], 1);
-    let expected_at_drop = humantime::format_rfc3339_seconds(at_drop).to_string();
-    let expected_at_flush = humantime::format_rfc3339_seconds(at_flush).to_string();
+    let expected_at_drop = wire_at_drop.to_string();
+    let expected_at_flush = wire_at_flush.to_string();
     assert_eq!(
         marker_v["at"].as_str().expect("at is a string"),
         expected_at_drop,

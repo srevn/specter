@@ -14,8 +14,7 @@ tracing.workspace          = true
 compact_str.workspace      = true
 globset.workspace          = true
 smallvec.workspace         = true
-humantime.workspace        = true
-humantime-serde.workspace  = true
+jiff.workspace             = true
 
 [dev-dependencies]
 tempfile.workspace = true
