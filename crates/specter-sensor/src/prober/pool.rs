@@ -55,8 +55,9 @@
 //!
 //! Two layered primitives keep a worker thread alive across local panics:
 //!
-//! - The inner `catch_unwind` in [`run_worker`] catches probe-side panics and emits `Failed {
-//!   errno: EIO }`. The worker survives and resumes its `recv → check → run → cleanup → send` loop.
+//! - The inner `catch_unwind` in [`run_worker`] catches probe-side panics and emits
+//!   `Failed(PROBER_FAULT)`. The worker survives and resumes its `recv → check → run → cleanup →
+//!   send` loop.
 //! - Lock-acquisition panics (e.g., a panicking allocator during `BTreeMap::insert`) recover
 //!   silently via [`lock_expected`]. The `BTreeMap` operations we run inside the lock are
 //!   exception-safe under Rust's allocator-panic semantics, so the recovered map is structurally
@@ -66,12 +67,11 @@
 //! only remaining panic surface is `out.send` (which returns `SendError`, never panics) and the
 //! channel-disconnect path (the clean-shutdown signal).
 
+use crate::prober::PROBER_FAULT;
 use crate::prober::walk::{probe_anchor_file, probe_descent, probe_subtree};
 use crate::{Prober, ProberResponseSender};
 use crossbeam::channel::{Receiver, Sender};
-use specter_core::{
-    ProbeCorrelation, ProbeFailure, ProbeOutcome, ProbeRequest, ProbeResponse, ProfileId,
-};
+use specter_core::{ProbeCorrelation, ProbeOutcome, ProbeRequest, ProbeResponse, ProfileId};
 use std::collections::BTreeMap;
 use std::io;
 use std::num::NonZeroUsize;
@@ -393,10 +393,7 @@ pub(super) fn run_worker<F>(
                     ?correlation,
                     "prober worker panicked; emitting Failed(EIO)",
                 );
-                // Worker panic isn't a kernel errno but the engine routes it the same as a fatal
-                // root-`lstat` failure (log + teardown), so the `Anchor` variant is the correct
-                // routing target. Synthetic `EIO` mirrors the pre-typed-payload backstop.
-                ProbeOutcome::Failed(ProbeFailure::Anchor { errno: libc::EIO })
+                ProbeOutcome::Failed(PROBER_FAULT)
             });
 
         // Post-run cleanup: remove iff still ours. A racing fresh `submit` may have written a new

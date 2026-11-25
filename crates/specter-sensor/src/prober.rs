@@ -22,12 +22,19 @@
 //! # Panic recovery
 //!
 //! Each `run_probe` call is wrapped in `catch_unwind`. A panic converts to
-//! [`specter_core::ProbeOutcome::Failed`] carrying [`specter_core::ProbeFailure::Anchor`] with
-//! `errno = EIO` and the worker continues on the next request. Aborts (`panic = "abort"` profile)
-//! bypass this and kill the worker — v1 uses the workspace's default unwind profile.
+//! [`specter_core::ProbeOutcome::Failed`] carrying [`PROBER_FAULT`] and the worker continues on the
+//! next request. Aborts (`panic = "abort"` profile) bypass this and kill the worker — v1 uses the
+//! workspace's default unwind profile.
+
+use specter_core::ProbeFailure;
 
 mod pool;
 mod walk;
+
+/// What a probe answers when the prober itself faults — a worker panic — rather than the filesystem
+/// refusing a read: `Denied` with `EIO`, which no syscall returned. The engine routes it as a refusal
+/// (the burst stops and the Profile parks), the loud answer a path that should never run deserves.
+const PROBER_FAULT: ProbeFailure = ProbeFailure::Denied { errno: libc::EIO };
 
 #[cfg(test)]
 mod tests;

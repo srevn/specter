@@ -239,7 +239,7 @@ impl Engine {
     /// probe `Vanished`, kind mismatch) re-enters descent inside the loss step itself via
     /// [`Self::finalize_anchor_lost_and_descend`], so this arm never sees those Profiles — they are
     /// `Pending` before any later trigger can arrive. What parks and needs this arm: the
-    /// probe-`Failed { Anchor }` terminals, the watch-rejection purges, and an observed loss with
+    /// probe-`Failed { Denied }` terminals, the watch-rejection purges, and an observed loss with
     /// no recovery parent.
     ///
     /// **Unwitnessed entry — the trigger does not latch the descent's appearance witness.** The
@@ -1595,7 +1595,7 @@ impl Engine {
 
     /// Unhealable-loss terminal: [`Self::finalize_anchor_lost`], then park. The wrapper for the
     /// loss routes where an immediate descent would tight-loop against a condition descent cannot
-    /// fix — the three probe-`Failed { Anchor }` dispatches (path-fatal `EACCES`/`ELOOP`/`EIO`: the
+    /// fix — the three probe-`Failed { Denied }` dispatches (path-fatal `EACCES`/`ELOOP`/`EIO`: the
     /// anchor typically never left disk, so probe → fail repeats) and `on_watch_op_rejected`'s
     /// anchor purge (the kernel refused the watch, so materialize → Watch → reject repeats).
     ///
@@ -2267,11 +2267,11 @@ impl Engine {
     /// (pre-fire, Failed) — for both [`BurstIntent`]s. The pre-fire failure fork — the two
     /// `ProbeFailure` classes are different epistemic events and take different consequences:
     ///
-    /// - [`ProbeFailure::Anchor`] — path-fatal at the anchor root (`EACCES` / `ELOOP` / `ENOTDIR` /
-    ///   `EIO`). The anchor's *identity* is in question, so release its `watch_demand` via
-    ///   [`Self::finalize_anchor_lost_and_park`], **not** the descend wrapper: a read error against
-    ///   an anchor that typically still exists on disk (a chmod-000 chain) would loop probe → fail
-    ///   tightly if descended. The Profile parks and the recovery arm
+    /// - [`ProbeFailure::Denied`] — the anchor root refused the read (`EACCES` / `ELOOP` /
+    ///   `ENOTDIR` / `EIO`). The anchor's *identity* is in question, so release its `watch_demand`
+    ///   via [`Self::finalize_anchor_lost_and_park`], **not** the descend wrapper: a read error
+    ///   against an anchor that typically still exists on disk (a chmod-000 chain) would loop probe
+    ///   → fail tightly if descended. The Profile parks and the recovery arm
     ///   ([`Self::start_pending_recovery`]) retries on the parent's (or co-claimed anchor slot's)
     ///   next event, an overflow, or a re-attach.
     /// - [`ProbeFailure::Transient`] — FD / kernel-resource pressure (`EMFILE` / `ENFILE` /
@@ -2308,7 +2308,7 @@ impl Engine {
             failure,
         });
         match failure {
-            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
+            ProbeFailure::Denied { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
             ProbeFailure::Transient { .. } if forced => {
                 self.finish_verdict_terminal(
                     profile_id,
@@ -2530,7 +2530,7 @@ impl Engine {
     }
 
     /// (Rebase, Failed). Probe failed at the anchor between fire and rebase — the post-fire mirror of
-    /// [`Self::dispatch_pre_fire_failed`]. `Anchor` parks via [`Self::finalize_anchor_lost_and_park`]
+    /// [`Self::dispatch_pre_fire_failed`]. `Denied` parks via [`Self::finalize_anchor_lost_and_park`]
     /// (no descent — the tight-loop rationale on `dispatch_pre_fire_failed`). `Transient` mirrors the
     /// post-fire `Undischarged` consequence: settle-space the next sample through `Rebasing →
     /// Settling` ([`Self::transition_to_settling`]) while the `RebaseCeiling` holds (`!forced`), or —
@@ -2559,7 +2559,7 @@ impl Engine {
             failure,
         });
         match failure {
-            ProbeFailure::Anchor { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
+            ProbeFailure::Denied { .. } => self.finalize_anchor_lost_and_park(profile_id, out),
             ProbeFailure::Transient { .. } if forced => {
                 self.finish_verdict_terminal(
                     profile_id,

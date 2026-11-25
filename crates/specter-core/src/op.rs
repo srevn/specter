@@ -12,41 +12,47 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-/// Non-empty carrier for the [`ProofObligation::Chains`] chain set.
+/// A non-empty, path-ordered set of paths — the carrier of [`ProofObligation::Chains`].
 ///
-/// The wrapper's value *is* the invariant: a `Chains(NonEmptyChainSet)` always carries at least one
-/// chain. Empty input is rejected at construction ([`Self::new`] returns `None`), with the contract
-/// that the caller MUST degrade to [`ProofObligation::WholeSubtree`] — passing an empty chain set
-/// to the walker would silently certify [`ProofAuthority::Authoritative`] (the walker's `certify`
-/// returns `Authoritative` when no chain matches a degraded frame, and an empty chain set matches
-/// nothing), defeating the proof obligation.
+/// The wrapper's value *is* the invariant: it always holds at least one path. Empty input is
+/// rejected at construction ([`Self::new`] returns `None`), and the caller decides what an empty
+/// set means. For the obligation the contract is to degrade to [`ProofObligation::WholeSubtree`] —
+/// an empty chain set would silently certify [`ProofAuthority::Authoritative`] (the walker's
+/// `certify` returns `Authoritative` when no chain matches a degraded frame, and an empty chain set
+/// matches nothing), defeating the proof obligation.
 ///
-/// No public mutators — the wrapper is constructed once at the engine's probe choke and consumed
-/// read-only by the walker. The invariant composes through `Clone` because [`BTreeSet`]'s
-/// non-emptiness is preserved by clone.
+/// No public mutators — the wrapper is constructed once and consumed read-only. The invariant
+/// composes through `Clone` because [`BTreeSet`]'s non-emptiness is preserved by clone.
 ///
-/// Member order follows `BTreeSet<Arc<Path>>` (lex on the path bytes) so the walker's first-hit
-/// search (its `certify` pass) is deterministic across replays.
+/// Member order follows `BTreeSet<Arc<Path>>` (lex on the path bytes), so a first-hit search over
+/// it and its [`Self::first`] are deterministic across replays.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct NonEmptyChainSet(BTreeSet<Arc<Path>>);
+pub struct NonEmptyPathSet(BTreeSet<Arc<Path>>);
 
-impl NonEmptyChainSet {
-    /// Wrap a [`BTreeSet`] of chain paths, returning `None` when the input is empty. The `None`
-    /// case is the caller's contract: degrade to [`ProofObligation::WholeSubtree`].
+impl NonEmptyPathSet {
+    /// Wrap a [`BTreeSet`] of paths, returning `None` when the input is empty.
     #[must_use]
     pub fn new(set: BTreeSet<Arc<Path>>) -> Option<Self> {
         (!set.is_empty()).then_some(Self(set))
     }
 
-    /// Borrowing iterator over every chain path, in [`BTreeSet`] lex order. The wrapper exposes no
-    /// other iteration shape — the walker's `certify` and tests' membership / cardinality
-    /// assertions compose through this projection.
+    /// Borrowing iterator over every path, in [`BTreeSet`] lex order. The wrapper exposes no other
+    /// iteration shape — the walker's `certify` and tests' membership / cardinality assertions
+    /// compose through this projection.
     pub fn iter(&self) -> impl Iterator<Item = &Arc<Path>> + '_ {
         self.0.iter()
     }
 
-    /// Number of chain paths. Always `>= 1` by construction; pair with [`Self::is_empty`] to
-    /// satisfy clippy's `len_without_is_empty` lint with a structural proof rather than `#[allow]`.
+    /// The first path in lex order. Total: the set is never empty.
+    #[must_use]
+    pub fn first(&self) -> &Arc<Path> {
+        self.0
+            .first()
+            .expect("a NonEmptyPathSet holds at least one path by construction")
+    }
+
+    /// Number of paths. Always `>= 1` by construction; pair with [`Self::is_empty`] to satisfy
+    /// clippy's `len_without_is_empty` lint with a structural proof rather than `#[allow]`.
     #[must_use]
     pub fn len(&self) -> usize {
         self.0.len()
@@ -59,12 +65,12 @@ impl NonEmptyChainSet {
         false
     }
 
-    /// True iff `frame` is at-or-above some chain path. Composes the walker's
-    /// `obligation_at_or_under` predicate: a frame on the recursion path that is an ancestor of (or
-    /// equal to) any chain path must not be mtime-skipped, lest the kernel's signal at the chain
-    /// leaf be missed.
+    /// True iff some path is at-or-under `frame` — component-wise, so `/a` holds `/a/b/c` and not
+    /// `/ab`. Composes the walker's `obligation_at_or_under` predicate: a frame on the recursion
+    /// path that is an ancestor of (or equal to) any chain path must not be mtime-skipped, lest the
+    /// kernel's signal at the chain leaf be missed.
     #[must_use]
-    pub fn any_chain_starts_with(&self, frame: &Path) -> bool {
+    pub fn any_at_or_under(&self, frame: &Path) -> bool {
         self.0.iter().any(|p| p.starts_with(frame))
     }
 }
@@ -77,7 +83,7 @@ impl NonEmptyChainSet {
 ///
 /// - [`Self::Chains`] — Standard. The dirty root→leaf chains (resources whose `FsEvent` drove the
 ///   burst, projected to paths). The walker refuses mtime-skip at any directory at-or-above a chain
-///   path; off-chain siblings stay skip-eligible. The [`NonEmptyChainSet`] carrier makes the empty
+///   path; off-chain siblings stay skip-eligible. The [`NonEmptyPathSet`] carrier makes the empty
 ///   case unrepresentable: an empty chain set would silently certify
 ///   [`ProofAuthority::Authoritative`] (no chain to match a degraded frame), defeating the proof
 ///   obligation, so the engine degrades to [`Self::WholeSubtree`] when the source projection yields
@@ -92,7 +98,7 @@ impl NonEmptyChainSet {
 /// the underlying `BTreeSet` orders them deterministically for replay.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ProofObligation {
-    Chains(NonEmptyChainSet),
+    Chains(NonEmptyPathSet),
     WholeSubtree,
 }
 
@@ -297,32 +303,30 @@ pub enum ProofAuthority {
     Undischarged { first_unread: Arc<Path> },
 }
 
-/// Typed failure stamped on [`ProbeOutcome::Failed`].
+/// Typed failure stamped on [`ProbeOutcome::Failed`]: what a read the probe could not complete said
+/// — the path refused it, or the daemon lacked a resource.
 ///
-/// The engine forks on the variant at the dispatch site: `Anchor` tears the anchor watch down,
-/// `Transient` retries the window (the consequence the verdict floor gives an `Undischarged` proof
-/// — see the variant docs). Backends translate libc errnos to this variant once, at the trait
-/// boundary in `specter-sensor`, so the fork never re-classifies a raw errno inside the engine; the
-/// engine stays free of kernel vocabulary.
-///
-/// Cross-crate dual of [`WatchFailure`]. Naming follows the same rule — each variant carries "what
-/// the engine should do," not the kernel's error-class name. `errno` is diagnostic context
-/// (operator-visible integer on the IPC wire), not a behavioural switch.
+/// Each variant names what the read said, not what the engine does with it; the dispatch arms own
+/// the consequence (`dispatch_pre_fire_failed`, `dispatch_rebase_failed`, and the descent's own).
+/// Backends translate libc errnos to this variant once, at the trait boundary in `specter-sensor`,
+/// so no arm re-classifies a raw errno inside the engine; the engine stays free of kernel
+/// vocabulary. `errno` is diagnostic context (operator-visible integer on the IPC wire), not a
+/// behavioural switch.
 ///
 /// The `From<io::Error>` translation lives in `specter-sensor` (via `ProbeFailureExt::from_io`)
 /// because errno-name matching needs `libc`, which is banned in `core` per `deny.toml`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ProbeFailure {
-    /// Path-fatal at the probe root: a non-`NotFound` I/O error from the root `lstat` (`EACCES` /
-    /// `ELOOP` / `ENOTDIR` / `EIO`). Engine routes to its per-route `dispatch_*_failed` cleanup —
-    /// release the anchor's `watch_demand`, surface the diagnostic, finish the burst.
+    /// The path refused the read: a non-`NotFound` I/O error that is not want of a resource
+    /// (`EACCES` / `ELOOP` / `ENOTDIR` / `EIO`) — a fact about the path, not about the daemon's
+    /// resources. A fault in the prober itself (a worker panic) answers as one, with `EIO`.
     ///
-    /// `ENOENT` is *not* an `Anchor` failure: the walker collapses "path absent" into
+    /// `ENOENT` is *not* a refusal: the walker collapses "path absent" into
     /// [`ProbeOutcome::Vanished`] before this enum is reached.
-    Anchor { errno: i32 },
-    /// Backpressure or transient kernel-resource failure: the process-wide or system-wide FD
-    /// ceiling was hit at the root-`lstat` syscall, or the walker retried into a transient
-    /// rate-limit (`EMFILE` / `ENFILE` / `ENOSPC` / `EAGAIN`).
+    Denied { errno: i32 },
+    /// The daemon lacked a resource: the process-wide or system-wide FD ceiling was hit at the
+    /// root-`lstat` syscall, or the walker retried into a transient rate-limit (`EMFILE` / `ENFILE`
+    /// / `ENOSPC` / `EAGAIN`).
     ///
     /// The probe observed *nothing* — and says nothing about the anchor's identity. This is the
     /// epistemic twin of an [`ProofAuthority::Undischarged`] proof ("couldn't observe," not "couldn't
@@ -344,7 +348,7 @@ impl ProbeFailure {
     #[must_use]
     pub const fn errno(&self) -> i32 {
         match self {
-            Self::Anchor { errno } | Self::Transient { errno } => *errno,
+            Self::Denied { errno } | Self::Transient { errno } => *errno,
         }
     }
 }
@@ -526,8 +530,8 @@ pub enum EffectOp {
 }
 
 #[cfg(test)]
-mod non_empty_chain_set_tests {
-    use super::NonEmptyChainSet;
+mod non_empty_path_set_tests {
+    use super::NonEmptyPathSet;
     use std::collections::BTreeSet;
     use std::path::Path;
     use std::sync::Arc;
@@ -536,14 +540,21 @@ mod non_empty_chain_set_tests {
     /// this `None` to degrade to `WholeSubtree`; flipping `new`'s contract would silently emit a
     /// chain-less `Chains` obligation and the walker would certify Authoritative against a no-op
     /// proof. Behavioural integration tests cover the downstream effects; this is the focused
-    /// constructor pin.
+    /// constructor pin, and the pin of the total `first` the invariant buys.
     #[test]
     fn new_rejects_empty_and_wraps_non_empty() {
-        assert!(NonEmptyChainSet::new(BTreeSet::new()).is_none());
+        assert!(NonEmptyPathSet::new(BTreeSet::new()).is_none());
 
-        let mut populated: BTreeSet<Arc<Path>> = BTreeSet::new();
-        populated.insert(Arc::from(Path::new("/w/a")));
-        let wrapped = NonEmptyChainSet::new(populated).expect("non-empty wraps");
-        assert_eq!(wrapped.len(), 1);
+        let populated: BTreeSet<Arc<Path>> = ["/w/b", "/w/a"]
+            .into_iter()
+            .map(|p| Arc::from(Path::new(p)))
+            .collect();
+        let wrapped = NonEmptyPathSet::new(populated).expect("non-empty wraps");
+        assert_eq!(wrapped.len(), 2);
+        assert_eq!(
+            wrapped.first().as_ref(),
+            Path::new("/w/a"),
+            "first is the least path"
+        );
     }
 }

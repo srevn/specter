@@ -762,11 +762,11 @@ impl crate::Engine {
     ///   ([`Diagnostic::PendingPathRetriesExhausted`]) and clear the marker so a *future* prefix
     ///   event / overflow earns a fresh budget. The descent stays Pending, recovering on the next
     ///   event rather than spinning.
-    /// - **Everything else** — an [`ProbeFailure::Anchor`] (path-fatal `EACCES`-class — descent
+    /// - **Everything else** — a [`ProbeFailure::Denied`] (path-fatal `EACCES`-class — descent
     ///   cannot fix it), or a transient failure of a *non*-signal-bearing probe (the descent-entry
     ///   / forward-advance / rewind probes re-trigger through their own channels). Narrate
     ///   [`Diagnostic::PendingPathProbeFailed`] and await the next event, the long-standing
-    ///   posture. A signal-bearing probe that hit a path-fatal Anchor fate also clears its marker
+    ///   posture. A signal-bearing probe that hit a path-fatal `Denied` fate also clears its marker
     ///   (it will not retry) so a later event re-budgets.
     pub(crate) fn dispatch_descent_failed(
         &mut self,
@@ -820,7 +820,7 @@ impl crate::Engine {
                     });
             }
             _ => {
-                // Anchor (path-fatal), or a non-signal-bearing transient failure: retain Pending,
+                // Denied (path-fatal), or a non-signal-bearing transient failure: retain Pending,
                 // narrate, await the next event. Clear a stale signal marker iff a signal-bearing
                 // probe reached this non-retry fate — a non-signal probe carries none.
                 if signal_retries.is_some() {
@@ -1313,7 +1313,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr1,
-                outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+                outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
             }),
             Instant::now(),
         );
@@ -1336,7 +1336,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr2,
-                outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+                outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
             }),
             Instant::now(),
         );
@@ -1523,7 +1523,7 @@ mod tests {
             Input::ProbeResponse(ProbeResponse {
                 owner: pid,
                 correlation: corr,
-                outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+                outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
             }),
             Instant::now(),
         );
@@ -1532,7 +1532,7 @@ mod tests {
             matches!(
                 d,
                 Diagnostic::PendingPathProbeFailed {
-                    failure: ProbeFailure::Anchor { errno: 13 },
+                    failure: ProbeFailure::Denied { errno: 13 },
                     ..
                 },
             )

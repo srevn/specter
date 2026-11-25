@@ -1067,7 +1067,7 @@ fn seed_failed_releases_anchor_claim() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: corr,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
         }),
         at,
     );
@@ -1208,7 +1208,7 @@ fn standard_failed_with_reap_pending_does_not_double_release_anchor() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
         }),
         t2,
     );

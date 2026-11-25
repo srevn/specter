@@ -714,7 +714,7 @@ fn probe_response_seed_failed_clears_baseline_and_diagnoses() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
         }),
         now + SETTLE,
     );
@@ -723,7 +723,7 @@ fn probe_response_seed_failed_clears_baseline_and_diagnoses() {
             d,
             Diagnostic::ProbeFailed {
                 intent: BurstIntent::Seed,
-                failure: ProbeFailure::Anchor { errno: 13 },
+                failure: ProbeFailure::Denied { errno: 13 },
                 ..
             },
         )
@@ -3085,7 +3085,7 @@ fn sensor_overflow_pending_profile_reprobes() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: corr,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
         }),
         Instant::now(),
     );
@@ -4228,7 +4228,7 @@ fn dispatch_pre_fire_failed_seed_clears_profile_kind() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 5 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 5 }),
         }),
         Instant::now(),
     );
@@ -4269,7 +4269,7 @@ fn dispatch_pre_fire_failed_standard_clears_profile_kind() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
         }),
         now + SETTLE,
     );
@@ -4310,7 +4310,7 @@ fn dispatch_rebase_failed_clears_profile_kind() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 5 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 5 }),
         }),
         now + SETTLE * 4,
     );
@@ -4325,15 +4325,15 @@ fn dispatch_rebase_failed_clears_profile_kind() {
 // A `Transient` probe failure (FD / kernel-resource pressure — `EMFILE`, errno 24) is the epistemic
 // twin of an `Undischarged` proof: the probe observed nothing, so the engine takes the same
 // consequence the verdict floor gives `Undischarged` — retry the window while the deadline holds,
-// finish to Idle once it forces — never tearing the anchor down. Only `Anchor`-class failures tear
+// finish to Idle once it forces — never tearing the anchor down. Only `Denied`-class failures tear
 // the anchor down, pinned by the `*_clears_profile_kind` tests above.
 
 /// (Standard, Transient). FD pressure on a Standard verify re-batches for another window
 /// (`!forced`) — the anchor watch and baseline retained, the pressure surfaced — then, once the
 /// `BurstDeadline` forces, finishes to Idle with the anchor watch and baseline **still** retained,
-/// so the anchor's own next event re-bursts without waiting on the parent (an `Anchor`-class
-/// failure would instead tear it down). Pins both Standard-route Transient arms in one lifecycle;
-/// the retained baseline is the central regression guard a baseline-less Seed cannot assert.
+/// so the anchor's own next event re-bursts without waiting on the parent (a `Denied`-class failure
+/// would instead tear it down). Pins both Standard-route Transient arms in one lifecycle; the
+/// retained baseline is the central regression guard a baseline-less Seed cannot assert.
 #[test]
 fn standard_transient_retries_then_forced_finishes_retaining_anchor() {
     let (mut e, pid, _sid, root, now) = engine_with_attached_sub();
@@ -8140,7 +8140,7 @@ mod props {
                     Input::ProbeResponse(ProbeResponse {
                         owner: pid,
                         correlation: corr,
-                        outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno }),
+                        outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno }),
                     }),
                     *t,
                 )
@@ -8353,7 +8353,7 @@ mod props {
             let outcome = match seed_outcome {
                 0 => ProbeOutcome::SubtreeProven { snapshot: dir_tree_snap(vec![]), authority: ProofAuthority::Authoritative },
                 1 => ProbeOutcome::Vanished,
-                _ => ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+                _ => ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
             };
             let out = e.step(
                 Input::ProbeResponse(ProbeResponse { owner: pid,

@@ -514,7 +514,7 @@ fn pending_path_failed_probe_retains_state() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid,
             correlation: corr,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
         }),
         Instant::now(),
     );
@@ -522,7 +522,7 @@ fn pending_path_failed_probe_retains_state() {
     assert!(out.diagnostics.iter().any(|d| matches!(
         d,
         Diagnostic::PendingPathProbeFailed {
-            failure: ProbeFailure::Anchor { errno: 13 },
+            failure: ProbeFailure::Denied { errno: 13 },
             ..
         },
     )));
@@ -931,7 +931,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid_b,
             correlation: b_corr,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
         }),
         b_fail_at,
     );

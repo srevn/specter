@@ -434,7 +434,7 @@ fn anchor_loss_via_probe_failed_clears_kind_and_recovers_via_subtree() {
         Input::ProbeResponse(ProbeResponse {
             owner: pid_p,
             correlation: p_corr,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 5 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 5 }),
         }),
         p_at,
     );

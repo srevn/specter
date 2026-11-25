@@ -4520,9 +4520,9 @@ mod tests {
     fn dirty_provenance_chains_non_empty_iff_dirty_non_empty() {
         // Probe-choke post-condition: `chains()` is empty exactly when `dirty` is empty (and
         // conversely, non-empty when `dirty` is non-empty). The engine's probe choke wraps the
-        // result with `NonEmptyChainSet::new(...)`; the `None` arm degrades to `WholeSubtree`. For
-        // a Standard burst with a recorded trigger (`!dirty.is_empty()`), the projection must yield
-        // a non-empty chain set or the engine would silently re-walk the whole subtree under
+        // result with `NonEmptyPathSet::new(...)`; the `None` arm degrades to `WholeSubtree`. For a
+        // Standard burst with a recorded trigger (`!dirty.is_empty()`), the projection must yield a
+        // non-empty chain set or the engine would silently re-walk the whole subtree under
         // `WholeSubtree`. Forward-defensive: if a future change to `chains()` (a filter, a guard)
         // could leave it empty while `dirty` still carries values, this test catches it before the
         // probe-choke regression lands.

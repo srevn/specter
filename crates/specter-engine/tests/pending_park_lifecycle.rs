@@ -59,7 +59,7 @@ fn third_door_event_at_co_watched_parked_anchor_must_not_fire_unanchored() {
         t_r + SETTLE * 4,
     );
 
-    // Park P via a path-fatal probe failure: Standard burst → Verifying → Failed(Anchor).
+    // Park P via a path-fatal probe failure: Standard burst → Verifying → Failed(Denied).
     let t2 = t_p + SETTLE * 4;
     let _ = e.step(MockSensor::fs_event(log, FsEvent::ContentChanged), t2);
     let _ = drain_due(&mut e, t2 + SETTLE * 2);
@@ -70,7 +70,7 @@ fn third_door_event_at_co_watched_parked_anchor_must_not_fire_unanchored() {
         MockSensor::probe_response(ProbeResponse {
             owner: pid_p,
             correlation: corr,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
         }),
         t2 + SETTLE * 3,
     );
@@ -546,7 +546,7 @@ fn descent_terminus_keeps_carrier_count_exact_on_next_event() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `ParkedRejoin` re-arms recovery for a channel-bearing park: a probe-`Failed { Anchor }` terminal
+/// `ParkedRejoin` re-arms recovery for a channel-bearing park: a probe-`Failed { Denied }` terminal
 /// preserves `watch_root_parent`, and a same-identity re-attach enters descent at that cached
 /// channel. (The channel-less shape is pinned by `attach_join_onto_parked_profile_rearms_recovery`.)
 #[test]
@@ -567,7 +567,7 @@ fn parked_rejoin_rearms_recovery_for_channel_bearing_park() {
         t0,
     );
 
-    // Park via a path-fatal probe failure: Standard burst → Verifying → Failed(Anchor).
+    // Park via a path-fatal probe failure: Standard burst → Verifying → Failed(Denied).
     let t1 = t_seeded + SETTLE * 4;
     let _ = e.step(MockSensor::fs_event(src, FsEvent::ContentChanged), t1);
     let _ = drain_due(&mut e, t1 + SETTLE * 2);
@@ -576,7 +576,7 @@ fn parked_rejoin_rearms_recovery_for_channel_bearing_park() {
         MockSensor::probe_response(ProbeResponse {
             owner: pid_a,
             correlation: corr,
-            outcome: ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 }),
+            outcome: ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 }),
         }),
         t1 + SETTLE * 3,
     );

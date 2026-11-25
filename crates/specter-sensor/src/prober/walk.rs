@@ -211,8 +211,8 @@ impl WalkContext<'_> {
     }
 
     /// True iff an obligation chain runs at-or-through `path` — some chain path is at-or-below it
-    /// (`NonEmptyChainSet::any_chain_starts_with`). `WholeSubtree` carries no enumerable chain, so
-    /// its projection is empty (`false`).
+    /// (`NonEmptyPathSet::any_at_or_under`). `WholeSubtree` carries no enumerable chain, so its
+    /// projection is empty (`false`).
     ///
     /// The single read of the obligation's chain structure, shared by the two obligation-sensitive
     /// decisions: [`obligation_at_or_under`](Self::obligation_at_or_under) (the mtime-skip refusal)
@@ -225,7 +225,7 @@ impl WalkContext<'_> {
     #[must_use]
     fn chain_through(&self, path: &Path) -> bool {
         match self.obligation {
-            ProofObligation::Chains(chains) => chains.any_chain_starts_with(path),
+            ProofObligation::Chains(chains) => chains.any_at_or_under(path),
             ProofObligation::WholeSubtree => false,
         }
     }

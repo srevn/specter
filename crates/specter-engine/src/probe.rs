@@ -46,7 +46,7 @@ use crate::path::empty_path;
 use compact_str::CompactString;
 use specter_core::{
     ActiveBurst, BurstIntent, CeilingState, DirSnapshot, DirtyProvenance, EntryKind, LeafEntry,
-    NonEmptyChainSet, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeFailure, ProbeOp,
+    NonEmptyPathSet, PostFirePhase, PreFirePhase, ProbeCorrelation, ProbeFailure, ProbeOp,
     ProbeOutcome, ProbeRequest, Profile, ProfileId, ProfileState, ProofAuthority, ProofObligation,
     ResourceId, ResourceKind, StepOutput, subtree_at_dir,
 };
@@ -434,12 +434,12 @@ impl Engine {
     ///    `Subtree` with the Profile's `(config, config_hash)`, `baseline_subtree`, and the
     ///    per-carrier [`specter_core::ProofObligation`], keyed on
     ///    [`specter_core::Profile::event_chains_prove_quiescence`]: an events-complete Standard
-    ///    burst ⇒ `Chains` over the [`specter_core::NonEmptyChainSet`] from the persisting
-    ///    `dirty`'s captured paths (degrading to `WholeSubtree` when the projection is empty —
-    ///    production never reaches that arm but the type wrapper makes a silently-chainless
-    ///    `Chains` unrepresentable); Seed, events-incomplete Standard, and Rebase ⇒ `WholeSubtree`
-    ///    — no trustworthy prior, or a stream that cannot witness in-place writes — built lazily,
-    ///    never for a File anchor. The kind rule lives here exactly once, so the prior positional
+    ///    burst ⇒ `Chains` over the [`specter_core::NonEmptyPathSet`] from the persisting `dirty`'s
+    ///    captured paths (degrading to `WholeSubtree` when the projection is empty — production
+    ///    never reaches that arm but the type wrapper makes a silently-chainless `Chains`
+    ///    unrepresentable); Seed, events-incomplete Standard, and Rebase ⇒ `WholeSubtree` — no
+    ///    trustworthy prior, or a stream that cannot witness in-place writes — built lazily, never
+    ///    for a File anchor. The kind rule lives here exactly once, so the prior positional
     ///    constructors' fan-out dissolves into struct literals.
     fn probe_emission_request(&self, owner: ProfileId) -> Option<ProbeRequest> {
         // `Copy` carrier classification: which carrier, and — for the pre-fire carrier — the target +
@@ -569,7 +569,7 @@ impl Engine {
                         // *persisting* `dirty` (the burst outlives this probe across re-batching).
                         // Every captured path is at-or-under `target` by construction (the target is
                         // the captured paths' LCA), so no subtree filter is needed.
-                        // `NonEmptyChainSet::new` rejects an empty projection — degrade to
+                        // `NonEmptyPathSet::new` rejects an empty projection — degrade to
                         // `WholeSubtree` so the walker proves the whole subtree rather than silently
                         // certifying Authoritative against a chain-less obligation. Production never
                         // reaches the `None` arm (a Standard burst notes its trigger), but the type
@@ -580,7 +580,7 @@ impl Engine {
                         // exactly the frames the hash-channel samples must freshly observe).
                         Carrier::PreFire { intent, dirty, .. } => {
                             if p.event_chains_prove_quiescence(intent) {
-                                NonEmptyChainSet::new(dirty.chains())
+                                NonEmptyPathSet::new(dirty.chains())
                                     .map_or(ProofObligation::WholeSubtree, ProofObligation::Chains)
                             } else {
                                 ProofObligation::WholeSubtree
@@ -665,7 +665,7 @@ mod tests {
             Ok(ProofOutcome::Vanished),
         ));
         assert!(matches!(
-            ProofOutcome::try_from(ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 })),
+            ProofOutcome::try_from(ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 })),
             Ok(ProofOutcome::Failed(_)),
         ));
         assert!(matches!(
@@ -693,7 +693,7 @@ mod tests {
             Ok(DescentOutcome::Vanished),
         ));
         assert!(matches!(
-            DescentOutcome::try_from(ProbeOutcome::Failed(ProbeFailure::Anchor { errno: 13 })),
+            DescentOutcome::try_from(ProbeOutcome::Failed(ProbeFailure::Denied { errno: 13 })),
             Ok(DescentOutcome::Failed(_)),
         ));
         assert!(matches!(

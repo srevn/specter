@@ -13,7 +13,7 @@ use crossbeam::channel::{Receiver, Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, GlobPattern, Input,
-    LeafEntry, NonEmptyChainSet, PatternSpec, ProbeCorrelation, ProbeFailure, ProbeOutcome,
+    LeafEntry, NonEmptyPathSet, PatternSpec, ProbeCorrelation, ProbeFailure, ProbeOutcome,
     ProbeRequest, ProbeResponse, ProfileId, ProofAuthority, ProofObligation, ScanConfig,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -71,14 +71,14 @@ fn req_anchor(profile: ProfileId, correlation: u64) -> ProbeRequest {
 /// tests never want `WholeSubtree` ("never skip"), so the bridge is total over non-empty sets.
 fn chains_from(set: BTreeSet<Arc<Path>>) -> ProofObligation {
     ProofObligation::Chains(
-        NonEmptyChainSet::new(set).expect("chains_from requires a non-empty obligation set"),
+        NonEmptyPathSet::new(set).expect("chains_from requires a non-empty obligation set"),
     )
 }
 
 /// Marker obligation for tests that don't exercise the proof obligation — a single non-matching
 /// chain path (outside any tempdir hierarchy) so the walker's `obligation_at_or_under` always
 /// returns `false` and mtime-skip stays allowed (the test semantic "no obligation"). The type-level
-/// non-emptiness of `NonEmptyChainSet` rules out `Chains(empty)`, but the *behavioural* "no
+/// non-emptiness of `NonEmptyPathSet` rules out `Chains(empty)`, but the *behavioural* "no
 /// obligation" stays reachable through a chain path that can never start with a tempdir frame.
 fn no_obligation() -> ProofObligation {
     let path: Arc<Path> = Arc::from(Path::new("/__no_obligation_for_tests"));
@@ -2292,7 +2292,7 @@ fn run_worker_panic_in_probe_emits_failed_eio() {
     assert_eq!(responses.len(), 1);
     assert!(matches!(
         responses[0].outcome,
-        ProbeOutcome::Failed(ProbeFailure::Anchor { errno: libc::EIO })
+        ProbeOutcome::Failed(ProbeFailure::Denied { errno: libc::EIO })
     ));
 }
 
@@ -2315,12 +2315,12 @@ fn run_worker_panic_does_not_kill_loop() {
         assert!(req.owner() != panic_for, "simulated panic on first request");
         ProbeOutcome::Vanished
     });
-    // First panicked → Failed(Anchor{EIO}); second succeeded → Vanished. Both arrive — the worker
+    // First panicked → Failed(Denied{EIO}); second succeeded → Vanished. Both arrive — the worker
     // survived the panic.
     assert_eq!(responses.len(), 2);
     assert!(matches!(
         responses[0].outcome,
-        ProbeOutcome::Failed(ProbeFailure::Anchor { errno: libc::EIO })
+        ProbeOutcome::Failed(ProbeFailure::Denied { errno: libc::EIO })
     ));
     assert!(matches!(responses[1].outcome, ProbeOutcome::Vanished));
 }

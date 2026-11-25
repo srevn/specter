@@ -90,7 +90,7 @@ impl ProbeFailureExt for ProbeFailure {
             Some(n @ (libc::EMFILE | libc::ENFILE | libc::ENOSPC | libc::EAGAIN)) => {
                 Self::Transient { errno: n }
             }
-            other => Self::Anchor {
+            other => Self::Denied {
                 errno: other.unwrap_or(libc::EIO),
             },
         }
