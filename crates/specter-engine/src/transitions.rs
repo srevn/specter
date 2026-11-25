@@ -2267,7 +2267,7 @@ impl Engine {
     /// (pre-fire, Failed) — for both [`BurstIntent`]s. The pre-fire failure fork — the two
     /// `ProbeFailure` classes are different epistemic events and take different consequences:
     ///
-    /// - [`ProbeFailure::Denied`] — the anchor root refused the read (`EACCES` / `ELOOP` /
+    /// - [`ProbeFailure::Denied`] — the probe's root refused the read (`EACCES` / `ELOOP` /
     ///   `ENOTDIR` / `EIO`). The anchor's *identity* is in question, so release its `watch_demand`
     ///   via [`Self::finalize_anchor_lost_and_park`], **not** the descend wrapper: a read error
     ///   against an anchor that typically still exists on disk (a chmod-000 chain) would loop probe
