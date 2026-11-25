@@ -406,9 +406,9 @@ const GOLDEN_LEAF_HASH: u128 = 0x8b04_357b_6b61_4546_6947_f1f3_280d_d31b;
 /// Pins the leaf-kind decision over its two booleans. `(false, false)` is the load-bearing case: a
 /// directory `FileType` (is_file=false, is_symlink=false) maps to `Other`, never a panic or a stray
 /// kind — fifo/socket/block/char land here too. Leaf construction is never reached for a directory
-/// (the walker routes `is_dir` dirents to `build_dir_child`), so this documents the
-/// degrade-to-Other contract; the `is_dir` arm is structurally absent (the fn cannot observe it).
-/// `is_file` dominates — a regular file via `lstat` is never also a symlink.
+/// (the walker never builds a leaf for one), so this documents the degrade-to-Other contract; the
+/// `is_dir` arm is structurally absent (the fn cannot observe it). `is_file` dominates — a regular
+/// file via `lstat` is never also a symlink.
 #[test]
 fn entry_kind_from_flags_maps_every_shape() {
     use super::entry_kind_from_flags;

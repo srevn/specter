@@ -76,10 +76,10 @@ fn chains_from(set: BTreeSet<Arc<Path>>) -> ProofObligation {
 }
 
 /// Marker obligation for tests that don't exercise the proof obligation — a single non-matching
-/// chain path (outside any tempdir hierarchy) so the walker's `obligation_at_or_under` always
-/// returns `false` and mtime-skip stays allowed (the test semantic "no obligation"). The type-level
-/// non-emptiness of `NonEmptyPathSet` rules out `Chains(empty)`, but the *behavioural* "no
-/// obligation" stays reachable through a chain path that can never start with a tempdir frame.
+/// chain path (outside any tempdir hierarchy) so no chain runs through any frame and mtime-skip
+/// stays allowed (the test semantic "no obligation"). The type-level non-emptiness of
+/// `NonEmptyPathSet` rules out `Chains(empty)`, but the *behavioural* "no obligation" stays
+/// reachable through a chain path that can never start with a tempdir frame.
 fn no_obligation() -> ProofObligation {
     let path: Arc<Path> = Arc::from(Path::new("/__no_obligation_for_tests"));
     let mut set = BTreeSet::new();

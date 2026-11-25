@@ -183,9 +183,8 @@ impl LeafEntry {
     /// is derived from `meta.file_type()` (file → `File`, symlink → `Symlink`, else → `Other`).
     ///
     /// **Precondition:** `meta` is *not* a directory. There is no `is_dir` arm — a directory
-    /// `FileType` would degrade to `EntryKind::Other`. Leaf construction is never reached for a
-    /// directory by the walker's dispatch (`enumerate_dir` routes `is_dir` dirents to
-    /// `build_dir_child`); the precondition holds by caller contract and is not re-checked here.
+    /// `FileType` would degrade to `EntryKind::Other`; the precondition holds by caller contract
+    /// and is not re-checked here.
     ///
     /// `Metadata` field reads are not syscalls — consistent with `core`'s no-I/O discipline (I1).
     #[cfg(unix)]
@@ -278,9 +277,8 @@ impl LeafEntry {
 
 /// Map a `std::fs::FileType` to the leaf [`EntryKind`] the snapshot stores. **Not total over the
 /// filesystem:** there is deliberately no `is_dir` arm — a directory `FileType` falls through to
-/// `EntryKind::Other`. The contract is that leaf construction is never reached for a directory (the
-/// walker's `enumerate_dir` routes `is_dir` dirents to `build_dir_child`); callers of
-/// [`LeafEntry::from_metadata`] uphold that precondition.
+/// `EntryKind::Other`. The contract is that leaf construction is never reached for a directory;
+/// callers of [`LeafEntry::from_metadata`] uphold that precondition.
 #[cfg(unix)]
 #[must_use]
 fn entry_kind_from_file_type(ft: std::fs::FileType) -> EntryKind {
@@ -561,11 +559,8 @@ impl DirSnapshot {
     /// `Dir(Covered(_))`. Returns `None` for missing entries, for `Leaf` entries, and for the
     /// directories the snapshot holds no listing of, `Dir(Uncovered(_))` and `Dir(Denied(_))`.
     ///
-    /// Four call sites consume the covered-dir slot: the walker's recursive baseline lookup,
-    /// [`subtree_at_dir`]'s descent step, `splice_dir`'s prior-child resolution, and the engine's
-    /// pre-fire target descent. Each needs "`Dir` entry that is `Covered`" → `Arc<DirSnapshot>` as
-    /// a single named operation; this primitive collapses the `entries.get(name)` + variant match
-    /// into one call.
+    /// It matches by name alone: a walk that must know the listing is of this very directory goes
+    /// through [`PriorDir`], which matches identity too.
     #[must_use]
     pub fn lookup_covered_dir(&self, name: &str) -> Option<&Arc<Self>> {
         match self.entries.get(name)? {
