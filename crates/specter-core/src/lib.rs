@@ -43,8 +43,8 @@ pub use pattern::{PatternError, PatternSpec};
 pub use probe::ProbeSlot;
 pub use profile::{
     AbsorbMode, AbsorbWindow, ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent,
-    CeilingState, DescentRemaining, DescentState, DetachLifecycle, DirtyProvenance, PostFireBurst,
-    PostFirePhase, PreFireBurst, PreFirePhase, Profile, ProfileMap, ProfileState,
+    CeilingState, DescentRemaining, DescentState, DescentWitness, DetachLifecycle, DirtyProvenance,
+    PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, Profile, ProfileMap, ProfileState,
     ProfileStateDiscriminant, QuiescenceVerdict, QuiescenceWitness, ReapTrigger, StableReason,
     StateLabel, TimerKind, quiescence_verdict,
 };

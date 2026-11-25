@@ -22,8 +22,8 @@ use specter_core::program::SpawnBody;
 use specter_core::testkit::single_exec_program;
 use specter_core::{
     ActionProgram, ActiveBurst, AnchorClaim, ArgPart, ArgTemplate, BurstFinish, BurstIntent,
-    CeilingState, ChildEntry, ClaimKind, ClassSet, DedupKey, Diagnostic, DirChild, DirMeta,
-    DirSnapshot, DirtyProvenance, EffectCompletion, EffectOutcome, EffectScope, EntryKind,
+    CeilingState, ChildEntry, ClaimKind, ClassSet, DedupKey, DescentWitness, Diagnostic, DirChild,
+    DirMeta, DirSnapshot, DirtyProvenance, EffectCompletion, EffectOutcome, EffectScope, EntryKind,
     FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry, OverflowScope, Placeholder,
     PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeFailure, ProbeOp, ProbeOutcome,
     ProbeRequest, ProbeResponse, ProbeSlot, ProfileIdentity, ProfileState, ProofAuthority,
@@ -2991,8 +2991,9 @@ fn sensor_overflow_pending_descent_latches_and_repays() {
         pre_prefix,
         "descent position preserved across overflow",
     );
-    assert!(
-        !descent.witnessed(),
+    assert_eq!(
+        descent.witness(),
+        DescentWitness::Unobserved,
         "overflow never writes the appearance witness — dropped events prove churn \
          somewhere in scope, not that the awaited segment appeared; the in-flight \
          probe's own observations carry whatever witness is due",

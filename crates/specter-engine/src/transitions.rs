@@ -25,12 +25,12 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     AbsorbMode, ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind,
-    ClassSet, DedupKey, Denial, DescentRemaining, DetachReason, Diagnostic, Effect, EffectCommon,
-    EffectOutcome, EffectScope, FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeFailure,
-    ProbeResponse, Profile, ProfileId, ProfileState, ProofAuthority, QuiescenceVerdict,
-    QuiescenceWitness, Reaction, ResourceId, ResourceKind, StableReason, StepOutput,
-    SubAttachRequest, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot, WatchFailure,
-    quiescence_verdict,
+    ClassSet, DedupKey, Denial, DescentRemaining, DescentWitness, DetachReason, Diagnostic, Effect,
+    EffectCommon, EffectOutcome, EffectScope, FsEvent, OverflowScope, PostFirePhase, PreFirePhase,
+    ProbeFailure, ProbeResponse, Profile, ProfileId, ProfileState, ProofAuthority,
+    QuiescenceVerdict, QuiescenceWitness, Reaction, ResourceId, ResourceKind, StableReason,
+    StepOutput, SubAttachRequest, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot,
+    WatchFailure, quiescence_verdict,
 };
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -267,7 +267,7 @@ impl Engine {
         else {
             return;
         };
-        self.enter_anchor_recovery_descent(profile_id, parent, /* witnessed: */ false, out);
+        self.enter_anchor_recovery_descent(profile_id, parent, DescentWitness::Unobserved, out);
     }
 
     /// Shared single-segment descent entry for anchor recovery: the anchor's segment becomes the sole
@@ -282,7 +282,7 @@ impl Engine {
         &mut self,
         profile_id: ProfileId,
         parent: ResourceId,
-        witnessed: bool,
+        witness: DescentWitness,
         out: &mut StepOutput,
     ) {
         let Some(anchor) = self.profiles.get(profile_id).map(Profile::resource) else {
@@ -295,7 +295,7 @@ impl Engine {
         // structurally `Some`. `expect` documents the contract.
         let remaining = DescentRemaining::from_vec(vec![anchor_name])
             .expect("anchor recovery descent: single-segment remaining is non-empty");
-        self.enter_pending_descent(profile_id, parent, remaining, witnessed, out);
+        self.enter_pending_descent(profile_id, parent, remaining, witness, out);
     }
 
     /// Dispatch a [`ProbeResponse`]. Every probe — `Pending` descent, `Active(PreFire(Verifying))`,
@@ -1538,7 +1538,7 @@ impl Engine {
             self.park_profile(profile_id, ParkNarration::Operational, out);
             return;
         };
-        self.enter_anchor_recovery_descent(profile_id, parent, /* witnessed: */ true, out);
+        self.enter_anchor_recovery_descent(profile_id, parent, DescentWitness::Appeared, out);
     }
 
     /// Unhealable-loss terminal: [`Self::finalize_anchor_lost`], then park. The wrapper for the

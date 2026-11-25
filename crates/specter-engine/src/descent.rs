@@ -42,9 +42,10 @@
 //! 3. `dispatch_descent_probe` consumes the response. The responses also carry the descent's
 //!    **appearance witness**: a probe observing the awaited segment absent (or the prefix vanished)
 //!    records a standing absence observation, and a later probe finding the segment present
-//!    completes the absence→presence pair, latching `DescentState::witnessed`. Probes are the only
-//!    witness writers — a prefix event names no segment on either backend, so sibling churn at a
-//!    shared prefix can never masquerade as the anchor appearing.
+//!    completes the absence→presence pair: the descent witnessed the appearance
+//!    ([`specter_core::DescentWitness::Appeared`]). Probes are the only witness writers — a prefix
+//!    event names no segment on either backend, so sibling churn at a shared prefix can never
+//!    masquerade as the anchor appearing.
 //!    - `SegmentObserved { kind: Some(_) }`: the awaited segment exists. Is the anchor →
 //!      materialize: set its kind, transition Pending → Idle, run the tail every anchor that goes
 //!      live runs (promote to `User`, the anchor's and parent's claims, a Seed burst — cold, or
@@ -69,9 +70,9 @@ use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use crate::transitions::ParkNarration;
 use compact_str::CompactString;
 use specter_core::{
-    ClassSet, ContribKey, DescentRemaining, DescentState, Diagnostic, EntryKind, FS_ROOT_SEGMENT,
-    ProbeFailure, ProbeSlot, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
-    StepOutput, TreePath,
+    ClassSet, ContribKey, DescentRemaining, DescentState, DescentWitness, Diagnostic, EntryKind,
+    FS_ROOT_SEGMENT, ProbeFailure, ProbeSlot, ProfileId, ProfileState, ResourceId, ResourceKind,
+    ResourceRole, StepOutput, TreePath,
 };
 use std::time::Instant;
 
@@ -235,15 +236,14 @@ impl crate::Engine {
     /// `Pending`, bumps the prefix's `STRUCTURE` `watch_demand` contribution, and emits the descent
     /// probe — the four-step Idle → Pending entry sequence as a single helper.
     ///
-    /// `witnessed` is the descent's appearance-latch birth value ([`DescentState::new`]): `true`
-    /// when the entry itself was driven by an observed anchor loss (the loss signal is the absence
-    /// half of the witness; materialization supplies the presence half), `false` when no first-hand
-    /// observation vouches for the anchor having been absent — the attach-time entry (no
+    /// `witness` is the latch's birth value: [`DescentWitness::Appeared`] when the entry itself was
+    /// driven by an observed anchor loss (the loss signal is the absence half of the witness;
+    /// materialization supplies the presence half), [`DescentWitness::Unobserved`] when no
+    /// first-hand observation vouches for the anchor having been absent — the attach-time entry (no
     /// observation at all) and the event-scan recovery (whose entry event can be sibling churn at
     /// the parent, out of the Sub's scope). After entry the latch moves only on the descent's own
-    /// probe observations: an absent-then-present pair across responses latches it
-    /// ([`DescentState::note_observed_absent`] / [`DescentState::note_observed_present`]); events
-    /// never write it.
+    /// probe observations ([`DescentState::note_observed_absent`] /
+    /// [`DescentState::note_observed_present`]); events never write it.
     ///
     /// **Ordering: mint → state-flip → add_watch → emit.** The mint runs *first* so the `Pending`
     /// state is constructed with its probe slot already armed — phase-without-correlation cannot
@@ -271,7 +271,7 @@ impl crate::Engine {
         profile_id: ProfileId,
         prefix: ResourceId,
         remaining: DescentRemaining,
-        witnessed: bool,
+        witness: DescentWitness,
         out: &mut StepOutput,
     ) {
         debug_assert!(
@@ -310,7 +310,7 @@ impl crate::Engine {
                 prefix,
                 remaining,
                 ProbeSlot::armed(correlation),
-                witnessed,
+                witness,
             )),
         );
 
@@ -468,7 +468,7 @@ impl crate::Engine {
                 );
             };
             d.note_observed_absent();
-            if d.witnessed() {
+            if d.witness() == DescentWitness::Appeared {
                 out.diagnostics
                     .push(Diagnostic::PendingPathAwaitingSegment {
                         profile: owner,
@@ -604,11 +604,7 @@ impl crate::Engine {
                  at the terminus — dispatch_descent_ok proved it"
             );
         };
-        let witness = if descent.witnessed() {
-            SeedWitness::Appeared
-        } else {
-            SeedWitness::Cold
-        };
+        let witness = SeedWitness::from(descent.witness());
 
         // Through the ProfileMap chokepoint: the bundled `Pending → (Idle, classified)` write is a
         // carrier-count edge (`Pending` counted, `Idle` not) the wrapper reconciles.
@@ -912,12 +908,12 @@ impl crate::Engine {
     /// entirely outside the Sub's scope — a daemon whose attach path crosses a busy directory
     /// (`/tmp`, `/var/log`, a shared tempdir) sees such churn constantly. The appearance witness
     /// lives in the probe observations themselves ([`Self::dispatch_descent_ok`] /
-    /// [`Self::dispatch_descent_vanished`]): an absent-then-present pair latches
-    /// `DescentState::witnessed`; a response that finds every segment on first observation leaves
-    /// the terminus cold. The probe this handler triggers is how an appearance gets observed at all
-    /// — the event's only role. Overflow likewise proves events were dropped somewhere in scope,
-    /// not that the awaited segment appeared; the re-probe reads the post-overflow tree and its
-    /// observations carry whatever witness is due.
+    /// [`Self::dispatch_descent_vanished`]): an absent-then-present pair witnesses the appearance;
+    /// a response that finds every segment on first observation leaves the terminus cold. The probe
+    /// this handler triggers is how an appearance gets observed at all — the event's only role.
+    /// Overflow likewise proves events were dropped somewhere in scope, not that the awaited
+    /// segment appeared; the re-probe reads the post-overflow tree and its observations carry
+    /// whatever witness is due.
     pub(crate) fn on_descent_event(&mut self, owner: ProfileId, out: &mut StepOutput) {
         if self.try_emit_descent_probe(owner, out) {
             return;

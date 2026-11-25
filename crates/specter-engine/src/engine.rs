@@ -28,8 +28,8 @@ use specter_core::{ProfileId, ResourceId, SubId, TimerId};
 use specter_core::Tree;
 // Profile state machine.
 use specter_core::{
-    AnchorClaim, BurstFinish, DescentRemaining, DescentState, DetachLifecycle, DetachReason,
-    Profile, ProfileMap, ProfileState, ReapTrigger, TimerKind,
+    AnchorClaim, BurstFinish, DescentRemaining, DescentState, DescentWitness, DetachLifecycle,
+    DetachReason, Profile, ProfileMap, ProfileState, ReapTrigger, TimerKind,
 };
 // Registries.
 use specter_core::{
@@ -280,11 +280,15 @@ impl Engine {
                 AnchorResolution::Pending {
                     prefix, remaining, ..
                 } => {
-                    // Unwitnessed: a terminus whose segments were all present on first observation
-                    // pins silently (attach-over-existing must not fire), while an appearance after
-                    // the attach is witnessed by the probes themselves — an absence, then a presence.
+                    // A terminus whose segments were all present on first observation pins silently
+                    // (attach-over-existing must not fire), while an appearance after the attach is
+                    // witnessed by the probes themselves — an absence, then a presence.
                     self.enter_pending_descent(
-                        profile_id, prefix, remaining, /* witnessed: */ false, out,
+                        profile_id,
+                        prefix,
+                        remaining,
+                        DescentWitness::Unobserved,
+                        out,
                     );
                 }
             },
@@ -1046,7 +1050,7 @@ enum Join {
 /// Whether a live observation of the anchor's *own appearance* stands behind the anchor going live
 /// — the parameter of the anchor-materialisation tail ([`Engine::seed_at_anchor`]). An attach never
 /// has one (`Cold`); a mint reads it off its [`MintEntry`]; a descent's terminus off its
-/// witnessed-activity latch.
+/// [`DescentWitness`].
 ///
 /// Deliberately engine-internal, **not** a [`SubAttachRequest`] field: the request crosses channels
 /// (config load, hot reload, IPC), and a fire-owing witness must not be claimable from the wire.
@@ -1064,6 +1068,17 @@ impl From<MintEntry> for SeedWitness {
         match entry {
             MintEntry::Enumerated => Self::Cold,
             MintEntry::Appeared => Self::Appeared,
+        }
+    }
+}
+
+impl From<DescentWitness> for SeedWitness {
+    /// A descent saw its anchor appear only if it saw it absent first; an absence the terminus
+    /// never followed with a presence is no appearance.
+    fn from(witness: DescentWitness) -> Self {
+        match witness {
+            DescentWitness::Appeared => Self::Appeared,
+            DescentWitness::Unobserved | DescentWitness::Absent => Self::Cold,
         }
     }
 }
