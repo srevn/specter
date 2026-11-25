@@ -574,13 +574,16 @@ impl crate::Engine {
     ///    silently, the restart-safe doctrine.
     /// 2. Transition the Profile via [`specter_core::Profile::materialize_anchor`] — atomic `Pending
     ///    → Idle`, kind pin.
-    /// 3. Release the descent's prefix claim. Its place relative to the flip is free: a
-    ///    contribution is attributed by its explicit [`ContribKey`], never by reading
-    ///    `Profile.state`.
-    /// 4. Narrate [`Diagnostic::PendingPathMaterialized`] before the Seed, so the stream reads
+    /// 3. Narrate [`Diagnostic::PendingPathMaterialized`] before the Seed, so the stream reads
     ///    recovery-complete → baseline-established in order.
-    /// 5. Seed at the anchor ([`Self::seed_at_anchor`]): its claim and its parent's, then the Seed —
+    /// 4. Seed at the anchor ([`Self::seed_at_anchor`]): its claim and its parent's, then the Seed —
     ///    the tail an immediate attach runs too.
+    /// 5. Release the descent's prefix claim, last. At the terminus the prefix is the anchor's
+    ///    parent, so the parent claim the tail just installed takes the slot over before the
+    ///    descent lets go — make before break: the slot's contributions go `{descent} → {descent,
+    ///    parent} → {parent}`, and its kernel watch is neither closed and reopened nor narrowed and
+    ///    widened. The release reads no Profile state (a contribution is attributed by its explicit
+    ///    [`ContribKey`]), so its place after the Seed has started is free.
     fn materialize_profile_anchor(
         &mut self,
         profile_id: ProfileId,
@@ -620,13 +623,6 @@ impl crate::Engine {
             "descent anchor materialization: Profile.resource diverges from descent anchor",
         );
 
-        sub_watch(
-            &mut self.tree,
-            prefix,
-            ContribKey::ProfileDescent(profile_id),
-            out,
-        );
-
         // The terminus is the descent lifecycle's single positive narration: the awaited anchor is
         // now live and the Profile is leaving Pending. Unconditional across all three descent
         // entries (attach / observed-loss / park recovery) — an unwitnessed cold descent pins its
@@ -637,6 +633,13 @@ impl crate::Engine {
         });
 
         self.seed_at_anchor(profile_id, witness, now, out);
+
+        sub_watch(
+            &mut self.tree,
+            prefix,
+            ContribKey::ProfileDescent(profile_id),
+            out,
+        );
     }
 
     /// **Rewind chain depth.** A `Vanished` response on a rewound prefix triggers a further rewind
@@ -947,10 +950,10 @@ mod tests {
     use compact_str::CompactString;
     use specter_core::testkit::single_exec_program;
     use specter_core::{
-        ActionProgram, AnchorClaim, ClassSet, Diagnostic, EffectScope, EntryKind, FS_ROOT_SEGMENT,
-        Input, ProbeFailure, ProbeOp, ProbeOutcome, ProbeRequest, ProbeResponse, ProfileIdentity,
-        ReapTrigger, ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor,
-        SubAttachRequest,
+        ActionProgram, AnchorClaim, ClassSet, ContribKey, Diagnostic, EffectScope, EntryKind,
+        FS_ROOT_SEGMENT, Input, ProbeFailure, ProbeOp, ProbeOutcome, ProbeRequest, ProbeResponse,
+        ProfileIdentity, ReapTrigger, ResourceId, ResourceKind, ResourceRole, ScanConfig,
+        SubAttachAnchor, SubAttachRequest,
     };
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -1063,6 +1066,45 @@ mod tests {
             )),
             "descent terminus emits PendingPathMaterialized for the live anchor: {:?}",
             out.diagnostics,
+        );
+        let _ = e.cancel_all_in_flight_probes();
+    }
+
+    /// At a descent's terminus the prefix is the anchor's parent, and the parent claim takes the
+    /// slot over before the descent's claim lets go: no watch op reaches the parent — its kernel
+    /// watch is neither closed and reopened nor re-registered — and the parent claim alone holds
+    /// it afterwards.
+    #[test]
+    fn terminus_hands_the_parent_slot_over_without_a_watch_op() {
+        let (mut e, _sid, pid) = setup_pending_one_level();
+        let foo = lookup_foo(&e);
+        let correlation = e.pending_probe_for(pid).expect("descent probe in flight");
+        let out = e.step(
+            Input::ProbeResponse(ProbeResponse {
+                owner: pid,
+                correlation,
+                outcome: ProbeOutcome::SegmentObserved {
+                    kind: Some(EntryKind::Dir),
+                },
+            }),
+            Instant::now(),
+        );
+
+        assert!(
+            out.watch_ops.iter().all(|op| op.resource() != foo),
+            "the parent's watch is handed over, not reopened: {:?}",
+            out.watch_ops,
+        );
+        assert_eq!(
+            e.tree()
+                .get(foo)
+                .expect("parent live")
+                .contributions()
+                .keys()
+                .copied()
+                .collect::<Vec<_>>(),
+            vec![ContribKey::ProfileParent(pid)],
+            "the parent claim alone holds the slot",
         );
         let _ = e.cancel_all_in_flight_probes();
     }
