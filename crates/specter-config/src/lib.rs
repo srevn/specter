@@ -23,7 +23,7 @@ pub use cli::{
     AbsorbArgs, Cli, ClientArgs, ColorWhen, Command, DaemonArgs, ListArgs, NameTargetArgs,
     OutputFormat, ShowArgs, StatusArgs, TailArgs, WaitArgs, WaitKind,
 };
-pub use config::{Config, LogConfig, LogDestination, LogLevel, SubSpec, TemplateSpec};
+pub use config::{Config, LogConfig, LogDestination, LogLevel, SubSpec, WatchTarget};
 pub use diff::diff;
 pub use duration::DisplayDuration;
 pub use error::{ConfigError, IssueKind, ValidationIssue};

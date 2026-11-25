@@ -160,11 +160,7 @@ pub fn run(args: DaemonArgs) -> ExitCode {
         destination = ?log_cfg.destination,
         path = ?log_cfg.path.as_ref().map(|p| p.display().to_string()),
         watches = initial_config.watches.len(),
-        discovery = initial_config
-            .watches
-            .iter()
-            .filter(|s| s.template.is_some())
-            .count(),
+        discovery = initial_config.dynamic_count(),
         ?disabled_watches,
         config = %config.display(),
         "specter starting"

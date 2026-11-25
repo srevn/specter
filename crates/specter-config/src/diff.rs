@@ -9,8 +9,7 @@ use std::collections::BTreeMap;
 /// **name-keyed**: `removed` carries operator names; `added` / `modified_*` carry pre-id requests
 /// whose name lives inside the request. The engine resolves name → id at apply time through its own
 /// authoritative `by_name` index — identity resolution is a registry-owner operation, not the
-/// loader's. Dynamic `[[watch]]` blocks ride the same buckets: a discovery spec is a
-/// template-bearing [`SubSpec`] in the one [`Config::watches`] list.
+/// loader's. Dynamic `[[watch]]` blocks ride the same buckets.
 ///
 /// Filters both sides through [`Config::active_watches`] before the name-keyed comparison: a
 /// disabled entry on either side is structurally equivalent to "absent." Flipping `enabled = true →
@@ -20,14 +19,13 @@ use std::collections::BTreeMap;
 ///
 /// Modified entries are partitioned by `SubSpec::requires_new_profile`:
 ///
-/// - **`modified_identity`** — path / scan / max_settle / events differ, **or either spec is
-///   template-bearing**: any field change on a discovery spec is a wholesale replace (minted Subs
-///   hold `Arc`s of the template Sub's program — an in-place rebind would strand them), and a path
-///   edit across the `is_dynamic` boundary flips template presence, landing here too. The engine
-///   validates the new anchor's parse, then runs `detach_old → attach_new`.
+/// - **`modified_identity`** — the target / scan / max_settle / events differ, **or the watch is
+///   dynamic**: any edit of a dynamic watch is a wholesale replace, and a path edit across the
+///   `is_dynamic` boundary changes the target's kind. The engine validates the new anchor's parse,
+///   then runs `detach_old → attach_new`.
 /// - **`modified_params`** — only per-Sub fields differ (`program`, `scope`, `settle`,
-///   `log_output`) on a template-free pair. The engine rebinds the live Sub in place; no Profile
-///   churn, no kernel-watch flap, no baseline loss.
+///   `log_output`) on a static watch. The engine rebinds the live Sub in place; no Profile churn,
+///   no kernel-watch flap, no baseline loss.
 ///
 /// The partition is exhaustive and disjoint: every modified entry lands in exactly one bucket.
 ///
@@ -491,8 +489,8 @@ mod tests {
         assert_eq!(d.modified_identity.len(), 1);
     }
 
-    /// Identical dynamic blocks yield no diff — `PatternSpec` equality routes through `source` and
-    /// `TemplateSpec` is structural, so re-parsing the same TOML is diff-invisible.
+    /// Identical dynamic blocks yield no diff — `PatternSpec` equality routes through `source`, so
+    /// re-parsing the same TOML is diff-invisible.
     #[test]
     fn discovery_identical_configs_yield_empty_diff() {
         let blocks = [dyn_block("logs", "/srv/log/*", "echo")];

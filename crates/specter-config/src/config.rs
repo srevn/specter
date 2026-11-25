@@ -55,12 +55,7 @@ const MAX_CONDITIONAL_DEPTH: u8 = 32;
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct Config {
     pub log: LogConfig,
-    /// Every `[[watch]]` block, in source order. Each entry maps to one [`SubSpec`] and is attached
-    /// as a Sub by the bin's initial-attach pass. The static/dynamic dispatch happens on `path`
-    /// ([`PatternSpec::is_dynamic`]): a glob-bearing path lowers to a discovery Sub — a
-    /// template-bearing [`SubSpec`] whose Profile walks the pattern's match chain and mints one
-    /// dynamic Sub per match — while a literal path lowers to a plain static [`SubSpec`]. One list,
-    /// one attach pipeline; the kind difference is carried by [`SubSpec::template`].
+    /// Every `[[watch]]` block, in source order, static and dynamic alike ([`SubSpec::target`]).
     pub watches: Vec<SubSpec>,
 }
 
@@ -163,144 +158,97 @@ pub enum LogDestination {
     File,
 }
 
+/// What a `[[watch]]`'s `path` names. A glob discriminator in it ([`PatternSpec::is_dynamic`])
+/// makes it a pattern; anything else is a literal path.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub enum WatchTarget {
+    /// A literal path, canonicalised leniently: on disk yet or not.
+    Static(PathBuf),
+    /// A pattern, its literal prefix canonicalised: each of its matches is an anchor. One parsed
+    /// pattern travels from here into the identity of the Profile that walks its chain.
+    Dynamic(Arc<PatternSpec>),
+}
+
+/// One validated `[[watch]]` block.
+///
+/// A static and a dynamic watch differ in their [`Self::target`] and in nothing else: every other
+/// field holds of the Sub at a static path and of each Sub a dynamic watch mints alike.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SubSpec {
     pub name: CompactString,
-    pub path: PathBuf,
-    /// Lowered bytecode IR. Built once at config validation; cloned by Arc into each
-    /// [`SubAttachRequest`] (and from there into every emitted `Effect`). Equality is structural
-    /// over the instruction sequence — two TOML configs that lower to the same program compare
-    /// equal, so the hot-reload diff suppresses no-op churn on cosmetic edits (whitespace, comment,
-    /// key ordering).
+    pub target: WatchTarget,
+    /// Lowered bytecode IR, built once at validation. Equality is structural over the instruction
+    /// sequence, so a cosmetic edit of the TOML — whitespace, a comment, key order — is no reload.
     pub program: Arc<ActionProgram>,
     pub scope: EffectScope,
-    pub settle: Duration,
-    pub max_settle: Duration,
-    pub scan: ScanConfig,
-    /// User-declared event-class mask. Materialized by `validate_watch` — explicit when the TOML
-    /// carries an `events` array, otherwise the scope-conditional default
-    /// ([`ClassSet::DEFAULT_SUBTREE_ROOT`] for `subtree-root`, [`ClassSet::DEFAULT_PER_FILE`] for
-    /// `per-stable-file`). Folded into the Profile's `config_hash` by the engine —
-    /// `PartialEq`-derived diffs ensure a hot-reload flip on this field reaps the old Profile and
-    /// attaches a fresh one.
-    pub events: ClassSet,
-    /// Forward subprocess stdout/stderr to Specter's own stdio. False by default — children run with
-    /// `Stdio::null()`. When true, the actuator uses `Stdio::inherit()` and the supervisor's log
-    /// facility (systemd journal, launchd `StandardOutPath`, FreeBSD `daemon -o`) captures the bytes.
-    /// Engine threads this through `SubAttachRequest` → `Sub.log_output` → `Effect.capture_output`.
+    /// Forward subprocess stdout/stderr to Specter's own stdio; `false`, the default, sends it to
+    /// `/dev/null`.
     pub log_output: bool,
-    /// Operator-controlled suppression flag. `true` (TOML default) ⇒ the entry is effective;
-    /// `false` ⇒ structurally equivalent to "absent from the config." Disabled entries flow through
-    /// parsing and validation unchanged (so typos surface at config load, not silently at re-enable
-    /// time) but are filtered out of every runtime view by [`Config::active_watches`]. The engine
-    /// never learns about disabled entries — every transition (initial attach, hot-reload diff,
-    /// drain-window derivation) consumes the filtered iterator.
-    ///
-    /// Included in [`PartialEq`] so two specs differing only on this field compare unequal. The
-    /// diff layer's filter strips disabled entries *before* the equality check, so this matters
-    /// only for future consumers that compare unfiltered specs.
-    ///
-    /// **Cost of a disable → re-enable cycle.** Because the diff surfaces a `false → true` flip as
-    /// `subs.added` (and the reverse as `subs.removed`), every disable/re-enable cycle reaps the
-    /// Sub's Profile (its last live Sub left) and mints a fresh Profile on re-enable. The fresh
-    /// Profile has no baseline, so changes that landed on the tree *during* the disabled window are
-    /// folded into the first post-re-enable Seed rather than surfacing as a fire. Operators relying
-    /// on baseline continuity across reconfiguration should avoid the disable/re-enable pattern for
-    /// transient toggles; a future "suspend, don't reap" path is the deeper fix. For a discovery
-    /// Sub the same cycle additionally reaps the minted set (the detach cascade) and re-mints fresh
-    /// `SubId`s on the first post-re-enable reconcile.
-    pub enabled: bool,
-    /// `Some` ⇒ this spec is a discovery Sub lowered from a dynamic `[[watch]]` block: `scan` is
-    /// `MatchChain`, `path` is the pattern's canonicalised literal prefix, `settle`/`max_settle`/
-    /// `events` are the discovery constants, and every user knob lives here instead — the identity
-    /// the minted Subs' Profiles run under. `None` for static watches.
-    pub template: Option<TemplateSpec>,
-}
-
-/// The user's knobs of a dynamic `[[watch]]` block.
-///
-/// Everything here is what the minted Subs (not the discovery Sub itself) run under, lowered
-/// verbatim into a [`specter_core::MintSpec`] by [`SubSpec::to_attach_request`].
-///
-/// Config-side mirror rather than `MintSpec` directly: `MintSpec`/`ProfileIdentity` deliberately
-/// carry no `Eq` (the hash is the engine's only identity comparison), while the diff layer compares
-/// *specs* structurally — its existing discipline. The mirror keeps that discipline without weakening
-/// the core types, and keeps the sealed `SpawnSpec` / eager identity hash out of the `Eq` derive (the
-/// spec's flat `program`/`scope`/`log_output` already carry the same information for comparison).
-#[derive(Debug, Clone, Eq, PartialEq)]
-pub struct TemplateSpec {
-    /// Minted Profiles' scan — the `Subtree` built from the block's `recursive` / `hidden` /
-    /// `max_depth` / `pattern` / `exclude` knobs.
-    pub scan: ScanConfig,
-    /// Minted Profiles' event-class mask (the block's `events`, or its scope-conditional default).
-    pub events: ClassSet,
-    /// Minted Subs' debounce (the block's `settle`).
     pub settle: Duration,
-    /// Minted Profiles' forced-fire ceiling (the block's `max_settle`). Validated against `settle`
-    /// by `validate_settle` on the raw fields — the user pair keeps today's meaning exactly.
+    pub scan: ScanConfig,
+    /// The event-class mask: the TOML's `events`, or the scope's default
+    /// ([`ClassSet::DEFAULT_SUBTREE_ROOT`], [`ClassSet::DEFAULT_PER_FILE`]).
+    pub events: ClassSet,
     pub max_settle: Duration,
+    /// `false` ⇒ the entry is absent from every runtime view ([`Config::active_watches`]); it is
+    /// still validated, so a typo surfaces at load and not at re-enable. Disabling and re-enabling
+    /// is a remove and an add: the Profile is reaped and its successor starts with no baseline, so
+    /// what changed in between folds into its first Seed instead of firing, and a dynamic watch
+    /// mints its set anew under fresh ids.
+    pub enabled: bool,
 }
 
 impl SubSpec {
+    /// The request this watch attaches through: a Sub at a static path, or a template anchored at a
+    /// pattern's literal prefix, whose Profile walks the pattern's chain at the discovery pair and
+    /// which mints one Sub per match under this spec's identity and params.
     #[must_use]
     pub fn to_attach_request(&self) -> SubAttachRequest {
-        // The spec's flat program/scope/log_output seal into one SpawnSpec either way; the template
-        // fork decides whose reaction it is — the Sub's own (static) or the minted Subs' (the
-        // discovery Sub itself spawns nothing).
         let spawn = SpawnSpec::new(Arc::clone(&self.program), self.scope, self.log_output);
-        SubAttachRequest::from_parts(
-            SubAttachAnchor::Path(self.path.clone()),
-            ProfileIdentity::new(self.scan.clone(), self.max_settle, self.events),
-            SubParams {
-                name: self.name.clone(),
-                settle: self.settle,
-                reaction: match &self.template {
-                    // The projection adds nothing: the template's knobs land in the MintSpec
-                    // verbatim, so the minted Profiles' identity hash equals one hand-built over
-                    // the same user fields.
-                    Some(t) => ReactionSpec::Mint(Arc::new(MintSpec {
-                        identity: ProfileIdentity::new(t.scan.clone(), t.max_settle, t.events),
-                        settle: t.settle,
+        let firing = ProfileIdentity::new(self.scan.clone(), self.max_settle, self.events);
+        match &self.target {
+            WatchTarget::Static(path) => SubAttachRequest::from_parts(
+                SubAttachAnchor::Path(path.clone()),
+                firing,
+                SubParams {
+                    name: self.name.clone(),
+                    settle: self.settle,
+                    reaction: ReactionSpec::Spawn(spawn),
+                },
+            ),
+            WatchTarget::Dynamic(pattern) => SubAttachRequest::from_parts(
+                SubAttachAnchor::Path(pattern.literal_prefix_path()),
+                ProfileIdentity::new(
+                    ScanConfig::MatchChain(Arc::clone(pattern)),
+                    DISCOVERY_MAX_SETTLE,
+                    ClassSet::STRUCTURE,
+                ),
+                SubParams {
+                    name: self.name.clone(),
+                    settle: DISCOVERY_SETTLE,
+                    reaction: ReactionSpec::Mint(Arc::new(MintSpec {
+                        identity: firing,
+                        settle: self.settle,
                         spawn,
                     })),
-                    None => ReactionSpec::Spawn(spawn),
                 },
-            },
-        )
+            ),
+        }
     }
 
-    /// True iff changing the live attachment from `self` to `other` would require a different
-    /// Profile partition — the discriminator behind hot-reload's `modified_identity` vs
-    /// `modified_params` split.
+    /// True iff the edit from `self` to `other` moves the watch to another Profile: its target, or
+    /// one of the three axes a firing Profile's identity folds. What is left — `program`, `scope`,
+    /// `log_output`, `settle` — rebinds in place; `name` is the diff's key and `enabled` its
+    /// filter, so neither reaches here. Field-derived, so no [`ProfileIdentity`] is built to be
+    /// compared and dropped.
     ///
-    /// The engine partitions Profiles on `(anchor_resource, ProfileIdentity::config_hash())`. Four
-    /// `SubSpec` fields fold into that key: `path` resolves into the anchor resource; `scan`,
-    /// `max_settle`, and `events` fold into the hash via `ProfileIdentity::config_hash`. Any
-    /// difference on these forces the Sub onto a different Profile and routes the entry into
-    /// `modified_identity`.
-    ///
-    /// The remaining `SubSpec` fields — `program`, `scope`, `settle`, `log_output` — live on
-    /// `SubParams` and rebind in place; they do not partition the Profile. The `name` field is the
-    /// diff key (two specs differing on `name` are distinct entries, not a modification) and
-    /// `enabled` is filtered out before the diff runs (an enabled-flip surfaces as added/removed,
-    /// not modified).
-    ///
-    /// Field-derived, not hash-derived: comparing fields directly is allocation-free and avoids
-    /// constructing a [`ProfileIdentity`] only to compare and discard.
-    ///
-    /// **Template-bearing pairs always classify identity.** The diff only consults this on unequal
-    /// specs, so the head guard reads: *any* field change on a discovery spec — including
-    /// `program`/`scope`/`log_output`, the params-class fields — is a wholesale replace, never an
-    /// in-place rebind. Minted Subs hold `Arc`s of the template Sub's program; a rebind would
-    /// strand them on the old program (the registry's both-`None` rebind assertion is the
-    /// engine-side backstop). Static↔dynamic path edits fall out of the same guard: template
-    /// presence differs across the pair.
+    /// Every edit of a dynamic watch is identity: the registry's rebind refuses a template
+    /// ([`specter_core::SubRegistry::rebind`]), so a params edit replaces the template and the set
+    /// it minted.
     #[must_use]
     pub(crate) fn requires_new_profile(&self, other: &Self) -> bool {
-        if self.template.is_some() || other.template.is_some() {
-            return true;
-        }
-        self.path != other.path
+        matches!(self.target, WatchTarget::Dynamic(_))
+            || self.target != other.target
             || self.scan != other.scan
             || self.max_settle != other.max_settle
             || self.events != other.events
@@ -360,6 +308,15 @@ impl Config {
         self.active_watches().find(|s| s.name == name)
     }
 
+    /// How many entries are dynamic, disabled ones included.
+    #[must_use]
+    pub fn dynamic_count(&self) -> usize {
+        self.watches
+            .iter()
+            .filter(|s| matches!(s.target, WatchTarget::Dynamic(_)))
+            .count()
+    }
+
     /// Names of every operator-suppressed entry — the complement of [`Self::active_watches`]
     /// flattened to the names the runtime needs for tracing, in source order. Sole consumers are
     /// the startup-info log and the per-load `"config loaded"` summary — both want the same
@@ -381,12 +338,11 @@ impl Config {
     /// Pure: no filesystem access — dynamic prefixes canonicalise at lowering (like static paths),
     /// so anchor divergence is structurally impossible and there is nothing here to resolve.
     ///
-    /// One kind today, [`IssueKind::EventsIncompleteMask`]: the watch's effective event mask
-    /// (static `events`, or the dynamic template's) cannot witness its scan shape's quiescence
-    /// classes, so every fire is proven by the hash channel — at least two consecutive agreeing
-    /// full subtree walks at the anchor, mtime-skip disabled. A supported, deliberately expensive
-    /// configuration (the safety net for writers the kernel may not surface as events); the warning
-    /// makes the cost visible.
+    /// One kind today, [`IssueKind::EventsIncompleteMask`]: the watch's event mask cannot witness
+    /// its scan shape's quiescence classes, so every fire is proven by the hash channel — at least
+    /// two consecutive agreeing full subtree walks at the anchor, mtime-skip disabled. A supported,
+    /// deliberately expensive configuration (the safety net for writers the kernel may not surface
+    /// as events); the warning makes the cost visible.
     ///
     /// Disabled entries warn too, mirroring the validator's discipline: hazards surface at config
     /// load, not at re-enable time.
@@ -394,14 +350,7 @@ impl Config {
     pub fn warnings(&self) -> Vec<ValidationIssue> {
         let mut found = Vec::new();
         for (i, spec) in self.watches.iter().enumerate() {
-            // The identity the watch's firing Profiles actually run under: a static entry's own
-            // (scan, events); a dynamic entry's template pair (the discovery Sub itself carries the
-            // STRUCTURE constant, which always witnesses its MatchChain shape).
-            let (scan, events) = match &spec.template {
-                Some(t) => (&t.scan, t.events),
-                None => (&spec.scan, spec.events),
-            };
-            if !events.contains(scan.quiescence_witness_classes()) {
+            if !spec.events.contains(spec.scan.quiescence_witness_classes()) {
                 found.push(ValidationIssue::new(
                     Some(i),
                     "events",
@@ -487,14 +436,14 @@ impl std::str::FromStr for Config {
 /// `disabled_watches` carries the names of entries the operator suppressed via `enabled = false`.
 /// The macro renders an empty `Vec` as `[]` — accept the noise for the all-enabled case rather than
 /// branching the format string. Operators triaging "why isn't watch X firing?" can grep the log for
-/// the watch's name in the disabled list rather than re-reading the TOML. `discovery` is the
-/// template-bearing subset of `watches` — the operator's "how many patterns" view.
+/// the watch's name in the disabled list rather than re-reading the TOML. `discovery` counts the
+/// dynamic entries — the operator's "how many patterns" view.
 fn log_config_loaded(cfg: &Config, path: &Path) {
     let disabled_watches = cfg.disabled_names();
     tracing::info!(
         path = %path.display(),
         watches = cfg.watches.len(),
-        discovery = cfg.watches.iter().filter(|s| s.template.is_some()).count(),
+        discovery = cfg.dynamic_count(),
         ?disabled_watches,
         "config loaded",
     );
@@ -527,16 +476,7 @@ fn validate(raw: &RawConfig, path: Option<&Path>) -> Result<Config, ConfigError>
             seen_names.insert(raw_w.name.as_str(), i);
         }
 
-        // Auto-detect: any of `*?[{` in `path` routes the entry to the dynamic validator. The
-        // dispatcher is the contract — neither validator second-guesses it on the well-trodden
-        // path. Both kinds lower to a SubSpec in the one source-ordered list; the dynamic one is
-        // template-bearing.
-        let validated = if PatternSpec::is_dynamic(&raw_w.path) {
-            validate_dynamic_watch(i, raw_w)
-        } else {
-            validate_static_watch(i, raw_w)
-        };
-        match validated {
+        match validate_watch(i, raw_w) {
             Ok(spec) => watches.push(spec),
             Err(mut errs) => errors.append(&mut errs),
         }
@@ -1325,102 +1265,26 @@ fn validate_depth(
     }
 }
 
-/// Per-attachment fields shared between static and dynamic `[[watch]]` blocks. Everything in this
-/// struct is independent of the path-vs-pattern dispatch: the same operator-supplied knobs (`name`,
-/// `actions`, `scope`, `settle`, etc.) carry the same meaning for both kinds of watch and run through
-/// the same validators. Materialised once by [`validate_watch_attachment`]; the two thin wrappers
-/// ([`validate_static_watch`] / [`validate_dynamic_watch`]) consume it via the `into_*_spec`
-/// projections after resolving their kind-specific anchor — the dynamic projection re-homes the user
-/// knobs onto the [`TemplateSpec`] and pins the Sub's own identity to the discovery constants.
-struct WatchAttachmentFields {
-    name: CompactString,
-    program: Arc<ActionProgram>,
-    scope: EffectScope,
-    settle: Duration,
-    max_settle: Duration,
-    scan: ScanConfig,
-    events: ClassSet,
-    log_output: bool,
-    enabled: bool,
-}
-
-impl WatchAttachmentFields {
-    /// Move the validated common fields plus a resolved static anchor into a [`SubSpec`]. Cannot
-    /// fail — both inputs are already validated by construction.
-    fn into_sub_spec(self, path: PathBuf) -> SubSpec {
-        SubSpec {
-            name: self.name,
-            path,
-            program: self.program,
-            scope: self.scope,
-            settle: self.settle,
-            max_settle: self.max_settle,
-            scan: self.scan,
-            events: self.events,
-            log_output: self.log_output,
-            enabled: self.enabled,
-            template: None,
-        }
-    }
-
-    /// Move the validated common fields plus a parsed dynamic pattern into a discovery [`SubSpec`].
-    /// Mirror of [`Self::into_sub_spec`] for the dynamic dispatch.
-    ///
-    /// The discovery Sub's *own* identity is pinned to constants — `MatchChain` scan, `STRUCTURE`
-    /// events (membership changes are the chain proof object's only witness classes, and dir-only
-    /// chain FDs follow from the mask), [`DISCOVERY_SETTLE`] / [`DISCOVERY_MAX_SETTLE`] — so one
-    /// pattern always maps to one discovery Profile. Every user knob moves into the
-    /// [`TemplateSpec`]: the `[[watch]]` surface keeps its meaning (`settle` debounces the
-    /// *reaction*, i.e. the minted Subs). `program` / `scope` / `log_output` stay on the spec's
-    /// flat fields — `to_attach_request` seals them into the template's `SpawnSpec`, the minted
-    /// Subs' reaction (the discovery Sub itself spawns nothing).
-    ///
-    /// The anchor is the pattern's **canonicalised** literal prefix — symlink-resolved at lowering
-    /// by [`validate_dynamic_pattern`], like every other watched path. Matching is positional
-    /// ([`PatternSpec::matches_at`] reads only the glob tail, never the prefix), so
-    /// canonicalisation sites the anchor where the kernel's `O_NOFOLLOW` watch opens succeed
-    /// without changing which termini match; the identity hash folds the canonical `source`, so
-    /// anchor and identity stay consistent. `pattern` arrives already re-anchored —
-    /// `pattern.literal_prefix_path()` is the canonical path and the sole source of the anchor.
-    fn into_discovery_spec(self, pattern: PatternSpec) -> SubSpec {
-        SubSpec {
-            name: self.name,
-            path: pattern.literal_prefix_path(),
-            program: self.program,
-            scope: self.scope,
-            settle: DISCOVERY_SETTLE,
-            max_settle: DISCOVERY_MAX_SETTLE,
-            scan: ScanConfig::MatchChain(Arc::new(pattern)),
-            events: ClassSet::STRUCTURE,
-            log_output: self.log_output,
-            enabled: self.enabled,
-            template: Some(TemplateSpec {
-                scan: self.scan,
-                events: self.events,
-                settle: self.settle,
-                max_settle: self.max_settle,
-            }),
-        }
+/// Validate a `[[watch]]`'s `path` into its target: a glob discriminator (`*?[{`) makes it a
+/// pattern, and then only the pattern's validator reads it.
+fn validate_target(idx: usize, raw_path: &str) -> Result<WatchTarget, ValidationIssue> {
+    if PatternSpec::is_dynamic(raw_path) {
+        validate_dynamic_pattern(idx, raw_path)
+            .map(|pattern| WatchTarget::Dynamic(Arc::new(pattern)))
+    } else {
+        validate_static_path(idx, raw_path).map(WatchTarget::Static)
     }
 }
 
-/// Validate the [`RawWatch`] fields that don't depend on the static/dynamic dispatch. Returns
-/// `Ok(WatchAttachmentFields)` when every sub-validator succeeds, `Err(Vec<ValidationIssue>)`
-/// accumulating every per-field failure.
+/// Validate one `[[watch]]` block, accumulating every field's failure: the path's first, then the
+/// rest in field order.
 ///
 /// **Scope → events ordering** is load-bearing: [`parse_events_field`] reads scope to pick the
 /// scope-conditional default ([`ClassSet`]), so `validate_scope` must run first. On a scope failure
 /// the events parser falls back to the default scope ([`EffectScope::default`]) to keep a phantom
 /// events error from cascading — the scope error already surfaces from `scope_r`.
-///
-/// Single source of validation for the common fields: the two thin wrappers
-/// ([`validate_static_watch`] / [`validate_dynamic_watch`]) call this and then prepend their
-/// kind-specific anchor (path / pattern). The only differences across the two dispatch paths (anchor
-/// resolution and output type) live in the wrappers; this helper is path-agnostic by construction.
-fn validate_watch_attachment(
-    idx: usize,
-    raw: &RawWatch,
-) -> Result<WatchAttachmentFields, Vec<ValidationIssue>> {
+fn validate_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
+    let target_r = validate_target(idx, &raw.path);
     let name_r = validate_name(idx, &raw.name);
     let program_r = validate_actions(idx, &raw.actions);
     let scope_r = validate_scope(idx, raw.scope.as_deref());
@@ -1432,91 +1296,38 @@ fn validate_watch_attachment(
         idx,
     );
 
-    match (name_r, program_r, scope_r, settle_r, scan_r, events_r) {
-        (Ok(()), Ok(program), Ok(scope), Ok((settle, max_settle)), Ok(scan), Ok(events)) => {
-            Ok(WatchAttachmentFields {
-                name: CompactString::new(&raw.name),
-                program,
-                scope,
-                settle,
-                max_settle,
-                scan,
-                events,
-                log_output: raw.log_output,
-                enabled: raw.enabled,
-            })
-        }
-        (name_r, program_r, scope_r, settle_r, scan_r, events_r) => {
+    match (
+        target_r, name_r, program_r, scope_r, settle_r, scan_r, events_r,
+    ) {
+        (
+            Ok(target),
+            Ok(()),
+            Ok(program),
+            Ok(scope),
+            Ok((settle, max_settle)),
+            Ok(scan),
+            Ok(events),
+        ) => Ok(SubSpec {
+            name: CompactString::new(&raw.name),
+            target,
+            program,
+            scope,
+            log_output: raw.log_output,
+            settle,
+            scan,
+            events,
+            max_settle,
+            enabled: raw.enabled,
+        }),
+        (target_r, name_r, program_r, scope_r, settle_r, scan_r, events_r) => {
             let mut errors: Vec<ValidationIssue> = Vec::new();
-            if let Err(e) = name_r {
-                errors.push(e);
-            }
-            if let Err(es) = program_r {
-                errors.extend(es);
-            }
-            if let Err(e) = scope_r {
-                errors.push(e);
-            }
-            if let Err(es) = settle_r {
-                errors.extend(es);
-            }
-            if let Err(es) = scan_r {
-                errors.extend(es);
-            }
-            if let Err(es) = events_r {
-                errors.extend(es);
-            }
-            Err(errors)
-        }
-    }
-}
-
-/// Validator for `[[watch]]` blocks whose `path` carries no glob discriminator characters (`*?[{`)
-/// — pure-literal anchors. The dispatcher in [`validate`] gates on [`PatternSpec::is_dynamic`]
-/// before invoking this, so a glob-bearing path cannot reach here.
-///
-/// Thin composition: resolve the static anchor and the common attachment fields independently, then
-/// either project a [`SubSpec`] from both Oks or accumulate every failure across both halves.
-/// Cross-half error fan-in is preserved — a path failure does not short-circuit the attachment-side
-/// issues, and vice versa.
-fn validate_static_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
-    let path_r = validate_static_path(idx, &raw.path);
-    let fields_r = validate_watch_attachment(idx, raw);
-    match (path_r, fields_r) {
-        (Ok(path), Ok(fields)) => Ok(fields.into_sub_spec(path)),
-        (path_r, fields_r) => {
-            let mut errors: Vec<ValidationIssue> = Vec::new();
-            if let Err(e) = path_r {
-                errors.push(e);
-            }
-            if let Err(es) = fields_r {
-                errors.extend(es);
-            }
-            Err(errors)
-        }
-    }
-}
-
-/// Validator for `[[watch]]` blocks whose `path` carries at least one glob discriminator character
-/// (`*?[{`). Caller gates on [`PatternSpec::is_dynamic`]; the parser itself enforces the pattern's
-/// structural invariants (absolute, no `**`, no `.`/`..`, no empty segments, no Windows prefix).
-///
-/// Mirror of [`validate_static_watch`] for the dynamic dispatch: same composition, same error
-/// fan-in, different anchor resolution ([`PatternSpec`] vs [`PathBuf`]) and projection
-/// ([`WatchAttachmentFields::into_discovery_spec`] vs `into_sub_spec`).
-fn validate_dynamic_watch(idx: usize, raw: &RawWatch) -> Result<SubSpec, Vec<ValidationIssue>> {
-    let pattern_r = validate_dynamic_pattern(idx, &raw.path);
-    let fields_r = validate_watch_attachment(idx, raw);
-    match (pattern_r, fields_r) {
-        (Ok(pattern), Ok(fields)) => Ok(fields.into_discovery_spec(pattern)),
-        (pattern_r, fields_r) => {
-            let mut errors: Vec<ValidationIssue> = Vec::new();
-            if let Err(e) = pattern_r {
-                errors.push(e);
-            }
-            if let Err(es) = fields_r {
-                errors.extend(es);
-            }
+            errors.extend(target_r.err());
+            errors.extend(name_r.err());
+            errors.extend(program_r.err().unwrap_or_default());
+            errors.extend(scope_r.err());
+            errors.extend(settle_r.err().unwrap_or_default());
+            errors.extend(scan_r.err().unwrap_or_default());
+            errors.extend(events_r.err().unwrap_or_default());
             Err(errors)
         }
     }
@@ -1605,7 +1416,9 @@ fn parse_events_field(
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, LogConfig, LogDestination, LogLevel, SubAttachAnchor, SubSpec};
+    use super::{
+        Config, LogConfig, LogDestination, LogLevel, SubAttachAnchor, SubSpec, WatchTarget,
+    };
     use crate::error::{ConfigError, IssueKind};
     use specter_core::program::SpawnBody;
     use specter_core::{
@@ -1820,7 +1633,7 @@ mod tests {
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.watches.len(), 1);
         assert!(!cfg.watches[0].enabled);
-        assert!(cfg.watches[0].template.is_some());
+        assert!(matches!(cfg.watches[0].target, WatchTarget::Dynamic(_)));
     }
 
     /// `disabled_names` is the structural complement of `active_watches` — each name appears in
@@ -2191,7 +2004,8 @@ mod tests {
             panic!("expected Path anchor")
         };
         assert_eq!(
-            p, &cfg.watches[0].path,
+            cfg.watches[0].target,
+            WatchTarget::Static(p.clone()),
             "request carries the same path stored in SubSpec"
         );
         assert_eq!(
@@ -2374,12 +2188,16 @@ mod tests {
             pending.display(),
         );
         let cfg = Config::from_str(&toml).unwrap();
+        let WatchTarget::Static(path) = &cfg.watches[0].target else {
+            panic!(
+                "a literal path is a static target, got {:?}",
+                cfg.watches[0].target
+            );
+        };
         assert!(
-            cfg.watches[0]
-                .path
-                .ends_with(std::path::Path::new("does-not-exist/leaf")),
+            path.ends_with(std::path::Path::new("does-not-exist/leaf")),
             "got {}",
-            cfg.watches[0].path.display(),
+            path.display(),
         );
     }
 
@@ -2405,12 +2223,11 @@ mod tests {
         let cfg = Config::from_str(&toml).unwrap();
         let w = &cfg.watches[0];
 
-        // Anchor resolved onto the real `weird[x]` directory — the `[x]` did not split the prefix.
-        assert_eq!(w.path, weird);
-        let ScanConfig::MatchChain(spec) = &w.scan else {
-            panic!("dynamic watch lowers to MatchChain, got {:?}", w.scan);
+        let WatchTarget::Dynamic(spec) = &w.target else {
+            panic!("a glob path is a dynamic target, got {:?}", w.target);
         };
-        // The `weird[x]` segment is part of the literal-prefix anchor; only `*.log` is below it.
+        // Anchor resolved onto the real `weird[x]` directory — the `[x]` did not split the prefix:
+        // the segment is part of the literal-prefix anchor, and only `*.log` is below it.
         assert_eq!(spec.literal_prefix_path(), weird);
         assert_eq!(spec.terminus_depth(), 1);
         assert!(spec.matches_at(1, "access.log"));
@@ -2458,18 +2275,17 @@ mod tests {
 
     // ---- Auto-detect dispatch ----
 
-    /// Pure-literal absolute path → static dispatch → template-free [`SubSpec`].
+    /// Pure-literal absolute path → static dispatch → a static target.
     #[test]
     fn pure_literal_path_dispatches_to_static() {
         let toml = "[[watch]]\nname = \"static\"\npath = \"/var/log/myapp\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
         assert_eq!(cfg.watches.len(), 1);
         assert_eq!(cfg.watches[0].name, "static");
-        assert!(cfg.watches[0].template.is_none());
+        assert!(matches!(cfg.watches[0].target, WatchTarget::Static(_)));
     }
 
-    /// Path with `*` discriminator → dynamic dispatch → template-bearing discovery [`SubSpec`]
-    /// whose scan carries the pattern.
+    /// Path with `*` discriminator → dynamic dispatch → a target that carries the pattern.
     #[test]
     fn glob_star_path_dispatches_to_dynamic() {
         let toml =
@@ -2478,9 +2294,8 @@ mod tests {
         assert_eq!(cfg.watches.len(), 1);
         let w = &cfg.watches[0];
         assert_eq!(w.name, "dyn");
-        assert!(w.template.is_some());
-        let ScanConfig::MatchChain(spec) = &w.scan else {
-            panic!("dynamic watch lowers to MatchChain, got {:?}", w.scan);
+        let WatchTarget::Dynamic(spec) = &w.target else {
+            panic!("a glob path is a dynamic target, got {:?}", w.target);
         };
         assert_eq!(spec.source(), "/srv/log/*");
     }
@@ -2491,7 +2306,7 @@ mod tests {
         let toml =
             "[[watch]]\nname = \"dyn\"\npath = \"/srv/?/data\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
-        assert!(cfg.watches[0].template.is_some());
+        assert!(matches!(cfg.watches[0].target, WatchTarget::Dynamic(_)));
     }
 
     /// Path with `[…]` → dynamic.
@@ -2499,7 +2314,7 @@ mod tests {
     fn bracket_path_dispatches_to_dynamic() {
         let toml = "[[watch]]\nname = \"dyn\"\npath = \"/srv/[a-z]/data\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
-        assert!(cfg.watches[0].template.is_some());
+        assert!(matches!(cfg.watches[0].target, WatchTarget::Dynamic(_)));
     }
 
     /// Path with `{a,b}` (brace expansion) → dynamic; the brace stays one glob component, so the
@@ -2509,12 +2324,17 @@ mod tests {
         let toml = "[[watch]]\nname = \"dyn\"\npath = \"/srv/log/{app,system}/access.log\"\n\
                     actions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
-        assert!(cfg.watches[0].template.is_some());
-        assert_eq!(cfg.watches[0].path, Path::new("/srv/log"));
+        let WatchTarget::Dynamic(spec) = &cfg.watches[0].target else {
+            panic!(
+                "a glob path is a dynamic target, got {:?}",
+                cfg.watches[0].target
+            );
+        };
+        assert_eq!(spec.literal_prefix_path(), Path::new("/srv/log"));
     }
 
     /// Mixed config — both kinds land in the one `watches` list in source order; the kind
-    /// difference is template presence.
+    /// difference is the target.
     #[test]
     fn mixed_static_and_dynamic_routes_each_correctly() {
         let toml = "\
@@ -2527,7 +2347,7 @@ mod tests {
         let kinds: Vec<(&str, bool)> = cfg
             .watches
             .iter()
-            .map(|w| (w.name.as_str(), w.template.is_some()))
+            .map(|w| (w.name.as_str(), matches!(w.target, WatchTarget::Dynamic(_))))
             .collect();
         assert_eq!(
             kinds,
@@ -2600,9 +2420,9 @@ mod tests {
 
     // ---- Discovery lowering ----
 
-    /// Minimal dynamic watch: the discovery Sub's own identity is the constant pair plus `STRUCTURE`
-    /// and `MatchChain`; the template carries the same defaults the static validator would produce
-    /// (settle = 200ms, max_settle = 1h, the default `Subtree`, scope-conditional events).
+    /// A minimal dynamic watch takes the defaults a static one does (settle = 200ms, max_settle =
+    /// 1h, the default scan, the scope's mask): its knobs are its own fields, never the discovery
+    /// constants.
     #[test]
     fn minimal_dynamic_watch_round_trips_with_defaults() {
         let toml =
@@ -2610,23 +2430,19 @@ mod tests {
         let cfg = Config::from_str(toml).unwrap();
         let w = &cfg.watches[0];
         assert_eq!(w.name, "logs");
+        assert!(matches!(w.target, WatchTarget::Dynamic(_)));
         assert_eq!(w.scope, EffectScope::SubtreeRoot);
-        assert_eq!(w.settle, Duration::from_millis(150));
-        assert_eq!(w.max_settle, Duration::from_secs(2));
-        assert_eq!(w.events, ClassSet::STRUCTURE);
         assert!(!w.log_output);
-        let t = w.template.as_ref().expect("dynamic watch carries template");
-        assert_eq!(t.settle, Duration::from_millis(200));
-        assert_eq!(t.max_settle, Duration::from_hours(1));
-        assert_eq!(t.events, ClassSet::DEFAULT_SUBTREE_ROOT);
-        assert_eq!(t.scan, ScanConfig::builder().build());
+        assert_eq!(w.settle, Duration::from_millis(200));
+        assert_eq!(w.max_settle, Duration::from_hours(1));
+        assert_eq!(w.events, ClassSet::DEFAULT_SUBTREE_ROOT);
+        assert_eq!(w.scan, ScanConfig::builder().build());
     }
 
-    /// The full lowering grid: a dynamic block's user knobs land on the template *verbatim* (`scan`
-    /// / `events` / `settle` / `max_settle`), `program`/`scope`/`log_output` stay on the Sub
-    /// (doubling as the minted reaction spec), and the Sub's own identity is pinned to the
-    /// discovery constants with the literal-prefix anchor. The projected `MintSpec`'s identity hash
-    /// equals a hand-built [`ProfileIdentity`] over the same knobs — the projection adds nothing.
+    /// The full lowering grid: a dynamic block's knobs stay on its spec, as a static block's do,
+    /// and its request anchors the template at the pattern's literal prefix, the knobs sealed into
+    /// its `MintSpec` verbatim — the minted identity's hash equals a hand-built [`ProfileIdentity`]
+    /// over the same knobs, and the template's own Profile is the discovery shape.
     #[test]
     fn dynamic_block_lowers_to_discovery_sub_spec() {
         let toml = "[[watch]]\nname = \"logs\"\npath = \"/srv/log/*\"\n\
@@ -2640,27 +2456,17 @@ mod tests {
         let cfg = Config::from_str(toml).unwrap();
         let w = &cfg.watches[0];
 
-        // Discovery Sub's own identity: constants + MatchChain + literal-prefix anchor.
-        assert_eq!(w.path, Path::new("/srv/log"));
-        assert_eq!(w.settle, Duration::from_millis(150));
-        assert_eq!(w.max_settle, Duration::from_secs(2));
-        assert_eq!(w.events, ClassSet::STRUCTURE);
-        let ScanConfig::MatchChain(spec) = &w.scan else {
-            panic!("dynamic watch lowers to MatchChain, got {:?}", w.scan);
+        let WatchTarget::Dynamic(spec) = &w.target else {
+            panic!("a glob path is a dynamic target, got {:?}", w.target);
         };
         assert_eq!(spec.source(), "/srv/log/*");
-
-        // Reaction spec stays on the Sub.
         assert_eq!(w.scope, EffectScope::PerStableFile);
         assert!(w.log_output);
-
-        // User knobs land on the template verbatim.
-        let t = w.template.as_ref().expect("dynamic watch carries template");
-        assert_eq!(t.settle, Duration::from_millis(300));
-        assert_eq!(t.max_settle, Duration::from_millis(1200));
-        assert_eq!(t.events, ClassSet::CONTENT);
+        assert_eq!(w.settle, Duration::from_millis(300));
+        assert_eq!(w.max_settle, Duration::from_millis(1200));
+        assert_eq!(w.events, ClassSet::CONTENT);
         assert_eq!(
-            t.scan,
+            w.scan,
             ScanConfig::builder()
                 .hidden(true)
                 .pattern(GlobPattern::compile("*.log").expect("valid glob"))
@@ -2668,22 +2474,24 @@ mod tests {
                 .build()
         );
 
-        // The attach-request projection: minted identity hash equals the hand-built one.
-        let req = cfg.watches[0].to_attach_request();
+        let req = w.to_attach_request();
+        let SubAttachAnchor::Path(anchor) = &req.anchor else {
+            panic!("a lowered request anchors at a path");
+        };
+        assert_eq!(anchor, Path::new("/srv/log"));
         let ReactionSpec::Mint(minted) = &req.params.reaction else {
             panic!("dynamic watch lowers to a Mint reaction");
         };
         assert_eq!(minted.settle, Duration::from_millis(300));
-        let hand_built = ProfileIdentity::new(t.scan.clone(), t.max_settle, t.events);
+        let hand_built = ProfileIdentity::new(w.scan.clone(), w.max_settle, w.events);
         assert_eq!(minted.identity.config_hash(), hand_built.config_hash());
-        // The discovery Sub's own request identity is the constant shape.
         assert_eq!(req.identity.max_settle(), Duration::from_secs(2));
         assert_eq!(req.identity.events(), ClassSet::STRUCTURE);
     }
 
     /// Dynamic watches accept `pattern` (per-Sub include filter) and `exclude` (per-Sub exclude
     /// list) the same way static watches do — they're orthogonal to the path-pattern dispatch and
-    /// scope the *minted* Profiles via the template scan.
+    /// scope the *minted* Profiles.
     #[test]
     fn dynamic_watch_carries_scan_pattern_and_excludes() {
         let toml = "[[watch]]\nname = \"logs\"\npath = \"/srv/log/*\"\n\
@@ -2691,18 +2499,14 @@ mod tests {
                     pattern = \"*.log\"\n\
                     exclude = [\"*.gz\"]\n";
         let cfg = Config::from_str(toml).unwrap();
-        let t = cfg.watches[0]
-            .template
-            .as_ref()
-            .expect("dynamic watch carries template");
-        let ScanConfig::Subtree {
-            pattern, exclude, ..
-        } = &t.scan
-        else {
-            panic!("template scan is the user Subtree, got {:?}", t.scan);
-        };
-        assert!(pattern.is_some());
-        assert_eq!(exclude.len(), 1);
+        let glob = |source| GlobPattern::compile(source).expect("valid glob");
+        assert_eq!(
+            cfg.watches[0].scan,
+            ScanConfig::builder()
+                .pattern(glob("*.log"))
+                .exclude(glob("*.gz"))
+                .build()
+        );
     }
 
     /// Multiple errors in one dynamic watch accumulate — pattern parse failure does NOT
@@ -2728,8 +2532,13 @@ mod tests {
     fn fs_root_glob_pattern_accepted() {
         let toml = "[[watch]]\nname = \"root\"\npath = \"/*\"\nactions = [{ exec = [\"echo\"] }]";
         let cfg = Config::from_str(toml).unwrap();
-        assert!(cfg.watches[0].template.is_some());
-        assert_eq!(cfg.watches[0].path, Path::new("/"));
+        let WatchTarget::Dynamic(spec) = &cfg.watches[0].target else {
+            panic!(
+                "a glob path is a dynamic target, got {:?}",
+                cfg.watches[0].target
+            );
+        };
+        assert_eq!(spec.literal_prefix_path(), Path::new("/"));
     }
 }
 

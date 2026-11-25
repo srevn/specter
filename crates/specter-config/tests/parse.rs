@@ -1,6 +1,6 @@
 //! Integration tests: parse + validate against TOML fixtures.
 
-use specter_config::{Config, ConfigError, IssueKind};
+use specter_config::{Config, ConfigError, IssueKind, WatchTarget};
 use specter_core::program::{BranchTarget, SpawnBody};
 use specter_core::{ArgPart, ClassSet, EffectScope, GlobPattern, Placeholder, ScanConfig};
 use std::num::NonZeroU32;
@@ -94,15 +94,10 @@ fn pending_path_round_trips_via_lenient_canonicalization() {
         pending.display(),
     );
     let cfg = Config::from_str(&toml).unwrap();
-    assert!(
-        cfg.watches[0].path.ends_with(Path::new("missing/leaf.txt")),
-        "got {}",
-        cfg.watches[0].path.display(),
-    );
     let canon_td = td.path().canonicalize().unwrap();
     assert_eq!(
-        cfg.watches[0].path,
-        canon_td.join("missing").join("leaf.txt"),
+        cfg.watches[0].target,
+        WatchTarget::Static(canon_td.join("missing").join("leaf.txt")),
     );
 }
 

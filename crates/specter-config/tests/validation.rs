@@ -1,6 +1,6 @@
 //! Integration tests: every `IssueKind` produced by an explicit fixture.
 
-use specter_config::{Config, ConfigError, IssueKind, ValidationIssue};
+use specter_config::{Config, ConfigError, IssueKind, ValidationIssue, WatchTarget};
 
 const ROOT: &str = "/";
 
@@ -228,12 +228,17 @@ fn dynamic_prefix_canonicalises_and_composes_with_static() {
     let cfg = Config::from_str(&toml).unwrap();
 
     // Both anchors resolved through the symlink onto the same canonical branch.
+    let WatchTarget::Dynamic(pattern) = &cfg.watches[0].target else {
+        panic!("a glob path is a dynamic target");
+    };
     assert_eq!(
-        cfg.watches[0].path, target,
+        pattern.literal_prefix_path(),
+        target,
         "the dynamic pattern's literal prefix resolves to the link target",
     );
     assert_eq!(
-        cfg.watches[1].path, target,
+        cfg.watches[1].target,
+        WatchTarget::Static(target),
         "the static sibling resolves to the same target — they compose",
     );
 
