@@ -86,11 +86,12 @@ use std::time::Instant;
 /// walk-policy concern, not the engine's. See [`specter_core::DescentState::signal_retries`].
 const SIGNAL_PROBE_RETRY_BUDGET: u8 = 3;
 
-/// Result of `Engine::materialize_path_or_pending`. Either the entire path is disk-observed (the
-/// anchor is live on disk; proceed with the normal immediate Seed-burst flow) or the deepest
+/// Result of `Engine::materialize_path_or_pending`, and what an attach resolves its anchor to.
+/// Either the anchor is live (proceed with the normal immediate Seed-burst flow) or the deepest
 /// disk-observed prefix is an ancestor (descent registers; remaining components are tracked).
 pub(crate) enum MaterializeResult {
-    /// Every segment is disk-observed (the whole path is live on disk); the leaf is `User`-rooted.
+    /// The anchor is live: every segment of its path is disk-observed and the leaf `User`-rooted,
+    /// or it is a slot the caller holds ([`specter_core::SubAttachAnchor::Resource`]).
     Materialized(ResourceId),
     /// Descent is needed. The leaf `ResourceId` is the anchor's (currently `DescentScaffold`-roled)
     /// slot; the engine registers `DescentState` keyed by the Profile's id once it's been minted.
@@ -102,6 +103,15 @@ pub(crate) enum MaterializeResult {
         prefix: ResourceId,
         remaining: DescentRemaining,
     },
+}
+
+impl MaterializeResult {
+    /// The anchor's slot, materialised or scaffolded.
+    pub(crate) const fn anchor(&self) -> ResourceId {
+        match self {
+            Self::Materialized(anchor) | Self::Pending { anchor, .. } => *anchor,
+        }
+    }
 }
 
 impl crate::Engine {

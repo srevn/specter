@@ -14,6 +14,7 @@
 //! internals).
 
 use crate::counter::MonotonicCounter;
+use crate::descent::MaterializeResult;
 use crate::path::empty_path;
 use crate::timer::{TimerEntry, TimerHeap};
 use crate::transitions::ParkNarration;
@@ -25,11 +26,11 @@ use compact_str::CompactString;
 // Identity.
 use specter_core::{ProfileId, ResourceId, SubId, TimerId};
 // Tree + path validation.
-use specter_core::Tree;
+use specter_core::{Tree, TreePath};
 // Profile state machine.
 use specter_core::{
-    AnchorClaim, BurstFinish, DescentRemaining, DescentState, DescentWitness, DetachLifecycle,
-    DetachReason, Profile, ProfileMap, ProfileState, ReapTrigger, TimerKind,
+    AnchorClaim, BurstFinish, DescentState, DescentWitness, DetachLifecycle, DetachReason, Profile,
+    ProfileMap, ProfileState, ReapTrigger, TimerKind,
 };
 // Registries.
 use specter_core::{
@@ -197,19 +198,14 @@ impl Engine {
     /// [`Self::on_config_diff`] can compose detaches and attaches into one [`StepOutput`]. A Sub a
     /// template mints enters through [`Self::mint_sub`] instead.
     ///
-    /// Total: an unresolvable anchor attaches nothing and narrates a typed diagnostic —
-    /// [`Diagnostic::AttachPathInvalid`] for a malformed `Path`, [`Diagnostic::AttachResourceStale`]
-    /// for a `Resource` with no live slot. External callers reconcile their `name → SubId` index from
-    /// the [`Diagnostic::SubAttached`] / `AttachPathInvalid` / `AttachResourceStale` stream.
+    /// Total: an anchor the gate refuses ([`Self::admit_attach_anchor`]) attaches nothing, and the
+    /// gate's line says why.
     ///
     /// # Production invariants (`Path` anchor)
     ///
-    /// 1. **Absolute paths only.** A [`SubAttachAnchor::Path`] must be absolute and UTF-8.
-    ///    [`Tree::parse_attach_path`] is the canonical gate; it rejects non-absolute paths,
-    ///    non-UTF-8 segments, `.` / `..` components, Windows path prefixes, and empty segments. The
-    ///    config layer's `canonicalize_lenient` already enforces absolute paths for TOML-loaded
-    ///    configs, but hot-reload `ConfigDiff::added` constructs `SubAttachRequest` from a
-    ///    different path; the gate keeps the engine's contract independent of every caller.
+    /// 1. **Absolute paths only.** [`Tree::parse_attach_path`] is the gate's parse. Config lowering
+    ///    hands the engine only paths it admits (`canonicalize_lenient`); the gate keeps the engine
+    ///    total for any other producer of an [`Input`].
     /// 2. **Single FS-root.** Every validated [`specter_core::TreePath`] starts with
     ///    [`specter_core::FS_ROOT_SEGMENT`]; `materialize_path_or_pending` lazily bootstraps a
     ///    synthetic `/` slot (role `ResourceRole::DescentScaffold`) before the pre-existence walk
@@ -223,10 +219,8 @@ impl Engine {
     ///
     /// # Pipeline
     ///
-    /// 1. **Identity resolution.** `resolve_attach_anchor` resolves the request's `anchor` —
-    ///    parsing and materialising a `Path`, or liveness-checking a `Resource` — and yields a
-    ///    typed [`AnchorResolution`] indicating whether the anchor is materialised (`Immediate`) or
-    ///    scaffolded (`Pending`). `find_or_create_profile` then classifies the `(anchor,
+    /// 1. **The anchor.** The gate admits it; a path then materialises, or scaffolds for its
+    ///    descent ([`MaterializeResult`]). `find_or_create_profile` classifies the `(anchor,
     ///    config_hash)` lookup into a [`ProfileOrigin`].
     /// 2. **Sub registration** ([`Self::register_sub`]).
     /// 3. **Per-origin bookkeeping.** A Profile that already stood takes the join; a fresh one
@@ -262,10 +256,10 @@ impl Engine {
         self.register_sub(Sub::from_request(profile_id, params), out);
         match origin {
             ProfileOrigin::Fresh => match resolved {
-                AnchorResolution::Immediate { .. } => {
+                MaterializeResult::Materialized(_) => {
                     self.seed_at_anchor(profile_id, SeedWitness::Cold, now, out);
                 }
-                AnchorResolution::Pending {
+                MaterializeResult::Pending {
                     prefix, remaining, ..
                 } => {
                     // A terminus whose segments were all present on first observation pins silently
@@ -357,102 +351,53 @@ impl Engine {
         });
     }
 
-    /// Phase 1 of `attach_sub_inner` — resolve the request's anchor to a Tree slot, classifying the
-    /// outcome as `Immediate` (anchor is materialised on disk) or `Pending` (anchor is a scaffold;
-    /// the engine must descend before the burst can start).
+    /// The one fallible boundary of an attach: what `anchor` names, admitted, or refused with its
+    /// line — [`Diagnostic::AttachResourceStale`] for a slot no longer live (a request crosses a
+    /// channel and holds no Tree borrow), [`Diagnostic::AttachPathInvalid`] for a path the Tree
+    /// cannot hold.
     ///
-    /// A [`SubAttachAnchor::Path`] routes through [`Tree::parse_attach_path`] (which rejects
-    /// non-absolute, non-UTF-8, `.` / `..`, Windows-prefix, and empty-segment paths) and then
-    /// [`Self::materialize_path_or_pending`]; a malformed path emits
-    /// [`Diagnostic::AttachPathInvalid`] and returns `None`.
-    ///
-    /// A [`SubAttachAnchor::Resource`] re-gates the caller's claimed slot with an O(1) liveness
-    /// check: a stale id emits [`Diagnostic::AttachResourceStale`] and returns `None`, otherwise it
-    /// resolves [`AnchorResolution::Immediate`] (a `Resource` anchor never descends).
+    /// Reads only, so [`Self::on_config_diff`] asks it before the detach a refused attach would
+    /// make for nothing. The attach asks again after: that detach can reap the very slot a request
+    /// names, so nothing admitted is carried across it.
+    pub(crate) fn admit_attach_anchor(
+        &self,
+        anchor: &SubAttachAnchor,
+        out: &mut StepOutput,
+    ) -> Option<AttachSite> {
+        match anchor {
+            SubAttachAnchor::Resource(slot) => {
+                if self.tree.get(*slot).is_some() {
+                    Some(AttachSite::Slot(*slot))
+                } else {
+                    out.diagnostics
+                        .push(Diagnostic::AttachResourceStale { resource: *slot });
+                    None
+                }
+            }
+            SubAttachAnchor::Path(path) => match Tree::parse_attach_path(path) {
+                Ok(parsed) => Some(AttachSite::Path(parsed)),
+                Err(err) => {
+                    out.diagnostics.push(Diagnostic::AttachPathInvalid {
+                        path: Arc::from(path.as_path()),
+                        hint: err.hint(),
+                    });
+                    None
+                }
+            },
+        }
+    }
+
+    /// The anchor an attach stands on: admitted ([`Self::admit_attach_anchor`]), then a held slot
+    /// as it stands, and a path materialised or left pending its descent.
     fn resolve_attach_anchor(
         &mut self,
         anchor: &SubAttachAnchor,
         out: &mut StepOutput,
-    ) -> Option<AnchorResolution> {
-        match anchor {
-            SubAttachAnchor::Path(path) => {
-                let parsed = match Tree::parse_attach_path(path) {
-                    Ok(p) => p,
-                    Err(err) => {
-                        out.diagnostics.push(Diagnostic::AttachPathInvalid {
-                            path: std::sync::Arc::from(path.as_path()),
-                            hint: err.hint(),
-                        });
-                        return None;
-                    }
-                };
-                Some(match self.materialize_path_or_pending(&parsed) {
-                    crate::descent::MaterializeResult::Materialized(anchor) => {
-                        AnchorResolution::Immediate { anchor }
-                    }
-                    crate::descent::MaterializeResult::Pending {
-                        anchor,
-                        prefix,
-                        remaining,
-                    } => AnchorResolution::Pending {
-                        anchor,
-                        prefix,
-                        remaining,
-                    },
-                })
-            }
-            SubAttachAnchor::Resource(r) => {
-                // The caller claims `r` is already live. Re-gate it at the boundary — the request
-                // crossed a channel and cannot hold a Tree borrow, so liveness is verified here,
-                // symmetric with the Path arm's `parse_attach_path` re-check. A stale slot is
-                // dropped gracefully rather than panicking downstream.
-                if self.tree.get(*r).is_none() {
-                    out.diagnostics
-                        .push(Diagnostic::AttachResourceStale { resource: *r });
-                    return None;
-                }
-                Some(AnchorResolution::Immediate { anchor: *r })
-            }
-        }
-    }
-
-    /// Pure pre-check that returns `true` iff a subsequent [`Self::attach_sub_inner`] call with
-    /// `req` would clear its only fallible boundary — `Tree::parse_attach_path` for a `Path`
-    /// anchor, or slot liveness for a `Resource` anchor. Mutates nothing; never installs a
-    /// scaffold, never promotes a role.
-    ///
-    /// Sole consumer is [`Self::on_config_diff`]'s `modified_identity` arm: it runs the validate
-    /// *before* detaching the old Sub so a malformed path doesn't tear down a live attachment for
-    /// nothing. The detach + attach pair is then total — validate said yes, so the attach won't
-    /// surface a parse error.
-    ///
-    /// Emits the same diagnostic [`Self::attach_sub_inner`] would on the failure path
-    /// (`AttachPathInvalid` / `AttachResourceStale`), so the validate-then-act site never re-emits
-    /// on its own. The re-parse at attach time (one `Tree::parse_attach_path` call, O(path length),
-    /// pure) is the cost of total composition; the attach has no engine-state precondition the
-    /// validate could lock in.
-    pub(crate) fn validate_sub_attach(&self, req: &SubAttachRequest, out: &mut StepOutput) -> bool {
-        match &req.anchor {
-            SubAttachAnchor::Path(p) => match Tree::parse_attach_path(p) {
-                Ok(_) => true,
-                Err(err) => {
-                    out.diagnostics.push(Diagnostic::AttachPathInvalid {
-                        path: std::sync::Arc::from(p.as_path()),
-                        hint: err.hint(),
-                    });
-                    false
-                }
-            },
-            SubAttachAnchor::Resource(r) => {
-                if self.tree.get(*r).is_some() {
-                    true
-                } else {
-                    out.diagnostics
-                        .push(Diagnostic::AttachResourceStale { resource: *r });
-                    false
-                }
-            }
-        }
+    ) -> Option<MaterializeResult> {
+        Some(match self.admit_attach_anchor(anchor, out)? {
+            AttachSite::Slot(slot) => MaterializeResult::Materialized(slot),
+            AttachSite::Path(path) => self.materialize_path_or_pending(&path),
+        })
     }
 
     /// File `sub` and narrate [`Diagnostic::SubAttached`] — the one point a `SubId` enters the
@@ -1079,36 +1024,12 @@ impl From<DescentWitness> for SeedWitness {
     }
 }
 
-/// Outcome of `attach_sub_inner`'s Phase 1 anchor resolution. The two variants encode the semantic
-/// divide between attaches whose anchor is already live on disk and those whose anchor is
-/// scaffolded awaiting materialisation. The split drives Phase 3's `Fresh` arm: seed at the anchor
-/// now, or descend to it first.
-///
-/// The `Immediate` arm subsumes both a fully-materialised [`SubAttachAnchor::Path`] and a
-/// liveness-checked [`SubAttachAnchor::Resource`]; only `Path` can resolve `Pending`.
-enum AnchorResolution {
-    /// The anchor is a live, materialised Tree slot. A fresh Profile seeds at it at once
-    /// ([`Engine::seed_at_anchor`]).
-    Immediate { anchor: ResourceId },
-    /// The anchor is a `DescentScaffold`-roled slot awaiting materialisation. `prefix` is the
-    /// deepest existing ancestor (where the descent probe is currently watching) and `remaining`
-    /// carries the path components from `prefix` (exclusive) down to `anchor` (inclusive). A fresh
-    /// Profile enters `ProfileState::Pending(_)` and descends ([`Engine::enter_pending_descent`]).
-    Pending {
-        anchor: ResourceId,
-        prefix: ResourceId,
-        remaining: DescentRemaining,
-    },
-}
-
-impl AnchorResolution {
-    /// The anchor slot — the Profile's resource on attach. Both variants expose the same field name
-    /// so `find_or_create_profile` can key off it without matching on the variant.
-    const fn anchor(&self) -> ResourceId {
-        match self {
-            Self::Immediate { anchor } | Self::Pending { anchor, .. } => *anchor,
-        }
-    }
+/// What an anchor names once the attach's gate has admitted it ([`Engine::admit_attach_anchor`]).
+pub(crate) enum AttachSite {
+    /// A slot the caller holds, found live.
+    Slot(ResourceId),
+    /// A path the Tree can hold.
+    Path(TreePath),
 }
 
 #[cfg(test)]

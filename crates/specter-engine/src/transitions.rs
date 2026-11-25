@@ -961,19 +961,18 @@ impl Engine {
     ///    the engine degrades the entry to a fresh attach
     ///    ([`Diagnostic::ConfigDiffRebindFallbackAttach`] narrates the reason).
     /// 3. **Sub `modified_identity`** — path / scan / max_settle / events changed; the Sub must
-    ///    move to a different Profile partition. [`Self::validate_sub_attach`] pre-checks the only
-    ///    fallible boundary (the new anchor's parse); on success, the engine detaches the old Sub
-    ///    (if present) and attaches the new. On validation failure the old Sub stays in place —
-    ///    **structural rollback** at the composition layer: the validate site captures nothing,
-    ///    attach re-derives, so the state-mid-operation problem doesn't arise.
+    ///    move to a different Profile partition. The attach's own gate
+    ///    ([`Self::admit_attach_anchor`]) is asked first; on success, the engine detaches the old
+    ///    Sub (if present) and attaches the new. A refused anchor leaves the old Sub in place —
+    ///    **structural rollback** at the composition layer: the gate captures nothing, the attach
+    ///    re-derives, so the state-mid-operation problem doesn't arise.
     /// 4. **Sub `added`** — `attach_sub_inner` materialises the anchor and registers the Sub.
     ///
     /// **Ordering: removed → params → identity → added.** `removed` first frees name slots a
     /// downstream identity-arm might want (defense in depth — the four buckets are name-disjoint by
     /// diff construction). `modified_params` next is the cheapest path (in-place rebind, no Profile
     /// churn) and locks in the new params before any reap could drop the Sub. `modified_identity`
-    /// next: validation precedes detach so a malformed new path doesn't tear down a live attachment
-    /// for nothing. `added` last, after every detach has freed its name slot. The buckets are
+    /// next, and `added` last, after every detach has freed its name slot. The buckets are
     /// name-disjoint by diff construction, and each `find_by_name` reads the live registry *after*
     /// prior mutations in the same step, resolving the current id.
     ///
@@ -1013,10 +1012,7 @@ impl Engine {
             }
         }
         for req in subs.modified_identity {
-            // Validate-then-act: a malformed new anchor leaves the old Sub in place. The validate
-            // is a pure read; on success the attach re-derives, so no engine state is captured
-            // across the detach-attach boundary.
-            if !self.validate_sub_attach(&req, out) {
+            if self.admit_attach_anchor(&req.anchor, out).is_none() {
                 continue;
             }
             if let Some(old) = self.subs.find_by_name(&req.params.name) {
