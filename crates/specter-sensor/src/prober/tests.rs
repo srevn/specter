@@ -486,10 +486,10 @@ fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
     };
     let sub = match dc {
         DirChild::Covered(s) => s,
-        DirChild::Uncovered(_) => panic!(
-            "EACCES'd subdir must emit DirChild::Covered(empty_arc), not Uncovered — \
+        DirChild::Uncovered(_) | DirChild::Denied(_) => panic!(
+            "EACCES'd subdir must emit DirChild::Covered(empty_arc) — \
              Uncovered is reserved for the static-config gates only \
-             (recursive=false / max_depth / cross-fs)",
+             (recursive=false / max_depth / cross-fs); got {dc:?}",
         ),
     };
     assert!(

@@ -1624,7 +1624,7 @@ mod tests {
     )]
 
     use crate::Engine;
-    use specter_core::testkit::{covered, dir_snap, dir_snap_nested};
+    use specter_core::testkit::{covered, denied, dir_snap, dir_snap_nested};
     use specter_core::{
         ActiveBurst, BurstIntent, ClassSet, DirSnapshot, EntryKind, Input, PreFirePhase, ProbeOp,
         ProbeRequest, ProbeSlot, Profile, ProfileIdentity, ProfileState, ProofObligation,
@@ -2553,6 +2553,24 @@ mod tests {
             standard_target(&e, pid, dirty_at(&[(slots[1], "/root/a/c")])),
             slots[0],
             "an unlisted slot roots the walk at the nearest directory the listing holds",
+        );
+    }
+
+    #[test]
+    fn pre_fire_target_standard_denied_dir_roots_at_its_parent_dir() {
+        // The listing holds `a` denied — the walk could not read it — while another Profile
+        // anchored beneath it keeps the slots alive and an event there reaches this Profile by
+        // scope. The descent stops at the anchor, which lists `a`: a walk rooted at `a` would have
+        // no prior to stand on.
+        let (e, pid, root, slots) = engine_listing(
+            ScanConfig::builder().recursive(true).build(),
+            dir_snap_nested(&[("a", denied(1))]),
+            &["a", "a/x"],
+        );
+        assert_eq!(
+            standard_target(&e, pid, dirty_at(&[(slots[1], "/root/a/x")])),
+            root,
+            "a denied directory roots the walk at the directory that lists it",
         );
     }
 

@@ -86,9 +86,9 @@ pub enum BurstHelper {
 ///   The slot's generation advanced between burst start and graft commit (the Resource was reaped
 ///   under another Profile's pass).
 /// - [`Self::IntermediateUncovered`] — an interior segment was stored as
-///   [`crate::DirChild::Uncovered`] (or absent, or as a [`crate::ChildEntry::Leaf`]) in the prior
-///   snapshot. The walker recorded the slot's identity but did not recurse, so the splice path
-///   cannot navigate through it.
+///   [`crate::DirChild::Uncovered`] or [`crate::DirChild::Denied`] (or absent, or as a
+///   [`crate::ChildEntry::Leaf`]) in the prior snapshot. The walk recorded the slot's identity but
+///   holds no listing of it, so the splice path cannot navigate through it.
 ///
 /// None is reachable through legitimate filesystem state: the engine roots every Standard probe at
 /// a directory the Profile's snapshot lists, so each hop of the splice resolves through a listing

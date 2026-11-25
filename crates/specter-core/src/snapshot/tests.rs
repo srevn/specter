@@ -1,5 +1,5 @@
 use super::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, PriorDir, SpliceResult, TreeSnapshot,
     diff_dir_pair, diff_tree, splice,
 };
 use crate::diag::SpliceFailureCause;
@@ -55,12 +55,14 @@ fn name(s: &str) -> CompactString {
     CompactString::new(s)
 }
 
-/// Extract the inner `Arc<DirSnapshot>` from a `ChildEntry`. Panics if the entry is a Leaf or an
-/// uncovered Dir — only used in fixtures where the structure is statically known.
+/// Extract the inner `Arc<DirSnapshot>` from a `ChildEntry`. Panics if the entry is a Leaf or a Dir
+/// the snapshot holds no listing of — only used in fixtures where the structure is statically known.
 fn dir_subtree(c: &ChildEntry) -> &Arc<DirSnapshot> {
     match c {
         ChildEntry::Dir(DirChild::Covered(s)) => s,
-        ChildEntry::Dir(DirChild::Uncovered(_)) => panic!("expected covered Dir entry"),
+        ChildEntry::Dir(DirChild::Uncovered(_) | DirChild::Denied(_)) => {
+            panic!("expected covered Dir entry")
+        }
         ChildEntry::Leaf(_) => panic!("expected Dir entry, got Leaf"),
     }
 }
@@ -513,9 +515,18 @@ fn dirchild_fs_id_uncovered_returns_stored_value() {
 // compute_dir_hash — per-variant tag discrimination
 // ---------------------------------------------------------------------------
 //
-// The three-tag encoding makes covered/uncovered structurally distinguishable in the fold. Verify
-// that the discrimination survives a "naïve" attack: two snapshots whose `Covered` and `Uncovered`
-// payloads coincidentally hash to the same value at the slot, but whose variant tags differ.
+// The per-variant tags make the child shapes structurally distinguishable in the fold. Verify that
+// the discrimination survives a "naïve" attack: two snapshots whose payloads coincidentally hash to
+// the same value at the slot, but whose variant tags differ.
+
+#[test]
+fn dir_hash_distinguishes_denied_from_uncovered_same_fs_id() {
+    // Both fold the raw `fs_id`; only the tag tells a denied directory from a boundary.
+    assert_ne!(
+        holding(Some(denied(5)), 1).dir_hash(),
+        holding(Some(dir(5, 0, None)), 1).dir_hash(),
+    );
+}
 
 #[test]
 fn dir_hash_distinguishes_covered_empty_from_uncovered_same_fs_id() {
@@ -1558,10 +1569,10 @@ fn diff_tree_dir_replace_at_different_inode_emits_descendants() {
 }
 
 /// Same-name `"dir"` whose coverage flips Covered→Uncovered at the **same** `fs_id`. The matching
-/// `fs_id` makes `diff_same_name` reach the inner `(Covered, Uncovered)` arm; the Covered side
-/// carries one child so the outer `dir_hash` differs (Covered-non-empty vs Uncovered) and the walk
-/// descends into `"dir"` instead of short-circuiting at the root. Constructor-level only — the
-/// walker's config-frozen / fs_id-changing gates make this state v1-unreachable on a real probe.
+/// `fs_id` makes `diff_same_name` reach its unreachable-flip arm; the Covered side carries one
+/// child so the outer `dir_hash` differs (Covered-non-empty vs Uncovered) and the walk descends
+/// into `"dir"` instead of short-circuiting at the root. Constructor-level only — the walker's
+/// config-frozen / fs_id-changing gates make this state v1-unreachable on a real probe.
 fn coverage_flip_same_fs_id_pair() -> (TreeSnapshot, TreeSnapshot) {
     let inner = make_dir(
         meta(1, 500, 0),
@@ -1586,7 +1597,9 @@ fn coverage_flip_same_fs_id_pair() -> (TreeSnapshot, TreeSnapshot) {
 
 #[cfg(debug_assertions)]
 #[test]
-#[should_panic(expected = "same-fs_id (Covered, Uncovered) is v1-unreachable")]
+#[should_panic(
+    expected = "same-fs_id coverage flip other than (Denied, Covered) is v1-unreachable"
+)]
 fn diff_same_name_coverage_flip_trips_debug_assert() {
     let (a, b) = coverage_flip_same_fs_id_pair();
     let _ = diff_tree(&a, &b);
@@ -1607,6 +1620,163 @@ fn diff_same_name_coverage_flip_degrades_to_delete_create_in_release() {
     assert!(
         d.renamed.is_empty(),
         "coverage flip must not collapse to a Rename",
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Denied entries
+// ---------------------------------------------------------------------------
+
+fn denied(inode: u64) -> ChildEntry {
+    ChildEntry::Dir(DirChild::Denied(FsIdentity::synthetic(inode, 0)))
+}
+
+/// A read directory of identity `inode` listing one leaf `"k"`.
+fn listed(inode: u64) -> ChildEntry {
+    let leaf_k = ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 77, 0));
+    dir(
+        inode,
+        0,
+        Some(make_dir(
+            meta(1, inode, 0),
+            0,
+            BTreeMap::from_iter([(name("k"), leaf_k)]),
+        )),
+    )
+}
+
+/// A snapshot holding `child` (if any) under `"d"`, beside a leaf `"z"` of size `z_size`. A sibling
+/// that changes lets two snapshots whose `"d"` entries hash alike still reach `diff_same_name`.
+fn holding(child: Option<ChildEntry>, z_size: u64) -> Arc<DirSnapshot> {
+    let z = ChildEntry::Leaf(leaf(EntryKind::File, z_size, 1, 90, 0));
+    make_dir(
+        meta(1, 1, 0),
+        0,
+        child
+            .map(|c| (name("d"), c))
+            .into_iter()
+            .chain([(name("z"), z)])
+            .collect(),
+    )
+}
+
+fn segments(entries: &[EntryRef]) -> Vec<&str> {
+    entries.iter().map(|e| e.segment.as_str()).collect()
+}
+
+/// A denied directory never enters a diff: at one name, a pair holding a denied entry diffs exactly
+/// as it would with that side absent. The other side stages as usual — the branch that opened, a
+/// denied directory replaced, a directory or a leaf replaced by a denied one — and a denied
+/// directory that appears, goes, or stays denied stages nothing.
+#[test]
+fn a_denied_entry_diffs_as_an_absent_one() {
+    let file = ChildEntry::Leaf(leaf(EntryKind::File, 1, 1, 6, 0));
+    let pairs = [
+        (Some(denied(5)), Some(listed(5))),
+        (Some(denied(4)), Some(listed(5))),
+        (Some(denied(4)), Some(dir(5, 0, None))),
+        (Some(denied(4)), Some(file.clone())),
+        (Some(listed(5)), Some(denied(4))),
+        (Some(dir(5, 0, None)), Some(denied(4))),
+        (Some(file), Some(denied(4))),
+        (Some(denied(5)), Some(denied(5))),
+        (Some(denied(5)), Some(denied(4))),
+        (None, Some(denied(5))),
+        (Some(denied(5)), None),
+    ];
+    let as_absent = |side: &Option<ChildEntry>| {
+        side.clone()
+            .filter(|c| !matches!(c, ChildEntry::Dir(DirChild::Denied(_))))
+    };
+    for (prior, new) in pairs {
+        assert_eq!(
+            diff_dir_pair(&holding(prior.clone(), 1), &holding(new.clone(), 2)),
+            diff_dir_pair(&holding(as_absent(&prior), 1), &holding(as_absent(&new), 2)),
+            "{prior:?} -> {new:?}",
+        );
+    }
+}
+
+#[test]
+fn all_created_and_all_deleted_skip_a_denied_entry() {
+    let snap = holding(Some(denied(5)), 1);
+    assert_eq!(segments(&Diff::all_created(&snap).created), ["z"]);
+    assert_eq!(segments(&Diff::all_deleted(&snap).deleted), ["z"]);
+}
+
+#[cfg(debug_assertions)]
+#[test]
+#[should_panic(
+    expected = "same-fs_id coverage flip other than (Denied, Covered) is v1-unreachable"
+)]
+fn diff_same_name_listing_turned_denied_trips_debug_assert() {
+    let _ = diff_dir_pair(&holding(Some(listed(5)), 1), &holding(Some(denied(5)), 2));
+}
+
+#[test]
+fn prior_dir_matches_by_identity_and_knows_nothing_below_a_denied_directory() {
+    let id = |inode| FsIdentity::synthetic(inode, 0);
+    let sub = make_dir(
+        meta(1, 5, 0),
+        0,
+        BTreeMap::from_iter([(name("g"), denied(7))]),
+    );
+    let root = make_dir(
+        meta(1, 1, 0),
+        0,
+        BTreeMap::from_iter([
+            (
+                name("s"),
+                ChildEntry::Dir(DirChild::Covered(Arc::clone(&sub))),
+            ),
+            (name("x"), denied(6)),
+            (name("b"), dir(8, 0, None)),
+        ]),
+    );
+
+    let prior = PriorDir::root(Some(&root), id(1));
+    assert!(prior.listing().is_some_and(|l| Arc::ptr_eq(l, &root)));
+    assert!(
+        matches!(PriorDir::root(Some(&root), id(2)), PriorDir::Unseen),
+        "another root"
+    );
+    assert!(
+        matches!(PriorDir::root(None, id(1)), PriorDir::Unseen),
+        "no snapshot"
+    );
+
+    let s = prior.child("s", id(5));
+    assert!(
+        s.listing().is_some_and(|l| Arc::ptr_eq(l, &sub)),
+        "a listed child"
+    );
+    assert!(
+        matches!(prior.child("s", id(9)), PriorDir::Unseen),
+        "another directory, one name"
+    );
+    assert!(
+        matches!(prior.child("x", id(6)), PriorDir::Denied),
+        "a denied child"
+    );
+    assert!(
+        matches!(prior.child("x", id(9)), PriorDir::Unseen),
+        "denied under another identity"
+    );
+    assert!(
+        matches!(prior.child("b", id(8)), PriorDir::Unseen),
+        "a boundary lists nothing"
+    );
+    assert!(
+        matches!(prior.child("y", id(1)), PriorDir::Unseen),
+        "no entry"
+    );
+    assert!(
+        matches!(s.child("g", id(7)), PriorDir::Denied),
+        "denied deeper down"
+    );
+    assert!(
+        matches!(prior.child("x", id(6)).child("g", id(7)), PriorDir::Unseen),
+        "nothing is known below a denied directory",
     );
 }
 

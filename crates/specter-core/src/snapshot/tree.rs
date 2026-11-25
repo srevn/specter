@@ -7,10 +7,11 @@
 //!   the `ScanConfig` hash they were captured under (`captured_with`), and a `BTreeMap<CompactString,
 //!   ChildEntry>` of direct children (string-keyed — keeps the hash cross-process stable).
 //! - Children are either [`LeafEntry`] (file/symlink/other; no recursion) or [`DirChild`]
-//!   (directory; a sum type with two variants — `Covered(Arc<DirSnapshot>)` and
-//!   `Uncovered(FsIdentity)`). `Uncovered` means the walker stored the entry but did not recurse
-//!   (`recursive=false`, beyond `max_depth`, or cross-filesystem); the sum makes the coverage
-//!   discrimination structural rather than `Option`-tagged.
+//!   (directory; a sum type of the three things a walk can truthfully say of one —
+//!   `Covered(Arc<DirSnapshot>)`, `Uncovered(FsIdentity)` and `Denied(FsIdentity)`). `Uncovered`
+//!   means the shape does not list the directory (`recursive=false`, beyond `max_depth`,
+//!   cross-filesystem, a chain terminus); `Denied` that the shape lists it and the walk could not
+//!   read it. The sum makes the discrimination structural rather than `Option`-tagged.
 //! - A `DirSnapshot` carries no engine-side identity. The walker speaks paths; the engine speaks
 //!   resources; navigation helpers ([`subtree_at_dir`], [`TreeSnapshot::subtree_at`]) take an
 //!   explicit `anchor: ResourceId` so the caller's anchor invariant lives at the call site rather
@@ -22,9 +23,10 @@
 //!   mtime is its per-file content fingerprint, so it belongs in the identity.
 //! - [`DirSnapshot::dir_hash`] folds `captured_with`, the directory's own `fs_id`, an entry-count
 //!   length-prefix, then each `(name, ChildEntry)` pair in lex order, with a per-variant tag
-//!   distinguishing the three child shapes: `Leaf` contributes `leaf_hash`, `Dir(Covered)`
-//!   contributes the subtree's `dir_hash`, and `Dir(Uncovered)` contributes the raw `fs_id` (the
-//!   walker has no observation beyond the directory's identity). `root_meta.mtime` is **not** folded
+//!   distinguishing the four child shapes: `Leaf` contributes `leaf_hash`, `Dir(Covered)` contributes
+//!   the subtree's `dir_hash`, and `Dir(Uncovered)` and `Dir(Denied)` each contribute the raw `fs_id`
+//!   under their own tag (the walk holds no observation beyond the directory's identity, and a
+//!   boundary and a denied directory of one identity fold apart). `root_meta.mtime` is **not** folded
 //!   — `dir_hash` is filter-aware identity ("are these snapshots observably the same to the user?"),
 //!   and a directory's mtime bumps on every dirent-block change including filtered-out entries
 //!   (`.DS_Store`, hidden files, excluded paths) the user-configured filter would never present. The
@@ -287,9 +289,9 @@ fn entry_kind_from_file_type(ft: std::fs::FileType) -> EntryKind {
 
 /// The **total** kind classification of one observed filesystem entity — the answer a structural
 /// query (the walker's descent `lstat`) reports for whatever it found, directory included. Distinct
-/// from the leaf-only [`entry_kind_from_file_type`] above, whose missing `is_dir` arm is a
-/// deliberate contract (leaf construction is never reached for a directory); a structural query has
-/// no such precondition, so its classification must cover every kind.
+/// from the leaf-only `entry_kind_from_file_type` above, whose missing `is_dir` arm is a deliberate
+/// contract (leaf construction is never reached for a directory); a structural query has no such
+/// precondition, so its classification must cover every kind.
 impl From<std::fs::FileType> for EntryKind {
     fn from(ft: std::fs::FileType) -> Self {
         if ft.is_dir() {
@@ -320,59 +322,111 @@ const fn entry_kind_from_flags(is_file: bool, is_symlink: bool) -> EntryKind {
 // DirChild
 // ---------------------------------------------------------------------------
 
-/// Direct child that *is* a directory.
+/// Direct child that *is* a directory: one of the three things a walk can truthfully say of one.
 ///
-/// Sum type encoding the walker's covered/uncovered distinction structurally — `Covered` carries
-/// the recursive `Arc<DirSnapshot>` (whose `root_meta.fs_id` is the kernel identity); `Uncovered`
-/// carries the `FsIdentity` directly.
+/// - `Covered` — the walk listed it. The recursive `Arc<DirSnapshot>` is the listing; its
+///   `root_meta.fs_id` is the kernel identity.
+/// - `Uncovered` — the shape does not list it: the scan shape's recursion edge
+///   (`ScanConfig::descends_into`) refused the level — `Subtree`'s `recursive=false`,
+///   beyond-`max_depth` or cross-filesystem gates (the child's `fs_id.device` differs from the walk
+///   root's), or `MatchChain`'s terminus depth (a matched directory at the chain's end is
+///   membership, not content). A boundary: its identity is all the proof folds.
+/// - `Denied` — the shape lists it, and the walk could not read it and holds no earlier listing of
+///   it: its identity is all that is known. It never stages into a diff ([`diff_dir_pair`],
+///   [`Diff::all_created`], [`Diff::all_deleted`]), so its Profile gives it no Tree slot and never
+///   asks for a watch the kernel would refuse on a directory the process may not read.
 ///
-/// `Uncovered` means *the walker stored the entry but did not recurse* because the scan shape's
-/// recursion edge (`ScanConfig::descends_into`) refused the level: `Subtree`'s `recursive=false`,
-/// beyond-`max_depth`, or cross-filesystem gates (the child's `fs_id.device` differs from the
-/// anchor's `root_dev`), or `MatchChain`'s terminus depth (a matched directory at the chain's end
-/// is membership, not content — the pruned walk stops there by design). The walker never mints
-/// `Uncovered` for transient I/O failures (raced unlink, kind-flip, EACCES on the subdir's
-/// `read_dir`); those surface as `Covered(empty_or_partial_arc)` via the walker's `read_dir`
-/// benign-empty contract, distinct from the uncovered variant. The structural consequence: within a
-/// Profile (whose `config_hash` freezes the scan shape and its depth bounds, and whose cross-fs
-/// identity bifurcates through `fs_id` rather than this variant), the `(Covered, Uncovered)` and
-/// `(Uncovered, Covered)` transitions on the *same* `fs_id` are unreachable.
-///
-/// Two boundary cases to keep distinct:
-/// - **`exclude` glob**: filtered entries are absent from the parent's `entries` map entirely — the
-///   walker never constructs a `DirChild` for them, so neither variant applies.
-/// - **`read_dir` failure (EACCES, EIO, …)**: the parent's `lstat` succeeded but enumeration of
-///   *this* directory's contents failed. The walker emits a *covered-but-empty*
-///   `DirChild::Covered(arc)` where `arc.entries` is empty — the engine sees a known-empty subtree,
-///   not an uncovered slot. The walker contract in `specter-sensor::prober::walk::probe_subtree` is
-///   authoritative.
+/// Within a Profile — whose `config_hash` freezes the scan shape and its depth bounds, and whose
+/// cross-fs identity bifurcates through `fs_id` rather than this variant — one identity changes
+/// variant one way only: `Denied` → `Covered`, a branch that opened. Between a listed variant and
+/// `Uncovered` a change would need a gate the config froze, and `Covered` → `Denied` would be a
+/// walk denied a directory it held a listing of, where that listing stands in. An entry the shape
+/// filters (`exclude`, a chain's positional match) is absent from the parent's `entries` map — no
+/// variant applies.
 ///
 /// Subtree mtime is **not** stored on `DirChild` — the canonical mtime lives at
 /// `Covered(_).root_meta.mtime` and is consumed by the walker's mtime-skip directly off the
 /// [`DirSnapshot`] struct field. The parent `dir_hash` fold deliberately omits subtree mtime
 /// (filter-aware identity is independent of kernel-side dirent-block churn).
 ///
-/// Both variants project a uniform `fs_id()` (sourced from the subtree's `root_meta.fs_id` on
-/// `Covered`, or stored directly on `Uncovered`); the hash fold uses a per-variant tag so the two
+/// Every variant projects a uniform `fs_id()` (sourced from the subtree's `root_meta.fs_id` on
+/// `Covered`, stored directly on the other two); the hash fold tags each variant, so the three
 /// shapes contribute distinct payloads even when their identities coincide.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum DirChild {
-    /// The walker recursed and stored the directory's snapshot. The kernel identity lives at
-    /// `arc.root_meta.fs_id`.
+    /// The walk listed it. The kernel identity lives at `arc.root_meta.fs_id`.
     Covered(Arc<DirSnapshot>),
-    /// The walker stored the entry but did not recurse — one of the three static-config gates fired
-    /// (`!recursive`, `max_depth`, or cross-fs). Carries the kernel identity directly.
+    /// The shape does not list it: a boundary. Its identity is all the proof folds.
     Uncovered(FsIdentity),
+    /// The shape lists it, and the walk could not read it and holds no earlier listing of it. Its
+    /// identity is all that is known.
+    Denied(FsIdentity),
 }
 
 impl DirChild {
     /// Kernel identity of the directory. For `Covered`, sourced from the subtree's
-    /// `root_meta.fs_id`; for `Uncovered`, the stored value. Single source of truth per variant.
+    /// `root_meta.fs_id`; for the other two, the stored value. Single source of truth per variant.
     #[must_use]
     pub fn fs_id(&self) -> FsIdentity {
         match self {
             Self::Covered(s) => s.root_meta.fs_id,
-            Self::Uncovered(id) => *id,
+            Self::Uncovered(id) | Self::Denied(id) => *id,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PriorDir
+// ---------------------------------------------------------------------------
+
+/// What an earlier snapshot holds for one directory, matched by name *and* identity — how a walk
+/// finds a directory's prior, and how a pass tells a branch that opened from one that stood.
+///
+/// Identity is part of the match because a name outlives its directory: a directory replaced under
+/// the same name is a new directory, and inherits neither the old one's listing nor its denial.
+#[derive(Clone, Copy, Debug)]
+pub enum PriorDir<'a> {
+    /// A listing of this very directory.
+    Listed(&'a Arc<DirSnapshot>),
+    /// This very directory, recorded denied.
+    Denied,
+    /// Nothing known: no directory under the name, another directory under it, a boundary, or a
+    /// name below a directory the earlier snapshot holds no listing of.
+    Unseen,
+}
+
+impl<'a> PriorDir<'a> {
+    /// A snapshot's own root, if it has the identity `fs_id`.
+    #[must_use]
+    pub fn root(snapshot: Option<&'a Arc<DirSnapshot>>, fs_id: FsIdentity) -> Self {
+        match snapshot {
+            Some(listing) if listing.root_meta.fs_id == fs_id => Self::Listed(listing),
+            _ => Self::Unseen,
+        }
+    }
+
+    /// The entry under `name`, if it holds a directory of identity `fs_id`. `Denied` and `Unseen`
+    /// descend to `Unseen`: an earlier snapshot saw nothing below a directory it could not read.
+    #[must_use]
+    pub fn child(self, name: &str, fs_id: FsIdentity) -> Self {
+        let Self::Listed(listing) = self else {
+            return Self::Unseen;
+        };
+        match listing.entries.get(name) {
+            Some(ChildEntry::Dir(DirChild::Covered(sub))) if sub.root_meta.fs_id == fs_id => {
+                Self::Listed(sub)
+            }
+            Some(ChildEntry::Dir(DirChild::Denied(id))) if *id == fs_id => Self::Denied,
+            _ => Self::Unseen,
+        }
+    }
+
+    /// The earlier listing of this directory, if there is one.
+    #[must_use]
+    pub const fn listing(self) -> Option<&'a Arc<DirSnapshot>> {
+        match self {
+            Self::Listed(listing) => Some(listing),
+            Self::Denied | Self::Unseen => None,
         }
     }
 }
@@ -504,18 +558,21 @@ impl DirSnapshot {
     }
 
     /// Look up `name` and return the covered subtree iff present and the entry is a
-    /// `Dir(Covered(_))`. Returns `None` for missing entries, for `Leaf` entries, and for
-    /// `Dir(Uncovered(_))`.
+    /// `Dir(Covered(_))`. Returns `None` for missing entries, for `Leaf` entries, and for the
+    /// directories the snapshot holds no listing of, `Dir(Uncovered(_))` and `Dir(Denied(_))`.
     ///
-    /// Three call sites consume the covered-dir slot: the walker's recursive baseline lookup,
-    /// [`subtree_at_dir`]'s descent step, and `splice_dir`'s prior-child resolution. Each needs
-    /// "`Dir` entry that is `Covered`" → `Arc<DirSnapshot>` as a single named operation; this
-    /// primitive collapses the `entries.get(name)` + variant match into one call.
+    /// Four call sites consume the covered-dir slot: the walker's recursive baseline lookup,
+    /// [`subtree_at_dir`]'s descent step, `splice_dir`'s prior-child resolution, and the engine's
+    /// pre-fire target descent. Each needs "`Dir` entry that is `Covered`" → `Arc<DirSnapshot>` as
+    /// a single named operation; this primitive collapses the `entries.get(name)` + variant match
+    /// into one call.
     #[must_use]
     pub fn lookup_covered_dir(&self, name: &str) -> Option<&Arc<Self>> {
         match self.entries.get(name)? {
             ChildEntry::Dir(DirChild::Covered(s)) => Some(s),
-            ChildEntry::Dir(DirChild::Uncovered(_)) | ChildEntry::Leaf(_) => None,
+            ChildEntry::Dir(DirChild::Uncovered(_) | DirChild::Denied(_)) | ChildEntry::Leaf(_) => {
+                None
+            }
         }
     }
 }
@@ -563,7 +620,8 @@ impl TreeSnapshot {
     ///
     /// - `TreeSnapshot::File` (no recursion possible).
     /// - `target` outside `anchor`'s subtree (the parent walk bottoms out before reaching `anchor`).
-    /// - The chain crosses a `Leaf` or a `DirChild::Uncovered(_)` intermediate.
+    /// - The chain crosses a `Leaf`, or a directory the snapshot holds no listing of
+    ///   (`DirChild::Uncovered(_)` / `DirChild::Denied(_)`).
     /// - Any segment fails to resolve via `tree.name` (slot reaped).
     ///
     /// `anchor` is the engine-side `ResourceId` the caller knows the snapshot is rooted at — for
@@ -600,6 +658,10 @@ const DIR_COVERED_TAG: u8 = 2;
 
 /// Tag for `DirChild::Uncovered` — a Dir child the snapshot did not descend; its subtree is opaque.
 const DIR_UNCOVERED_TAG: u8 = 3;
+
+/// Tag for `DirChild::Denied` — a Dir child the shape lists that the walk could not read. Apart
+/// from [`DIR_UNCOVERED_TAG`], so a denied directory and a boundary of one identity fold apart.
+const DIR_DENIED_TAG: u8 = 4;
 
 fn compute_leaf_hash(kind: EntryKind, size: u64, mtime: SystemTime, fs_id: FsIdentity) -> u128 {
     let mut h = hasher_128();
@@ -642,6 +704,8 @@ fn compute_dir_hash(
     //                   `(root_meta.fs_id, entries...)`).
     // - `Dir(Uncovered)` contributes the raw `fs_id` — the walker has no observation beyond the
     //   directory's identity.
+    // - `Dir(Denied)`    contributes the raw `fs_id` under its own tag — likewise identity alone,
+    //   kept apart from a boundary of the same identity.
     for (name, child) in entries {
         h.put_str(name.as_str());
         match child {
@@ -655,6 +719,10 @@ fn compute_dir_hash(
             }
             ChildEntry::Dir(DirChild::Uncovered(fs_id)) => {
                 h.put_u8(DIR_UNCOVERED_TAG);
+                encode_into(*fs_id, &mut h);
+            }
+            ChildEntry::Dir(DirChild::Denied(fs_id)) => {
+                h.put_u8(DIR_DENIED_TAG);
                 encode_into(*fs_id, &mut h);
             }
         }
@@ -685,7 +753,8 @@ fn compute_dir_hash(
 /// - `target` is outside `anchor`'s tree subtree (ancestor walk bottoms out before reaching
 ///   `anchor`).
 /// - The chain crosses a [`ChildEntry::Leaf`] (snapshot identity flip at an intermediate segment).
-/// - The chain crosses a [`DirChild::Uncovered`] intermediate.
+/// - The chain crosses a directory the snapshot holds no listing of ([`DirChild::Uncovered`] or
+///   [`DirChild::Denied`]).
 /// - Any segment fails to resolve via [`Tree::name`] (slot reaped).
 #[must_use]
 pub fn subtree_at_dir(
@@ -697,8 +766,8 @@ pub fn subtree_at_dir(
     let chain = ancestor_chain(target, anchor, tree)?;
 
     // Descend from `root` by following segment names. `chain[0] == anchor` matches `root` already,
-    // so we start at `chain[1]`. Any non-covered intermediate (Leaf, Uncovered Dir, or missing
-    // entry) yields None via `lookup_covered_dir`'s unified gate.
+    // so we start at `chain[1]`. Any non-covered intermediate (Leaf, Uncovered / Denied Dir, or
+    // missing entry) yields None via `lookup_covered_dir`'s unified gate.
     let mut current: Arc<DirSnapshot> = Arc::clone(root);
     for &id in chain.iter().skip(1) {
         let name = tree.name(id)?;
@@ -756,7 +825,8 @@ pub enum SpliceResult {
     /// three structural failure modes: [`SpliceFailureCause::TargetOutsideAnchorSubtree`] (target
     /// outside anchor's tree subtree), [`SpliceFailureCause::SlotReapedMidGraft`] (interior slot's
     /// generation moved mid-graft), and [`SpliceFailureCause::IntermediateUncovered`] (path crossed
-    /// a [`DirChild::Uncovered`], a missing entry, or a `Leaf` at an interior segment).
+    /// a directory the snapshot holds no listing of, a missing entry, or a `Leaf` at an interior
+    /// segment).
     ///
     /// The caller leaves its prior view in place and emits
     /// [`crate::Diagnostic::SpliceCrossedUncovered`] carrying the cause so the contract violation
@@ -801,7 +871,7 @@ pub enum SpliceResult {
 /// - [`SpliceFailureCause::SlotReapedMidGraft`] — an interior segment's slot was reaped mid-graft
 ///   (`Tree::name` ⇒ `None`).
 /// - [`SpliceFailureCause::IntermediateUncovered`] — the path from anchor to target crosses a
-///   [`DirChild::Uncovered`] intermediate (snapshot coverage gap), a missing entry, or a `Leaf` at
+///   directory the snapshot holds no listing of (a coverage gap), a missing entry, or a `Leaf` at
 ///   an interior segment.
 ///
 /// None is reachable through legitimate filesystem state: the engine roots every probe at a
@@ -863,7 +933,7 @@ fn splice_dir_prior(
 /// - [`SpliceFailureCause::SlotReapedMidGraft`] — `tree.name(next_id)` returned `None` for an
 ///   interior segment; the slot's generation moved between burst start and graft commit.
 /// - [`SpliceFailureCause::IntermediateUncovered`] — the prior snapshot's `lookup_covered_dir(name)`
-///   returned `None` (entry is absent, a `Leaf`, or stored as `DirChild::Uncovered`).
+///   returned `None` (entry is absent, a `Leaf`, or a `DirChild::Uncovered` / `DirChild::Denied`).
 ///
 /// The typed error threads through the recursive call via `?`, so deeper failures surface at the
 /// dispatcher with the originating site's classification intact. [`splice_dir_prior`] wraps the
@@ -895,7 +965,7 @@ fn splice_dir(
     let name = tree
         .name(next_id)
         .ok_or(SpliceFailureCause::SlotReapedMidGraft)?;
-    // Path crossed an uncovered branch (DirChild::Uncovered), missing entry, or a Leaf at this
+    // Path crossed a directory the snapshot holds no listing of, a missing entry, or a Leaf at this
     // interior segment. We don't synthesise empty intermediates — that would lie to `dir_hash`.
     // Surface as IntermediateUncovered; the engine keeps its prior view and converges on the next
     // probe.
@@ -1112,23 +1182,33 @@ fn diff_same_name(
                     collect_dir_pair(ps, ns, &rel, modified, staged_created, staged_deleted);
                 }
             }
-            (DirChild::Uncovered(_), DirChild::Uncovered(_)) => {
-                // Both sides uncovered: no observation, no delta.
+            (DirChild::Uncovered(_), DirChild::Uncovered(_))
+            | (DirChild::Denied(_), DirChild::Denied(_)) => {
+                // Neither side observed beyond the identity (a boundary, or a directory still
+                // denied): no delta.
             }
-            (DirChild::Covered(_), DirChild::Uncovered(_))
-            | (DirChild::Uncovered(_), DirChild::Covered(_)) => {
-                // Same-fs_id coverage flip: v1-unreachable. The walker's Uncovered gates
-                // (`!recursive`, `max_depth`, cross-fs) are `config_hash`-frozen per Profile or
-                // change `fs_id`, so a flip never meets an unchanged identity.
+            (DirChild::Denied(_), DirChild::Covered(_)) => {
+                // The branch opened — the one same-fs_id flip that occurs. It stages as replaced,
+                // and the denied side contributes nothing, so the directory and its listing surface
+                // as created, which installs its watch through the ordinary path.
+                stage_replaced(rel, pc, nc, staged_created, staged_deleted);
+            }
+            _ => {
+                // Every other same-fs_id flip is v1-unreachable. Between a listed variant and
+                // `Uncovered` it would need a gate the config froze (`!recursive`, `max_depth` and
+                // cross-fs are `config_hash`-frozen per Profile or change `fs_id`); `Covered` →
+                // `Denied` would be a walk denied a directory it held a listing of, where that
+                // listing stands in.
                 //
                 // Degrade, don't abort: a panic here stalls the single-threaded engine driver for a
                 // compounding routing breach. Release stages the name as replaced, surfacing the
                 // dropped coverage delta rather than silently leaking Tree watches.
                 debug_assert!(
                     false,
-                    "diff_same_name: same-fs_id (Covered, Uncovered) is \
-                     v1-unreachable — Uncovered gates are config-frozen \
-                     or change fs_id",
+                    "diff_same_name: a same-fs_id coverage flip other than \
+                     (Denied, Covered) is v1-unreachable — the shape's gates \
+                     are config-frozen, and a listing stands in for its own \
+                     denied directory",
                 );
                 stage_replaced(rel, pc, nc, staged_created, staged_deleted);
             }
@@ -1155,9 +1235,10 @@ fn stage_replaced(
 }
 
 /// Stage `entry` at `rel` on one side of a diff, then every entry of the listing beneath it,
-/// eligible — the one primitive every staged entry passes through. Depth-first pre-order: an entry
-/// precedes its subtree, and each level is lex-ordered by its `BTreeMap`. The output is a flat Diff
-/// for the Effect API, which does not care about reap order.
+/// eligible — the one primitive every staged entry passes through, and so the one gate that keeps a
+/// denied directory out of every diff. Depth-first pre-order: an entry precedes its subtree, and
+/// each level is lex-ordered by its `BTreeMap`. The output is a flat Diff for the Effect API, which
+/// does not care about reap order.
 fn stage(
     rel: CompactString,
     entry: &ChildEntry,
@@ -1174,6 +1255,10 @@ fn stage(
         ChildEntry::Dir(DirChild::Uncovered(_)) | ChildEntry::Leaf(_) => {
             staged.push(StagedEntry::new(rel, entry, pair_eligible));
         }
+        // A denied directory stages nothing: a diff entry is a slot and, for an interior directory,
+        // a watch — on a directory the process may not read, a watch the kernel refuses. It enters
+        // a diff when its branch opens.
+        ChildEntry::Dir(DirChild::Denied(_)) => {}
     }
 }
 

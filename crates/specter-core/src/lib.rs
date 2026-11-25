@@ -53,7 +53,7 @@ pub use resource::{ContribKey, Resource, ResourceKind, ResourceRole};
 pub use scan_config::{ConfigError, GlobPattern, ProfileIdentity, ScanConfig, ScanConfigBuilder};
 pub use snapshot::EntryKind;
 pub use snapshot::tree::{
-    ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, SpliceResult, TreeSnapshot,
+    ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, PriorDir, SpliceResult, TreeSnapshot,
     diff_dir_pair, diff_tree, splice, subtree_at_dir,
 };
 pub use sub::{
