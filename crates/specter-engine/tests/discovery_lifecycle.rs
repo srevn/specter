@@ -16,16 +16,16 @@ use specter_core::testkit::{
 use specter_core::{
     ActiveBurst, ChildEntry, ClassSet, ContribKey, DetachReason, Diagnostic, DirChild, DirSnapshot,
     EffectCompletion, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input,
-    MintEntry, MintSpec, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId,
-    ProfileIdentity, ProfileState, ProofAuthority, ResourceId, ResourceKind, ScanConfig, SpawnSpec,
-    StepOutput, SubAttachAnchor, SubId, TimerKind, WatchOp,
+    MintEntry, MintSpec, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, Profile, ProfileId,
+    ProfileIdentity, ProfileState, ProofAuthority, Resource, ResourceId, ResourceKind, ScanConfig,
+    SpawnSpec, StepOutput, SubAttachAnchor, SubId, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
     DEFAULT_EVENTS, MAX_SETTLE, SETTLE, attach, attach_discovery, attach_discovery_returning,
     complete_effect_to_rebasing, descent_advance, discovery_subs_of, drain_due, fire_standard_once,
     is_draining, last_probe_path, mint_spec, mint_spec_scoped, pid_of, pre_place_dir,
-    respond_anchor_file, seed_to_idle, seed_to_idle_with,
+    respond_anchor_file, seed_to_idle, seed_to_idle_with, watch_op_rejected_input,
 };
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -1535,6 +1535,76 @@ fn second_template_shares_profile_and_walk_mints_per_template() {
     assert_eq!(
         p1, p2,
         "identical minted identity ⇒ the two minted Subs share one minted Profile",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// A mint founds its Profile kinded as the snapshot lists the match, even on a slot the Tree holds
+/// unkinded: a Profile takes its anchor's kind from the slot when it is founded. A watch rejection
+/// at `a` resets the slot's kind and parks the Profile anchored there; a second template, minting
+/// under another identity, then founds a Profile of its own on that slot.
+#[test]
+fn a_mint_at_a_slot_a_watch_rejection_vacated_founds_its_profile_kinded() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let (alpha, pid) = attach_discovery(
+        &mut e,
+        "alpha",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_spec(),
+        now,
+    );
+    let listing = dir_snap(&[("a", EntryKind::Dir, 1)]);
+    let _ = respond(&mut e, pid, &listing, now);
+    settle_minted_seeds(&mut e, alpha, now);
+    let a = e.tree().lookup(Some(data), "a").expect("a slot");
+    let t1 = now + Duration::from_millis(10);
+    let _ = e.step(watch_op_rejected_input(a), t1);
+    assert_eq!(
+        e.tree().get(a).map(Resource::kind_raw),
+        Some(ResourceKind::Unknown),
+        "premise: the rejection leaves the slot unkinded",
+    );
+
+    let flat = Arc::new(MintSpec {
+        identity: ProfileIdentity::new(
+            ScanConfig::builder().recursive(false).build(),
+            MAX_SETTLE,
+            ClassSet::EMPTY,
+        ),
+        settle: SETTLE,
+        spawn: SpawnSpec::new(empty_program(), EffectScope::SubtreeRoot, false),
+    });
+    let (beta, _) = attach_discovery(
+        &mut e,
+        "beta",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        flat,
+        t1,
+    );
+    let out = respond(&mut e, pid, &listing, t1);
+    let narrated: Vec<ResourceKind> = out
+        .diagnostics
+        .iter()
+        .filter_map(|d| match d {
+            Diagnostic::DiscoveryMinted { source, kind, .. } if *source == beta => Some(*kind),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        narrated,
+        [ResourceKind::Dir],
+        "the mint narrates the listed kind"
+    );
+    let minted = pid_of(&e, minted_under(&e, beta, data, &["a"]));
+    assert_ne!(minted, pid_of(&e, minted_under(&e, alpha, data, &["a"])));
+    assert_eq!(
+        e.profiles().get(minted).and_then(Profile::kind),
+        Some(ResourceKind::Dir),
+        "the Profile it founds is kinded",
     );
     let _ = e.cancel_all_in_flight_probes();
 }
