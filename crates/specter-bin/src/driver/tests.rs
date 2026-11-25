@@ -19,6 +19,7 @@ use crate::app::CliLogOverrides;
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode, WireId, WireRequest};
 use crate::ipc::wire::WireTime;
 use crate::loader::Loader;
+use crate::testkit::mint_one;
 use compact_str::CompactString;
 use crossbeam::channel::Sender;
 use specter_actuator::RunWiring;
@@ -2941,81 +2942,35 @@ fn ipc_disable_unknown_dynamic_shape_name_returns_unknown_sub() {
     assert!(rig.driver.disabled_runtime.is_empty());
 }
 
-/// Disable against a real discovery-minted Sub returns [`WireErrorCode::DynamicSubNoOp`]. Inject a
-/// dynamic Sub directly so the gate (which reads `is_dynamic`) fires.
+/// Disable against a discovery-minted Sub returns [`WireErrorCode::DynamicSubNoOp`].
 #[test]
 fn ipc_disable_dynamic_sub_returns_dynamic_no_op() {
-    use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
-    use specter_core::{
-        ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, ProfileIdentity,
-        ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
-    };
-
-    fn trivial_program() -> Arc<ActionProgram> {
-        let mut b = ProgramBuilder::new();
-        let h = b.emit(SpawnBody::Exec(ExecAction::new(
-            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
-            None,
-        )));
-        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
-        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
-        Arc::new(b.build().unwrap())
-    }
-
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
-
-    let dynamic_name = "template@/tmp/dyn_anchor";
-    let req = SubAttachRequest::from_parts(
-        SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
-        ProfileIdentity::new(
-            ScanConfig::builder().build(),
-            Duration::from_hours(1),
-            ClassSet::DEFAULT_SUBTREE_ROOT,
-        ),
-        SubParams::minted(
-            CompactString::const_new(dynamic_name),
-            trivial_program(),
-            EffectScope::SubtreeRoot,
-            Duration::from_millis(100),
-            false,
-            SubId::default(),
-        ),
-    );
-    let _ = rig
+    let minted = mint_one(&mut rig.driver.engine);
+    let name = rig
         .driver
         .engine
-        .step(Input::AttachSub(req), Instant::now());
-    assert!(
-        rig.driver
-            .engine
-            .subs()
-            .find_by_name(dynamic_name)
-            .is_some()
-    );
+        .subs()
+        .get(minted)
+        .expect("live")
+        .name
+        .clone();
 
     let mut client = ipc_connect(&rig);
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
-        &WireRequest::Disable {
-            name: CompactString::const_new(dynamic_name),
-        },
+        &WireRequest::Disable { name: name.clone() },
     );
     match reply {
         ResponsePayload::Err { code, .. } => assert_eq!(code, WireErrorCode::DynamicSubNoOp),
         other => panic!("expected Err, got {other:?}"),
     }
     assert!(rig.driver.disabled_runtime.is_empty());
-    assert!(
-        rig.driver
-            .engine
-            .subs()
-            .find_by_name(dynamic_name)
-            .is_some()
-    );
+    assert_eq!(rig.driver.engine.subs().find_by_name(&name), Some(minted));
 
     let _ = rig.driver.begin_shutdown();
 }
@@ -3228,60 +3183,29 @@ fn ipc_absorb_unknown_name_returns_unknown_sub() {
 }
 
 /// `absorb` against a discovery-minted Sub refuses with [`WireErrorCode::DynamicSubNoOp`] — minted
-/// Subs vanish and re-mint with the match set, the same reason `disable` refuses them. The dynamic
-/// Sub is injected directly so the `is_dynamic` gate fires.
+/// Subs vanish and re-mint with the match set, the same reason `disable` refuses them.
 #[test]
 fn ipc_absorb_dynamic_sub_returns_dynamic_no_op() {
-    use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
-    use specter_core::{
-        ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, ProfileIdentity,
-        ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
-    };
-
-    fn trivial_program() -> Arc<ActionProgram> {
-        let mut b = ProgramBuilder::new();
-        let h = b.emit(SpawnBody::Exec(ExecAction::new(
-            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
-            None,
-        )));
-        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
-        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
-        Arc::new(b.build().unwrap())
-    }
-
     let tmp = tempfile::TempDir::new().unwrap();
     let cfg_path = tmp.path().join("specter.toml");
     let config = Config::from_str("").expect("empty config parses");
     let mut rig = rig_for(config, cfg_path);
-
-    let dynamic_name = "template@/tmp/dyn_anchor";
-    let req = SubAttachRequest::from_parts(
-        SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
-        ProfileIdentity::new(
-            ScanConfig::builder().build(),
-            Duration::from_hours(1),
-            ClassSet::DEFAULT_SUBTREE_ROOT,
-        ),
-        SubParams::minted(
-            CompactString::const_new(dynamic_name),
-            trivial_program(),
-            EffectScope::SubtreeRoot,
-            Duration::from_millis(100),
-            false,
-            SubId::default(),
-        ),
-    );
-    let _ = rig
+    let minted = mint_one(&mut rig.driver.engine);
+    let name = rig
         .driver
         .engine
-        .step(Input::AttachSub(req), Instant::now());
+        .subs()
+        .get(minted)
+        .expect("live")
+        .name
+        .clone();
 
     let mut client = ipc_connect(&rig);
     let reply = ipc_round_trip(
         &mut rig,
         &mut client,
         &WireRequest::Absorb {
-            name: CompactString::const_new(dynamic_name),
+            name,
             duration_ms: None,
         },
     );

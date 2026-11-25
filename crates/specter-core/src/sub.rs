@@ -217,15 +217,13 @@ impl MintState {
     }
 }
 
-/// The reaction half of [`SubParams`] — pure intent, no runtime state.
+/// What a request says a Sub does — pure intent, no runtime state. A request cannot say "minted": a
+/// minted Sub comes only from [`Sub::minted`], at the engine's mint entry.
 ///
 /// [`Sub::from_request`] gives it the state it carries at rest: `Spawn` a fresh [`FireHistory`],
 /// `Mint` a fresh [`MintState`].
 ///
-/// - `Spawn` — run a program when the Profile settles. `minted_by` is the Sub-side provenance axis:
-///   `Some` iff a discovery reconcile minted this Sub. Living *inside* the variant, a minted
-///   template is unrepresentable, and the detach cascade is structurally depth-one (a minted Sub is
-///   always `Spawn`, which mints nothing).
+/// - `Spawn` — run a program when the Profile settles.
 /// - `Mint` — attach a dynamic Sub per matched chain terminus. Coupled iff with the `MatchChain`
 ///   Profile shape (the engine's attach boundary asserts both directions: a mint reaction on a
 ///   non-chain Profile and a spawn reaction on a chain Profile are equally unconstructable). `Arc`:
@@ -233,25 +231,11 @@ impl MintState {
 ///   copy, and `SubParams: Clone` stays cheap.
 #[derive(Clone, Debug)]
 pub enum ReactionSpec {
-    Spawn {
-        spec: SpawnSpec,
-        minted_by: Option<SubId>,
-    },
+    Spawn(SpawnSpec),
     Mint(Arc<MintSpec>),
 }
 
 impl ReactionSpec {
-    /// The discovery template this reaction attributes the Sub to — `None` for operator-declared
-    /// Subs. Pre-attach twin of [`Sub::minted_by`]; consumers read provenance through it rather
-    /// than binding to the variant encoding.
-    #[must_use]
-    pub const fn minted_by(&self) -> Option<SubId> {
-        match self {
-            Self::Spawn { minted_by, .. } => *minted_by,
-            Self::Mint(_) => None,
-        }
-    }
-
     /// Whether this is the mint reaction — a discovery template. The engine's attach boundary
     /// asserts the iff-coupling with the `MatchChain` Profile shape on exactly this predicate.
     #[must_use]
@@ -286,9 +270,8 @@ pub struct SubParams {
 }
 
 impl SubParams {
-    /// Params for a Sub whose reaction is spawning its own program, with no mint provenance. The
-    /// construction funnel for everything that is neither a template nor minted: call sites name
-    /// only the spawn fields, so the provenance axis cannot be half-filled by accident.
+    /// Params for a Sub whose reaction is spawning its own program — the construction funnel for
+    /// everything that is not a template.
     #[must_use]
     pub fn spawn(
         name: CompactString,
@@ -300,40 +283,8 @@ impl SubParams {
         Self {
             name,
             settle,
-            reaction: ReactionSpec::Spawn {
-                spec: SpawnSpec::new(program, scope, log_output),
-                minted_by: None,
-            },
+            reaction: ReactionSpec::Spawn(SpawnSpec::new(program, scope, log_output)),
         }
-    }
-
-    /// Params for a discovery-minted Sub — [`Self::spawn`] plus the minting template's id. A
-    /// flat-argument ergonomic for tests injecting dynamic Subs; the production mint arm clones the
-    /// template's sealed [`SpawnSpec`] directly (one `needs_diff` derivation per template, not one
-    /// per mint).
-    #[must_use]
-    pub fn minted(
-        name: CompactString,
-        program: Arc<ActionProgram>,
-        scope: EffectScope,
-        settle: Duration,
-        log_output: bool,
-        minted_by: SubId,
-    ) -> Self {
-        Self {
-            name,
-            settle,
-            reaction: ReactionSpec::Spawn {
-                spec: SpawnSpec::new(program, scope, log_output),
-                minted_by: Some(minted_by),
-            },
-        }
-    }
-
-    /// The discovery template these params attribute the Sub to — [`ReactionSpec::minted_by`].
-    #[must_use]
-    pub const fn minted_by(&self) -> Option<SubId> {
-        self.reaction.minted_by()
     }
 
     /// Whether these params declare a discovery template — [`ReactionSpec::is_template`].
@@ -362,8 +313,7 @@ pub struct SubAttachRequest {
 
 impl SubAttachRequest {
     /// Canonical constructor. [`Self::for_anchor`] is the flat-argument ergonomic over this for the
-    /// config layer and tests; the engine's discovery reconcile builds minted Subs through this
-    /// directly.
+    /// config layer and tests.
     #[must_use]
     pub const fn from_parts(
         anchor: SubAttachAnchor,
@@ -377,10 +327,9 @@ impl SubAttachRequest {
         }
     }
 
-    /// Build a static (operator-declared) attach request — [`SubParams::spawn`] params. Discovery
-    /// templates (config lowering) and minted Subs ([`SubParams::minted`], discovery reconcile)
-    /// build their params explicitly and flow through [`Self::from_parts`]. Not `const`: minting
-    /// the identity's config handle allocates.
+    /// Build a static (operator-declared) attach request — [`SubParams::spawn`] params. A discovery
+    /// template (config lowering) builds its params explicitly and flows through
+    /// [`Self::from_parts`]. Not `const`: minting the identity's config handle allocates.
     #[must_use]
     pub fn for_anchor(
         name: CompactString,
@@ -603,8 +552,9 @@ impl std::ops::BitAndAssign for ClassSet {
 pub enum Reaction {
     Spawn {
         spec: SpawnSpec,
-        /// Template that minted this Sub — `None` for operator-declared Subs. Never mutated
-        /// post-attach ([`SubRegistry::rebind`] asserts equality).
+        /// The template that minted this Sub — written by [`Sub::minted`] alone; `None` for a Sub a
+        /// request declared. Living inside `Spawn`, a minted template is unrepresentable and the
+        /// detach cascade is depth one: a minted Sub mints nothing.
         minted_by: Option<SubId>,
         history: FireHistory,
     },
@@ -620,11 +570,11 @@ pub struct Sub {
     /// The Profile this Sub attaches to — the join axis of the per-Sub fire bookkeeping onto a
     /// `(Resource, ScanConfig)` partition.
     ///
-    /// **Write-once** at [`Sub::from_request`]: re-assigning this would orphan
-    /// [`SubRegistry::by_profile`] (the secondary index by `ProfileId`), break the `Sub`-to-`Profile`
-    /// lifetime presupposition every dispatcher reads, and silently re-target fire history. The
-    /// invariant is held by encapsulation — module-private with no setter — matching the discipline
-    /// on [`crate::Profile::resource`] (the same write-once join axis on the Profile side).
+    /// **Write-once** at construction: re-assigning this would orphan [`SubRegistry::by_profile`]
+    /// (the secondary index by `ProfileId`), break the `Sub`-to-`Profile` lifetime presupposition
+    /// every dispatcher reads, and silently re-target fire history. The invariant is held by
+    /// encapsulation — module-private with no setter — matching the discipline on
+    /// [`crate::Profile::resource`] (the same write-once join axis on the Profile side).
     profile: ProfileId,
     /// Per-Sub debounce floor. `max_settle` and `events` are *not* stored here — they are Profile
     /// identity (fold into `config_hash`, invariant for the Profile's lifetime); read them off the
@@ -656,9 +606,9 @@ impl Sub {
             profile,
             settle: params.settle,
             reaction: match params.reaction {
-                ReactionSpec::Spawn { spec, minted_by } => Reaction::Spawn {
+                ReactionSpec::Spawn(spec) => Reaction::Spawn {
                     spec,
-                    minted_by,
+                    minted_by: None,
                     history: FireHistory::default(),
                 },
                 ReactionSpec::Mint(spec) => Reaction::Mint {
@@ -669,8 +619,30 @@ impl Sub {
         }
     }
 
-    /// The Profile this Sub attaches to. Write-once at [`Self::from_request`]; see the field
-    /// rustdoc for the load-bearing invariant.
+    /// A Sub `template` minted: its reaction is the spec's spawn and its debounce the spec's
+    /// settle, and it starts never fired. The one constructor that names a template, so a Sub's
+    /// provenance is the engine's mint entry's to write, never a request's.
+    #[must_use]
+    pub fn minted(
+        profile: ProfileId,
+        name: CompactString,
+        template: SubId,
+        spec: &MintSpec,
+    ) -> Self {
+        Self {
+            name,
+            profile,
+            settle: spec.settle,
+            reaction: Reaction::Spawn {
+                spec: spec.spawn.clone(),
+                minted_by: Some(template),
+                history: FireHistory::default(),
+            },
+        }
+    }
+
+    /// The Profile this Sub attaches to. Write-once at construction; see the field rustdoc for the
+    /// load-bearing invariant.
     #[must_use]
     pub const fn profile(&self) -> ProfileId {
         self.profile
@@ -695,8 +667,8 @@ impl Sub {
     }
 
     /// The discovery template that minted this Sub — `None` for operator-declared Subs, discovery
-    /// templates included. Written once, at [`Self::from_request`]: the registry files the Sub
-    /// under it, in its template's minted set ([`SubRegistry::minted`]).
+    /// templates included. Written once, at [`Self::minted`]: the registry files the Sub under it,
+    /// in its template's minted set ([`SubRegistry::minted`]).
     #[must_use]
     pub const fn minted_by(&self) -> Option<SubId> {
         match &self.reaction {
@@ -999,13 +971,13 @@ impl SubRegistry {
     ///
     /// **Preserves**: [`SubId`], `profile`, `name`, `minted_by`, and the whole [`FireHistory`]. The
     /// first two are structural (the slotmap key and the Profile join are invariants of this Sub's
-    /// lifetime); `name` and `minted_by` are pinned by the rebind invariant (callers route through
-    /// [`Self::find_by_name`], which keys on `name`, and a `minted_by` change would cross the
-    /// static↔dynamic boundary the diff already maps to add+remove). `has_fired` is preserved because
-    /// the B1 dedup floor reads it as "this Sub has already announced the current stable tree state";
-    /// a program swap changes *what runs*, not *whether the tree changed*. The three observational
-    /// counters are preserved for the same reason — they record this Sub's history under its
-    /// operator-facing name, and a `modified_params` rebind leaves both identity and history intact.
+    /// lifetime), and a request carries no provenance to change `minted_by` with; `name` is pinned
+    /// by the rebind invariant (callers route through [`Self::find_by_name`], which keys on it).
+    /// `has_fired` is preserved because the B1 dedup floor reads it as "this Sub has already
+    /// announced the current stable tree state"; a program swap changes *what runs*, not *whether
+    /// the tree changed*. The three observational counters are preserved for the same reason — they
+    /// record this Sub's history under its operator-facing name, and a `modified_params` rebind
+    /// leaves both identity and history intact.
     ///
     /// **Replaces**: the sealed [`SpawnSpec`] wholesale (`program` / `scope` / `log_output` with
     /// `needs_diff` pre-derived at [`SpawnSpec::new`] — no recompute here to forget) and `settle`.
@@ -1013,14 +985,14 @@ impl SubRegistry {
     /// Returns the Sub's settle before the rebind and its Profile, whose settle floor the caller
     /// recomputes when the settle moved; `None` for a stale id.
     ///
-    /// The `debug_assert!`s catch a request whose `name` or `minted_by` differs from the live Sub's;
-    /// release keeps the live ones — the registry's indices key on both — and rebinds the rest. The
-    /// variant match is the `Mint` wall: any field change on a template-bearing spec classifies as
-    /// `modified_identity` (wholesale reap + reattach) at the config diff, never an in-place rebind —
-    /// the minted Subs hold `Arc`s of the template's program, so a rebind would strand them on stale
-    /// reaction state. The config-diff head guard is the outer wall; the variant mismatch here is the
-    /// inner one — loud in dev, and in release it refuses the rebind (`None`, surfaced through the
-    /// caller's `RebindUnknownSub` narration) rather than silently clobbering a template.
+    /// The `debug_assert!` catches a request whose `name` differs from the live Sub's; release keeps
+    /// the live one — the registry's index keys on it — and rebinds the rest. The variant match is
+    /// the `Mint` wall: any field change on a template-bearing spec classifies as `modified_identity`
+    /// (wholesale reap + reattach) at the config diff, never an in-place rebind — the minted Subs
+    /// hold `Arc`s of the template's program, so a rebind would strand them on stale reaction state.
+    /// The config-diff head guard is the outer wall; the variant mismatch here is the inner one —
+    /// loud in dev, and in release it refuses the rebind (`None`, surfaced through the caller's
+    /// `RebindUnknownSub` narration) rather than silently clobbering a template.
     pub fn rebind(&mut self, sub: SubId, new_params: SubParams) -> Option<(Duration, ProfileId)> {
         let s = self.subs.get_mut(sub)?;
         debug_assert_eq!(
@@ -1028,19 +1000,7 @@ impl SubRegistry {
             "rebind cannot change Sub name (rebind identity invariant)",
         );
         match (&mut s.reaction, new_params.reaction) {
-            (
-                Reaction::Spawn {
-                    spec, minted_by, ..
-                },
-                ReactionSpec::Spawn {
-                    spec: new_spec,
-                    minted_by: new_minted_by,
-                },
-            ) => {
-                debug_assert_eq!(
-                    *minted_by, new_minted_by,
-                    "rebind cannot change minted_by (static↔dynamic boundary)",
-                );
+            (Reaction::Spawn { spec, .. }, ReactionSpec::Spawn(new_spec)) => {
                 let prior_settle = s.settle;
                 *spec = new_spec;
                 s.settle = new_params.settle;
@@ -1473,29 +1433,17 @@ mod tests {
     fn by_name_indexes_static_and_dynamic_subs() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        let mk = |name: &str, source: Option<SubId>| {
-            let params = match source {
-                Some(src) => SubParams::minted(
-                    name.into(),
-                    anchor_only_program(),
-                    EffectScope::SubtreeRoot,
-                    SETTLE,
-                    false,
-                    src,
-                ),
-                None => SubParams::spawn(
-                    name.into(),
-                    anchor_only_program(),
-                    EffectScope::SubtreeRoot,
-                    SETTLE,
-                    false,
-                ),
-            };
-            Sub::from_request(pid, params)
-        };
-
-        let static_id = reg.insert(mk("foo", None));
-        let dynamic_id = reg.insert(mk("p@/tmp/x", Some(SubId::default())));
+        let static_id = reg.insert(Sub::from_request(
+            pid,
+            SubParams::spawn(
+                "foo".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
+        ));
+        let dynamic_id = reg.insert(minted(pid, "p@/tmp/x", SubId::default()));
 
         assert_eq!(
             reg.find_by_name("foo"),
@@ -1519,17 +1467,7 @@ mod tests {
     fn remove_clears_by_name_for_dynamic_sub() {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
-        let dynamic_id = reg.insert(Sub::from_request(
-            pid,
-            SubParams::minted(
-                "p@/tmp/x".into(),
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                false,
-                SubId::default(),
-            ),
-        ));
+        let dynamic_id = reg.insert(minted(pid, "p@/tmp/x", SubId::default()));
         assert_eq!(reg.find_by_name("p@/tmp/x"), Some(dynamic_id));
 
         let _ = reg.remove(dynamic_id).expect("dynamic removed");
@@ -1573,21 +1511,8 @@ mod tests {
         let mut reg = SubRegistry::new();
         let pid = ProfileId::default();
         let template = reg.insert(Sub::from_request(pid, template_params("disc")));
-        let mint = |reg: &mut SubRegistry, name: &str| {
-            reg.insert(Sub::from_request(
-                pid,
-                SubParams::minted(
-                    name.into(),
-                    anchor_only_program(),
-                    EffectScope::SubtreeRoot,
-                    SETTLE,
-                    false,
-                    template,
-                ),
-            ))
-        };
-        let a = mint(&mut reg, "disc@/a");
-        let b = mint(&mut reg, "disc@/b");
+        let a = reg.insert(minted(pid, "disc@/a", template));
+        let b = reg.insert(minted(pid, "disc@/b", template));
         let _ = reg.insert(Sub::from_request(
             pid,
             SubParams::spawn(
@@ -1632,37 +1557,25 @@ mod tests {
         let mut reg = SubRegistry::new();
         let alpha = reg.insert(Sub::from_request(discovery, template_params("alpha")));
         let beta = reg.insert(Sub::from_request(discovery, template_params("beta")));
-        let on_shared = |name: &str, template: Option<SubId>| {
-            let params = match template {
-                Some(t) => SubParams::minted(
-                    name.into(),
-                    anchor_only_program(),
-                    EffectScope::SubtreeRoot,
-                    SETTLE,
-                    false,
-                    t,
-                ),
-                None => SubParams::spawn(
-                    name.into(),
-                    anchor_only_program(),
-                    EffectScope::SubtreeRoot,
-                    SETTLE,
-                    false,
-                ),
-            };
-            Sub::from_request(shared, params)
-        };
-
-        let _ = reg.insert(on_shared("build", None));
+        let _ = reg.insert(Sub::from_request(
+            shared,
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
+        ));
         assert_eq!(reg.minted_at(alpha, shared), None, "an operator's Sub");
-        let beta_mint = reg.insert(on_shared("beta@/x", Some(beta)));
+        let beta_mint = reg.insert(minted(shared, "beta@/x", beta));
         assert_eq!(
             reg.minted_at(alpha, shared),
             None,
             "another template's mint"
         );
         assert_eq!(reg.minted_at(beta, shared), Some(beta_mint));
-        let alpha_mint = reg.insert(on_shared("alpha@/x", Some(alpha)));
+        let alpha_mint = reg.insert(minted(shared, "alpha@/x", alpha));
         assert_eq!(reg.minted_at(alpha, shared), Some(alpha_mint));
         assert_eq!(
             reg.minted_at(alpha, discovery),
@@ -1887,9 +1800,22 @@ mod tests {
         assert!(res.is_none(), "stale SubId yields None");
     }
 
-    /// A `Mint`-reaction `SubParams` fixture. The minted identity is an arbitrary `Subtree` scan:
-    /// the mint ⟺ `MatchChain` coupling is the engine attach boundary's invariant, not the
-    /// registry's — these pins exercise registry mechanics only.
+    /// A mint spec whose minted identity is an arbitrary `Subtree` scan: the mint ⟺ `MatchChain`
+    /// coupling is the engine attach boundary's invariant, not the registry's — these pins exercise
+    /// registry mechanics only.
+    fn mint_spec(scope: EffectScope) -> MintSpec {
+        MintSpec {
+            identity: ProfileIdentity::new(
+                ScanConfig::builder().build(),
+                SETTLE * 4,
+                ClassSet::EMPTY,
+            ),
+            settle: SETTLE,
+            spawn: SpawnSpec::new(anchor_only_program(), scope, false),
+        }
+    }
+
+    /// A `Mint`-reaction `SubParams` fixture.
     fn template_params(name: &str) -> SubParams {
         template_params_scoped(name, EffectScope::SubtreeRoot)
     }
@@ -1900,16 +1826,18 @@ mod tests {
         SubParams {
             name: name.into(),
             settle: SETTLE,
-            reaction: ReactionSpec::Mint(Arc::new(MintSpec {
-                identity: ProfileIdentity::new(
-                    ScanConfig::builder().build(),
-                    SETTLE * 4,
-                    ClassSet::EMPTY,
-                ),
-                settle: SETTLE,
-                spawn: SpawnSpec::new(anchor_only_program(), scope, false),
-            })),
+            reaction: ReactionSpec::Mint(Arc::new(mint_spec(scope))),
         }
+    }
+
+    /// A Sub `template` minted on `profile`.
+    fn minted(profile: ProfileId, name: &str, template: SubId) -> Sub {
+        Sub::minted(
+            profile,
+            name.into(),
+            template,
+            &mint_spec(EffectScope::SubtreeRoot),
+        )
     }
 
     /// Each line is made once per template lifetime, and making one leaves the other unmade.
@@ -1972,35 +1900,6 @@ mod tests {
         assert_eq!(miss(&reg), MintEntry::Appeared);
         reg.close_enumeration(sid);
         assert_eq!(miss(&reg), MintEntry::Appeared);
-    }
-
-    /// Rebind tripwire: `minted_by` is a synthesis-origin identity axis — crossing the
-    /// static↔dynamic boundary in place would silently re-attribute the Sub's cascade membership.
-    #[test]
-    #[should_panic(expected = "minted_by")]
-    fn rebind_panics_on_minted_by_change() {
-        let mut reg = SubRegistry::new();
-        let sid = reg.insert(Sub::from_request(
-            ProfileId::default(),
-            SubParams::spawn(
-                "build".into(),
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                false,
-            ),
-        ));
-        let _ = reg.rebind(
-            sid,
-            SubParams::minted(
-                "build".into(),
-                anchor_only_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                false,
-                SubId::default(),
-            ),
-        );
     }
 
     /// Rebind tripwire: a `Mint` reaction never rebinds in place — minted Subs hold `Arc`s of the

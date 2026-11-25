@@ -41,12 +41,12 @@
 
 use crate::Engine;
 use crate::path::empty_path;
-use compact_str::{CompactString, format_compact};
+use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     ChildEntry, DetachReason, Diagnostic, DirChild, DirSnapshot, EntryKind, MintEntry,
-    MintNarration, MintSpec, NonEmptyPathSet, PriorDir, ProfileId, ReactionSpec, ResourceId,
-    ResourceRole, StepOutput, Sub, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
+    MintNarration, NonEmptyPathSet, PriorDir, ProfileId, ResourceId, ResourceRole, StepOutput, Sub,
+    SubId,
 };
 use std::collections::BTreeSet;
 use std::path::Path;
@@ -177,14 +177,12 @@ fn denied_above(root: &DirSnapshot, rel: &Path) -> bool {
     false
 }
 
-/// Owned capture of one template Sub's mint inputs, collected before the reconcile loop takes `&mut
-/// self` — an Arc refcount bump per pass instead of re-borrowing the registry per mint. The
-/// template carries everything a mint needs (identity with its sealed hash, debounce, the minted
-/// reaction); only the Sub's `name` (the synthesized-name prefix) rides alongside.
+/// What the pass reads of one template, captured before its `&mut self` work begins.
 struct TemplateCapture {
     sid: SubId,
-    tpl: Arc<MintSpec>,
-    name: CompactString,
+    /// The hash of the identity the template mints under — the key its mints' Profiles partition
+    /// on, so the dedup's.
+    minted_hash: u64,
     /// The template's miss, captured **pre-pass**: every dedup miss in one pass enters by the state
     /// the template came in with — within a template's first pass, later termini stay enumerations
     /// even though earlier ones in the same pass already minted for it.
@@ -236,14 +234,14 @@ impl Engine {
     /// minted set) is simply absent here, so the in-flight burst's reconcile mints nothing, reaps
     /// nothing, and the seal reaps the Profile.
     ///
-    /// Each mint runs the ordinary `attach_sub_inner` pipeline with the witness its [`MintEntry`]
-    /// names (read off the pre-pass capture of the template's miss and the terminus's [`Branch`]):
-    /// an enumeration enters its own cold Seed (probe emitted within the same `StepOutput`); an
-    /// appearance's Seed opens triggered (Batching-first, debouncing a terminus still being
-    /// written) and owes the first fire. Discovery's "fire" is a batch of attachments. Each reap
-    /// runs the ordinary `detach_sub_inner` pipeline, so a victim's Profile follows the standard
-    /// detach lifecycle (`ReapNow` from Idle / Pending — common, since a vanished terminus usually
-    /// parked its minted Profile in a recovery descent — deferred to burst end from Active).
+    /// Each mint enters through [`Engine::mint_sub`] with its [`MintEntry`] (read off the pre-pass
+    /// capture of the template's miss and the terminus's [`Branch`]): an enumeration enters its own
+    /// cold Seed (probe emitted within the same `StepOutput`); an appearance's Seed opens triggered
+    /// (Batching-first, debouncing a terminus still being written) and owes the first fire.
+    /// Discovery's "fire" is a batch of attachments. Each reap runs the ordinary `detach_sub_inner`
+    /// pipeline, so a victim's Profile follows the standard detach lifecycle (`ReapNow` from Idle /
+    /// Pending — common, since a vanished terminus usually parked its minted Profile in a recovery
+    /// descent — deferred to burst end from Active).
     pub(crate) fn reconcile_matches(
         &mut self,
         profile_id: ProfileId,
@@ -280,8 +278,7 @@ impl Engine {
                 let s = self.subs.get(sid)?;
                 Some(TemplateCapture {
                     sid,
-                    tpl: Arc::clone(s.mint_spec()?),
-                    name: s.name.clone(),
+                    minted_hash: s.mint_spec()?.identity.config_hash(),
                     miss: s.mint_state()?.miss(),
                 })
             })
@@ -312,10 +309,9 @@ impl Engine {
             spec.terminus_depth(),
         );
         for terminus in termini {
-            // The absolute path (name suffix + diag payload) materialises lazily — on the first
-            // dedup miss, or on a template's first unsupported-kind line: a steady-state pass where
-            // every template already minted (or already warned) allocates no paths — O(termini)
-            // allocations would otherwise recur on every no-op reconcile.
+            // The absolute path materialises only for a template's first unsupported-kind line: a
+            // steady-state pass allocates no paths — O(termini) allocations would otherwise recur
+            // on every no-op reconcile.
             let build_abs = |segments: &[CompactString]| -> Arc<Path> {
                 let mut p = anchor_path.to_path_buf();
                 for seg in segments {
@@ -374,21 +370,19 @@ impl Engine {
             self.tree.set_kind(slot, terminus.kind.into());
             live_slots.insert(slot);
 
-            let mut abs: Option<Arc<Path>> = None;
             for t in &templates {
                 // What `t` minted here sits on the Profile its minted identity keys at this slot —
-                // `attach_sub_inner`'s find-or-create partition. A template's identity is frozen
-                // for its lifetime (an edit to it replaces the template), so every mint of `t`
-                // carries that hash.
+                // the mint's find-or-create partition. A template's identity is frozen for its
+                // lifetime (an edit to it replaces the template), so every mint of `t` carries that
+                // hash.
                 if self
                     .profiles
-                    .find(slot, t.tpl.identity.config_hash())
+                    .find(slot, t.minted_hash)
                     .and_then(|profile| self.subs.minted_at(t.sid, profile))
                     .is_some()
                 {
                     continue;
                 }
-                let abs = abs.get_or_insert_with(|| build_abs(&terminus.segments));
                 // In a branch that stood, a miss enters as the template's miss says; in a branch
                 // the daemon could not read until now, it is an enumeration whatever the template
                 // holds — its matches may predate the watch.
@@ -396,46 +390,7 @@ impl Engine {
                     Branch::Standing => t.miss,
                     Branch::Opened => MintEntry::Enumerated,
                 };
-                // `format_compact!` writes straight into the `CompactString` that becomes
-                // `SubParams.name`; the `@` byte is reserved at config validation, so synthesised
-                // names never collide with operator names in the registry's `by_name` index. The
-                // template name (the prefix) is itself `@`-free for the same reason, so the *first*
-                // `@` delimits prefix from path deterministically: `(template, terminus-path) →
-                // name` is injective, and no two distinct mints can synthesise one name.
-                let synthesized = format_compact!("{}@{}", t.name, abs.display());
-                self.attach_sub_inner(
-                    SubAttachRequest::from_parts(
-                        SubAttachAnchor::Resource(slot),
-                        t.tpl.identity.clone(),
-                        SubParams {
-                            name: synthesized,
-                            settle: t.tpl.settle,
-                            // The template's sealed spawn clones straight onto the mint — an Arc
-                            // bump plus `Copy` fields, with `needs_diff` derived once at lowering
-                            // rather than once per mint.
-                            reaction: ReactionSpec::Spawn {
-                                spec: t.tpl.spawn.clone(),
-                                minted_by: Some(t.sid),
-                            },
-                        },
-                    ),
-                    entry.into(),
-                    now,
-                    out,
-                )
-                .expect(
-                    "discovery mint anchored at a freshly ensured live User slot; \
-                     the engine's Resource-arm liveness check cannot trip",
-                );
-                out.diagnostics.push(Diagnostic::DiscoveryMinted {
-                    source: t.sid,
-                    path: Arc::clone(abs),
-                    // Faithful here, unlike on the skip arm's diagnostic: only `File | Dir` termini
-                    // reach the mint, so the `ResourceKind` projection loses nothing and names
-                    // exactly the kind the Tree stamped.
-                    kind: terminus.kind.into(),
-                    entry,
-                });
+                self.mint_sub(t.sid, slot, entry, now, out);
             }
         }
 

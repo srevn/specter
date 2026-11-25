@@ -147,18 +147,14 @@ mod tests {
     use super::show;
     use crate::driver::DriverState;
     use crate::ipc::protocol::{DisabledSource, ShowResponse, WireReaction};
+    use crate::testkit::mint_one;
     use compact_str::CompactString;
     use specter_config::Config;
-    use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
-    use specter_core::{
-        ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, Input,
-        ProfileIdentity, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
-    };
+    use specter_core::Input;
     use specter_engine::Engine;
     use std::collections::BTreeSet;
     use std::fmt::Write as _;
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::time::{Duration, Instant};
 
     fn fresh_state() -> DriverState {
@@ -217,17 +213,6 @@ mod tests {
                 let _ = e.cancel_all_in_flight_probes();
             }
         }
-    }
-
-    fn trivial_program() -> Arc<ActionProgram> {
-        let mut b = ProgramBuilder::new();
-        let h = b.emit(SpawnBody::Exec(ExecAction::new(
-            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
-            None,
-        )));
-        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
-        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
-        Arc::new(b.build().unwrap())
     }
 
     /// An engine-attached name returns `Active` with a populated `SubDetails`. Anchor is
@@ -445,49 +430,22 @@ mod tests {
     /// contract that minted Subs are addressed through `list`, not `show`.
     #[test]
     fn show_dynamic_sub_name_resolves_unknown() {
-        let req = SubAttachRequest::from_parts(
-            SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
-            ProfileIdentity::new(
-                ScanConfig::builder().build(),
-                Duration::from_hours(1),
-                ClassSet::DEFAULT_SUBTREE_ROOT,
-            ),
-            SubParams::minted(
-                CompactString::const_new("template@/tmp/dyn_anchor"),
-                trivial_program(),
-                EffectScope::SubtreeRoot,
-                Duration::from_millis(100),
-                false,
-                SubId::default(),
-            ),
-        );
         let mut engine = Engine::new();
-        let _ = engine.step(Input::AttachSub(req), Instant::now());
-
-        // The dynamic Sub IS in the registry — and now `by_name` indexes it. The Unknown verdict
-        // comes from the guard at the show callsite, not from a `None` lookup.
-        assert_eq!(engine.subs().len(), 1, "Sub did land in the registry");
-        assert!(
-            engine
-                .subs()
-                .find_by_name("template@/tmp/dyn_anchor")
-                .is_some(),
-            "registry indexes the dynamic name (load-bearing precondition for the guard test)",
-        );
+        let minted = mint_one(&mut engine);
+        let name = engine.subs().get(minted).expect("live").name.to_string();
         let guard = EngineGuard::wrap(engine);
+
         let r = show(
             guard.engine(),
             &fresh_state(),
             &BTreeSet::new(),
             &Config::from_str("").expect("empty"),
-            "template@/tmp/dyn_anchor",
+            &name,
             Instant::now(),
         );
         match r {
-            ShowResponse::Unknown { name } => {
-                assert_eq!(name, "template@/tmp/dyn_anchor");
-            }
-            other => panic!("expected Unknown for dynamic Sub name, got {other:?}"),
+            ShowResponse::Unknown { name: unknown } => assert_eq!(unknown, name),
+            other => panic!("expected Unknown for a minted Sub's name, got {other:?}"),
         }
     }
 
@@ -551,43 +509,18 @@ mod tests {
         }
     }
 
-    /// `minted_live` is the length of the template's minted set, which a hand-attached minted Sub
-    /// (the projection-side stand-in for a discovery reconcile's mint) joins.
+    /// `minted_live` is the length of the template's minted set.
     #[test]
     fn show_template_minted_live_counts_its_minted_subs() {
-        let tmp = tempfile::TempDir::new().unwrap();
-        let pattern = format!("{}/{{a,b}}/access.log", tmp.path().display());
-        let config = config_from_watches(&[("disc", &pattern, true)]);
-        let mut engine = engine_with(&config);
-        let template_sid = engine
-            .subs()
-            .find_by_name("disc")
-            .expect("template attached");
-
-        let req = SubAttachRequest::from_parts(
-            SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
-            ProfileIdentity::new(
-                ScanConfig::builder().build(),
-                Duration::from_hours(1),
-                ClassSet::DEFAULT_SUBTREE_ROOT,
-            ),
-            SubParams::minted(
-                CompactString::const_new("disc@/tmp/dyn_anchor"),
-                trivial_program(),
-                EffectScope::SubtreeRoot,
-                Duration::from_millis(100),
-                false,
-                template_sid,
-            ),
-        );
-        let _ = engine.step(Input::AttachSub(req), Instant::now());
+        let mut engine = Engine::new();
+        let _ = mint_one(&mut engine);
         let guard = EngineGuard::wrap(engine);
 
         let r = show(
             guard.engine(),
             &fresh_state(),
             &BTreeSet::new(),
-            &config,
+            &Config::from_str("").expect("empty"),
             "disc",
             Instant::now(),
         );

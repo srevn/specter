@@ -18,6 +18,8 @@ mod ipc;
 mod loader;
 mod observability;
 mod signals;
+#[cfg(test)]
+mod testkit;
 
 use specter_config::{Cli, Command};
 use std::process::ExitCode;

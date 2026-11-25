@@ -38,6 +38,7 @@ tracing-appender.workspace   = true
 nix.workspace      = true
 tempfile.workspace = true
 specter-core     = { path = "../specter-core", features = ["testkit"] }
+specter-engine   = { path = "../specter-engine", features = ["testkit"] }
 specter-sensor   = { path = "../specter-sensor", features = ["testkit"] }
 
 [lints]

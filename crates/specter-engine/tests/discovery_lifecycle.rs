@@ -2115,6 +2115,61 @@ fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
+/// A match that appears where a Profile of the minted identity already stands — an operator's Sub
+/// of the same identity, Idle at the slot — is minted onto it, and the appearance is noted into it:
+/// the minted Sub owes its first fire as it would on a Profile of its own.
+#[test]
+fn an_appearance_minted_onto_a_standing_profile_owes_its_fire() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(data),
+        "/data/*",
+        mint_spec(),
+        now,
+    );
+    let _ = respond(&mut e, pid, &dir_snap(&[]), now);
+
+    let o = pre_place_dir(&mut e, &["data", "o"]);
+    let (_, co_pid) = attach(
+        &mut e,
+        "operator",
+        SubAttachAnchor::Resource(o),
+        ScanConfig::builder().recursive(true).build(),
+        ClassSet::EMPTY,
+        MAX_SETTLE,
+        now,
+    );
+    let _ = seed_to_idle(&mut e, co_pid, &dir_snap(&[]), now);
+
+    let (out, at) = burst_and_respond(
+        &mut e,
+        pid,
+        data,
+        &dir_snap(&[("o", EntryKind::Dir, 1)]),
+        now + Duration::from_secs(1),
+    );
+    assert_eq!(
+        minted_entries(&out),
+        [("/data/o".to_string(), MintEntry::Appeared)]
+    );
+    let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
+    assert_eq!(
+        pid_of(&e, mid),
+        co_pid,
+        "minted onto the operator's Profile"
+    );
+    let _ = settle_minted(&mut e, mid, None, at);
+    assert!(
+        e.subs().get(mid).unwrap().has_fired(),
+        "the appearance owes the minted Sub its first fire",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
 /// One reconcile minting past the fan-out threshold warns exactly once; the latch silences every
 /// later reconcile for the template's lifetime.
 #[test]

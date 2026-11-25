@@ -118,17 +118,16 @@ fn disabled_row(name: &str, source: DisabledSource) -> ListRow {
 mod tests {
     use super::list;
     use crate::driver::DriverState;
-    use crate::ipc::protocol::DisabledSource;
+    use crate::ipc::protocol::{DisabledSource, WireId};
     use crate::ipc::wire::WireReactionKind;
+    use crate::testkit::mint_one;
     use compact_str::CompactString;
     use specter_config::Config;
-    use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
-    use specter_core::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Input};
+    use specter_core::Input;
     use specter_engine::Engine;
     use std::collections::BTreeSet;
     use std::fmt::Write as _;
     use std::path::PathBuf;
-    use std::sync::Arc;
     use std::time::Instant;
 
     fn fresh_state() -> DriverState {
@@ -337,36 +336,15 @@ mod tests {
         assert!(row.sub.is_some(), "attached ⇒ SubId present");
     }
 
-    /// A dynamic Sub (`minted_by: Some(_)`) projects with the discriminator populated. Construct it
-    /// by directly attaching a `SubAttachRequest` whose `minted_by` is `Some(_)` — the engine's
-    /// `attach_sub` does not require the source template to exist for this projection-side test.
+    /// A minted Sub's row names its template.
     #[test]
     fn list_dynamic_sub_carries_minted_by() {
-        use specter_core::{ClassSet, ProfileIdentity};
-        use specter_core::{
-            EffectScope, ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
-        };
-        use std::time::Duration;
-
-        let program = trivial_program();
-        let req = SubAttachRequest::from_parts(
-            SubAttachAnchor::Path(PathBuf::from("/tmp/dyn_anchor")),
-            ProfileIdentity::new(
-                ScanConfig::builder().build(),
-                Duration::from_hours(1),
-                ClassSet::DEFAULT_SUBTREE_ROOT,
-            ),
-            SubParams::minted(
-                CompactString::const_new("template@/tmp/dyn_anchor"),
-                program,
-                EffectScope::SubtreeRoot,
-                Duration::from_millis(100),
-                false,
-                SubId::default(),
-            ),
-        );
         let mut engine = Engine::new();
-        let _ = engine.step(Input::AttachSub(req), Instant::now());
+        let minted = mint_one(&mut engine);
+        let template = engine
+            .subs()
+            .find_by_name("disc")
+            .expect("template attached");
         let guard = EngineGuard::wrap(engine);
 
         let resp = list(
@@ -375,19 +353,11 @@ mod tests {
             &BTreeSet::new(),
             &Config::from_str("").expect("empty config"),
         );
-        assert_eq!(resp.rows.len(), 1);
-        let row = &resp.rows[0];
-        assert!(row.minted_by.is_some(), "dynamic Sub must carry minted_by");
-    }
-
-    fn trivial_program() -> Arc<ActionProgram> {
-        let mut b = ProgramBuilder::new();
-        let h = b.emit(SpawnBody::Exec(ExecAction::new(
-            [ArgTemplate::new([ArgPart::literal("/bin/true")])],
-            None,
-        )));
-        b.patch_on_ok(h, BranchTarget::Escape).unwrap();
-        b.patch_on_failed(h, BranchTarget::Terminate).unwrap();
-        Arc::new(b.build().unwrap())
+        let row = resp
+            .rows
+            .iter()
+            .find(|row| row.sub == Some(WireId::from(minted)))
+            .expect("the minted Sub has a row");
+        assert_eq!(row.minted_by, Some(WireId::from(template)));
     }
 }

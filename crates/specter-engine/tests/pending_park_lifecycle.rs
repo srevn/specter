@@ -247,7 +247,7 @@ fn parent_event_after_overflow_recovery_reprobes_descent() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// A fresh attach joining a parked Profile re-arms recovery (`ParkedRejoin`) instead of silently
+/// A fresh attach joining a parked Profile re-arms recovery (`Join::Parked`) instead of silently
 /// inheriting the park — here the channel-less shape, whose recovery prefix re-derives from the Tree.
 #[test]
 fn attach_join_onto_parked_profile_rearms_recovery() {
@@ -285,7 +285,7 @@ fn attach_join_onto_parked_profile_rearms_recovery() {
         assert!(p.watch_root_parent().is_none(), "channel-less park");
     }
 
-    // Sub B: same path, same config → ParkedRejoin.
+    // Sub B: same path, same config → Join::Parked.
     let t2 = t1 + SETTLE;
     let (_sid_b, pid_b, join_out) = attach_returning(
         &mut e,
@@ -546,7 +546,7 @@ fn descent_terminus_keeps_carrier_count_exact_on_next_event() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `ParkedRejoin` re-arms recovery for a channel-bearing park: a probe-`Failed { Denied }` terminal
+/// `Join::Parked` re-arms recovery for a channel-bearing park: a probe-`Failed { Denied }` terminal
 /// preserves `watch_root_parent`, and a same-identity re-attach enters descent at that cached
 /// channel. (The channel-less shape is pinned by `attach_join_onto_parked_profile_rearms_recovery`.)
 #[test]

@@ -262,10 +262,7 @@ impl SubSpec {
                         settle: t.settle,
                         spawn,
                     })),
-                    None => ReactionSpec::Spawn {
-                        spec: spawn,
-                        minted_by: None,
-                    },
+                    None => ReactionSpec::Spawn(spawn),
                 },
             },
         )
@@ -1785,7 +1782,7 @@ mod tests {
     fn log_output_threads_into_attach_request() {
         let cfg = Config::from_str(&minimal_toml("log_output = true\n")).unwrap();
         let req = cfg.watches[0].to_attach_request();
-        let ReactionSpec::Spawn { spec, .. } = &req.params.reaction else {
+        let ReactionSpec::Spawn(spec) = &req.params.reaction else {
             panic!("static watch lowers to a Spawn reaction");
         };
         assert!(

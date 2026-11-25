@@ -17,7 +17,7 @@
 
 use crate::Engine;
 use crate::coverage::CoverageClass;
-use crate::engine::{SeedWitness, is_timer_referenced};
+use crate::engine::is_timer_referenced;
 use crate::path::empty_path;
 use crate::probe::{DescentOutcome, ProfileProbeRoute, ProofOutcome, WalkerContractViolation};
 use crate::reconcile::{ensure_descendant, graft, lookup_descendant};
@@ -221,10 +221,10 @@ impl Engine {
     /// Re-enter recovery descent for a [`ProfileState::Parked`] Profile — the single park exit
     /// every recovery trigger converges on: the event-scan arm of [`Self::classify_event_carriers`]
     /// (a `StructureChanged` at `watch_root_parent` or at the co-claimed anchor slot),
-    /// `on_sensor_overflow`'s Parked arm, and `attach_sub_inner`'s `ParkedRejoin` re-arm. **Every
-    /// park exit is a descent entry, never a Seed** — a parked anchor may be gone or refused, so
-    /// its exit probes for it first, and only the descent's terminus, finding it, runs the tail
-    /// that re-installs the claim, the anchor watch and the parent edge (`seed_at_anchor`).
+    /// `on_sensor_overflow`'s Parked arm, and `join_profile`'s `Join::Parked` re-arm. **Every park
+    /// exit is a descent entry, never a Seed** — a parked anchor may be gone or refused, so its
+    /// exit probes for it first, and only the descent's terminus, finding it, runs the tail that
+    /// re-installs the claim, the anchor watch and the parent edge (`seed_at_anchor`).
     ///
     /// **The prefix is re-derived from the Profile, not the trigger.** `watch_root_parent` when
     /// cached, else `tree.parent(anchor)` (the Tree chain is retained by the anchor back-ref, so
@@ -1008,7 +1008,7 @@ impl Engine {
                         .push(Diagnostic::ConfigDiffRebindFallbackAttach {
                             name: req.params.name.clone(),
                         });
-                    let _ = self.attach_sub_inner(req, SeedWitness::Cold, now, out);
+                    self.attach_sub_inner(req, now, out);
                 }
             }
         }
@@ -1022,10 +1022,10 @@ impl Engine {
             if let Some(old) = self.subs.find_by_name(&req.params.name) {
                 self.detach_sub_inner(old, DetachReason::ConfigDiffIdentityChanged, out);
             }
-            let _ = self.attach_sub_inner(req, SeedWitness::Cold, now, out);
+            self.attach_sub_inner(req, now, out);
         }
         for req in subs.added {
-            let _ = self.attach_sub_inner(req, SeedWitness::Cold, now, out);
+            self.attach_sub_inner(req, now, out);
         }
         // The single-StepOutput sort happens at `step`'s caller.
     }

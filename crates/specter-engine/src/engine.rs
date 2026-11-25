@@ -17,8 +17,9 @@ use crate::counter::MonotonicCounter;
 use crate::path::empty_path;
 use crate::timer::{TimerEntry, TimerHeap};
 use crate::transitions::ParkNarration;
-// Only the inline test module needs `CompactString` — `register_sub` moves the request's own — and
-// it reaches it via `use super::*`; gating keeps the lib build warning-free.
+use compact_str::format_compact;
+// Only the inline test module names `CompactString`, reaching it via `use super::*`; gating keeps
+// the lib build warning-free.
 #[cfg(test)]
 use compact_str::CompactString;
 // Identity.
@@ -35,7 +36,7 @@ use specter_core::{
     MintEntry, ProfileIdentity, Sub, SubAttachAnchor, SubAttachRequest, SubParams, SubRegistry,
 };
 // Per-Resource bookkeeping.
-use specter_core::ClassSet;
+use specter_core::{ClassSet, ResourceKind};
 // Probe + effect correlation.
 use specter_core::{CorrelationId, ProbeCorrelation};
 // Engine step I/O.
@@ -166,9 +167,7 @@ impl Engine {
             Input::SensorOverflow { scope } => {
                 self.on_sensor_overflow(scope, now, &mut out);
             }
-            Input::AttachSub(req) => {
-                let _ = self.attach_sub_inner(req, SeedWitness::Cold, now, &mut out);
-            }
+            Input::AttachSub(req) => self.attach_sub_inner(req, now, &mut out),
             Input::DetachSub(sub) => {
                 // [`Input::DetachSub`] is the engine's public detach surface. Its sole external
                 // producer is the bin's IPC `disable` handler. Hardcode the canonical reason here
@@ -187,39 +186,18 @@ impl Engine {
     }
 
     /// Attach a Sub at its [`SubAttachAnchor`] — a caller-supplied `Resource` slot or a `Path` the
-    /// engine materialises. Reuses an existing Profile when `(anchor, config_hash)` matches;
-    /// otherwise creates a fresh Profile and seeds it at its anchor ([`Self::seed_at_anchor`]: the
-    /// anchor's and its parent's claims, then a Seed burst whose `Stable` verdict pins the
-    /// baseline) — at once when the anchor is on disk, or at the terminus of the pending descent it
-    /// enters when it is not.
+    /// engine materialises. Reuses an existing Profile when `(anchor, config_hash)` matches
+    /// ([`Self::join_profile`]); otherwise creates a fresh Profile and seeds it at its anchor
+    /// ([`Self::seed_at_anchor`]: the anchor's and its parent's claims, then a Seed burst whose
+    /// `Stable` verdict pins the baseline) — at once when the anchor is on disk, or at the terminus
+    /// of the pending descent it enters when it is not. Nothing but intent stands behind a request,
+    /// so its fresh anchor seeds cold and its descent enters unwitnessed.
     ///
-    /// Three-phase pipeline; sole public entry is [`Input::AttachSub`] via [`Self::step`]. The
-    /// inner is `pub(crate)` so [`Self::on_config_diff`] can compose multiple detach/attach
-    /// operations into one [`StepOutput`] on hot reload.
+    /// Sole public entry is [`Input::AttachSub`] via [`Self::step`]; `pub(crate)` so
+    /// [`Self::on_config_diff`] can compose detaches and attaches into one [`StepOutput`]. A Sub a
+    /// template mints enters through [`Self::mint_sub`] instead.
     ///
-    /// **Zombie revival.** When the matched Profile is in deferred-reap state
-    /// ([`BurstFinish::Reap`], set by `detach_sub_inner` when the last Sub detached during an
-    /// Active burst), the attach revives it: [`Diagnostic::ReapPendingCancelled`] emits, the
-    /// directive flips back to [`BurstFinish::ReturnToIdle`], and the cleanup the deferred detach
-    /// skipped (`recompute_profile_settle`) runs. The in-flight burst continues to completion under
-    /// the new Sub set.
-    ///
-    /// **Witness.** `witness` says whether a live observation of the anchor's own appearance stands
-    /// behind this attach ([`SeedWitness`]). A `Fresh` attach hands it to `seed_at_anchor`, where
-    /// it selects the Seed's cold/triggered arm exactly as the descent terminus's latch does; a
-    /// witnessed attach landing on an *existing* Profile notes the appearance into whatever burst
-    /// that Profile is running (a synthesized STRUCTURE event through `drive_burst` — an appearance
-    /// *is* a structure change), so the live verdict fires instead of cold-pinning.
-    /// `Pending`/`Parked` hits deliberately drop the note: descents own their own witness latch.
-    ///
-    /// **Template join-reseed.** A discovery template joining an existing **Idle** Profile reseeds
-    /// it (cold — the overflow-reseed lever): reconcile's convergence claim covers the one delta
-    /// axis that arrives without any tree event, a registry delta — without the reseed the joiner
-    /// starves until external churn. Every other join state already converges: Pending's terminus
-    /// seeds, an Active pass derives templates from the live registry, Parked re-descends, zombies
-    /// ride the revived burst.
-    ///
-    /// Total: an unresolvable anchor returns `None` with a typed diagnostic —
+    /// Total: an unresolvable anchor attaches nothing and narrates a typed diagnostic —
     /// [`Diagnostic::AttachPathInvalid`] for a malformed `Path`, [`Diagnostic::AttachResourceStale`]
     /// for a `Resource` with no live slot. External callers reconcile their `name → SubId` index from
     /// the [`Diagnostic::SubAttached`] / `AttachPathInvalid` / `AttachResourceStale` stream.
@@ -243,33 +221,27 @@ impl Engine {
     ///    to absolute, so the Sensor's `WatchOp::Watch { path }` always carries an absolute path
     ///    for any Profile registered through this pipeline.
     ///
-    /// # Pipeline (three phases)
+    /// # Pipeline
     ///
     /// 1. **Identity resolution.** `resolve_attach_anchor` resolves the request's `anchor` —
     ///    parsing and materialising a `Path`, or liveness-checking a `Resource` — and yields a
     ///    typed [`AnchorResolution`] indicating whether the anchor is materialised (`Immediate`) or
     ///    scaffolded (`Pending`). `find_or_create_profile` then classifies the `(anchor,
     ///    config_hash)` lookup into a [`ProfileOrigin`].
-    /// 2. **Sub registration.** `register_sub` consumes the request to mint the [`Sub`] and emit
-    ///    [`Diagnostic::SubAttached`] — the single point at which a SubId enters the registry.
-    /// 3. **Per-origin bookkeeping.** Existing-Profile arms run their targeted cleanup
-    ///    (`revive_zombie` / `join_existing`); the `Fresh` arm dispatches on the anchor resolution.
-    ///    An `Immediate` anchor is live, so the Profile seeds at it now ([`Self::seed_at_anchor`]);
-    ///    a `Pending` anchor is not on disk yet, so the Profile only enters the descent
-    ///    ([`Self::enter_pending_descent`]), whose terminus runs the same tail when the anchor
-    ///    appears.
+    /// 2. **Sub registration** ([`Self::register_sub`]).
+    /// 3. **Per-origin bookkeeping.** A Profile that already stood takes the join; a fresh one
+    ///    seeds at its anchor ([`Self::seed_at_anchor`]) when it is live, else only enters the
+    ///    descent ([`Self::enter_pending_descent`]), whose terminus runs the same tail when the
+    ///    anchor appears.
     pub(crate) fn attach_sub_inner(
         &mut self,
         req: SubAttachRequest,
-        witness: SeedWitness,
         now: Instant,
         out: &mut StepOutput,
-    ) -> Option<SubId> {
+    ) {
         // A discovery template and the `MatchChain` shape are coupled iff: a template on a
         // non-chain Profile could never reconcile, and a plain Sub on a chain Profile could never
-        // react (its Profile mints attachments, not Effects). One assert closes both directions —
-        // and transitively forbids a chain-shaped *template* (its mint would be a template-less Sub
-        // on a chain Profile and trip this same assert at mint time).
+        // react (its Profile mints attachments, not Effects).
         debug_assert_eq!(
             req.params.is_template(),
             req.identity.config().match_chain().is_some(),
@@ -289,118 +261,106 @@ impl Engine {
             req.identity.events(),
         );
 
-        // Phase 1 — Identity resolution. The origin classification below is the structural source
-        // of truth for "what state is this Profile entering on this attach?". Two predicates are
-        // exhaustively typed rather than derived ambiguously:
-        // - "no live Subs on the Profile" is ambiguous against `ZombieRevival` (the prior burst
-        //   hasn't released its anchor claim yet) — the origin tells you whether the Sub is the
-        //   *first* on the Profile or the *first since reap was deferred*.
-        // - `anchor_claim == None` is ambiguous against `Fresh` (no bump yet) vs `Pending` revival
-        //   (descent prefix carried it instead). The fresh-Profile arm structurally cannot mean
-        //   "Profile existed but its anchor was unbumped."
         let SubAttachRequest {
             anchor,
             identity,
             params,
         } = req;
-        let resolved = self.resolve_attach_anchor(&anchor, out)?;
-        let resolved_anchor = resolved.anchor();
-        let (profile_id, origin) = self.find_or_create_profile(resolved_anchor, identity, &params);
-
-        // Phase 2 — Sub registration. Consumes `params` for the `Sub::from_request` move; captures
-        // `settle` and the template predicate first for the `ExistingJoin` arm below (params is no
-        // longer accessible after this point).
-        let attach_settle = params.settle;
-        let attach_is_template = params.is_template();
-        let sub_id = self.register_sub(params, profile_id, out);
-
-        // Phase 3 — Per-origin bookkeeping. Existing-Profile arms run their targeted cleanup and
-        // stop; the `Fresh` arm dispatches on the anchor resolution.
-        //
-        // The events mask folds into `config_hash`, so a Sub joining an existing Profile shares its
-        // mask by construction — `events_union` and `has_per_file_fds` are invariant for the
-        // Profile's lifetime. No retroactive per-leaf `watch_demand` bump is needed on either
-        // existing-Profile arm.
+        let Some(resolved) = self.resolve_attach_anchor(&anchor, out) else {
+            return;
+        };
+        let (profile_id, origin) =
+            self.find_or_create_profile(resolved.anchor(), identity, params.settle);
+        self.register_sub(Sub::from_request(profile_id, params), out);
         match origin {
-            ProfileOrigin::ZombieRevival => self.revive_zombie(profile_id, out),
-            ProfileOrigin::ExistingJoin => {
-                self.join_existing(profile_id, attach_settle);
-                // Template join-reseed: a template joining an *Idle* discovery Profile would
-                // otherwise starve until external churn — reconcile converges registry deltas only
-                // when a verdict runs, and a registry delta arrives without any tree event. The
-                // cold reseed (the overflow-reseed lever) drives one fresh certified walk whose
-                // pass mints for the joiner — cold, since the joiner is un-enumerated: a mid-life
-                // join over an existing tree is attach-over-existing, restart parity. The Idle
-                // check is this arm's own (not `start_seed_burst`'s `require_idle`, which narrates
-                // a contract violation): non-Idle joins need nothing — Pending's descent terminus
-                // seeds, an Active pass derives its templates from the live registry at pass time,
-                // and zombies took the revival arm.
-                if attach_is_template
-                    && self
-                        .profiles
-                        .get(profile_id)
-                        .is_some_and(|p| matches!(p.state(), ProfileState::Idle))
-                {
-                    self.start_seed_burst(profile_id, None, now, out);
-                }
-            }
-            ProfileOrigin::ParkedRejoin => {
-                self.join_existing(profile_id, attach_settle);
-                // An explicit re-attach is the in-band equivalent of the operator restart the
-                // park's no-descend posture defers to — the natural trigger to re-try the kernel
-                // watch, so re-arm recovery descent (channel-less parks re-derive the prefix from
-                // the Tree; a re-rejected watch re-parks, bounded by attach rate).
-                self.start_pending_recovery(profile_id, out);
-            }
             ProfileOrigin::Fresh => match resolved {
                 AnchorResolution::Immediate { .. } => {
-                    self.seed_at_anchor(profile_id, witness, now, out);
+                    self.seed_at_anchor(profile_id, SeedWitness::Cold, now, out);
                 }
                 AnchorResolution::Pending {
                     prefix, remaining, ..
                 } => {
-                    // A witness names an observed appearance of the anchor itself, so a witnessed
-                    // anchor is materialised by construction: mints anchor at a freshly ensured
-                    // `SubAttachAnchor::Resource` (which never descends), and no Path-anchored
-                    // caller can claim a witness. The descent therefore enters unwitnessed: with no
-                    // observation behind the attach, a terminus whose segments were all present on
-                    // first observation stays cold and pins silently (attach-over-existing must not
-                    // fire), while an appearance after the attach is witnessed by the probes
-                    // themselves — an absent observation, then a present one.
-                    debug_assert!(
-                        matches!(witness, SeedWitness::Cold),
-                        "attach_sub_inner: a witnessed attach cannot resolve Pending \
-                         (profile = {profile_id:?})",
-                    );
+                    // Unwitnessed: a terminus whose segments were all present on first observation
+                    // pins silently (attach-over-existing must not fire), while an appearance after
+                    // the attach is witnessed by the probes themselves — an absence, then a presence.
                     self.enter_pending_descent(
                         profile_id, prefix, remaining, /* witnessed: */ false, out,
                     );
                 }
             },
+            ProfileOrigin::Existing(join) => self.join_profile(profile_id, join, now, out),
         }
+    }
 
-        // A witnessed appearance landing on an existing Profile must not be dropped — the existing
-        // burst (or Idle baseline fork) folds it exactly as a kernel STRUCTURE event at the anchor
-        // would, which is what an appearance is. `drive_burst` is total over every state: an Active
-        // pre-fire burst notes it into `dirty` (idempotent for same-pass sibling-template mints
-        // onto the just-created Batching Profile), a revived zombie's in-flight burst absorbs it so
-        // its verdict fires instead of cold-pinning, the theoretically-unreachable Idle hit takes
-        // the baseline fork (Standard burst / triggered Seed — correct semantics, not just
-        // containment), and Pending/Parked no-op — descents latch their own witness at loss entry.
-        // The Fresh arm already threaded the witness into its Seed above.
-        if matches!(witness, SeedWitness::Appeared) && !matches!(origin, ProfileOrigin::Fresh) {
-            let path = self.anchor_path(resolved_anchor);
-            self.drive_burst(
-                profile_id,
-                resolved_anchor,
-                &path,
-                FsEvent::StructureChanged,
-                now,
-                out,
+    /// Seat the Sub `template` mints at `terminus`, entering its match set as `entry` — the one way
+    /// a minted Sub comes to be. `terminus` is a live slot the pass has resolved and kinded, and
+    /// holds no Sub of `template`'s (the pass's dedup); nothing is resolved or parsed here.
+    ///
+    /// The Profile is found or created at `terminus` under the spec's minted identity. A fresh one
+    /// seeds at its anchor with the entry's witness: an enumeration pins cold, an appearance owes
+    /// its first fire. One that already stood takes the join, and an appearance is noted into
+    /// whatever burst it runs — a STRUCTURE event at the anchor, which is what an appearance is —
+    /// so its verdict fires instead of pinning cold; a Pending or Parked Profile drops the note,
+    /// its descent keeping its own witness.
+    ///
+    /// Narrates [`Diagnostic::DiscoveryMinted`] last, after the Sub's own `SubAttached`.
+    pub(crate) fn mint_sub(
+        &mut self,
+        template: SubId,
+        terminus: ResourceId,
+        entry: MintEntry,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        let path = self.anchor_path(terminus);
+        // `<template>@<path>`: config validation reserves `@`, so no operator name collides with a
+        // minted one in `by_name`, and the first `@` splits prefix from path — no two mints
+        // synthesise one name.
+        let Some((name, spec)) = self.subs.get(template).and_then(|t| {
+            let spec = Arc::clone(t.mint_spec()?);
+            Some((format_compact!("{}@{}", t.name, path.display()), spec))
+        }) else {
+            // A missed mint costs one pass: the pass is idempotent, and the next one mints it.
+            debug_assert!(
+                false,
+                "mint_sub: the pass hands over a live template (template = {template:?})",
             );
+            return;
+        };
+        // A minted Sub reacts, so its Profile must fire: on a chain Profile it would never react.
+        debug_assert!(
+            spec.identity.config().match_chain().is_none(),
+            "mint_sub: a minted identity is never a MatchChain (template = {template:?})",
+        );
+        let (profile_id, origin) =
+            self.find_or_create_profile(terminus, spec.identity.clone(), spec.settle);
+        self.register_sub(Sub::minted(profile_id, name, template, &spec), out);
+        match origin {
+            ProfileOrigin::Fresh => self.seed_at_anchor(profile_id, entry.into(), now, out),
+            ProfileOrigin::Existing(join) => {
+                self.join_profile(profile_id, join, now, out);
+                if entry == MintEntry::Appeared {
+                    self.drive_burst(
+                        profile_id,
+                        terminus,
+                        &path,
+                        FsEvent::StructureChanged,
+                        now,
+                        out,
+                    );
+                }
+            }
         }
-
-        Some(sub_id)
+        let kind = self
+            .tree
+            .get(terminus)
+            .map_or(ResourceKind::Unknown, specter_core::Resource::kind_raw);
+        out.diagnostics.push(Diagnostic::DiscoveryMinted {
+            source: template,
+            path,
+            kind,
+            entry,
+        });
     }
 
     /// Phase 1 of `attach_sub_inner` — resolve the request's anchor to a Tree slot, classifying the
@@ -501,45 +461,60 @@ impl Engine {
         }
     }
 
-    /// Phase 2 of `attach_sub_inner` — register the Sub and emit [`Diagnostic::SubAttached`].
-    ///
-    /// Consumes `params` for the [`Sub::from_request`] move (which moves `params.name` into
-    /// `Sub.name`), so the narration name is captured first as one `CompactString` clone — inline
-    /// for typical short names, the single irreducible copy on the static attach path.
-    /// `params.minted_by()` is a cheap `Option<SubId>` copy.
-    ///
-    /// Sole emitter of `SubAttached`; downstream Phase-3 helpers never re-emit. The diagnostic is
-    /// pure operator narration — identity is resolved engine-side via the registry's `by_name`
-    /// index, not from this stream.
-    fn register_sub(
-        &mut self,
-        params: SubParams,
-        profile_id: ProfileId,
-        out: &mut StepOutput,
-    ) -> SubId {
-        let diag_name = params.name.clone();
-        let diag_minted_by = params.minted_by();
-        let sub_id = self.subs.insert(Sub::from_request(profile_id, params));
+    /// File `sub` and narrate [`Diagnostic::SubAttached`] — the one point a `SubId` enters the
+    /// registry, for either entry, and the line's sole emitter. The line is operator narration:
+    /// identity is resolved engine-side through the registry's `by_name` index, not from it.
+    fn register_sub(&mut self, sub: Sub, out: &mut StepOutput) {
+        let name = sub.name.clone();
+        let minted_by = sub.minted_by();
+        let sub = self.subs.insert(sub);
         out.diagnostics.push(Diagnostic::SubAttached {
-            sub: sub_id,
-            name: diag_name,
-            minted_by: diag_minted_by,
+            sub,
+            name,
+            minted_by,
         });
-        sub_id
     }
 
-    /// Phase 3 of `attach_sub_inner` — zombie-revival arm.
+    /// A Sub joins a Profile that already stood ([`Join`]): it may lower the settle floor; a
+    /// zombie's deferred reap is cancelled, its in-flight burst running on under the new Sub set; a
+    /// parked Profile re-arms its recovery descent — a join is the in-band equivalent of the
+    /// operator restart a park waits for, and a re-rejected watch re-parks, bounded by the attach
+    /// rate. No watch moves: the events mask folds into the identity hash, so the joiner shares the
+    /// Profile's mask.
     ///
-    /// The deferred-reap detach branch flipped the Active burst's finish directive to
-    /// [`BurstFinish::Reap`] and skipped the `recompute_profile_settle` the refcount-still-positive
-    /// detach path performs (there is no fire-history purge — it is per-Sub and dies with the Sub).
-    /// This helper un-defers the reap and runs the recompute symmetrically:
-    /// [`ProfileState::clear_active_reap`] flips `BurstFinish::Reap → ReturnToIdle` on Active
-    /// (returning `true` by construction of the [`ProfileOrigin::ZombieRevival`] classification —
-    /// the `debug_assert!` pins the invariant against a future routing breach), emits
-    /// [`Diagnostic::ReapPendingCancelled`], and recomputes `Profile.settle` over the live Sub set
-    /// (just the attaching Sub on first revival; further attaches in the same step take the
-    /// `ExistingJoin` arm because the directive is already cleared).
+    /// **An Idle discovery Profile reseeds**, cold. Only a template joins a chain Profile, and it
+    /// arrives with no tree event: without one fresh certified walk it would starve until external
+    /// churn. The walk's pass mints for the joiner cold, its enumeration still open — a join over
+    /// an existing tree is attach-over-existing. Every other state already converges: a descent's
+    /// terminus seeds, an Active pass reads its templates off the live registry, and a zombie's
+    /// revived burst runs its pass. The Idle test is this arm's own: `start_seed_burst`'s guard
+    /// narrates a contract violation.
+    fn join_profile(
+        &mut self,
+        profile_id: ProfileId,
+        join: Join,
+        now: Instant,
+        out: &mut StepOutput,
+    ) {
+        self.recompute_profile_settle(profile_id);
+        match join {
+            Join::Zombie => self.revive_zombie(profile_id, out),
+            Join::Parked => self.start_pending_recovery(profile_id, out),
+            Join::Live => {
+                if self.profiles.get(profile_id).is_some_and(|p| {
+                    p.config().match_chain().is_some() && matches!(p.state(), ProfileState::Idle)
+                }) {
+                    self.start_seed_burst(profile_id, None, now, out);
+                }
+            }
+        }
+    }
+
+    /// The zombie arm of [`Self::join_profile`]: the deferred-reap detach flipped the Active
+    /// burst's finish directive to [`BurstFinish::Reap`], and the join flips it back
+    /// ([`ProfileState::clear_active_reap`] — `true` by construction of [`Join::Zombie`], which the
+    /// `debug_assert!` pins against a routing breach), narrating
+    /// [`Diagnostic::ReapPendingCancelled`]. A second join in the same step finds it live.
     fn revive_zombie(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
         let cleared = self
             .profiles
@@ -547,32 +522,17 @@ impl Engine {
             .is_some_and(specter_core::Profile::clear_active_reap);
         debug_assert!(
             cleared,
-            "revive_zombie: ZombieRevival origin must clear an active Reap directive \
+            "revive_zombie: Join::Zombie must clear an active Reap directive \
              (profile = {profile_id:?})",
         );
         out.diagnostics.push(Diagnostic::ReapPendingCancelled {
             profile: profile_id,
         });
-        self.recompute_profile_settle(profile_id);
-    }
-
-    /// Phase 3 of `attach_sub_inner` — existing-join arm.
-    ///
-    /// `attach_settle` is the request's `settle`; the Profile's `settle` is the min over its live
-    /// Subs' settles, so the attaching Sub only shrinks it (and only when its settle is strictly
-    /// lower). No other bookkeeping is required: the events mask folds into `config_hash`, so a
-    /// joining Sub shares the existing Profile's mask by construction.
-    fn join_existing(&mut self, profile_id: ProfileId, attach_settle: Duration) {
-        if let Some(p) = self.profiles.get_mut(profile_id)
-            && attach_settle < p.settle
-        {
-            p.settle = attach_settle;
-        }
     }
 
     /// The anchor is live: install its claim and its parent's, then start the Seed — the one tail
-    /// of every anchor that goes live, whether an attach found it on disk (`attach_sub_inner`'s
-    /// fresh, immediate arm) or a descent's terminus just did (`materialize_profile_anchor`).
+    /// of every anchor that goes live, whether an attach or a mint founded its Profile on it or a
+    /// descent's terminus just found it (`materialize_profile_anchor`).
     ///
     /// Sequence:
     /// 1. Promote the anchor slot to `User` — a no-op where a real role stands, so a co-resident
@@ -611,58 +571,47 @@ impl Engine {
         self.start_seed_burst(profile_id, trigger, now, out);
     }
 
-    /// The path of a live Profile's anchor — the event path an observed appearance of the anchor
-    /// carries, into a Seed's trigger or an existing burst's `dirty`. The Profile's back-reference
-    /// holds the slot, so the path resolves; a miss is a state-machine breach, loud in debug, and
-    /// degrades to the empty path in release rather than dropping the appearance (an empty path in
-    /// `dirty` still counts as activity).
+    /// The path of an anchor slot — a live Profile's, or the terminus a mint is about to anchor:
+    /// the event path an observed appearance carries into a Seed's trigger or an existing burst's
+    /// `dirty`, and a minted Sub's name. The slot is held — by the Profile's back-reference, or by
+    /// the pass that just resolved the terminus — so the path resolves; a miss is a state-machine
+    /// breach, loud in debug, and degrades to the empty path in release rather than dropping the
+    /// appearance (an empty path in `dirty` still counts as activity).
     fn anchor_path(&self, anchor: ResourceId) -> Arc<Path> {
         self.tree.path_of(anchor).unwrap_or_else(|| {
             debug_assert!(
                 false,
-                "a live Profile's anchor resolves a path (resource = {anchor:?})",
+                "a held anchor slot resolves a path (resource = {anchor:?})",
             );
             empty_path()
         })
     }
 
-    /// Find an existing Profile at `(anchor, identity.config_hash())` or create a fresh one.
-    /// Returns the [`ProfileId`] and a [`ProfileOrigin`] classifying the outcome — `Fresh`,
-    /// `ExistingJoin`, or `ZombieRevival` (existing Profile carrying [`BurstFinish::Reap`]).
+    /// Find the Profile at `(anchor, identity.config_hash())`, classifying how a Sub joins it, or
+    /// create one whose settle floor is the attaching Sub's `settle`.
     ///
-    /// `identity` is taken by value: the `Fresh` arm moves its fields straight into [`Profile::new`]
-    /// (no clone); the existing-Profile arms drop it. The canonical hash is computed once here.
-    ///
-    /// The slim enum supersedes the prior `is_fresh_profile + was_zombie` two-read pattern: the
-    /// classification is captured in one read, and downstream branches dispatch on the typed origin
-    /// rather than re-deriving zombie / parked state from the Profile.
-    ///
-    /// **Fresh-Profile bookkeeping that lives here.** The anchor's classified kind is read from the
-    /// Tree slot and threaded through [`Profile::new`]: `None` for a `DescentScaffold` anchor
-    /// (descent materialisation classifies it) or a freshly-`ensure`d-but-unprobed slot (first
-    /// Seed-Ok classifies it). Existing Profiles already carry the field from their own
-    /// first-classify moment.
+    /// `identity` is taken by value: the `Fresh` arm moves it straight into [`Profile::new`]; a
+    /// standing Profile drops it. The anchor's classified kind is read from the Tree slot and
+    /// threaded through the constructor: `None` for a `DescentScaffold` anchor (descent
+    /// materialisation classifies it) or a freshly-`ensure`d-but-unprobed slot (the first Seed-Ok
+    /// classifies it). `profiles.attach` registers only Profile-side indices on the slot, never its
+    /// `kind`, so the read before construction is the read after.
     fn find_or_create_profile(
         &mut self,
         anchor: ResourceId,
         identity: ProfileIdentity,
-        params: &SubParams,
+        settle: Duration,
     ) -> (ProfileId, ProfileOrigin) {
-        let cfg_hash = identity.config_hash();
-        if let Some(pid) = self.profiles.find(anchor, cfg_hash) {
-            let origin = match self.profiles.get(pid).map(Profile::state) {
-                Some(ProfileState::Active(_, BurstFinish::Reap)) => ProfileOrigin::ZombieRevival,
-                Some(ProfileState::Parked) => ProfileOrigin::ParkedRejoin,
-                _ => ProfileOrigin::ExistingJoin,
+        if let Some(pid) = self.profiles.find(anchor, identity.config_hash()) {
+            let join = match self.profiles.get(pid).map(Profile::state) {
+                Some(ProfileState::Active(_, BurstFinish::Reap)) => Join::Zombie,
+                Some(ProfileState::Parked) => Join::Parked,
+                _ => Join::Live,
             };
-            return (pid, origin);
+            return (pid, ProfileOrigin::Existing(join));
         }
-        // Read the anchor's classified kind before construction: `profiles.attach` only registers
-        // Profile-side indices on the anchor slot, never its `kind`, so the slot's classification
-        // is identical before and after. Threading it through the constructor removes the
-        // post-attach re-borrow + `expect`.
         let anchor_kind = self.tree.get(anchor).and_then(specter_core::Resource::kind);
-        let p = Profile::new(anchor, identity, params.settle, anchor_kind);
+        let p = Profile::new(anchor, identity, settle, anchor_kind);
         let pid = self.profiles.attach(&mut self.tree, p);
         (pid, ProfileOrigin::Fresh)
     }
@@ -1071,45 +1020,38 @@ pub(crate) fn is_timer_referenced(
         .is_some_and(|live| live == id)
 }
 
-/// Find-or-create-or-revive outcome for `attach_sub_inner`. The four arms drive distinct downstream
-/// bookkeeping:
-/// - `Fresh`: brand-new Profile, no prior burst history. Seeds at its anchor
-///   ([`Engine::seed_at_anchor`]) when the anchor is on disk, else enters Pending descent.
-/// - `ExistingJoin`: Profile is alive with at least one live Sub; the attaching Sub joins the
-///   existing burst lifecycle (or shares the existing baseline if Idle). Only `Profile.settle` may
-///   need `min`-recompute.
-/// - `ParkedRejoin`: Profile is [`ProfileState::Parked`] — anchorless, awaiting recovery. The join
-///   bookkeeping runs (settle-min applies) **plus** a recovery-descent re-arm
-///   ([`Engine::start_pending_recovery`]): without it the new Sub would silently inherit the park
-///   and never fire, with a clean attach log.
-/// - `ZombieRevival`: Profile is in [`ProfileState::Active`] with [`BurstFinish::Reap`] (deferred
-///   reap). Clear the directive via [`ProfileState::clear_active_reap`], emit
-///   [`Diagnostic::ReapPendingCancelled`], and run the `recompute_profile_settle` the deferred-reap
-///   detach skipped.
-///
-/// Engine-local because no external caller distinguishes the arms — the engine dispatches on the
-/// typed origin inside `attach_sub_inner` and returns only `Option<SubId>` from the public surface.
+/// Whether an attach or a mint found its Profile or founded it — read once, so no arm re-derives
+/// "which Profile is this?" from state, where "no live Subs" cannot tell a first Sub from one
+/// reviving a zombie and "no anchor claim" cannot tell a fresh Profile from a Pending one.
 enum ProfileOrigin {
+    /// Brand-new: it seeds at its anchor ([`Engine::seed_at_anchor`]), or descends to it first.
     Fresh,
-    ExistingJoin,
-    ParkedRejoin,
-    ZombieRevival,
+    /// It already stood; the Sub joins it ([`Engine::join_profile`]).
+    Existing(Join),
 }
 
-/// Whether a live observation of the anchor's *own appearance* stands behind the anchor going live —
-/// the parameter of the anchor-materialisation tail ([`Engine::seed_at_anchor`]). The attach pipeline
-/// hands its caller's to the tail; the descent terminus reads its witnessed-activity latch into one.
+/// How a Profile that already stood takes a joining Sub ([`Engine::join_profile`]).
+#[derive(Clone, Copy)]
+enum Join {
+    /// Its burst, descent or Idle baseline runs on.
+    Live,
+    /// [`ProfileState::Parked`] — anchorless, awaiting recovery: without a re-armed descent the new
+    /// Sub would inherit the park and never fire, with a clean attach log.
+    Parked,
+    /// [`ProfileState::Active`] with [`BurstFinish::Reap`]: its last Sub left mid-burst, and the
+    /// reap waits for the burst's end.
+    Zombie,
+}
+
+/// Whether a live observation of the anchor's *own appearance* stands behind the anchor going live
+/// — the parameter of the anchor-materialisation tail ([`Engine::seed_at_anchor`]). An attach never
+/// has one (`Cold`); a mint reads it off its [`MintEntry`]; a descent's terminus off its
+/// witnessed-activity latch.
 ///
-/// Deliberately an engine-internal parameter, **not** a [`SubAttachRequest`] field: the request
-/// crosses channels (config load, hot reload, IPC), and a fire-owing witness must not be claimable
-/// from the wire. Payload-less by the same reasoning the descent latch is a bool — the witness
-/// names the anchor's own appearance, so the trigger tuple derives from the resolved anchor and a
-/// witness disagreeing with its anchor is unrepresentable.
-///
-/// Among attaches, `Appeared` has exactly one producer: the discovery mint arm
-/// (`reconcile_matches`), classifying a dedup miss against a template's established enumeration.
-/// Every other attach — the `Input::AttachSub` step arm and the three config-diff arms — attaches
-/// on intent alone and passes `Cold`.
+/// Deliberately engine-internal, **not** a [`SubAttachRequest`] field: the request crosses channels
+/// (config load, hot reload, IPC), and a fire-owing witness must not be claimable from the wire.
+/// Payload-less: the witness names the anchor's own appearance, so the trigger derives from the
+/// anchor and a witness disagreeing with its anchor is unrepresentable.
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum SeedWitness {
     Cold,
