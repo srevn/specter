@@ -226,7 +226,7 @@ pub fn attach_structure_only(
         e,
         "build",
         SubAttachAnchor::Resource(anchor),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         ClassSet::STRUCTURE,
         MAX_SETTLE,
         now,
@@ -660,11 +660,7 @@ pub fn mint_spec() -> Arc<MintSpec> {
 #[must_use]
 pub fn mint_spec_scoped(scope: EffectScope) -> Arc<MintSpec> {
     Arc::new(MintSpec {
-        identity: ProfileIdentity::new(
-            ScanConfig::builder().recursive(true).build(),
-            MAX_SETTLE,
-            ClassSet::EMPTY,
-        ),
+        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, ClassSet::EMPTY),
         settle: SETTLE,
         spawn: SpawnSpec::new(specter_core::testkit::empty_program(), scope, false),
     })

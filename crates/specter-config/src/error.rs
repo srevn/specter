@@ -70,6 +70,9 @@ pub enum IssueKind {
     SettleTooSmall,
     MaxSettleTooSmall,
     MaxDepthZero,
+    /// `recursive = false` beside a `max_depth` deeper than the one level it lists: two bounds for
+    /// one walk.
+    MaxDepthNotRecursive,
     DuplicateName,
     InvalidEnum,
     EventsEmpty,
@@ -246,6 +249,7 @@ const fn kind_label(k: IssueKind) -> &'static str {
         IssueKind::SettleTooSmall => "settle-too-small",
         IssueKind::MaxSettleTooSmall => "max-settle-too-small",
         IssueKind::MaxDepthZero => "max-depth-zero",
+        IssueKind::MaxDepthNotRecursive => "max-depth-not-recursive",
         IssueKind::DuplicateName => "duplicate-name",
         IssueKind::InvalidEnum => "invalid-enum",
         IssueKind::EventsEmpty => "events-empty",

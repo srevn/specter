@@ -393,6 +393,7 @@ mod tests {
         ProfileIdentity, ReactionSpec, ResourceId, ResourceKind, ResourceRole, ScanConfig,
         StepOutput, SubAttachAnchor, SubAttachRequest, SubParams, Tree,
     };
+    use std::num::NonZeroU32;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Instant;
@@ -554,7 +555,7 @@ mod tests {
             Input::AttachSub(SubAttachRequest::from_parts(
                 SubAttachAnchor::Resource(srv),
                 ProfileIdentity::new(
-                    ScanConfig::builder().build(),
+                    ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
                     MAX_SETTLE,
                     ClassSet::STRUCTURE,
                 ),

@@ -20,6 +20,7 @@ use crate::sub::ClassSet;
 use compact_str::CompactString;
 use globset::{Glob, GlobMatcher};
 use std::cmp::Ordering;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -108,12 +109,12 @@ pub enum ScanConfig {
     /// walk admits. The user-facing shape — [`ScanConfigBuilder`] builds it, config lowering and
     /// Profile identity carry it.
     Subtree {
-        recursive: bool,
         hidden: bool,
         /// Sorted by source string at builder time.
         exclude: Vec<GlobPattern>,
         pattern: Option<GlobPattern>,
-        max_depth: Option<u32>,
+        /// How deep the walk lists, the anchor's own entries being depth one; `None` is unbounded.
+        max_depth: Option<NonZeroU32>,
     },
     /// Positional per-segment chain over a parsed absolute pattern, anchored at the pattern's
     /// literal prefix. A dirent at anchor-relative depth `d` tests pattern component
@@ -145,12 +146,11 @@ impl ScanConfig {
     ///   `lstat`, so it calls the halves directly: [`Self::accepts_structural`] pre-`lstat`,
     ///   [`Self::accepts_kinded`] post-`lstat`; see the structural half's doc for the rationale.
     ///
-    /// **Depth 0 bypasses every filter.** The anchor is part of the Profile's scope by
-    /// construction. For `depth > 0`, `Subtree` folds `max_depth`, `recursive`, `hidden`
-    /// (last-segment basename test), `exclude` (full-`rel` test), and `pattern` (final-`File` only
-    /// — directories are always covered; we descend through them); `MatchChain` tests the last
-    /// segment against its positional component and applies the chain kind rule (mid-chain must be
-    /// Dir; the terminus admits any kind).
+    /// **Depth 0 bypasses every filter.** The anchor is part of the Profile's scope by construction.
+    /// For `depth > 0`, `Subtree` folds `max_depth`, `hidden` (last-segment basename test), `exclude`
+    /// (full-`rel` test), and `pattern` (final-`File` only — directories are always covered; we
+    /// descend through them); `MatchChain` tests the last segment against its positional component
+    /// and applies the chain kind rule (mid-chain must be Dir; the terminus admits any kind).
     ///
     /// `ResourceKind::Unknown` is collapsed by upstream callers (`Resource::kind_or_file`,
     /// `From<EntryKind>`) before reaching this method, so `kind != Dir` here means the same thing
@@ -161,11 +161,11 @@ impl ScanConfig {
             && self.accepts_kinded(rel, matches!(kind, ResourceKind::Dir), depth)
     }
 
-    /// The kind-independent half of [`Self::accepts`]. For `Subtree`, folds the four gates that
-    /// don't need a `ResourceKind`: `max_depth`, `recursive`, `hidden`, and `exclude`. For
-    /// `MatchChain`, the positional segment test — the last segment of `rel` against the pattern
-    /// component at `depth` (the depth bound is [`PatternSpec::matches_at`]'s own totality:
-    /// out-of-range depths are `false`).
+    /// The kind-independent half of [`Self::accepts`]. For `Subtree`, folds the three gates that
+    /// don't need a `ResourceKind`: `max_depth`, `hidden`, and `exclude`. For `MatchChain`, the
+    /// positional segment test — the last segment of `rel` against the pattern component at `depth`
+    /// (the depth bound is [`PatternSpec::matches_at`]'s own totality: out-of-range depths are
+    /// `false`).
     ///
     /// Exists for the walker, which doesn't know `is_dir` until after the per-dirent `lstat`. Calling
     /// [`Self::accepts`] there with a guessed kind would either skip a covered Dir (guess `File` +
@@ -189,18 +189,12 @@ impl ScanConfig {
         match self {
             // `pattern` lives here only to discharge the destructure; its gate is the kinded half.
             Self::Subtree {
-                recursive,
                 hidden,
                 exclude,
                 pattern: _,
                 max_depth,
             } => {
-                if let Some(max) = *max_depth
-                    && depth > max
-                {
-                    return false;
-                }
-                if depth > 1 && !*recursive {
+                if max_depth.is_some_and(|max| depth > max.get()) {
                     return false;
                 }
                 if !*hidden
@@ -263,8 +257,8 @@ impl ScanConfig {
     /// equals the recursion root's. The observation cannot originate here (the engine's `Tree`
     /// slots don't carry `device`), but whether it *matters* is the shape's policy:
     ///
-    /// - `Subtree` descends while `recursive`, under `max_depth`, and on the same device — an
-    ///   unbounded recursive walk must not wander into mounts.
+    /// - `Subtree` descends under `max_depth` and on the same device — an unbounded walk must not
+    ///   wander into mounts.
     /// - `MatchChain` descends strictly above the terminus depth, device-blind: the walk is bounded
     ///   by the chain length (no runaway-cost concern), and chain positions may legitimately sit on
     ///   distinct mounts (one matched volume per level).
@@ -274,11 +268,9 @@ impl ScanConfig {
     #[must_use]
     pub fn descends_into(&self, child_depth: u32, same_device: bool) -> bool {
         match self {
-            Self::Subtree {
-                recursive,
-                max_depth,
-                ..
-            } => *recursive && child_depth < max_depth.unwrap_or(u32::MAX) && same_device,
+            Self::Subtree { max_depth, .. } => {
+                max_depth.is_none_or(|max| child_depth < max.get()) && same_device
+            }
             Self::MatchChain(spec) => child_depth < spec.terminus_depth(),
         }
     }
@@ -361,22 +353,17 @@ pub enum Denial {
 /// logical configs are byte-equal under `compute_config_hash`, which reads the list in that already
 /// sorted-and-deduped order. The builder is the sole production construction path for the `Subtree`
 /// shape, so this canonicalisation holds for every Profile-bearing config.
+///
+/// Its default is a `[[watch]]` that writes none of these knobs: every depth, no dotfiles, no filter.
 #[derive(Debug, Default)]
 pub struct ScanConfigBuilder {
-    recursive: bool,
     hidden: bool,
     exclude: Vec<GlobPattern>,
     pattern: Option<GlobPattern>,
-    max_depth: Option<u32>,
+    max_depth: Option<NonZeroU32>,
 }
 
 impl ScanConfigBuilder {
-    #[must_use]
-    pub const fn recursive(mut self, v: bool) -> Self {
-        self.recursive = v;
-        self
-    }
-
     #[must_use]
     pub const fn hidden(mut self, v: bool) -> Self {
         self.hidden = v;
@@ -402,8 +389,8 @@ impl ScanConfigBuilder {
     }
 
     #[must_use]
-    pub const fn max_depth(mut self, d: Option<u32>) -> Self {
-        self.max_depth = d;
+    pub const fn max_depth(mut self, bound: Option<NonZeroU32>) -> Self {
+        self.max_depth = bound;
         self
     }
 
@@ -416,7 +403,6 @@ impl ScanConfigBuilder {
         self.exclude.sort();
         self.exclude.dedup();
         ScanConfig::Subtree {
-            recursive: self.recursive,
             hidden: self.hidden,
             exclude: self.exclude,
             pattern: self.pattern,
@@ -480,15 +466,9 @@ fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
 /// [`ProfileIdentity::new`] is the sole production caller: it seals the digest onto the identity at
 /// construction, and [`ProfileIdentity::config_hash`] reads that sealed value.
 ///
-/// Inputs are folded in fixed order through [`crate::hash::hasher`]: a 1-byte scan-shape
-/// discriminant, the variant's own fields (for `Subtree`: `recursive`, `hidden`, `len(exclude)` as
-/// `u32`, each `exclude.source`, then `pattern` and `max_depth` each as a 1-byte presence flag plus
-/// optional payload), then the shape-independent identity axes — `max_settle.as_nanos()` and
-/// `events.bits()`.
-///
 /// The discriminant byte is chosen explicitly in each arm (not `mem::discriminant`), so the digest
 /// is stable across variant reordering; it leads the fold so no two shapes' field encodings can
-/// collide byte-for-byte. `events` is folded last so two Subs differing only on event-class mask
+/// collide byte-for-byte. `events` folds too, so two Subs differing only on their event-class mask
 /// fork separate Profiles ("Profile-union infection" defence).
 #[must_use]
 pub(crate) fn compute_config_hash(
@@ -505,14 +485,12 @@ pub(crate) fn compute_config_hash(
         // invariant. Never add `..`: it silently re-opens the silent-Profile-merge hole. A new
         // *variant* is a non-exhaustive-match compile error until it picks its own discriminant byte.
         ScanConfig::Subtree {
-            recursive,
             hidden,
             exclude,
             pattern,
             max_depth,
         } => {
             h.put_u8(0);
-            h.put_u8(u8::from(*recursive));
             h.put_u8(u8::from(*hidden));
 
             // Canonical width: u32 for the count. The list arrives sorted *and* deduplicated from
@@ -536,15 +514,8 @@ pub(crate) fn compute_config_hash(
                 }
             }
 
-            match max_depth {
-                Some(d) => {
-                    h.put_u8(1);
-                    h.put_u32(*d);
-                }
-                None => {
-                    h.put_u8(0);
-                }
-            }
+            // Zero is no bound, so the bound's niche is the encoding of "unbounded".
+            h.put_u32(max_depth.map_or(0, NonZeroU32::get));
         }
         // `source` is the complete identity encoding of the positional predicate: it spells the
         // canonical literal prefix plus the glob tail, and equal source ⇒ byte-equal decomposition
@@ -656,6 +627,7 @@ mod tests {
         ClassSet, ConfigError, GlobPattern, PatternSpec, ProfileIdentity, ResourceKind, ScanConfig,
         compute_config_hash,
     };
+    use std::num::NonZeroU32;
     use std::path::Path;
     use std::sync::Arc;
     use std::time::Duration;
@@ -717,7 +689,6 @@ mod tests {
     fn empty_builder_yields_default_shaped_config() {
         let cfg = ScanConfig::builder().build();
         let ScanConfig::Subtree {
-            recursive,
             hidden,
             exclude,
             pattern,
@@ -726,7 +697,6 @@ mod tests {
         else {
             panic!("builder builds Subtree, got {cfg:?}");
         };
-        assert!(!recursive);
         assert!(!hidden);
         assert_eq!(exclude.as_slice(), []);
         assert!(pattern.is_none());
@@ -735,8 +705,8 @@ mod tests {
 
     #[test]
     fn hash_deterministic() {
-        let a = ScanConfig::builder().recursive(true).build();
-        let b = ScanConfig::builder().recursive(true).build();
+        let a = ScanConfig::builder().build();
+        let b = ScanConfig::builder().build();
         assert_eq!(
             compute_config_hash(&a, SETTLE, NO_EVENTS),
             compute_config_hash(&b, SETTLE, NO_EVENTS),
@@ -801,16 +771,6 @@ mod tests {
     }
 
     #[test]
-    fn hash_distinguishes_recursive() {
-        let a = ScanConfig::builder().recursive(true).build();
-        let b = ScanConfig::builder().recursive(false).build();
-        assert_ne!(
-            compute_config_hash(&a, SETTLE, NO_EVENTS),
-            compute_config_hash(&b, SETTLE, NO_EVENTS),
-        );
-    }
-
-    #[test]
     fn hash_distinguishes_hidden() {
         let a = ScanConfig::builder().hidden(true).build();
         let b = ScanConfig::builder().hidden(false).build();
@@ -835,19 +795,19 @@ mod tests {
         );
     }
 
+    /// Bounds that walk differently hash apart.
     #[test]
     fn hash_distinguishes_max_depth() {
-        let a = ScanConfig::builder().max_depth(Some(3)).build();
-        let b = ScanConfig::builder().max_depth(Some(4)).build();
-        let c = ScanConfig::builder().max_depth(None).build();
-        assert_ne!(
-            compute_config_hash(&a, SETTLE, NO_EVENTS),
-            compute_config_hash(&b, SETTLE, NO_EVENTS),
-        );
-        assert_ne!(
-            compute_config_hash(&a, SETTLE, NO_EVENTS),
-            compute_config_hash(&c, SETTLE, NO_EVENTS),
-        );
+        let [unbounded, one, three] = [None, NonZeroU32::new(1), NonZeroU32::new(3)].map(|bound| {
+            compute_config_hash(
+                &ScanConfig::builder().max_depth(bound).build(),
+                SETTLE,
+                NO_EVENTS,
+            )
+        });
+        assert_ne!(unbounded, one);
+        assert_ne!(unbounded, three);
+        assert_ne!(one, three);
     }
 
     #[test]
@@ -915,12 +875,11 @@ mod tests {
         }
         fn populated_scan() -> ScanConfig {
             ScanConfig::builder()
-                .recursive(true)
                 .hidden(true)
                 .exclude(glob("a"))
                 .exclude(glob("b"))
                 .pattern(glob("*.rs"))
-                .max_depth(Some(7))
+                .max_depth(NonZeroU32::new(7))
                 .build()
         }
         fn rehash_scan(mutate: impl FnOnce(&mut ScanConfig)) -> u64 {
@@ -932,16 +891,6 @@ mod tests {
         let h0 =
             ProfileIdentity::new(populated_scan(), BASE_MAX_SETTLE, base_events()).config_hash();
 
-        assert_ne!(
-            h0,
-            rehash_scan(|scan| {
-                let ScanConfig::Subtree { recursive, .. } = scan else {
-                    unreachable!("builder builds Subtree")
-                };
-                *recursive = false;
-            }),
-            "recursive must discriminate"
-        );
         assert_ne!(
             h0,
             rehash_scan(|scan| {
@@ -978,7 +927,7 @@ mod tests {
                 let ScanConfig::Subtree { max_depth, .. } = scan else {
                     unreachable!("builder builds Subtree")
                 };
-                *max_depth = Some(8);
+                *max_depth = NonZeroU32::new(8);
             }),
             "max_depth must discriminate"
         );
@@ -1066,7 +1015,7 @@ mod tests {
             "the terminus depth never descends",
         );
 
-        let subtree = ScanConfig::builder().recursive(true).build();
+        let subtree = ScanConfig::builder().build();
         assert!(subtree.descends_into(1, true));
         assert!(
             !subtree.descends_into(1, false),
@@ -1096,7 +1045,7 @@ mod tests {
         assert_eq!(identity.config_hash(), GOLDEN_HASH);
     }
 
-    const GOLDEN_HASH: u64 = 0x2BE2_4E94_4F1C_30EB;
+    const GOLDEN_HASH: u64 = 0x49FE_0EB9_4F17_13E0;
 
     /// Fold-completeness ratchet for [`ScanConfig::accepts`]. Mirrors
     /// [`hash_discriminates_every_populated_field`]: a fully-populated `ScanConfig` plus a neutral
@@ -1114,11 +1063,10 @@ mod tests {
     fn accepts_reads_every_field() {
         fn populated() -> ScanConfig {
             ScanConfig::builder()
-                .recursive(true)
                 .hidden(true)
                 .exclude(glob("excluded"))
                 .pattern(glob("*.rs"))
-                .max_depth(Some(7))
+                .max_depth(NonZeroU32::new(7))
                 .build()
         }
 
@@ -1142,7 +1090,6 @@ mod tests {
         // field under test. Verdicts overlap by design (the predicate short-circuits), so a probe
         // that's already rejected by a *different* field cannot discriminate.
         let probes: &[(&str, ResourceKind, u32)] = &[
-            ("foo.rs", ResourceKind::File, 5),
             (".hidden_dir", ResourceKind::Dir, 1),
             ("foo.rs", ResourceKind::File, 7),
             ("excluded", ResourceKind::Dir, 1),
@@ -1151,18 +1098,6 @@ mod tests {
 
         let base = populated();
         let base_v = verdicts(&base, probes);
-
-        let mut mut_recursive = populated();
-        {
-            let ScanConfig::Subtree { recursive, .. } = &mut mut_recursive else {
-                unreachable!("builder builds Subtree")
-            };
-            *recursive = false;
-        }
-        assert!(
-            shifted(&base_v, &mut_recursive, probes),
-            "recursive must discriminate"
-        );
 
         let mut mut_hidden = populated();
         {
@@ -1177,10 +1112,9 @@ mod tests {
         );
 
         let mut_exclude = ScanConfig::builder()
-            .recursive(true)
             .hidden(true)
             .pattern(glob("*.rs"))
-            .max_depth(Some(7))
+            .max_depth(NonZeroU32::new(7))
             .build();
         assert!(
             shifted(&base_v, &mut_exclude, probes),
@@ -1188,10 +1122,9 @@ mod tests {
         );
 
         let mut_pattern = ScanConfig::builder()
-            .recursive(true)
             .hidden(true)
             .exclude(glob("excluded"))
-            .max_depth(Some(7))
+            .max_depth(NonZeroU32::new(7))
             .build();
         assert!(
             shifted(&base_v, &mut_pattern, probes),
@@ -1203,7 +1136,7 @@ mod tests {
             let ScanConfig::Subtree { max_depth, .. } = &mut mut_max_depth else {
                 unreachable!("builder builds Subtree")
             };
-            *max_depth = Some(6);
+            *max_depth = NonZeroU32::new(6);
         }
         assert!(
             shifted(&base_v, &mut_max_depth, probes),

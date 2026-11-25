@@ -1112,6 +1112,7 @@ mod tests {
         ArgPart, ArgTemplate, BranchTarget, ExecAction, Placeholder, ProgramBuilder, SpawnBody,
     };
     use compact_str::CompactString;
+    use std::num::NonZeroU32;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
@@ -1654,7 +1655,9 @@ mod tests {
             crate::SubAttachRequest::for_anchor(
                 "a".into(),
                 crate::SubAttachAnchor::Path(std::path::PathBuf::from("/a")),
-                crate::ScanConfig::builder().build(),
+                crate::ScanConfig::builder()
+                    .max_depth(NonZeroU32::new(1))
+                    .build(),
                 Duration::from_hours(1),
                 SETTLE,
                 anchor_only_program(),
@@ -1810,7 +1813,7 @@ mod tests {
     fn mint_spec(scope: EffectScope) -> MintSpec {
         MintSpec {
             identity: ProfileIdentity::new(
-                ScanConfig::builder().build(),
+                ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
                 SETTLE * 4,
                 ClassSet::EMPTY,
             ),

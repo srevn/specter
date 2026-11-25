@@ -75,7 +75,7 @@ fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
     SubAttachRequest::for_anchor(
         name.into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -91,7 +91,7 @@ fn subtree_request_with_content(name: &str, r: ResourceId) -> SubAttachRequest {
     SubAttachRequest::for_anchor(
         name.into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -996,7 +996,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
     let req = SubAttachRequest::for_anchor(
         "fmt".into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -1455,7 +1455,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     let req = SubAttachRequest::for_anchor(
         "fmt".into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -1559,7 +1559,7 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
     let req = SubAttachRequest::for_anchor(
         "fmt".into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),

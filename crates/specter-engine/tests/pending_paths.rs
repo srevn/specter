@@ -17,6 +17,7 @@ use specter_engine::testkit::{
     MAX_SETTLE, NO_EVENTS, SETTLE, complete_effect_to_rebasing, descent_advance, drain_due,
     fire_standard_once, first_probe_correlation, pre_place_dir, respond_anchor_file, seed_to_idle,
 };
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -35,7 +36,7 @@ fn attach_sub_path_pending_then_anchor_appears() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Path(PathBuf::from("/var/log/myapp")),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -139,7 +140,7 @@ fn pending_path_witnessed_appearance_fires() {
     let req = SubAttachRequest::for_anchor(
         "pending".into(),
         SubAttachAnchor::Path(PathBuf::from("/watch/app.log")),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -231,7 +232,7 @@ fn pending_path_event_racing_inflight_probe_repays_and_fires() {
     let req = SubAttachRequest::for_anchor(
         "pending".into(),
         SubAttachAnchor::Path(PathBuf::from("/watch/app.log")),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -336,7 +337,7 @@ fn sibling_churn_during_attach_descent_pins_silently() {
     let req = SubAttachRequest::for_anchor(
         "churn".into(),
         SubAttachAnchor::Path(PathBuf::from("/watch/a/b")),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -424,7 +425,7 @@ fn prefix_vanished_rewind_then_recompletion_fires() {
     let req = SubAttachRequest::for_anchor(
         "vanish".into(),
         SubAttachAnchor::Path(PathBuf::from("/watch/a/b")),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -497,7 +498,7 @@ fn pending_path_failed_probe_retains_state() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Path(PathBuf::from("/var/missing")),
-        ScanConfig::builder().build(),
+        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -548,7 +549,7 @@ fn pending_path_event_at_prefix_emits_fresh_probe() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Path(PathBuf::from("/var/missing")),
-        ScanConfig::builder().build(),
+        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -614,7 +615,7 @@ fn anchor_disappears_re_enters_pending_via_watch_root_parent() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Resource(src),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -685,7 +686,7 @@ fn detach_pending_profile_with_inflight_descent_emits_cancel() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Path(PathBuf::from("/var/log/myapp")),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -745,7 +746,7 @@ fn pending_profile_event_at_anchor_lands_in_no_consumer_branch() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Path(PathBuf::from("/foo")),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -850,7 +851,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let req_a = SubAttachRequest::for_anchor(
         "watch-a".into(),
         SubAttachAnchor::Path(PathBuf::from("/root/foo")),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -885,7 +886,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let req_b = SubAttachRequest::for_anchor(
         "watch-b".into(),
         SubAttachAnchor::Resource(bar),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -944,7 +945,7 @@ fn classifier_routes_descent_and_recovery_in_single_pass() {
     let req_c = SubAttachRequest::for_anchor(
         "watch-c".into(),
         SubAttachAnchor::Resource(elsewhere),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),

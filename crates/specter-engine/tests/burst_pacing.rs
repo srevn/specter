@@ -30,7 +30,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().recursive(true).build(),
+            ScanConfig::builder().build(),
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
@@ -154,7 +154,7 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().recursive(true).build(),
+            ScanConfig::builder().build(),
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),

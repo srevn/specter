@@ -65,7 +65,7 @@ fn attach_at(
         e,
         name,
         SubAttachAnchor::Resource(anchor),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         events,
         max_settle,
         now,

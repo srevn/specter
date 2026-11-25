@@ -410,6 +410,7 @@ mod tests {
     /// a directory, is gone; a directory the walk may not open is denied.
     #[test]
     fn a_failed_open_is_gone_or_denied() {
+        use std::num::NonZeroU32;
         use std::os::unix::fs::PermissionsExt;
         let tmp = tempfile::TempDir::new().unwrap();
         let file = tmp.path().join("file");
@@ -418,7 +419,7 @@ mod tests {
         std::fs::create_dir(&locked).unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let config = ScanConfig::builder().build();
+        let config = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
         let obligation = ProofObligation::WholeSubtree;
         let ctx = WalkContext {
             anchor_path: tmp.path(),
@@ -471,7 +472,7 @@ mod tests {
             "the terminus depth never descends",
         );
 
-        let subtree_cfg = ScanConfig::builder().recursive(true).build();
+        let subtree_cfg = ScanConfig::builder().build();
         let subtree = WalkContext {
             config: &subtree_cfg,
             ..chain

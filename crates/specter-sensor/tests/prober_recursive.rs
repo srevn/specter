@@ -11,6 +11,7 @@ use specter_core::{
 };
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -98,10 +99,7 @@ fn recursive_walk_with_max_depth_three_collects_three_levels() {
 
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
-    let cfg = ScanConfig::builder()
-        .recursive(true)
-        .max_depth(Some(3))
-        .build();
+    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(3)).build();
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     // depth 1: a; 2: a/b; 3: a/b/c; 4 (file): excluded.
     assert!(segs.contains("a"));
@@ -124,7 +122,6 @@ fn exclude_target_dir_omits_subtree_contents() {
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
     let cfg = ScanConfig::builder()
-        .recursive(true)
         .exclude(GlobPattern::compile("target/**").unwrap())
         .build();
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
@@ -147,7 +144,6 @@ fn pattern_double_star_matches_recursive_files() {
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
     let cfg = ScanConfig::builder()
-        .recursive(true)
         .pattern(GlobPattern::compile("**/*.c").unwrap())
         .build();
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
@@ -168,7 +164,7 @@ fn hidden_false_skips_dot_subtree_entirely() {
 
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
-    let cfg = ScanConfig::builder().recursive(true).hidden(false).build();
+    let cfg = ScanConfig::builder().hidden(false).build();
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     assert!(!segs.contains(".git"));
     assert!(!segs.contains(".git/HEAD"));
@@ -185,7 +181,7 @@ fn hidden_true_includes_dot_subtree() {
 
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
-    let cfg = ScanConfig::builder().recursive(true).hidden(true).build();
+    let cfg = ScanConfig::builder().hidden(true).build();
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     assert!(segs.contains(".git"));
     assert!(segs.contains(".git/HEAD"));

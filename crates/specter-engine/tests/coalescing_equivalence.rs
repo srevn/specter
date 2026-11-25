@@ -123,7 +123,7 @@ fn seeded() -> (
         &mut e,
         "build",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         ClassSet::DEFAULT_SUBTREE_ROOT,
         MAX_SETTLE,
         t0,

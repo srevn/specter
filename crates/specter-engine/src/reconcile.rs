@@ -429,6 +429,7 @@ mod tests {
         ResourceRole, ScanConfig, StepOutput, Tree, TreeSnapshot, WatchOp,
     };
     use std::collections::BTreeMap;
+    use std::num::NonZeroU32;
     use std::path::PathBuf;
     use std::sync::Arc;
     use std::time::{Duration, UNIX_EPOCH};
@@ -485,11 +486,7 @@ mod tests {
             &mut tree,
             Profile::new(
                 r,
-                ProfileIdentity::new(
-                    ScanConfig::builder().recursive(true).build(),
-                    MAX_SETTLE,
-                    events,
-                ),
+                ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, events),
                 SETTLE,
                 None,
             ),
@@ -680,7 +677,7 @@ mod tests {
             Profile::new(
                 r,
                 ProfileIdentity::new(
-                    ScanConfig::builder().recursive(false).build(),
+                    ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
                     MAX_SETTLE,
                     ClassSet::CONTENT,
                 ),

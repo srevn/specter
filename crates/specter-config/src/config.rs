@@ -12,6 +12,7 @@ use specter_core::{
     SubAttachRequest, SubParams,
 };
 use std::collections::BTreeMap;
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -1234,19 +1235,11 @@ fn dynamic_prefix_issue(
 /// (max_depth, pattern, and each exclude glob can fire independently).
 fn validate_scan(idx: usize, raw: &RawWatch) -> Result<ScanConfig, Vec<ValidationIssue>> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
-    if raw.max_depth == Some(0) {
-        errors.push(ValidationIssue::new(
-            Some(idx),
-            "max_depth",
-            IssueKind::MaxDepthZero,
-            "max_depth must be ≥ 1 or omitted (None = unbounded)".to_owned(),
-        ));
+    let mut sb = ScanConfig::builder().hidden(raw.hidden);
+    match validate_depth(idx, raw.recursive, raw.max_depth) {
+        Ok(bound) => sb = sb.max_depth(bound),
+        Err(issue) => errors.push(issue),
     }
-
-    let mut sb = ScanConfig::builder()
-        .recursive(raw.recursive)
-        .hidden(raw.hidden)
-        .max_depth(raw.max_depth);
 
     if let Some(p) = raw.pattern.as_deref() {
         match GlobPattern::compile(p) {
@@ -1299,6 +1292,36 @@ fn validate_scan(idx: usize, raw: &RawWatch) -> Result<ScanConfig, Vec<Validatio
         Ok(sb.build())
     } else {
         Err(errors)
+    }
+}
+
+/// The bound a `[[watch]]` lists to. `recursive = false` is the TOML's other spelling of one level,
+/// so a deeper `max_depth` beside it would say two bounds for one walk. A zero is refused before
+/// the key is read: it parses into no bound the key could contradict.
+fn validate_depth(
+    idx: usize,
+    recursive: bool,
+    max_depth: Option<u32>,
+) -> Result<Option<NonZeroU32>, ValidationIssue> {
+    const ONE_LEVEL: NonZeroU32 = NonZeroU32::MIN;
+    match (recursive, max_depth.map(NonZeroU32::new)) {
+        (_, Some(None)) => Err(ValidationIssue::new(
+            Some(idx),
+            "max_depth",
+            IssueKind::MaxDepthZero,
+            "max_depth must be ≥ 1 or omitted (None = unbounded)".to_owned(),
+        )),
+        (true, bound) => Ok(bound.flatten()),
+        (false, None | Some(Some(ONE_LEVEL))) => Ok(Some(ONE_LEVEL)),
+        (false, Some(Some(deeper))) => Err(ValidationIssue::new(
+            Some(idx),
+            "max_depth",
+            IssueKind::MaxDepthNotRecursive,
+            format!(
+                "max_depth = {deeper} contradicts recursive = false, which lists one level: \
+                 drop one of the two"
+            ),
+        )),
     }
 }
 
@@ -1586,8 +1609,10 @@ mod tests {
     use crate::error::{ConfigError, IssueKind};
     use specter_core::program::SpawnBody;
     use specter_core::{
-        ArgPart, ClassSet, EffectScope, Placeholder, ProfileIdentity, ReactionSpec, ScanConfig,
+        ArgPart, ClassSet, EffectScope, GlobPattern, Placeholder, ProfileIdentity, ReactionSpec,
+        ScanConfig,
     };
+    use std::num::NonZeroU32;
     use std::path::Path;
     use std::time::Duration;
 
@@ -1743,21 +1768,7 @@ mod tests {
         assert_eq!(w.scope, EffectScope::SubtreeRoot);
         assert_eq!(w.settle, Duration::from_millis(200));
         assert_eq!(w.max_settle, Duration::from_hours(1));
-        let ScanConfig::Subtree {
-            recursive,
-            hidden,
-            exclude,
-            pattern,
-            max_depth,
-        } = &w.scan
-        else {
-            panic!("static watch lowers to Subtree, got {:?}", w.scan);
-        };
-        assert!(*recursive);
-        assert!(!*hidden);
-        assert_eq!(exclude.as_slice(), []);
-        assert!(pattern.is_none());
-        assert_eq!(*max_depth, None);
+        assert_eq!(w.scan, ScanConfig::builder().build());
         let SpawnBody::Exec(exec) = w.program.ops()[0].body() else {
             panic!("expected SpawnBody::Exec");
         };
@@ -2018,6 +2029,31 @@ mod tests {
     fn max_depth_zero_rejected() {
         let toml = minimal_toml("max_depth = 0\n");
         assert_only_kind(&toml, IssueKind::MaxDepthZero);
+    }
+
+    /// `recursive = false` is the TOML's other spelling of `max_depth = 1`: either, or both, lower
+    /// to one spec, so an edit between them is no reload.
+    #[test]
+    fn recursive_false_lowers_as_max_depth_one() {
+        let lowered = |knobs: &str| {
+            Config::from_str(&minimal_toml(knobs))
+                .expect("valid config")
+                .watches
+                .remove(0)
+        };
+        let one_level = lowered("max_depth = 1\n");
+        assert_eq!(
+            one_level.scan,
+            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build()
+        );
+        assert_eq!(lowered("recursive = false\n"), one_level);
+        assert_eq!(lowered("recursive = false\nmax_depth = 1\n"), one_level);
+    }
+
+    #[test]
+    fn max_depth_deeper_than_recursive_false_rejected() {
+        let toml = minimal_toml("recursive = false\nmax_depth = 5\n");
+        assert_only_kind(&toml, IssueKind::MaxDepthNotRecursive);
     }
 
     #[test]
@@ -2326,10 +2362,7 @@ mod tests {
         assert_eq!(w.scope, EffectScope::SubtreeRoot);
         assert_eq!(w.settle, Duration::from_millis(200));
         assert_eq!(w.max_settle, Duration::from_hours(1));
-        let ScanConfig::Subtree { recursive, .. } = &w.scan else {
-            panic!("static watch lowers to Subtree, got {:?}", w.scan);
-        };
-        assert!(*recursive);
+        assert_eq!(w.scan, ScanConfig::builder().build());
     }
 
     #[test]
@@ -2569,7 +2602,7 @@ mod tests {
 
     /// Minimal dynamic watch: the discovery Sub's own identity is the constant pair plus `STRUCTURE`
     /// and `MatchChain`; the template carries the same defaults the static validator would produce
-    /// (settle = 200ms, max_settle = 1h, recursive `Subtree`, scope-conditional events).
+    /// (settle = 200ms, max_settle = 1h, the default `Subtree`, scope-conditional events).
     #[test]
     fn minimal_dynamic_watch_round_trips_with_defaults() {
         let toml =
@@ -2586,10 +2619,7 @@ mod tests {
         assert_eq!(t.settle, Duration::from_millis(200));
         assert_eq!(t.max_settle, Duration::from_hours(1));
         assert_eq!(t.events, ClassSet::DEFAULT_SUBTREE_ROOT);
-        let ScanConfig::Subtree { recursive, .. } = &t.scan else {
-            panic!("template scan is the user Subtree, got {:?}", t.scan);
-        };
-        assert!(*recursive);
+        assert_eq!(t.scan, ScanConfig::builder().build());
     }
 
     /// The full lowering grid: a dynamic block's user knobs land on the template *verbatim* (`scan`
@@ -2629,18 +2659,14 @@ mod tests {
         assert_eq!(t.settle, Duration::from_millis(300));
         assert_eq!(t.max_settle, Duration::from_millis(1200));
         assert_eq!(t.events, ClassSet::CONTENT);
-        let ScanConfig::Subtree {
-            recursive,
-            hidden,
-            pattern,
-            ..
-        } = &t.scan
-        else {
-            panic!("template scan is the user Subtree, got {:?}", t.scan);
-        };
-        assert!(!*recursive);
-        assert!(*hidden);
-        assert!(pattern.is_some());
+        assert_eq!(
+            t.scan,
+            ScanConfig::builder()
+                .hidden(true)
+                .pattern(GlobPattern::compile("*.log").expect("valid glob"))
+                .max_depth(NonZeroU32::new(1))
+                .build()
+        );
 
         // The attach-request projection: minted identity hash equals the hand-built one.
         let req = cfg.watches[0].to_attach_request();

@@ -26,8 +26,8 @@ actions = [{ exec = ["echo", "${specter.path}"] }]
 # pattern    = "**/*.{c,h,rs}"
 # exclude    = ["target/**", "node_modules/**"]
 # hidden     = false
-# recursive  = true
-# max_depth  = 8                              # ≥ 1; omit for unbounded
+# recursive  = true                           # false lists one level, as max_depth = 1
+# max_depth  = 8                              # ≥ 1; omit for unbounded; > 1 needs recursive
 # log_output = false                          # forward child stdio to specter
 
 # Placeholders inside an exec argv slot:

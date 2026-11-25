@@ -491,7 +491,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "watch".into(),
             SubAttachAnchor::Resource(anchor),
-            ScanConfig::builder().recursive(true).build(),
+            ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
             empty_program(),
@@ -782,7 +782,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "watch".into(),
             SubAttachAnchor::Resource(anchor),
-            ScanConfig::builder().recursive(true).build(),
+            ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
             empty_program(),
@@ -855,7 +855,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "watch".into(),
             SubAttachAnchor::Resource(anchor),
-            ScanConfig::builder().recursive(true).build(),
+            ScanConfig::builder().build(),
             MAX_SETTLE,
             SETTLE,
             empty_program(),

@@ -53,7 +53,7 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     let req = SubAttachRequest::for_anchor(
         CompactString::new("test"),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),

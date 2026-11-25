@@ -10,6 +10,7 @@ use specter_core::{
     Placeholder, Profile, ProfileIdentity, ProfileMap, ResourceRole, ScanConfig, StepOutput, Sub,
     SubParams, SubRegistry, Tree,
 };
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,7 +19,7 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
 fn bare_cfg() -> ScanConfig {
-    ScanConfig::builder().build()
+    ScanConfig::builder().max_depth(NonZeroU32::new(1)).build()
 }
 
 fn build_program() -> Arc<ActionProgram> {
@@ -118,9 +119,11 @@ fn distinct_profile_for_distinct_pattern() {
 
     let cfg_rs = ScanConfig::builder()
         .pattern(GlobPattern::compile("*.rs").unwrap())
+        .max_depth(NonZeroU32::new(1))
         .build();
     let cfg_txt = ScanConfig::builder()
         .pattern(GlobPattern::compile("*.txt").unwrap())
+        .max_depth(NonZeroU32::new(1))
         .build();
 
     let pid_rs = profiles.attach(

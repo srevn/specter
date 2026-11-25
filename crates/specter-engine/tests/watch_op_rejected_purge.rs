@@ -25,7 +25,7 @@ fn attach_subtree_root(
     let req = SubAttachRequest::for_anchor(
         name.into(),
         SubAttachAnchor::Resource(resource),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         max_settle,
         SETTLE,
         empty_program(),
@@ -304,7 +304,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Path(PathBuf::from("/foo/bar")),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),

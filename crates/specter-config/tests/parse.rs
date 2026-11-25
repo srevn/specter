@@ -2,7 +2,8 @@
 
 use specter_config::{Config, ConfigError, IssueKind};
 use specter_core::program::{BranchTarget, SpawnBody};
-use specter_core::{ArgPart, ClassSet, EffectScope, Placeholder, ScanConfig};
+use specter_core::{ArgPart, ClassSet, EffectScope, GlobPattern, Placeholder, ScanConfig};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -41,21 +42,15 @@ fn full_fixture_round_trips_every_field() {
     assert_eq!(w.scope, EffectScope::SubtreeRoot);
     assert_eq!(w.settle, Duration::from_millis(500));
     assert_eq!(w.max_settle, Duration::from_secs(30));
-    let ScanConfig::Subtree {
-        recursive,
-        hidden,
-        exclude,
-        pattern,
-        max_depth,
-    } = &w.scan
-    else {
-        panic!("static watch lowers to Subtree, got {:?}", w.scan);
-    };
-    assert!(*recursive);
-    assert!(!*hidden);
-    assert!(pattern.is_some());
-    assert_eq!(exclude.len(), 2);
-    assert_eq!(*max_depth, Some(5));
+    let glob = |source| GlobPattern::compile(source).expect("fixture glob compiles");
+    assert_eq!(
+        w.scan,
+        ScanConfig::builder()
+            .pattern(glob("**/*.{c,h,rs}"))
+            .excludes([glob("target/**"), glob("**/node_modules/**")])
+            .max_depth(NonZeroU32::new(5))
+            .build()
+    );
     assert_eq!(w.events, ClassSet::STRUCTURE | ClassSet::CONTENT);
     let SpawnBody::Exec(exec) = &w.program.ops()[0].body() else {
         panic!("expected SpawnBody::Exec");
@@ -146,21 +141,7 @@ fn duplicate_name_fixture_yields_validate_error() {
 fn all_defaults_fixture_applies_documented_defaults() {
     let cfg = Config::from_path(&fixture("all-defaults.toml")).unwrap();
     let w = &cfg.watches[0];
-    let ScanConfig::Subtree {
-        recursive,
-        hidden,
-        exclude,
-        pattern,
-        max_depth,
-    } = &w.scan
-    else {
-        panic!("static watch lowers to Subtree, got {:?}", w.scan);
-    };
-    assert!(*recursive);
-    assert!(!*hidden);
-    assert!(pattern.is_none());
-    assert_eq!(exclude.as_slice(), []);
-    assert_eq!(*max_depth, None);
+    assert_eq!(w.scan, ScanConfig::builder().build());
     assert_eq!(w.scope, EffectScope::SubtreeRoot);
     assert_eq!(w.settle, Duration::from_millis(200));
     assert_eq!(w.max_settle, Duration::from_hours(1));

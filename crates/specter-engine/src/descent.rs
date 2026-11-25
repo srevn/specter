@@ -961,7 +961,7 @@ mod tests {
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
     fn cfg() -> ScanConfig {
-        ScanConfig::builder().recursive(true).build()
+        ScanConfig::builder().build()
     }
 
     fn empty_program() -> Arc<ActionProgram> {
@@ -1785,7 +1785,6 @@ mod tests {
         e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
         let user_cfg = specter_core::ScanConfig::builder()
-            .recursive(true)
             .pattern(specter_core::GlobPattern::compile("*.c").unwrap())
             .build();
         let req = SubAttachRequest::for_anchor(
@@ -1888,11 +1887,16 @@ mod tests {
     #[test]
     fn profile_state_default_is_idle() {
         use specter_core::{Profile, ProfileState, ScanConfig};
+        use std::num::NonZeroU32;
         let mut e = Engine::new();
         let r = e.tree_mut().ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(
             r,
-            ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
+            ProfileIdentity::new(
+                ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+                MAX_SETTLE,
+                NO_EVENTS,
+            ),
             SETTLE,
             None,
         );

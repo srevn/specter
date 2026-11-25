@@ -21,6 +21,7 @@ use specter_engine::testkit::{
     first_probe_correlation, rebase_post_fire_to_idle, seed_to_idle,
 };
 use specter_engine::{Engine, covers};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
@@ -34,7 +35,7 @@ const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 
 fn cfg_recursive() -> ScanConfig {
-    ScanConfig::builder().recursive(true).build()
+    ScanConfig::builder().build()
 }
 
 fn mark_dir(tree: &mut Tree, id: ResourceId) {
@@ -72,7 +73,6 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
             root,
             ProfileIdentity::new(
                 ScanConfig::builder()
-                    .recursive(true)
                     .pattern(specter_core::GlobPattern::compile("*.rs").unwrap())
                     .build(),
                 MAX_SETTLE,
@@ -338,7 +338,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         &mut e,
         "fmt",
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().build(),
+        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
         NO_EVENTS,
         MAX_SETTLE,
         t0,

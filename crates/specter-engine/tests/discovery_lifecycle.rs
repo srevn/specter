@@ -28,6 +28,7 @@ use specter_engine::testkit::{
     respond_anchor_file, seed_to_idle, seed_to_idle_with, watch_op_rejected_input,
 };
 use std::collections::BTreeSet;
+use std::num::NonZeroU32;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -1304,11 +1305,7 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
     let now = Instant::now();
 
     let template = Arc::new(MintSpec {
-        identity: ProfileIdentity::new(
-            ScanConfig::builder().recursive(true).build(),
-            MAX_SETTLE,
-            DEFAULT_EVENTS,
-        ),
+        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
         settle: SETTLE,
         spawn: SpawnSpec::new(empty_program(), EffectScope::SubtreeRoot, false),
     });
@@ -1570,7 +1567,7 @@ fn a_mint_at_a_slot_a_watch_rejection_vacated_founds_its_profile_kinded() {
 
     let flat = Arc::new(MintSpec {
         identity: ProfileIdentity::new(
-            ScanConfig::builder().recursive(false).build(),
+            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             ClassSet::EMPTY,
         ),
@@ -2056,7 +2053,7 @@ fn mid_burst_discovery_descendant_does_not_drain_covering_profile() {
         &mut e,
         "outer",
         SubAttachAnchor::Resource(srv),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         DEFAULT_EVENTS,
         MAX_SETTLE,
         now,
@@ -2117,7 +2114,7 @@ fn mid_burst_minted_descendant_still_drains_through_discovery() {
         &mut e,
         "outer",
         SubAttachAnchor::Resource(srv),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         DEFAULT_EVENTS,
         MAX_SETTLE,
         now,
@@ -2192,7 +2189,7 @@ fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
         &mut e,
         "co-resident",
         SubAttachAnchor::Resource(x),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         ClassSet::EMPTY,
         MAX_SETTLE,
         now,
@@ -2262,7 +2259,7 @@ fn an_appearance_minted_onto_a_standing_profile_owes_its_fire() {
         &mut e,
         "operator",
         SubAttachAnchor::Resource(o),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         ClassSet::EMPTY,
         MAX_SETTLE,
         now,
@@ -2792,7 +2789,7 @@ fn descent_vanish_preserves_co_resident_discovery_contribution() {
         &mut e,
         "deep",
         SubAttachAnchor::Path("/data/missing/deep".into()),
-        ScanConfig::builder().recursive(true).build(),
+        ScanConfig::builder().build(),
         ClassSet::EMPTY,
         MAX_SETTLE,
         now,

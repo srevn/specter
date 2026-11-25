@@ -17,7 +17,7 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
     e.tree_mut().set_kind(r, specter_core::ResourceKind::Dir);
     // Identical (resource, ScanConfig, max_settle, settle, events) ⇒ identical config_hash ⇒ every
     // Sub attaches to one shared Profile.
-    let cfg = ScanConfig::builder().recursive(true).build();
+    let cfg = ScanConfig::builder().build();
     let now = Instant::now();
 
     let attach = |e: &mut Engine, name: &str| -> SubId {

@@ -1131,6 +1131,7 @@ mod tests {
         ProbeResponse, ProfileId, ResourceId, ScanConfig, StepOutput, SubId, SubRegistryDiff,
         TimerId, TimerKind, WatchOp,
     };
+    use std::num::NonZeroU32;
     use std::time::{Duration, Instant};
 
     // Compile-time `Send + Sync` check on `Engine`. The bin loop parks `Engine` on its own thread;
@@ -1415,7 +1416,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "bad".into(),
             SubAttachAnchor::Path(bad.clone()),
-            ScanConfig::builder().recursive(false).build(),
+            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
             specter_core::testkit::single_exec_program(std::iter::empty()),
@@ -1448,7 +1449,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "rel".into(),
             SubAttachAnchor::Path(bad.clone()),
-            ScanConfig::builder().recursive(false).build(),
+            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
             specter_core::testkit::single_exec_program(std::iter::empty()),
@@ -1494,7 +1495,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "bad".into(),
             SubAttachAnchor::Path(path.clone()),
-            ScanConfig::builder().recursive(false).build(),
+            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
             specter_core::testkit::single_exec_program(std::iter::empty()),
@@ -1534,7 +1535,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "stale".into(),
             SubAttachAnchor::Resource(stale),
-            ScanConfig::builder().recursive(false).build(),
+            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
             specter_core::testkit::single_exec_program(std::iter::empty()),
@@ -1602,7 +1603,7 @@ mod tests {
         SubAttachRequest::for_anchor(
             name.into(),
             SubAttachAnchor::Resource(anchor),
-            ScanConfig::builder().build(),
+            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_secs(6),
             settle,
             specter_core::testkit::single_exec_program(std::iter::empty()),
@@ -1823,7 +1824,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "permtest".into(),
             SubAttachAnchor::Resource(anchor),
-            ScanConfig::builder().build(),
+            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_secs(6),
             Duration::from_millis(50),
             specter_core::testkit::single_exec_program(std::iter::empty()),

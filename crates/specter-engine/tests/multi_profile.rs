@@ -18,6 +18,7 @@ use specter_engine::testkit::{
     DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, drain_due, rebase_post_fire_to_idle,
     reconfirm_probed, seed_to_idle, verify,
 };
+use std::num::NonZeroU32;
 use std::time::{Duration, Instant};
 
 #[test]
@@ -28,8 +29,8 @@ fn two_profiles_one_resource_share_watch_demand() {
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
-    let cfg_a = ScanConfig::builder().recursive(true).build();
-    let cfg_b = ScanConfig::builder().recursive(false).build();
+    let cfg_a = ScanConfig::builder().build();
+    let cfg_b = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
 
     let req_a = SubAttachRequest::for_anchor(
         "build".into(),
@@ -100,7 +101,7 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
     // stable + B1-dedup finish.
     e.tree_mut().set_kind(bar, ResourceKind::File);
 
-    let cfg = ScanConfig::builder().recursive(true).build();
+    let cfg = ScanConfig::builder().build();
     let now = Instant::now();
     // The child's view of /src/foo carries `bar` so the engine covers it as a descendant — an
     // FsEvent there can then absorb. Reused for every child response so all hashes match (stable
@@ -413,7 +414,7 @@ fn interposing_covering_profile_mid_burst_does_not_strand_draining_ancestor() {
         .expect("test live parent");
     e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
-    let cfg = ScanConfig::builder().recursive(true).build();
+    let cfg = ScanConfig::builder().build();
     let now = Instant::now();
 
     // Parent @ /src (recursive) — covers /src/mid/foo, no Profile at /src/mid yet, so the child's
@@ -635,11 +636,8 @@ fn sweep_reconfirms_draining_ancestor_off_the_finishers_chain() {
     let now = Instant::now();
     // A covers /src/mid (depth 1) but NOT /src/mid/foo (depth 2): once the intermediate B is gone,
     // A is off P's chain.
-    let a_cfg = ScanConfig::builder()
-        .recursive(true)
-        .max_depth(Some(1))
-        .build();
-    let unbounded = ScanConfig::builder().recursive(true).build();
+    let a_cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let unbounded = ScanConfig::builder().build();
 
     // A: events-reliable (DEFAULT_EVENTS) so its single Authoritative verify folds to Stable
     // directly. max_depth=1 keeps A off P's covering set anyway, so the descendant `foo` event
@@ -851,8 +849,8 @@ fn co_located_profiles_independently_record_shared_resource_obligation() {
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
-    let cfg_a = ScanConfig::builder().recursive(true).build();
-    let cfg_b = ScanConfig::builder().recursive(false).build();
+    let cfg_a = ScanConfig::builder().build();
+    let cfg_b = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
     let now = Instant::now();
 
     let attach_out = e.step(
@@ -989,7 +987,7 @@ fn draining_parent_gated_by_child() -> DrainingFixture {
         .expect("test live parent");
     e.tree_mut().set_kind(child_dir, ResourceKind::Dir);
 
-    let cfg = ScanConfig::builder().recursive(true).build();
+    let cfg = ScanConfig::builder().build();
     let now = Instant::now();
 
     // Child `D` @ /src/child FIRST — earlier slot ⇒ iterates before `A`.

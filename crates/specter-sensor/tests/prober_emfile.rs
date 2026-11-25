@@ -55,7 +55,7 @@ fn a_walk_with_no_descriptor_free_fails_transient() {
         correlation: ProbeCorrelation::from(1),
         target_path: Arc::clone(&root),
         anchor_path: root,
-        scan_config: Arc::new(ScanConfig::builder().recursive(true).build()),
+        scan_config: Arc::new(ScanConfig::builder().build()),
         captured_with: 0,
         baseline_subtree: None,
         obligation: ProofObligation::WholeSubtree,

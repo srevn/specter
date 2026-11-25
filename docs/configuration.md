@@ -41,8 +41,8 @@ everything else has a default.
 | `pattern`    | unset (match-all)    | Glob filter.                                       |
 | `exclude`    | `[]`                 | Globs to exclude.                                  |
 | `hidden`     | `false`              | Scan dotfiles.                                     |
-| `recursive`  | `true`               | Descend into subdirectories.                       |
-| `max_depth`  | unbounded            | Cap descent depth.                                 |
+| `recursive`  | `true`               | `false` lists one level, as `max_depth = 1`.       |
+| `max_depth`  | unbounded            | Levels listed; above 1 only with `recursive`.      |
 | `log_output` | `false`              | Forward child stdout/stderr to specter's stdio.    |
 
 ### `max_settle`

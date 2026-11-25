@@ -20,7 +20,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 fn cfg() -> ScanConfig {
-    ScanConfig::builder().recursive(true).build()
+    ScanConfig::builder().build()
 }
 
 /// An event at a co-watched parked anchor re-enters recovery descent and never fires unanchored. A

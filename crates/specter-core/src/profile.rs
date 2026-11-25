@@ -3709,7 +3709,7 @@ mod tests {
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
     fn cfg() -> ScanConfig {
-        ScanConfig::builder().build()
+        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build()
     }
 
     fn glob(source: &str) -> GlobPattern {
@@ -4301,6 +4301,7 @@ mod tests {
             .exclude(glob("z"))
             .exclude(glob("a"))
             .exclude(glob("m"))
+            .max_depth(NonZeroU32::new(1))
             .build();
 
         let p = mk_profile(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS, None);
@@ -4333,6 +4334,7 @@ mod tests {
         let cfg = ScanConfig::builder()
             .exclude(glob("*.tmp"))
             .exclude(glob("*.bak"))
+            .max_depth(NonZeroU32::new(1))
             .build();
 
         let p = mk_profile(r, cfg, MAX_SETTLE, SETTLE, NO_EVENTS, None);
