@@ -24,8 +24,10 @@ use compact_str::CompactString;
 use crossbeam::channel::Sender;
 use specter_actuator::RunWiring;
 use specter_config::{Config, FileMeta};
-use specter_core::{Diagnostic, Input, ResourceId, StepOutput, SubId};
+use specter_core::testkit::{covered_at, dir_snap_nested, leaf};
+use specter_core::{Diagnostic, EntryKind, Input, ResourceId, StepOutput, Sub, SubId};
 use specter_engine::Engine;
+use specter_engine::testkit::{pid_of, pre_place_dir, seed_to_idle};
 use specter_sensor::testkit::{MockFsWatcher, MockProber};
 use std::io::{Read, Write};
 use std::ops::ControlFlow;
@@ -1045,55 +1047,84 @@ actions   = [{{ exec = ["true"] }}]
     let _ = rig.driver.begin_shutdown();
 }
 
-/// Reload modifying a dynamic [[watch]] — even a program-only edit — classifies `modified_identity`
-/// (the template head guard), so the engine wholesale-replaces: a fresh `SubId` under the same
-/// name, never an in-place rebind.
+/// Reload editing a dynamic [[watch]]'s command classifies `modified_params`, and the real pipeline
+/// rebinds in place: the template and every Sub it minted keep their ids, and each runs — or stamps
+/// — the new program.
 #[test]
-fn reload_modified_dynamic_watch_replaces_sub_id() {
+fn reload_modified_dynamic_watch_rebinds_in_place() {
     let tmp = tempfile::TempDir::new().unwrap();
-    let initial_text = format!(
-        r#"
+    let root = std::fs::canonicalize(tmp.path()).unwrap();
+    let block = |exec: &str| {
+        format!(
+            r#"
 [[watch]]
 name      = "logs"
 path      = "{}/{{a,b}}/access.log"
-actions   = [{{ exec = ["true"] }}]
+actions   = [{{ exec = ["{exec}"] }}]
 "#,
-        tmp.path().display(),
-    );
-    let new_text = format!(
-        r#"
-[[watch]]
-name      = "logs"
-path      = "{}/{{a,b}}/access.log"
-actions   = [{{ exec = ["echo"] }}]
-"#,
-        tmp.path().display(),
-    );
+            root.display(),
+        )
+    };
+    let (initial_text, new_text) = (block("true"), block("echo"));
     let cfg_path = tmp.path().join("specter.toml");
     std::fs::write(&cfg_path, &initial_text).unwrap();
     let initial = Config::from_str(&initial_text).expect("initial parses");
 
     let mut rig = rig_for(initial, cfg_path.clone());
+    // The pattern's prefix stands in the Tree, so the template attaches at once and its cold Seed
+    // walks both matches.
+    let segments: Vec<&str> = root.iter().skip(1).filter_map(|s| s.to_str()).collect();
+    pre_place_dir(&mut rig.driver.engine, &segments);
     let _ = rig.driver.run_initial_attach();
-    let old_sid = rig
+    let template = rig
         .driver
         .engine
         .subs()
         .find_by_name("logs")
-        .expect("discovery Sub 'logs' registered pre-reload");
+        .expect("template attached");
+    let discovery = pid_of(&rig.driver.engine, template);
+    let match_dir = |inode| covered_at(inode, &[("access.log", leaf(EntryKind::File, inode + 1))]);
+    let walk = dir_snap_nested(&[("a", match_dir(1)), ("b", match_dir(3))]);
+    let _ = seed_to_idle(&mut rig.driver.engine, discovery, &walk, Instant::now());
+    let minted: Vec<SubId> = rig.driver.engine.subs().minted(template).collect();
+    assert_eq!(minted.len(), 2, "premise: the walk mints both matches");
 
     std::fs::write(&cfg_path, &new_text).unwrap();
     let _ = rig
         .driver
         .dispatch_reload(ReloadTrigger::Sighup, Instant::now());
 
-    let new_sid = rig
-        .driver
-        .engine
-        .subs()
-        .find_by_name("logs")
-        .expect("discovery Sub 'logs' still registered post-reload");
-    assert_ne!(new_sid, old_sid);
+    let subs = rig.driver.engine.subs();
+    assert_eq!(
+        subs.find_by_name("logs"),
+        Some(template),
+        "the template keeps its id"
+    );
+    assert_eq!(
+        subs.minted(template).collect::<Vec<_>>(),
+        minted,
+        "and so does every Sub it minted",
+    );
+    let new_text_config = Config::from_str(&new_text).expect("new parses");
+    let new_program = &new_text_config.watches[0].program;
+    let runs_new = |sid| {
+        subs.get(sid)
+            .and_then(Sub::spawn_spec)
+            .is_some_and(|spec| spec.program() == new_program)
+    };
+    assert!(
+        minted.iter().all(|&sid| runs_new(sid)),
+        "each runs the new program"
+    );
+    let stamped = subs
+        .get(template)
+        .and_then(Sub::mint_spec)
+        .expect("a template");
+    assert_eq!(
+        stamped.params().spawn.program(),
+        new_program,
+        "and the template stamps it",
+    );
 
     let _ = rig.driver.begin_shutdown();
 }

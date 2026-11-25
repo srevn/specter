@@ -19,13 +19,12 @@ use std::collections::BTreeMap;
 ///
 /// Modified entries are partitioned by `SubSpec::requires_new_profile`:
 ///
-/// - **`modified_identity`** — the target / scan / max_settle / events differ, **or the watch is
-///   dynamic**: any edit of a dynamic watch is a wholesale replace, and a path edit across the
-///   `is_dynamic` boundary changes the target's kind. The engine validates the new anchor's parse,
-///   then runs `detach_old → attach_new`.
+/// - **`modified_identity`** — the target / scan / max_settle / events differ, for either kind of
+///   watch; a path edit across the `is_dynamic` boundary changes the target's kind. The engine asks
+///   the attach's gate, then runs `detach_old → attach_new`.
 /// - **`modified_params`** — only per-Sub fields differ (`program`, `scope`, `settle`,
-///   `log_output`) on a static watch. The engine rebinds the live Sub in place; no Profile churn,
-///   no kernel-watch flap, no baseline loss.
+///   `log_output`), for either kind. The engine rebinds the live Sub in place, a template with the
+///   set it minted; no Profile churn, no kernel-watch flap, no baseline loss.
 ///
 /// The partition is exhaustive and disjoint: every modified entry lands in exactly one bucket.
 ///
@@ -437,12 +436,11 @@ mod tests {
         assert!(d.modified_params.is_empty());
     }
 
-    /// A **program-only** change on a dynamic pair classifies `modified_identity` — the same edit on
-    /// a static spec lands in `modified_params` (see [`different_command_lands_in_modified_params`]).
-    /// Minted Subs hold `Arc`s of the template Sub's program; an in-place rebind would strand them,
-    /// so any discovery edit is a wholesale replace.
+    /// A **program-only** change on a dynamic pair lands in `modified_params`, as the same edit on
+    /// a static spec does (see [`different_command_lands_in_modified_params`]): the engine rebinds
+    /// the template and the set it minted in place.
     #[test]
-    fn discovery_command_change_lands_in_modified_identity() {
+    fn discovery_command_change_lands_in_modified_params() {
         let old_blocks = [dyn_block("logs", "/srv/log/*", "echo")];
         let new_blocks = [dyn_block("logs", "/srv/log/*", "fmt")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
@@ -451,9 +449,9 @@ mod tests {
         let d = diff(&old, &new);
         assert!(d.added.is_empty());
         assert_eq!(d.removed, [] as [CompactString; 0]);
-        assert!(d.modified_params.is_empty());
-        assert_eq!(d.modified_identity.len(), 1);
-        assert_eq!(d.modified_identity[0].name, "logs");
+        assert!(d.modified_identity.is_empty());
+        assert_eq!(d.modified_params.len(), 1);
+        assert_eq!(d.modified_params[0].name, "logs");
     }
 
     /// Pattern source change re-anchors the discovery Profile; diff surfaces it as
@@ -474,19 +472,38 @@ mod tests {
         assert_eq!(spec.source(), "/srv/log/*.json");
     }
 
-    /// A user-`settle`-only change on a dynamic watch classifies `modified_identity` — the user's
-    /// `settle` lives on the *template* (the minted Subs' debounce), so a params-class rebind can
-    /// never carry it. Wholesale before the unification, identity now; never an in-place rebind.
+    /// A `settle`-only change on a dynamic watch lands in `modified_params`: it debounces the
+    /// reaction of each Sub the template mints, a param as it is for a static watch, never the
+    /// discovery walk's own debounce.
     #[test]
-    fn discovery_settle_change_lands_in_modified_identity() {
+    fn discovery_settle_change_lands_in_modified_params() {
         let old_blocks = [dyn_block_full("logs", "/srv/log/*", "echo", "200ms")];
         let new_blocks = [dyn_block_full("logs", "/srv/log/*", "echo", "500ms")];
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
 
         let d = diff(&old, &new);
+        assert!(d.modified_identity.is_empty());
+        assert_eq!(d.modified_params.len(), 1);
+    }
+
+    /// A scan-knob change on a dynamic watch, its pattern unchanged, lands in `modified_identity`:
+    /// the knobs are the identity of each Profile its template mints Subs on, so a dynamic watch's
+    /// identity is more than its pattern.
+    #[test]
+    fn discovery_scan_change_lands_in_modified_identity() {
+        let old_blocks = [dyn_block("logs", "/srv/log/*", "echo")];
+        let new_blocks = [format!(
+            "{}\nrecursive = false\n",
+            dyn_block("logs", "/srv/log/*", "echo")
+        )];
+        let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
+        let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
+
+        let d = diff(&old, &new);
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
+        assert_eq!(d.modified_identity[0].name, "logs");
     }
 
     /// Identical dynamic blocks yield no diff — `PatternSpec` equality routes through `source`, so

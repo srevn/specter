@@ -210,13 +210,9 @@ impl SubSpec {
     /// `log_output`, `settle` — rebinds in place; `name` is the diff's key and `enabled` its
     /// filter, so neither reaches here. Field-derived, so no [`core::ProfileIdentity`] is built to
     /// be compared and dropped.
-    ///
-    /// Every edit of a dynamic watch is identity: a params edit replaces the template and the set
-    /// it minted.
     #[must_use]
     pub(crate) fn requires_new_profile(&self, other: &Self) -> bool {
-        matches!(self.target, WatchTarget::Dynamic(_))
-            || self.target != other.target
+        self.target != other.target
             || self.scan != other.scan
             || self.max_settle != other.max_settle
             || self.events != other.events
