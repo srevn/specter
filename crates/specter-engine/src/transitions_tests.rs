@@ -27,8 +27,8 @@ use specter_core::{
     FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry, OverflowScope, Placeholder,
     PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeFailure, ProbeOp, ProbeOutcome,
     ProbeRequest, ProbeResponse, ProbeSlot, ProfileIdentity, ProfileState, ProofAuthority,
-    ProofObligation, QuiescenceVerdict, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-    StableReason, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Termination,
+    ProofObligation, QuiescenceVerdict, ResourceId, ResourceKind, ResourceRole, StableReason,
+    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, SubtreeScan, Termination,
     TimerKind, TreeSnapshot, WatchOp,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -72,7 +72,7 @@ fn engine_with_attached_sub() -> (
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
         params: SubParams::spawn(
             "test-sub".into(),
             empty_program(),
@@ -228,7 +228,7 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
         params: SubParams::spawn(
             "test-sub".into(),
             empty_program(),
@@ -289,7 +289,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
     // so Profile.kind starts as None.
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
         params: SubParams::spawn(
             "test-sub".into(),
             empty_program(),
@@ -347,7 +347,7 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
     // out correctly if it ever does (defense-in-depth + symmetry with the SubtreeProven arm).
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
         params: SubParams::spawn(
             "test-sub".into(),
             empty_program(),
@@ -412,7 +412,7 @@ fn dispatch_descent_with_anchor_outcome_is_walker_contract_violation() {
     let req = SubAttachRequest::for_anchor(
         "guard".into(),
         SubAttachAnchor::Path(std::path::PathBuf::from("/foo/bar")),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -511,7 +511,7 @@ fn kind_mismatched_response_routes_through_finalize_anchor_lost_debug() {
     e.tree.set_kind(r, ResourceKind::File);
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
         params: SubParams::spawn(
             "test-sub".into(),
             empty_program(),
@@ -597,7 +597,7 @@ fn attach_sub_existing_profile_bumps_refcount() {
     // `events` folds into `config_hash`.
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
         params: SubParams::spawn(
             "second".into(),
             empty_program(),
@@ -965,7 +965,7 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(file_anchor),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             DEFAULT_EVENTS,
         ),
@@ -1059,7 +1059,7 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(file_anchor),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             DEFAULT_EVENTS,
         ),
@@ -1546,8 +1546,7 @@ fn fs_event_metadatachanged_at_descendant_drops_with_event_class_dropped() {
     complete_seed_burst(&mut e, pid);
 
     // Materialize a covered descendant. Bump `watch_demand` so the event passes the
-    // `EventOnUnwatchedResource` head guard. The Profile's ScanConfig has `recursive(true)` so
-    // `covers(profile, child, tree)` is satisfied.
+    // `EventOnUnwatchedResource` head guard; the Profile's unbounded scan covers it.
     let child = e
         .tree
         .ensure_child(root, "child.txt", ResourceRole::User)
@@ -1600,7 +1599,7 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::STRUCTURE,
         ),
@@ -2190,7 +2189,7 @@ fn effect_emission_carries_diff_when_needs_diff() {
     let now = Instant::now();
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
         params: SubParams::spawn(
             "fmt".into(),
             diff_program(), // references ${specter.created}
@@ -2318,7 +2317,7 @@ fn probe_op_for_file_anchor_is_file_kind() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             NO_EVENTS,
         ),
@@ -2431,7 +2430,7 @@ fn watch_op_rejected_purges_pending_descent_at_rejected_prefix() {
     let req = SubAttachRequest::for_anchor(
         "guard".into(),
         SubAttachAnchor::Path(std::path::PathBuf::from("/foo/bar")),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -2554,7 +2553,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     let req_a = SubAttachRequest::for_anchor(
         "a".into(),
         SubAttachAnchor::Path(std::path::PathBuf::from("/foo/sib_a")),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -2565,7 +2564,7 @@ fn watch_op_rejected_purges_multiple_descents_at_same_prefix() {
     let req_b = SubAttachRequest::for_anchor(
         "b".into(),
         SubAttachAnchor::Path(std::path::PathBuf::from("/foo/sib_b")),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -2931,7 +2930,7 @@ fn sensor_overflow_pending_descent_latches_and_repays() {
     let req = SubAttachRequest::for_anchor(
         "guard".into(),
         SubAttachAnchor::Path(std::path::PathBuf::from("/missing/anchor")),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -3040,7 +3039,7 @@ fn sensor_overflow_pending_profile_reprobes() {
     let req = SubAttachRequest::for_anchor(
         "guard".into(),
         SubAttachAnchor::Path(std::path::PathBuf::from("/a/b")),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -3120,7 +3119,7 @@ fn sensor_overflow_resource_scope_filters_profiles() {
     let now = Instant::now();
     let req_a = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(a),
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
         params: SubParams::spawn(
             "sub-a".into(),
             empty_program(),
@@ -3361,7 +3360,7 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let cfg = ScanConfig::builder().build();
+    let cfg = SubtreeScan::builder().build();
     let attach_out = e.step(
         Input::AttachSub(SubAttachRequest {
             anchor: SubAttachAnchor::Resource(r),
@@ -3419,7 +3418,7 @@ fn config_diff_added_only_attaches_subs() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             NO_EVENTS,
         ),
@@ -3477,7 +3476,7 @@ fn config_diff_removed_then_added_atomic() {
     let req_b = SubAttachRequest::for_anchor(
         "B".into(),
         SubAttachAnchor::Path(std::path::PathBuf::from("/anchor")),
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(), // different config_hash (non-recursive)
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(), // different config_hash (non-recursive)
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -3513,7 +3512,7 @@ fn config_diff_unknown_removed_diagnoses_unknown_modified_retries_as_attach() {
     let revenant = SubAttachRequest::for_anchor(
         "revenant".into(),
         SubAttachAnchor::Path(std::path::PathBuf::from("/revenant-anchor")),
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -3577,7 +3576,7 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::DEFAULT_PER_FILE,
         ),
@@ -3687,7 +3686,7 @@ fn per_stable_file_skips_dir_entries() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::DEFAULT_PER_FILE,
         ),
@@ -3926,7 +3925,7 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
@@ -4006,7 +4005,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
@@ -4031,7 +4030,7 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     let req2 = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
@@ -4063,7 +4062,7 @@ fn structure_only_profile_has_per_file_fds_false() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::STRUCTURE,
         ),
@@ -4663,7 +4662,7 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(root),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
@@ -4848,7 +4847,7 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(root),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
@@ -6944,7 +6943,7 @@ fn attach_per_stable_file_sibling(
 ) -> specter_core::SubId {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(anchor),
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
         params: SubParams::spawn(
             "per-file-sibling".into(),
             empty_program(),
@@ -7285,7 +7284,7 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
     // the Profile alive across sid_a's detach below. Identical request shape ⇒ same ProfileId.
     let req_b = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(anchor),
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
         params: SubParams::spawn(
             "sibling".into(),
             empty_program(),
@@ -8157,7 +8156,7 @@ mod props {
         let now = Instant::now();
         let req = SubAttachRequest {
             anchor: SubAttachAnchor::Resource(r),
-            identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, NO_EVENTS),
+            identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
             params: SubParams::spawn(
                 "test".into(),
                 empty_program(),

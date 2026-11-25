@@ -2,7 +2,7 @@ use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
     AnchorClaim, ClaimKind, ClassSet, Diagnostic, EffectScope, FsEvent, Input, ProbeOp,
     ProbeOutcome, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole,
-    ScanConfig, SubAttachAnchor, SubAttachRequest, SubId, WatchFailure,
+    SubAttachAnchor, SubAttachRequest, SubId, SubtreeScan, WatchFailure,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{SETTLE, first_probe_correlation, seed_to_idle};
@@ -25,7 +25,7 @@ fn attach_subtree_root(
     let req = SubAttachRequest::for_anchor(
         name.into(),
         SubAttachAnchor::Resource(resource),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         max_settle,
         SETTLE,
         empty_program(),
@@ -304,7 +304,7 @@ fn descent_prefix_claim_purged_then_anchor_appears_no_recovery() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Path(PathBuf::from("/foo/bar")),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),

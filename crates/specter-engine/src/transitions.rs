@@ -2782,7 +2782,7 @@ impl Engine {
         let anchor_kind = p.kind().unwrap_or(ResourceKind::Dir);
         // Substitution-side projection of `ScanConfig.exclude`. The resolver iterates source strings;
         // the sensor consults compiled matchers. The order is the exclude list's build-time canonical
-        // form — `ScanConfigBuilder::build` sorts and dedups — which `Profile::new` copies out
+        // form — `SubtreeScanBuilder::build` sorts and dedups — which `Profile::new` copies out
         // verbatim, so the projection is already canonical without a re-sort here.
         let exclude_strings = Arc::clone(p.exclude_strings());
 

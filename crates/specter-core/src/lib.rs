@@ -51,7 +51,8 @@ pub use profile::{
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use resource::{ContribKey, Resource, ResourceKind, ResourceRole};
 pub use scan_config::{
-    ConfigError, Denial, GlobPattern, ProfileIdentity, ScanConfig, ScanConfigBuilder,
+    ConfigError, DISCOVERY_SETTLE, Denial, GlobPattern, ProfileIdentity, ScanConfig, SubtreeScan,
+    SubtreeScanBuilder,
 };
 pub use snapshot::EntryKind;
 pub use snapshot::tree::{

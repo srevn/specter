@@ -401,7 +401,7 @@ fn walker_fault(child_path: &Path, fault: &str) -> ProbeFailure {
 #[cfg(test)]
 mod tests {
     use super::{Reached, WalkContext, read_level};
-    use specter_core::{PatternSpec, PriorDir, ProofObligation, ScanConfig};
+    use specter_core::{PatternSpec, PriorDir, ProofObligation, ScanConfig, SubtreeScan};
     use std::path::Path;
     use std::sync::Arc;
 
@@ -419,7 +419,7 @@ mod tests {
         std::fs::create_dir(&locked).unwrap();
         std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
 
-        let config = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+        let config = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
         let obligation = ProofObligation::WholeSubtree;
         let ctx = WalkContext {
             anchor_path: tmp.path(),
@@ -472,7 +472,7 @@ mod tests {
             "the terminus depth never descends",
         );
 
-        let subtree_cfg = ScanConfig::builder().build();
+        let subtree_cfg = ScanConfig::from(SubtreeScan::builder().build());
         let subtree = WalkContext {
             config: &subtree_cfg,
             ..chain

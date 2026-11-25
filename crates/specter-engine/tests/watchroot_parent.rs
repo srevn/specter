@@ -4,7 +4,7 @@
 
 use specter_core::testkit::dir_snap;
 use specter_core::{
-    EffectScope, Input, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest,
+    EffectScope, Input, ResourceKind, ResourceRole, SubAttachAnchor, SubAttachRequest, SubtreeScan,
     WatchOp,
 };
 use specter_engine::Engine;
@@ -28,7 +28,7 @@ fn attach_sub_creates_watch_root_parent_contribution() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Resource(src),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         specter_core::testkit::empty_program(),
@@ -68,7 +68,7 @@ fn root_anchor_has_no_watch_root_parent() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Resource(src),
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         MAX_SETTLE,
         SETTLE,
         specter_core::testkit::empty_program(),
@@ -98,7 +98,7 @@ fn detach_sub_releases_watch_root_parent_contribution() {
     let req = SubAttachRequest::for_anchor(
         "watch".into(),
         SubAttachAnchor::Resource(src),
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         MAX_SETTLE,
         SETTLE,
         specter_core::testkit::empty_program(),
@@ -154,7 +154,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
         Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
             SubAttachAnchor::Resource(src_a),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             SETTLE,
             specter_core::testkit::empty_program(),
@@ -168,7 +168,7 @@ fn multiple_profiles_share_one_watch_root_parent() {
         Input::AttachSub(SubAttachRequest::for_anchor(
             "B".into(),
             SubAttachAnchor::Resource(src_b),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             SETTLE,
             specter_core::testkit::empty_program(),
@@ -205,7 +205,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
         Input::AttachSub(SubAttachRequest::for_anchor(
             "outer".into(),
             SubAttachAnchor::Resource(root),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             SETTLE,
             specter_core::testkit::empty_program(),
@@ -225,7 +225,7 @@ fn watch_root_parent_role_stays_user_when_already_user() {
         Input::AttachSub(SubAttachRequest::for_anchor(
             "inner".into(),
             SubAttachAnchor::Resource(src),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             SETTLE,
             specter_core::testkit::empty_program(),

@@ -8,6 +8,11 @@
 //! identity axis — so a new identity-bearing field is a compile error until folded — the
 //! fold-completeness ratchet.
 //!
+//! A [`SubtreeScan`] is a `[[watch]]`'s scan knobs; a [`ScanConfig`] is what a walk reads — a
+//! subtree scan, or a pattern's chain. An identity is built from either: [`ProfileIdentity::new`]
+//! from a subtree scan, the identity of a Profile that fires, and [`ProfileIdentity::discovery`]
+//! from a pattern alone, whose mask and ceiling it fixes.
+//!
 //! `GlobPattern` carries the canonical `source` string alongside the compiled
 //! `globset::GlobMatcher`. Equality and ordering are over `source` only — the matcher is a
 //! transient compiled artifact. There is no `Hash` impl: the single hashing path through these
@@ -96,7 +101,103 @@ impl PartialOrd for GlobPattern {
     }
 }
 
-/// The scan predicate — what the walker reads and what `covers` tests, as a sum over scan shapes.
+/// A `[[watch]]`'s scan knobs: the cumulative predicate one walk of a subtree admits.
+///
+/// Every filter narrows what the walk lists. A firing Profile's identity is built from one
+/// ([`ProfileIdentity::new`]); a walk reads it as [`ScanConfig::Subtree`]. [`SubtreeScanBuilder`]
+/// is its one constructor, so `exclude` is in the canonical order the hash folds.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SubtreeScan {
+    hidden: bool,
+    exclude: Vec<GlobPattern>,
+    pattern: Option<GlobPattern>,
+    /// How deep the walk lists, the anchor's own entries being depth one; `None` is unbounded.
+    max_depth: Option<NonZeroU32>,
+}
+
+impl SubtreeScan {
+    #[must_use]
+    pub fn builder() -> SubtreeScanBuilder {
+        SubtreeScanBuilder::default()
+    }
+
+    /// The classes a mask must cover for silence to witness a subtree's quiescence: the `Subtree`
+    /// arm of [`ScanConfig::quiescence_witness_classes`], for a holder of the knobs alone.
+    #[must_use]
+    pub const fn quiescence_witness_classes(&self) -> ClassSet {
+        ClassSet::IN_PLACE_WRITES
+    }
+}
+
+/// The one constructor of a [`SubtreeScan`].
+///
+/// `build` canonicalises `exclude` — sorted by source, adjacent duplicates dropped — so equal
+/// logical knobs are byte-equal under `compute_config_hash`, which folds the list in that order.
+///
+/// Its default is a `[[watch]]` that writes none of these knobs: every depth, no dotfiles, no filter.
+#[derive(Debug, Default)]
+pub struct SubtreeScanBuilder {
+    hidden: bool,
+    exclude: Vec<GlobPattern>,
+    pattern: Option<GlobPattern>,
+    max_depth: Option<NonZeroU32>,
+}
+
+impl SubtreeScanBuilder {
+    #[must_use]
+    pub const fn hidden(mut self, v: bool) -> Self {
+        self.hidden = v;
+        self
+    }
+
+    #[must_use]
+    pub fn exclude(mut self, g: GlobPattern) -> Self {
+        self.exclude.push(g);
+        self
+    }
+
+    #[must_use]
+    pub fn excludes<I: IntoIterator<Item = GlobPattern>>(mut self, gs: I) -> Self {
+        self.exclude.extend(gs);
+        self
+    }
+
+    #[must_use]
+    pub fn pattern(mut self, g: GlobPattern) -> Self {
+        self.pattern = Some(g);
+        self
+    }
+
+    #[must_use]
+    pub const fn max_depth(mut self, bound: Option<NonZeroU32>) -> Self {
+        self.max_depth = bound;
+        self
+    }
+
+    #[must_use]
+    pub fn build(mut self) -> SubtreeScan {
+        // Sort then collapse duplicates: `GlobPattern` equality is source-keyed, so after the sort
+        // every duplicate source is adjacent and `dedup` removes it exactly. This is the
+        // canonicalisation `compute_config_hash` relies on — a logically equal exclude set must
+        // produce one Profile, not fork on accidental repetition.
+        self.exclude.sort();
+        self.exclude.dedup();
+        SubtreeScan {
+            hidden: self.hidden,
+            exclude: self.exclude,
+            pattern: self.pattern,
+            max_depth: self.max_depth,
+        }
+    }
+}
+
+impl From<SubtreeScan> for ScanConfig {
+    fn from(scan: SubtreeScan) -> Self {
+        Self::Subtree(scan)
+    }
+}
+
+/// What a walk reads and what `covers` tests: a subtree scan, or a pattern's chain.
 ///
 /// Every consumer goes through the named predicates ([`Self::accepts`],
 /// [`Self::accepts_structural`], [`Self::accepts_kinded`], [`Self::descends_into`],
@@ -105,17 +206,8 @@ impl PartialOrd for GlobPattern {
 /// entirely in this module, so a new shape is a compile error here and nowhere else.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScanConfig {
-    /// The cumulative recursive predicate over one subtree: every filter narrows what a recursive
-    /// walk admits. The user-facing shape — [`ScanConfigBuilder`] builds it, config lowering and
-    /// Profile identity carry it.
-    Subtree {
-        hidden: bool,
-        /// Sorted by source string at builder time.
-        exclude: Vec<GlobPattern>,
-        pattern: Option<GlobPattern>,
-        /// How deep the walk lists, the anchor's own entries being depth one; `None` is unbounded.
-        max_depth: Option<NonZeroU32>,
-    },
+    /// One walk of a subtree under a `[[watch]]`'s knobs.
+    Subtree(SubtreeScan),
     /// Positional per-segment chain over a parsed absolute pattern, anchored at the pattern's
     /// literal prefix. A dirent at anchor-relative depth `d` tests pattern component
     /// `literal_prefix_len + d − 1` ([`PatternSpec::matches_at`]); coverage ends at the terminus
@@ -123,18 +215,12 @@ pub enum ScanConfig {
     /// (`DirChild::Uncovered`) and matched files are ordinary leaves — the pruned walk observes
     /// chain membership, not subtree content.
     ///
-    /// `Arc`: the discovery reconcile lifts the spec out of the Profile borrow
-    /// (`match_chain().map(Arc::clone)`) and walks termini while mutating the engine — a refcount
-    /// bump per pass instead of re-cloning the parsed components and their compiled matchers.
+    /// `Arc`: one parsed pattern travels from a dynamic watch's target into its chain's identity,
+    /// each hop a refcount bump instead of a copy of the parsed components and their matchers.
     MatchChain(Arc<PatternSpec>),
 }
 
 impl ScanConfig {
-    #[must_use]
-    pub fn builder() -> ScanConfigBuilder {
-        ScanConfigBuilder::default()
-    }
-
     /// True iff an entry at cumulative relative path `rel` of `kind` at `depth` (anchor = 0, direct
     /// child = 1, …) is in scope.
     ///
@@ -175,8 +261,8 @@ impl ScanConfig {
     /// against the known kind. `covers` has `kind` in hand and calls [`Self::accepts`] directly.
     ///
     /// **Fold-completeness ratchet, predicate tier.** The `Subtree` arm destructures exhaustively:
-    /// a new field on the variant is a compile error here until the author decides which half it
-    /// folds into — structural (a clause below) or kind-dependent (an arm in
+    /// a new field of [`SubtreeScan`] is a compile error here until the author decides which half
+    /// it folds into — structural (a clause below) or kind-dependent (an arm in
     /// [`Self::accepts_kinded`], where `pattern` lives). A new *variant* is a non-exhaustive-match
     /// compile error across every predicate and the hash at once.
     #[must_use]
@@ -188,12 +274,12 @@ impl ScanConfig {
         }
         match self {
             // `pattern` lives here only to discharge the destructure; its gate is the kinded half.
-            Self::Subtree {
+            Self::Subtree(SubtreeScan {
                 hidden,
                 exclude,
                 pattern: _,
                 max_depth,
-            } => {
+            }) => {
                 if max_depth.is_some_and(|max| depth > max.get()) {
                     return false;
                 }
@@ -242,7 +328,7 @@ impl ScanConfig {
             return true;
         }
         match self {
-            Self::Subtree { pattern, .. } => {
+            Self::Subtree(SubtreeScan { pattern, .. }) => {
                 is_dir || pattern.as_ref().is_none_or(|pat| pat.matches_path(rel))
             }
             Self::MatchChain(spec) => is_dir || depth >= spec.terminus_depth(),
@@ -268,7 +354,7 @@ impl ScanConfig {
     #[must_use]
     pub fn descends_into(&self, child_depth: u32, same_device: bool) -> bool {
         match self {
-            Self::Subtree { max_depth, .. } => {
+            Self::Subtree(SubtreeScan { max_depth, .. }) => {
                 max_depth.is_none_or(|max| child_depth < max.get()) && same_device
             }
             Self::MatchChain(spec) => child_depth < spec.terminus_depth(),
@@ -281,22 +367,19 @@ impl ScanConfig {
     #[must_use]
     pub fn exclude_globs(&self) -> &[GlobPattern] {
         match self {
-            Self::Subtree { exclude, .. } => exclude,
+            Self::Subtree(SubtreeScan { exclude, .. }) => exclude,
             Self::MatchChain(_) => &[],
         }
     }
 
-    /// The positional pattern iff this is the `MatchChain` shape — the named projection serving every
-    /// consumer that dispatches on (or reads the payload of) the discovery shape: the engine's
-    /// consequence classifier (`is_some()` ⇒ a stable verdict reconciles the match set instead of
-    /// firing Effects), the reconcile pass (the spec itself), the Draining-gate coverage filter
-    /// (`is_none()`), and the attach boundary's template ⟺ chain assertion. Keeping them all on this
-    /// one projection preserves the module contract above: no variant destructure leaves this module.
+    /// The positional pattern iff this is the `MatchChain` shape: the discovery discriminant. Every
+    /// consumer that dispatches on the discovery shape, or reads its pattern, asks this projection,
+    /// so no variant destructure leaves this module.
     #[must_use]
     pub const fn match_chain(&self) -> Option<&Arc<PatternSpec>> {
         match self {
             Self::MatchChain(spec) => Some(spec),
-            Self::Subtree { .. } => None,
+            Self::Subtree(_) => None,
         }
     }
 
@@ -319,7 +402,7 @@ impl ScanConfig {
     #[must_use]
     pub const fn quiescence_witness_classes(&self) -> ClassSet {
         match self {
-            Self::Subtree { .. } => ClassSet::IN_PLACE_WRITES,
+            Self::Subtree(scan) => scan.quiescence_witness_classes(),
             Self::MatchChain(_) => ClassSet::MEMBERSHIP_CHANGES,
         }
     }
@@ -328,7 +411,7 @@ impl ScanConfig {
     #[must_use]
     pub const fn denial(&self) -> Denial {
         match self {
-            Self::Subtree { .. } => Denial::Hole,
+            Self::Subtree(_) => Denial::Hole,
             Self::MatchChain(_) => Denial::Bound,
         }
     }
@@ -344,71 +427,6 @@ pub enum Denial {
     /// it: the proof goes on over what was read, as a shell glob goes on past a directory it may
     /// not list.
     Bound,
-}
-
-/// Builder for [`ScanConfig::Subtree`] — the user-facing shape; the `MatchChain` shape is
-/// constructed directly by config lowering from a dynamic `[[watch]]` glob.
-///
-/// Canonicalises `exclude` on `build()` — sort by source, then drop adjacent duplicates — so equal
-/// logical configs are byte-equal under `compute_config_hash`, which reads the list in that already
-/// sorted-and-deduped order. The builder is the sole production construction path for the `Subtree`
-/// shape, so this canonicalisation holds for every Profile-bearing config.
-///
-/// Its default is a `[[watch]]` that writes none of these knobs: every depth, no dotfiles, no filter.
-#[derive(Debug, Default)]
-pub struct ScanConfigBuilder {
-    hidden: bool,
-    exclude: Vec<GlobPattern>,
-    pattern: Option<GlobPattern>,
-    max_depth: Option<NonZeroU32>,
-}
-
-impl ScanConfigBuilder {
-    #[must_use]
-    pub const fn hidden(mut self, v: bool) -> Self {
-        self.hidden = v;
-        self
-    }
-
-    #[must_use]
-    pub fn exclude(mut self, g: GlobPattern) -> Self {
-        self.exclude.push(g);
-        self
-    }
-
-    #[must_use]
-    pub fn excludes<I: IntoIterator<Item = GlobPattern>>(mut self, gs: I) -> Self {
-        self.exclude.extend(gs);
-        self
-    }
-
-    #[must_use]
-    pub fn pattern(mut self, g: GlobPattern) -> Self {
-        self.pattern = Some(g);
-        self
-    }
-
-    #[must_use]
-    pub const fn max_depth(mut self, bound: Option<NonZeroU32>) -> Self {
-        self.max_depth = bound;
-        self
-    }
-
-    #[must_use]
-    pub fn build(mut self) -> ScanConfig {
-        // Sort then collapse duplicates: `GlobPattern` equality is source-keyed, so after the sort
-        // every duplicate source is adjacent and `dedup` removes it exactly. This is the
-        // canonicalisation `compute_config_hash` relies on — a logically equal exclude set must
-        // produce one Profile, not fork on accidental repetition.
-        self.exclude.sort();
-        self.exclude.dedup();
-        ScanConfig::Subtree {
-            hidden: self.hidden,
-            exclude: self.exclude,
-            pattern: self.pattern,
-            max_depth: self.max_depth,
-        }
-    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -463,8 +481,8 @@ fn validate_source_reachability(s: &str) -> Result<(), ConfigError> {
 }
 
 /// Canonical hash of `(ScanConfig, max_settle, events)` — the crate-internal hashing kernel.
-/// [`ProfileIdentity::new`] is the sole production caller: it seals the digest onto the identity at
-/// construction, and [`ProfileIdentity::config_hash`] reads that sealed value.
+/// `ProfileIdentity`'s two constructors are its only production callers: each seals the digest onto
+/// the identity, and [`ProfileIdentity::config_hash`] reads that sealed value.
 ///
 /// The discriminant byte is chosen explicitly in each arm (not `mem::discriminant`), so the digest
 /// is stable across variant reordering; it leads the fold so no two shapes' field encodings can
@@ -479,22 +497,22 @@ pub(crate) fn compute_config_hash(
     let mut h = hasher();
 
     match scan {
-        // Fold-completeness ratchet: this exhaustive destructure makes a new `Subtree` field a
+        // Fold-completeness ratchet: this exhaustive destructure makes a new `SubtreeScan` field a
         // compile error (E0027) until it is folded into the digest below — promoting
         // Profile-partition completeness from a hand-maintained test convention to a compiler
         // invariant. Never add `..`: it silently re-opens the silent-Profile-merge hole. A new
         // *variant* is a non-exhaustive-match compile error until it picks its own discriminant byte.
-        ScanConfig::Subtree {
+        ScanConfig::Subtree(SubtreeScan {
             hidden,
             exclude,
             pattern,
             max_depth,
-        } => {
+        }) => {
             h.put_u8(0);
             h.put_u8(u8::from(*hidden));
 
             // Canonical width: u32 for the count. The list arrives sorted *and* deduplicated from
-            // `ScanConfigBuilder::build`, so this count is over the canonical set — `["a", "a"]` and
+            // `SubtreeScanBuilder::build`, so this count is over the canonical set — `["a", "a"]` and
             // `["a"]` fold identically rather than forking two Profiles on a logically equal exclude
             // set. Saturate on the absurd overflow case — the alternative is an explicit panic, which
             // buys nothing for a config layer that cannot realistically reach 2^32 globs.
@@ -538,6 +556,16 @@ pub(crate) fn compute_config_hash(
     h.finish_u64()
 }
 
+/// The settle a discovery Profile is founded at, and a template's debounce.
+///
+/// Never a watch's own `settle`, which debounces its reaction: a `settle = "30s"` must not become
+/// thirty seconds of mint latency. 150 ms coalesces an untar-style burst of entries into one pass.
+pub const DISCOVERY_SETTLE: Duration = Duration::from_millis(150);
+/// A discovery Profile's ceiling: it bounds mint latency under sustained chain churn.
+const DISCOVERY_MAX_SETTLE: Duration = Duration::from_secs(2);
+// The order `Profile::new` asserts of every Profile: no settle above its ceiling.
+const _: () = assert!(DISCOVERY_SETTLE.as_nanos() <= DISCOVERY_MAX_SETTLE.as_nanos());
+
 /// The Profile partition key's config half, reified.
 ///
 /// The inputs whose canonical hash decides which Profile a Sub joins (equal hash ⇒ shared
@@ -545,17 +573,14 @@ pub(crate) fn compute_config_hash(
 /// the sole identity operation — a structural derive would be a second identity route that could
 /// diverge from the hash the partition actually keys on.
 ///
-/// Sealed: private fields, a sole constructor, and the hash computed once inside it. "The hash
+/// Sealed: private fields, two constructors, and the hash computed once inside them. "The hash
 /// agrees with its preimage" is thereby a structural property, not a documented convention — no
 /// construction or mutation path can produce an identity whose `hash` disagrees with its axes, so
-/// every downstream carrier (the Profile, each `MintSpec` identity clone, the reconcile capture)
-/// reads the same precomputed key instead of re-deriving it.
+/// every carrier reads the same precomputed key instead of re-deriving it.
 ///
-/// `config` sits behind an `Arc`: an identity is frozen at construction and then travels — onto the
-/// Profile, into every `MintSpec` identity clone at mint time, and (the config half alone) onto
-/// each `ProbeRequest::Subtree` wire — so each of those is a refcount bump, never a `ScanConfig`
-/// deep-copy. [`Self::new`] is the sole minting point of the handle; the other fields are `Copy`,
-/// so `ProfileIdentity: Clone` is cheap by construction.
+/// `config` sits behind an `Arc`, so an identity, and the scan it ships onto every probe, travels
+/// as a refcount bump, never a deep copy; the other fields are `Copy`, so `ProfileIdentity: Clone`
+/// is cheap by construction.
 #[derive(Clone, Debug)]
 pub struct ProfileIdentity {
     config: Arc<ScanConfig>,
@@ -566,11 +591,33 @@ pub struct ProfileIdentity {
 }
 
 impl ProfileIdentity {
-    /// Freeze the three identity axes and seal their canonical hash in one step. Every producer
-    /// holds a plain [`ScanConfig`] (builder output, config lowering); the single wrap here keeps
-    /// `Arc::new` out of the call sites.
+    /// A firing Profile's identity: a subtree scan under a ceiling and a mask. It takes no chain:
+    ///
+    /// ```compile_fail
+    /// use specter_core::{ClassSet, PatternSpec, ProfileIdentity, ScanConfig};
+    /// use std::{sync::Arc, time::Duration};
+    /// let chain = ScanConfig::MatchChain(Arc::new(PatternSpec::parse("/srv/*").unwrap()));
+    /// let _ = ProfileIdentity::new(chain, Duration::from_secs(2), ClassSet::STRUCTURE);
+    /// ```
     #[must_use]
-    pub fn new(config: ScanConfig, max_settle: Duration, events: ClassSet) -> Self {
+    pub fn new(scan: SubtreeScan, max_settle: Duration, events: ClassSet) -> Self {
+        Self::seal(ScanConfig::Subtree(scan), max_settle, events)
+    }
+
+    /// The identity of the Profile that walks `pattern`'s chain: its mask is the chain's witness
+    /// classes and its ceiling the discovery pair's, so one pattern is one Profile whatever the
+    /// watches over it say, and settle-window silence witnesses its match set.
+    #[must_use]
+    pub fn discovery(pattern: Arc<PatternSpec>) -> Self {
+        Self::seal(
+            ScanConfig::MatchChain(pattern),
+            DISCOVERY_MAX_SETTLE,
+            ClassSet::MEMBERSHIP_CHANGES,
+        )
+    }
+
+    /// Freeze the three identity axes and seal their canonical hash in one step.
+    fn seal(config: ScanConfig, max_settle: Duration, events: ClassSet) -> Self {
         // Fold-completeness ratchet, identity tier: a new axis on `ProfileIdentity` is a compile
         // error at this literal until it is given a field here — and it must also be threaded into
         // the canonical hash above, or the axis silently merges Profiles (the `ScanConfig` ratchet
@@ -625,7 +672,7 @@ impl ProfileIdentity {
 mod tests {
     use super::{
         ClassSet, ConfigError, GlobPattern, PatternSpec, ProfileIdentity, ResourceKind, ScanConfig,
-        compute_config_hash,
+        SubtreeScan, compute_config_hash,
     };
     use std::num::NonZeroU32;
     use std::path::Path;
@@ -636,14 +683,21 @@ mod tests {
         GlobPattern::compile(source).expect("test glob compiles")
     }
 
-    fn chain(pattern: &str) -> ScanConfig {
-        ScanConfig::MatchChain(Arc::new(
-            PatternSpec::parse(pattern).expect("test pattern parses"),
-        ))
+    fn pattern(source: &str) -> Arc<PatternSpec> {
+        Arc::new(PatternSpec::parse(source).expect("test pattern parses"))
+    }
+
+    fn chain(source: &str) -> ScanConfig {
+        ScanConfig::MatchChain(pattern(source))
     }
 
     const SETTLE: Duration = Duration::from_secs(6);
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
+
+    /// `scan`'s hash under the suite's ceiling and an empty mask.
+    fn hash(scan: SubtreeScan) -> u64 {
+        compute_config_hash(&scan.into(), SETTLE, NO_EVENTS)
+    }
 
     #[test]
     fn glob_compile_failure_returns_invalid_glob() {
@@ -672,31 +726,23 @@ mod tests {
 
     #[test]
     fn excludes_sorted_at_build_regardless_of_insertion_order() {
-        let cfg = ScanConfig::builder()
+        let scan = SubtreeScan::builder()
             .exclude(glob("z"))
             .exclude(glob("a"))
             .exclude(glob("m"))
             .build();
-        let sources: Vec<&str> = cfg
-            .exclude_globs()
-            .iter()
-            .map(GlobPattern::source)
-            .collect();
+        let sources: Vec<&str> = scan.exclude.iter().map(GlobPattern::source).collect();
         assert_eq!(sources, vec!["a", "m", "z"]);
     }
 
     #[test]
     fn empty_builder_yields_default_shaped_config() {
-        let cfg = ScanConfig::builder().build();
-        let ScanConfig::Subtree {
+        let SubtreeScan {
             hidden,
             exclude,
             pattern,
             max_depth,
-        } = &cfg
-        else {
-            panic!("builder builds Subtree, got {cfg:?}");
-        };
+        } = SubtreeScan::builder().build();
         assert!(!hidden);
         assert_eq!(exclude.as_slice(), []);
         assert!(pattern.is_none());
@@ -705,30 +751,25 @@ mod tests {
 
     #[test]
     fn hash_deterministic() {
-        let a = ScanConfig::builder().build();
-        let b = ScanConfig::builder().build();
         assert_eq!(
-            compute_config_hash(&a, SETTLE, NO_EVENTS),
-            compute_config_hash(&b, SETTLE, NO_EVENTS),
+            hash(SubtreeScan::builder().build()),
+            hash(SubtreeScan::builder().build()),
         );
     }
 
     #[test]
     fn hash_canonical_excludes() {
-        let a = ScanConfig::builder()
+        let a = SubtreeScan::builder()
             .exclude(glob("a"))
             .exclude(glob("z"))
             .exclude(glob("m"))
             .build();
-        let b = ScanConfig::builder()
+        let b = SubtreeScan::builder()
             .exclude(glob("z"))
             .exclude(glob("m"))
             .exclude(glob("a"))
             .build();
-        assert_eq!(
-            compute_config_hash(&a, SETTLE, NO_EVENTS),
-            compute_config_hash(&b, SETTLE, NO_EVENTS),
-        );
+        assert_eq!(hash(a), hash(b));
     }
 
     /// Duplicate excludes collapse at `build()`: `["a", "a", "z"]` and `["a", "z"]` are the same
@@ -737,33 +778,29 @@ mod tests {
     /// Pins both the canonical list shape and the hash equality.
     #[test]
     fn build_collapses_duplicate_excludes() {
-        let with_dup = ScanConfig::builder()
+        let with_dup = SubtreeScan::builder()
             .exclude(glob("a"))
             .exclude(glob("a"))
             .exclude(glob("z"))
             .build();
-        let without_dup = ScanConfig::builder()
+        let without_dup = SubtreeScan::builder()
             .exclude(glob("a"))
             .exclude(glob("z"))
             .build();
 
-        let sources: Vec<&str> = with_dup
-            .exclude_globs()
-            .iter()
-            .map(GlobPattern::source)
-            .collect();
+        let sources: Vec<&str> = with_dup.exclude.iter().map(GlobPattern::source).collect();
         assert_eq!(sources, vec!["a", "z"], "duplicate dropped at build");
 
         assert_eq!(
-            compute_config_hash(&with_dup, SETTLE, NO_EVENTS),
-            compute_config_hash(&without_dup, SETTLE, NO_EVENTS),
+            hash(with_dup),
+            hash(without_dup),
             "a duplicated exclude must not fork a second Profile",
         );
     }
 
     #[test]
     fn hash_distinguishes_max_settle() {
-        let cfg = ScanConfig::builder().build();
+        let cfg = ScanConfig::from(SubtreeScan::builder().build());
         assert_ne!(
             compute_config_hash(&cfg, Duration::from_secs(1), NO_EVENTS),
             compute_config_hash(&cfg, Duration::from_secs(2), NO_EVENTS),
@@ -772,39 +809,27 @@ mod tests {
 
     #[test]
     fn hash_distinguishes_hidden() {
-        let a = ScanConfig::builder().hidden(true).build();
-        let b = ScanConfig::builder().hidden(false).build();
         assert_ne!(
-            compute_config_hash(&a, SETTLE, NO_EVENTS),
-            compute_config_hash(&b, SETTLE, NO_EVENTS),
+            hash(SubtreeScan::builder().hidden(true).build()),
+            hash(SubtreeScan::builder().hidden(false).build()),
         );
     }
 
     #[test]
     fn hash_distinguishes_pattern() {
-        let a = ScanConfig::builder().pattern(glob("*.rs")).build();
-        let b = ScanConfig::builder().pattern(glob("*.txt")).build();
-        let c = ScanConfig::builder().build();
+        let rs = hash(SubtreeScan::builder().pattern(glob("*.rs")).build());
         assert_ne!(
-            compute_config_hash(&a, SETTLE, NO_EVENTS),
-            compute_config_hash(&b, SETTLE, NO_EVENTS),
+            rs,
+            hash(SubtreeScan::builder().pattern(glob("*.txt")).build())
         );
-        assert_ne!(
-            compute_config_hash(&a, SETTLE, NO_EVENTS),
-            compute_config_hash(&c, SETTLE, NO_EVENTS),
-        );
+        assert_ne!(rs, hash(SubtreeScan::builder().build()));
     }
 
     /// Bounds that walk differently hash apart.
     #[test]
     fn hash_distinguishes_max_depth() {
-        let [unbounded, one, three] = [None, NonZeroU32::new(1), NonZeroU32::new(3)].map(|bound| {
-            compute_config_hash(
-                &ScanConfig::builder().max_depth(bound).build(),
-                SETTLE,
-                NO_EVENTS,
-            )
-        });
+        let [unbounded, one, three] = [None, NonZeroU32::new(1), NonZeroU32::new(3)]
+            .map(|bound| hash(SubtreeScan::builder().max_depth(bound).build()));
         assert_ne!(unbounded, one);
         assert_ne!(unbounded, three);
         assert_ne!(one, three);
@@ -812,11 +837,9 @@ mod tests {
 
     #[test]
     fn hash_distinguishes_exclude_set() {
-        let a = ScanConfig::builder().exclude(glob("a")).build();
-        let b = ScanConfig::builder().build();
         assert_ne!(
-            compute_config_hash(&a, SETTLE, NO_EVENTS),
-            compute_config_hash(&b, SETTLE, NO_EVENTS),
+            hash(SubtreeScan::builder().exclude(glob("a")).build()),
+            hash(SubtreeScan::builder().build()),
         );
     }
 
@@ -824,7 +847,7 @@ mod tests {
     /// separate Profiles ("Profile-union infection" defence).
     #[test]
     fn hash_distinguishes_events_mask() {
-        let cfg = ScanConfig::builder().build();
+        let cfg = ScanConfig::from(SubtreeScan::builder().build());
         let empty = compute_config_hash(&cfg, SETTLE, ClassSet::EMPTY);
         let content = compute_config_hash(&cfg, SETTLE, ClassSet::CONTENT);
         let metadata = compute_config_hash(&cfg, SETTLE, ClassSet::METADATA);
@@ -843,7 +866,7 @@ mod tests {
     /// determines the fold, not call order.
     #[test]
     fn hash_events_is_canonical_over_or_order() {
-        let cfg = ScanConfig::builder().build();
+        let cfg = ScanConfig::from(SubtreeScan::builder().build());
         let a = ClassSet::CONTENT | ClassSet::METADATA;
         let b = ClassSet::METADATA | ClassSet::CONTENT;
         assert_eq!(
@@ -873,8 +896,8 @@ mod tests {
         fn base_events() -> ClassSet {
             ClassSet::CONTENT | ClassSet::METADATA
         }
-        fn populated_scan() -> ScanConfig {
-            ScanConfig::builder()
+        fn populated_scan() -> SubtreeScan {
+            SubtreeScan::builder()
                 .hidden(true)
                 .exclude(glob("a"))
                 .exclude(glob("b"))
@@ -882,7 +905,7 @@ mod tests {
                 .max_depth(NonZeroU32::new(7))
                 .build()
         }
-        fn rehash_scan(mutate: impl FnOnce(&mut ScanConfig)) -> u64 {
+        fn rehash_scan(mutate: impl FnOnce(&mut SubtreeScan)) -> u64 {
             let mut scan = populated_scan();
             mutate(&mut scan);
             ProfileIdentity::new(scan, BASE_MAX_SETTLE, base_events()).config_hash()
@@ -893,42 +916,22 @@ mod tests {
 
         assert_ne!(
             h0,
-            rehash_scan(|scan| {
-                let ScanConfig::Subtree { hidden, .. } = scan else {
-                    unreachable!("builder builds Subtree")
-                };
-                *hidden = false;
-            }),
+            rehash_scan(|scan| scan.hidden = false),
             "hidden must discriminate"
         );
         assert_ne!(
             h0,
-            rehash_scan(|scan| {
-                let ScanConfig::Subtree { exclude, .. } = scan else {
-                    unreachable!("builder builds Subtree")
-                };
-                exclude.push(glob("c"));
-            }),
+            rehash_scan(|scan| scan.exclude.push(glob("c"))),
             "exclude must discriminate"
         );
         assert_ne!(
             h0,
-            rehash_scan(|scan| {
-                let ScanConfig::Subtree { pattern, .. } = scan else {
-                    unreachable!("builder builds Subtree")
-                };
-                *pattern = None;
-            }),
+            rehash_scan(|scan| scan.pattern = None),
             "pattern must discriminate"
         );
         assert_ne!(
             h0,
-            rehash_scan(|scan| {
-                let ScanConfig::Subtree { max_depth, .. } = scan else {
-                    unreachable!("builder builds Subtree")
-                };
-                *max_depth = NonZeroU32::new(8);
-            }),
+            rehash_scan(|scan| scan.max_depth = NonZeroU32::new(8)),
             "max_depth must discriminate"
         );
         assert_ne!(
@@ -950,9 +953,8 @@ mod tests {
     /// with its own pairs.
     #[test]
     fn hash_distinguishes_scan_shape() {
-        let subtree_h = compute_config_hash(&ScanConfig::builder().build(), SETTLE, NO_EVENTS);
         let chain_h = compute_config_hash(&chain("/srv/*/log"), SETTLE, NO_EVENTS);
-        assert_ne!(subtree_h, chain_h);
+        assert_ne!(hash(SubtreeScan::builder().build()), chain_h);
     }
 
     /// Two positional sources digest apart — `source` is `MatchChain`'s complete encoding (parse
@@ -963,6 +965,20 @@ mod tests {
         assert_ne!(
             compute_config_hash(&chain("/srv/*/log"), SETTLE, NO_EVENTS),
             compute_config_hash(&chain("/srv/*/data"), SETTLE, NO_EVENTS),
+        );
+    }
+
+    /// A chain's identity is its pattern alone: STRUCTURE, the classes that witness a match set,
+    /// under the discovery ceiling. Two parses of one pattern are one Profile.
+    #[test]
+    fn discovery_identity_is_the_pattern_under_its_own_mask_and_ceiling() {
+        let identity = ProfileIdentity::discovery(pattern("/srv/*/log"));
+        assert_eq!(identity.config(), &chain("/srv/*/log"));
+        assert_eq!(identity.events(), ClassSet::STRUCTURE);
+        assert_eq!(identity.max_settle(), Duration::from_secs(2));
+        assert_eq!(
+            identity.config_hash(),
+            ProfileIdentity::discovery(pattern("/srv/*/log")).config_hash(),
         );
     }
 
@@ -1015,7 +1031,7 @@ mod tests {
             "the terminus depth never descends",
         );
 
-        let subtree = ScanConfig::builder().build();
+        let subtree = ScanConfig::from(SubtreeScan::builder().build());
         assert!(subtree.descends_into(1, true));
         assert!(
             !subtree.descends_into(1, false),
@@ -1028,7 +1044,7 @@ mod tests {
     /// review.
     #[test]
     fn hash_known_good() {
-        let cfg = ScanConfig::builder().build();
+        let cfg = ScanConfig::from(SubtreeScan::builder().build());
         let h = compute_config_hash(&cfg, Duration::from_secs(1), ClassSet::EMPTY);
         assert_eq!(h, GOLDEN_HASH);
     }
@@ -1038,7 +1054,7 @@ mod tests {
     #[test]
     fn profile_identity_config_hash_matches_golden() {
         let identity = ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             Duration::from_secs(1),
             ClassSet::EMPTY,
         );
@@ -1048,21 +1064,21 @@ mod tests {
     const GOLDEN_HASH: u64 = 0x49FE_0EB9_4F17_13E0;
 
     /// Fold-completeness ratchet for [`ScanConfig::accepts`]. Mirrors
-    /// [`hash_discriminates_every_populated_field`]: a fully-populated `ScanConfig` plus a neutral
-    /// target; toggling each filter field must move at least one `accepts` verdict on a small test
-    /// grid.
+    /// [`hash_discriminates_every_populated_field`]: a fully-populated [`SubtreeScan`] plus a
+    /// neutral target; toggling each filter field must move at least one `accepts` verdict on a
+    /// small test grid.
     ///
     /// The exhaustive destructure inside `accepts_structural` makes a new field a *compile error*
     /// until folded; this test makes the fold *discriminate*, so the ratchet cannot be satisfied by
     /// folding a new field as a constant.
     ///
-    /// Not itself ratcheted: a new field still needs a new mutation closure here. The compile error
-    /// from the destructure is the forcing function that drives the author to add it; this test
-    /// then guards that the fold actually discriminates.
+    /// Not itself ratcheted: a new field still needs a new mutation here. The compile error from
+    /// the destructure is the forcing function that drives the author to add it; this test then
+    /// guards that the fold actually discriminates.
     #[test]
     fn accepts_reads_every_field() {
-        fn populated() -> ScanConfig {
-            ScanConfig::builder()
+        fn populated() -> SubtreeScan {
+            SubtreeScan::builder()
                 .hidden(true)
                 .exclude(glob("excluded"))
                 .pattern(glob("*.rs"))
@@ -1070,19 +1086,12 @@ mod tests {
                 .build()
         }
 
-        fn verdicts(cfg: &ScanConfig, probes: &[(&str, ResourceKind, u32)]) -> Vec<bool> {
+        fn verdicts(scan: SubtreeScan, probes: &[(&str, ResourceKind, u32)]) -> Vec<bool> {
+            let cfg = ScanConfig::from(scan);
             probes
                 .iter()
                 .map(|(rel, kind, depth)| cfg.accepts(Path::new(rel), *kind, *depth))
                 .collect()
-        }
-
-        fn shifted(
-            base_v: &[bool],
-            cfg: &ScanConfig,
-            probes: &[(&str, ResourceKind, u32)],
-        ) -> bool {
-            verdicts(cfg, probes) != base_v
         }
 
         // Grid of probes: (rel, kind, depth). Each probe is chosen so a *single* field toggle
@@ -1095,51 +1104,27 @@ mod tests {
             ("excluded", ResourceKind::Dir, 1),
             ("foo.txt", ResourceKind::File, 1),
         ];
+        let base_v = verdicts(populated(), probes);
+        let shifted = |mutate: fn(&mut SubtreeScan)| {
+            let mut scan = populated();
+            mutate(&mut scan);
+            verdicts(scan, probes) != base_v
+        };
 
-        let base = populated();
-        let base_v = verdicts(&base, probes);
-
-        let mut mut_hidden = populated();
-        {
-            let ScanConfig::Subtree { hidden, .. } = &mut mut_hidden else {
-                unreachable!("builder builds Subtree")
-            };
-            *hidden = false;
-        }
         assert!(
-            shifted(&base_v, &mut_hidden, probes),
+            shifted(|scan| scan.hidden = false),
             "hidden must discriminate"
         );
-
-        let mut_exclude = ScanConfig::builder()
-            .hidden(true)
-            .pattern(glob("*.rs"))
-            .max_depth(NonZeroU32::new(7))
-            .build();
         assert!(
-            shifted(&base_v, &mut_exclude, probes),
+            shifted(|scan| scan.exclude.clear()),
             "exclude must discriminate"
         );
-
-        let mut_pattern = ScanConfig::builder()
-            .hidden(true)
-            .exclude(glob("excluded"))
-            .max_depth(NonZeroU32::new(7))
-            .build();
         assert!(
-            shifted(&base_v, &mut_pattern, probes),
+            shifted(|scan| scan.pattern = None),
             "pattern must discriminate"
         );
-
-        let mut mut_max_depth = populated();
-        {
-            let ScanConfig::Subtree { max_depth, .. } = &mut mut_max_depth else {
-                unreachable!("builder builds Subtree")
-            };
-            *max_depth = NonZeroU32::new(6);
-        }
         assert!(
-            shifted(&base_v, &mut_max_depth, probes),
+            shifted(|scan| scan.max_depth = NonZeroU32::new(6)),
             "max_depth must discriminate"
         );
 
@@ -1147,7 +1132,7 @@ mod tests {
         // "anchor is in scope by construction" property at the predicate's first line, so a future
         // structural rewrite that drops the short-circuit surfaces as a localised failure here.
         assert!(
-            base.accepts(Path::new(""), ResourceKind::Dir, 0),
+            ScanConfig::from(populated()).accepts(Path::new(""), ResourceKind::Dir, 0),
             "depth 0 must accept regardless of filters"
         );
     }

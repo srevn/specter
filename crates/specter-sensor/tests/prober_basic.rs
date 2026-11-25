@@ -7,7 +7,7 @@ use crossbeam::channel::{Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
     EntryKind, Input, ProbeCorrelation, ProbeOutcome, ProbeRequest, ProfileId, ProofObligation,
-    ScanConfig,
+    ScanConfig, SubtreeScan,
 };
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::num::NonZeroUsize;
@@ -59,7 +59,7 @@ fn subtree_request(profile: ProfileId, target_path: PathBuf, correlation: u64) -
         correlation: ProbeCorrelation::from(correlation),
         target_path,
         anchor_path,
-        scan_config: Arc::new(ScanConfig::builder().build()),
+        scan_config: Arc::new(ScanConfig::from(SubtreeScan::builder().build())),
         captured_with: 0,
         baseline_subtree: None,
         obligation: ProofObligation::WholeSubtree,

@@ -1628,7 +1628,7 @@ mod tests {
     use specter_core::{
         ActiveBurst, BurstIntent, ClassSet, DirSnapshot, EntryKind, Input, PreFirePhase, ProbeOp,
         ProbeRequest, ProbeSlot, Profile, ProfileIdentity, ProfileState, ProofObligation,
-        ResourceKind, ResourceRole, ScanConfig, StepOutput, TimerKind,
+        ResourceKind, ResourceRole, StepOutput, SubtreeScan, TimerKind,
     };
     use std::time::{Duration, Instant};
 
@@ -1653,7 +1653,7 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 r,
-                ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, EVENTS_COMPLETE),
+                ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, EVENTS_COMPLETE),
                 SETTLE,
                 None,
             ),
@@ -2276,7 +2276,7 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 root,
-                ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, mask),
+                ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, mask),
                 SETTLE,
                 None,
             ),
@@ -2305,7 +2305,7 @@ mod tests {
     /// slots only name what an event can land on: the target rule reads graftability off the
     /// listing alone.
     fn engine_listing(
-        config: ScanConfig,
+        config: SubtreeScan,
         listing: Arc<DirSnapshot>,
         slots: &[&str],
     ) -> (Engine, specter_core::ProfileId, ResourceId, Vec<ResourceId>) {
@@ -2423,7 +2423,7 @@ mod tests {
         // read, so the descent stops at the directory that lists it. The descendant-observation
         // model probes Dirs — a File-target probe is misread downstream as anchor removal.
         let (e, pid, root, slots) = engine_listing(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             dir_snap(&[("f", EntryKind::File, 1)]),
             &["f"],
         );
@@ -2450,7 +2450,7 @@ mod tests {
         // component-LCA of their captured paths is `/root/l1/l2`, a directory the listing holds as
         // read; the descent reaches it — not collapsing to the anchor and not returning either leaf.
         let (e, pid, _root, slots) = engine_listing(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             dir_snap_nested(&[(
                 "l1",
                 covered(dir_snap_nested(&[(
@@ -2482,7 +2482,7 @@ mod tests {
         // at `l1`, whose read observes the boundary's identity. Rooted at `l2` the commit's splice
         // — unable to look `l2` up as a read directory — would refuse.
         let (e, pid, _root, slots) = engine_listing(
-            ScanConfig::builder().max_depth(NonZeroU32::new(2)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(2)).build(),
             dir_snap_nested(&[("l1", covered(dir_snap(&[("l2", EntryKind::Dir, 2)])))]),
             &["l1", "l1/l2"],
         );
@@ -2498,7 +2498,7 @@ mod tests {
         // recursive=false: every depth-1 Dir is a boundary the listing holds by identity alone, so
         // the descent never leaves the anchor — the wholesale-replace arm that always grafts.
         let (e, pid, root, slots) = engine_listing(
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             dir_snap(&[("a", EntryKind::Dir, 1)]),
             &["a"],
         );
@@ -2516,7 +2516,7 @@ mod tests {
         // descent reads the listing, not the shape: it stops at the anchor, which lists `mnt`. A
         // walk rooted at `mnt` would carry no prior and could not graft.
         let (e, pid, root, slots) = engine_listing(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             dir_snap(&[("mnt", EntryKind::Dir, 1)]),
             &["mnt"],
         );
@@ -2535,7 +2535,7 @@ mod tests {
         // rooted at `c` the walk would carry no prior, and the splice could not find `c` in the
         // listing it splices into.
         let (e, pid, _root, slots) = engine_listing(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             dir_snap_nested(&[("a", covered(dir_snap(&[])))]),
             &["a", "a/c"],
         );
@@ -2553,7 +2553,7 @@ mod tests {
         // scope. The descent stops at the anchor, which lists `a`: a walk rooted at `a` would have
         // no prior to stand on.
         let (e, pid, root, slots) = engine_listing(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             dir_snap_nested(&[("a", denied(1))]),
             &["a", "a/x"],
         );
@@ -2571,7 +2571,7 @@ mod tests {
         // stays the basis and the stop moves the root only up; silently (no diagnostic —
         // delete-recreate churn would flood logs).
         let (mut e, pid, _root, slots) = engine_listing(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             dir_snap_nested(&[(
                 "a",
                 covered(dir_snap_nested(&[
@@ -2686,7 +2686,7 @@ mod tests {
             Profile::new(
                 file_anchor,
                 ProfileIdentity::new(
-                    ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+                    SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
                     MAX_SETTLE,
                     EVENTS_COMPLETE,
                 ),
@@ -2901,7 +2901,7 @@ mod tests {
             &mut e.tree,
             Profile::new(
                 root,
-                ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, EVENTS_COMPLETE),
+                ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, EVENTS_COMPLETE),
                 SETTLE,
                 None,
             ),

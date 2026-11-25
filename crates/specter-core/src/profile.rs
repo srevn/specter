@@ -3014,8 +3014,7 @@ impl Profile {
     }
 
     /// The lifetime-stable canonical config hash — the config axis of the `(resource, config_hash)`
-    /// partition key. A read through the frozen identity, which seals the hash at its own
-    /// construction ([`ProfileIdentity::new`]).
+    /// partition key. A read through the frozen identity, which seals the hash when it is built.
     #[must_use]
     pub const fn config_hash(&self) -> u64 {
         self.cfg.identity.config_hash()
@@ -3694,8 +3693,8 @@ mod tests {
     use crate::pattern::PatternSpec;
     use crate::probe::ProbeSlot;
     use crate::resource::{ResourceKind, ResourceRole};
-    use crate::scan_config::GlobPattern;
     use crate::scan_config::compute_config_hash;
+    use crate::scan_config::{GlobPattern, SubtreeScan};
     use crate::snapshot::EntryKind;
     use crate::snapshot::tree::{DirMeta, DirSnapshot, LeafEntry, TreeSnapshot};
     use crate::tree::Tree;
@@ -3708,8 +3707,8 @@ mod tests {
     const MAX_SETTLE: Duration = Duration::from_secs(6);
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-    fn cfg() -> ScanConfig {
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build()
+    fn cfg() -> SubtreeScan {
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build()
     }
 
     fn glob(source: &str) -> GlobPattern {
@@ -3721,7 +3720,7 @@ mod tests {
     /// value, so every fixture's exact parameters survive the decomposition unchanged.
     fn mk_profile(
         resource: ResourceId,
-        config: ScanConfig,
+        scan: SubtreeScan,
         max_settle: Duration,
         settle: Duration,
         events: ClassSet,
@@ -3729,7 +3728,7 @@ mod tests {
     ) -> Profile {
         Profile::new(
             resource,
-            ProfileIdentity::new(config, max_settle, events),
+            ProfileIdentity::new(scan, max_settle, events),
             settle,
             kind,
         )
@@ -3889,32 +3888,24 @@ mod tests {
         );
     }
 
-    /// The witness criterion is shape-owned: a `MatchChain` Profile's proof object is the match
-    /// set, whose changes are all STRUCTURE point events — so the STRUCTURE-only mask that fails
-    /// the `Subtree` witness (the sibling test above) suffices here, folding discovery bursts via
-    /// `EventsReliable` (N=1) instead of the two-sample hash channel. A chain mask *without*
-    /// STRUCTURE falls back to the hash channel — conservative composition, no panic shape, no
-    /// attach-time validation needed at this layer.
+    /// The witness criterion is shape-owned: a `MatchChain` Profile's proof object is the match set,
+    /// whose changes are all STRUCTURE point events — so the STRUCTURE-only mask that fails the
+    /// `Subtree` witness (the sibling test above) is a chain's whole mask, and its silence witnesses
+    /// the set: discovery bursts fold via `EventsReliable` (N=1), never the two-sample hash channel.
     #[test]
     fn events_witness_quiescence_dispatches_on_scan_shape() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let chain = || {
-            ScanConfig::MatchChain(Arc::new(
-                PatternSpec::parse("/srv/*/log").expect("test pattern parses"),
-            ))
-        };
-
-        let chain_structure = mk_profile(r, chain(), MAX_SETTLE, SETTLE, ClassSet::STRUCTURE, None);
-        assert!(
-            chain_structure.events_witness_quiescence(),
-            "STRUCTURE covers MEMBERSHIP_CHANGES — settle-silence witnesses the match set",
+        let pattern = PatternSpec::parse("/srv/*/log").expect("test pattern parses");
+        let chain = Profile::new(
+            r,
+            ProfileIdentity::discovery(Arc::new(pattern)),
+            SETTLE,
+            None,
         );
-
-        let chain_content = mk_profile(r, chain(), MAX_SETTLE, SETTLE, ClassSet::CONTENT, None);
         assert!(
-            !chain_content.events_witness_quiescence(),
-            "a chain mask missing STRUCTURE cannot witness membership — hash-channel fallback",
+            chain.events_witness_quiescence(),
+            "STRUCTURE covers MEMBERSHIP_CHANGES — settle-silence witnesses the match set",
         );
     }
 
@@ -3923,7 +3914,7 @@ mod tests {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
         let c = cfg();
-        let expected = compute_config_hash(&c, MAX_SETTLE, NO_EVENTS);
+        let expected = compute_config_hash(&ScanConfig::from(c.clone()), MAX_SETTLE, NO_EVENTS);
         let p = mk_profile(r, c, MAX_SETTLE, SETTLE, NO_EVENTS, None);
         assert_eq!(p.config_hash(), expected);
     }
@@ -4297,7 +4288,7 @@ mod tests {
     fn profile_new_projects_exclude_strings_in_canonical_order() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let cfg = ScanConfig::builder()
+        let cfg = SubtreeScan::builder()
             .exclude(glob("z"))
             .exclude(glob("a"))
             .exclude(glob("m"))
@@ -4331,7 +4322,7 @@ mod tests {
     fn profile_exclude_strings_arc_shared_across_siblings() {
         let mut tree = Tree::new();
         let r = tree.ensure_root("anchor", ResourceRole::User);
-        let cfg = ScanConfig::builder()
+        let cfg = SubtreeScan::builder()
             .exclude(glob("*.tmp"))
             .exclude(glob("*.bak"))
             .max_depth(NonZeroU32::new(1))

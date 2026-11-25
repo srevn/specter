@@ -7,8 +7,8 @@
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    Placeholder, Profile, ProfileIdentity, ProfileMap, ResourceRole, ScanConfig, StepOutput, Sub,
-    SubParams, SubRegistry, Tree,
+    Placeholder, Profile, ProfileIdentity, ProfileMap, ResourceRole, StepOutput, Sub, SubParams,
+    SubRegistry, SubtreeScan, Tree,
 };
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -18,8 +18,8 @@ const SETTLE: Duration = Duration::from_millis(100);
 const MAX_SETTLE: Duration = Duration::from_secs(6);
 const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-fn bare_cfg() -> ScanConfig {
-    ScanConfig::builder().max_depth(NonZeroU32::new(1)).build()
+fn bare_cfg() -> SubtreeScan {
+    SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build()
 }
 
 fn build_program() -> Arc<ActionProgram> {
@@ -117,11 +117,11 @@ fn distinct_profile_for_distinct_pattern() {
 
     let r = tree.ensure_root("/anchor", ResourceRole::User);
 
-    let cfg_rs = ScanConfig::builder()
+    let cfg_rs = SubtreeScan::builder()
         .pattern(GlobPattern::compile("*.rs").unwrap())
         .max_depth(NonZeroU32::new(1))
         .build();
-    let cfg_txt = ScanConfig::builder()
+    let cfg_txt = SubtreeScan::builder()
         .pattern(GlobPattern::compile("*.txt").unwrap())
         .max_depth(NonZeroU32::new(1))
         .build();

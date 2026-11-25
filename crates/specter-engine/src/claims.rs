@@ -399,7 +399,7 @@ mod tests {
         ActionProgram, AnchorClaim, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirChild, DirMeta,
         DirSnapshot, EffectScope, EntryKind, FsIdentity, Input, LeafEntry, ProbeOutcome,
         ProbeResponse, ProfileId, ProofAuthority, ResourceId, ResourceKind, ResourceRole,
-        ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, WatchOp,
+        StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubtreeScan, WatchOp,
     };
     use std::collections::BTreeMap;
     use std::sync::Arc;
@@ -491,7 +491,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "watch".into(),
             SubAttachAnchor::Resource(anchor),
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             SETTLE,
             empty_program(),
@@ -782,7 +782,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "watch".into(),
             SubAttachAnchor::Resource(anchor),
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             SETTLE,
             empty_program(),
@@ -855,7 +855,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "watch".into(),
             SubAttachAnchor::Resource(anchor),
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             SETTLE,
             empty_program(),

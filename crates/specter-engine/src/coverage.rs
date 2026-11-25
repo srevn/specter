@@ -445,7 +445,7 @@ mod tests {
     use super::*;
     use specter_core::{
         ClassSet, GlobPattern, Profile, ProfileIdentity, ProfileMap, ResourceKind, ResourceRole,
-        ScanConfig, ScanConfigBuilder,
+        SubtreeScan, SubtreeScanBuilder,
     };
     use std::num::NonZeroU32;
     use std::time::Duration;
@@ -461,13 +461,14 @@ mod tests {
         tree.set_kind(id, kind);
     }
 
-    /// The module's one `Profile` fixture: `config` under the supplied `max_settle`, `NO_EVENTS`,
-    /// `SETTLE`, unclassified kind. Coverage is a pure function of `(resource, config)`; the other
-    /// identity axes are held constant so every test reads as a config-shape variation.
-    fn profile_with(r: ResourceId, config: ScanConfig, max_settle: Duration) -> Profile {
+    /// The subtree `Profile` fixture: `scan` under the supplied `max_settle`, `NO_EVENTS`,
+    /// `SETTLE`, unclassified kind; a chain's is [`anchor_chain`]'s. Coverage is a pure function of
+    /// `(resource, config)`; the other identity axes are held constant so every test reads as a
+    /// config-shape variation.
+    fn profile_with(r: ResourceId, scan: SubtreeScan, max_settle: Duration) -> Profile {
         Profile::new(
             r,
-            ProfileIdentity::new(config, max_settle, NO_EVENTS),
+            ProfileIdentity::new(scan, max_settle, NO_EVENTS),
             SETTLE,
             None,
         )
@@ -475,13 +476,17 @@ mod tests {
 
     /// [`profile_with`] at the canonical `MAX_SETTLE` — the dominant shape. Tests that need two
     /// co-located Profiles fork identity through `profile_with`'s explicit `max_settle` instead.
-    fn profile_at(r: ResourceId, config: ScanConfig) -> Profile {
-        profile_with(r, config, MAX_SETTLE)
+    fn profile_at(r: ResourceId, scan: SubtreeScan) -> Profile {
+        profile_with(r, scan, MAX_SETTLE)
     }
 
-    /// Anchor a Profile with the supplied `ScanConfig`. Caller still owns the `Tree` (and any
+    /// Anchor a Profile with the supplied `SubtreeScan`. Caller still owns the `Tree` (and any
     /// descendant Resources they attach).
-    fn anchor(tree: &mut Tree, segment: &str, builder: ScanConfigBuilder) -> (ResourceId, Profile) {
+    fn anchor(
+        tree: &mut Tree,
+        segment: &str,
+        builder: SubtreeScanBuilder,
+    ) -> (ResourceId, Profile) {
         let r = tree.ensure_root(segment, ResourceRole::User);
         mark(tree, r, ResourceKind::Dir);
         (r, profile_at(r, builder.build()))
@@ -494,7 +499,7 @@ mod tests {
     #[test]
     fn target_equals_anchor_dir_is_covered() {
         let mut tree = Tree::new();
-        let (anchor_id, profile) = anchor(&mut tree, "root", ScanConfig::builder());
+        let (anchor_id, profile) = anchor(&mut tree, "root", SubtreeScan::builder());
         assert!(covers(&profile, anchor_id, &tree, &mut PathBuf::new()));
     }
 
@@ -505,7 +510,7 @@ mod tests {
         mark(&mut tree, r, ResourceKind::File);
         let p = profile_at(
             r,
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         );
         assert!(covers(&p, r, &tree, &mut PathBuf::new()));
     }
@@ -519,7 +524,7 @@ mod tests {
         mark(&mut tree, r, ResourceKind::File);
         let p = profile_at(
             r,
-            ScanConfig::builder()
+            SubtreeScan::builder()
                 .pattern(glob("*.rs"))
                 .max_depth(NonZeroU32::new(1))
                 .build(),
@@ -530,7 +535,7 @@ mod tests {
     #[test]
     fn target_outside_anchor_subtree_is_uncovered() {
         let mut tree = Tree::new();
-        let (_anchor_id, profile) = anchor(&mut tree, "root", ScanConfig::builder());
+        let (_anchor_id, profile) = anchor(&mut tree, "root", SubtreeScan::builder());
         let sibling = tree.ensure_root("sibling", ResourceRole::User);
         mark(&mut tree, sibling, ResourceKind::Dir);
         assert!(!covers(&profile, sibling, &tree, &mut PathBuf::new()));
@@ -547,14 +552,14 @@ mod tests {
             .ensure_child(parent, "anchor", ResourceRole::User)
             .expect("test live parent");
         mark(&mut tree, anchor_id, ResourceKind::Dir);
-        let profile = profile_at(anchor_id, ScanConfig::builder().build());
+        let profile = profile_at(anchor_id, SubtreeScan::builder().build());
         assert!(!covers(&profile, parent, &tree, &mut PathBuf::new()));
     }
 
     #[test]
     fn recursive_true_covers_deep_descendants() {
         let mut tree = Tree::new();
-        let (root, profile) = anchor(&mut tree, "root", ScanConfig::builder());
+        let (root, profile) = anchor(&mut tree, "root", SubtreeScan::builder());
         let a = tree
             .ensure_child(root, "a", ResourceRole::User)
             .expect("test live parent");
@@ -578,7 +583,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
         );
         let a = tree
             .ensure_child(root, "a", ResourceRole::User)
@@ -598,7 +603,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().max_depth(NonZeroU32::new(2)),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(2)),
         );
         let a = tree
             .ensure_child(root, "a", ResourceRole::User)
@@ -624,7 +629,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().exclude(glob("target")),
+            SubtreeScan::builder().exclude(glob("target")),
         );
         let target = tree
             .ensure_child(root, "target", ResourceRole::User)
@@ -645,7 +650,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().exclude(glob("target/**")),
+            SubtreeScan::builder().exclude(glob("target/**")),
         );
         let target = tree
             .ensure_child(root, "target", ResourceRole::User)
@@ -664,7 +669,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().pattern(glob("*.rs")),
+            SubtreeScan::builder().pattern(glob("*.rs")),
         );
         let rs = tree
             .ensure_child(root, "lib.rs", ResourceRole::User)
@@ -685,7 +690,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().pattern(glob("*.rs")),
+            SubtreeScan::builder().pattern(glob("*.rs")),
         );
         let src = tree
             .ensure_child(root, "src", ResourceRole::User)
@@ -700,7 +705,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().pattern(glob("src/**/*.rs")),
+            SubtreeScan::builder().pattern(glob("src/**/*.rs")),
         );
         let src = tree
             .ensure_child(root, "src", ResourceRole::User)
@@ -722,7 +727,7 @@ mod tests {
     #[test]
     fn stale_resource_id_returns_false() {
         let mut tree = Tree::new();
-        let (_root, profile) = anchor(&mut tree, "root", ScanConfig::builder());
+        let (_root, profile) = anchor(&mut tree, "root", SubtreeScan::builder());
         // Build a Resource then drop it via reap so the id is stale.
         let temp = tree
             .ensure_child(profile.resource(), "ghost", ResourceRole::User)
@@ -740,7 +745,7 @@ mod tests {
         // Excluding `a` also rejects `a/b`, since the cumulative path matches at depth 1 already (a
         // Path's glob matcher is checked progressively).
         let mut tree = Tree::new();
-        let (root, profile) = anchor(&mut tree, "root", ScanConfig::builder().exclude(glob("a")));
+        let (root, profile) = anchor(&mut tree, "root", SubtreeScan::builder().exclude(glob("a")));
         let a = tree
             .ensure_child(root, "a", ResourceRole::User)
             .expect("test live parent");
@@ -762,7 +767,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().pattern(glob("*.rs")),
+            SubtreeScan::builder().pattern(glob("*.rs")),
         );
         // Top-level .rs file matches.
         let lib = tree
@@ -801,7 +806,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().pattern(glob("*.rs")),
+            SubtreeScan::builder().pattern(glob("*.rs")),
         );
         let unprobed = tree
             .ensure_child(root, "lib.c", ResourceRole::User)
@@ -822,7 +827,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().exclude(glob("target/**")),
+            SubtreeScan::builder().exclude(glob("target/**")),
         );
         let target = tree
             .ensure_child(root, "target", ResourceRole::User)
@@ -858,7 +863,7 @@ mod tests {
     #[test]
     fn covers_rejects_hidden_segments_when_hidden_false() {
         let mut tree = Tree::new();
-        let (root, profile) = anchor(&mut tree, "root", ScanConfig::builder());
+        let (root, profile) = anchor(&mut tree, "root", SubtreeScan::builder());
         let hidden_dir = tree
             .ensure_child(root, ".hidden", ResourceRole::User)
             .expect("test live parent");
@@ -910,7 +915,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
         );
         let dir = tree
             .ensure_child(root, "sub", ResourceRole::User)
@@ -949,7 +954,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().max_depth(NonZeroU32::new(2)),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(2)),
         );
         let d1 = tree
             .ensure_child(root, "d1", ResourceRole::User)
@@ -991,7 +996,7 @@ mod tests {
         let (root, profile) = anchor(
             &mut tree,
             "root",
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
         );
         assert_eq!(
             classify(
@@ -1007,7 +1012,7 @@ mod tests {
         mark(&mut tree, f, ResourceKind::File);
         let fp = profile_at(
             f,
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         );
         assert_eq!(
             classify(&fp, f, ResourceKind::File, &tree, &mut PathBuf::new()),
@@ -1029,7 +1034,7 @@ mod tests {
             &mut tree,
             profile_at(
                 root,
-                ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+                SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             ),
         );
         let unprobed = tree
@@ -1056,10 +1061,11 @@ mod tests {
     fn anchor_chain(tree: &mut Tree, segment: &str, pattern: &str) -> (ResourceId, Profile) {
         let r = tree.ensure_root(segment, ResourceRole::User);
         mark(tree, r, ResourceKind::Dir);
-        let config = ScanConfig::MatchChain(Arc::new(
-            PatternSpec::parse(pattern).expect("test pattern parses"),
-        ));
-        (r, profile_at(r, config))
+        let pattern = Arc::new(PatternSpec::parse(pattern).expect("test pattern parses"));
+        (
+            r,
+            Profile::new(r, ProfileIdentity::discovery(pattern), SETTLE, None),
+        )
     }
 
     fn child(tree: &mut Tree, parent: ResourceId, segment: &str, kind: ResourceKind) -> ResourceId {
@@ -1192,8 +1198,8 @@ mod tests {
     // Resolution tests for the `covers` derivation. Walks Resource ancestors of a child Profile's
     // anchor; at each ancestor, picks the smallest covering [`ProfileId`].
 
-    fn cfg_recursive() -> ScanConfig {
-        ScanConfig::builder().build()
+    fn cfg_recursive() -> SubtreeScan {
+        SubtreeScan::builder().build()
     }
 
     fn mark_dir(tree: &mut Tree, id: ResourceId) {
@@ -1262,7 +1268,7 @@ mod tests {
             &mut tree,
             profile_at(
                 root,
-                ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+                SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             ),
         );
         let p_b = profiles.attach(&mut tree, profile_at(b, cfg_recursive()));
@@ -1374,7 +1380,7 @@ mod tests {
         tree: &mut Tree,
         profiles: &mut ProfileMap,
         r: ResourceId,
-        builder: ScanConfigBuilder,
+        builder: SubtreeScanBuilder,
     ) -> ProfileId {
         profiles.attach(tree, profile_at(r, builder.build()))
     }
@@ -1388,7 +1394,7 @@ mod tests {
         tree: &mut Tree,
         profiles: &mut ProfileMap,
         r: ResourceId,
-        builder: ScanConfigBuilder,
+        builder: SubtreeScanBuilder,
         intent: BurstIntent,
     ) -> ProfileId {
         let mut p = profile_at(r, builder.build());
@@ -1431,14 +1437,14 @@ mod tests {
             &mut tree,
             &mut profiles,
             a,
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
         );
-        let _ = attach_idle(&mut tree, &mut profiles, mid, ScanConfig::builder());
+        let _ = attach_idle(&mut tree, &mut profiles, mid, SubtreeScan::builder());
         let _ = attach_active(
             &mut tree,
             &mut profiles,
             deep,
-            ScanConfig::builder(),
+            SubtreeScan::builder(),
             BurstIntent::Standard,
         );
 
@@ -1467,10 +1473,15 @@ mod tests {
             &mut tree2,
             &mut profiles_idle,
             a2,
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
         );
-        let _ = attach_idle(&mut tree2, &mut profiles_idle, mid2, ScanConfig::builder());
-        let _ = attach_idle(&mut tree2, &mut profiles_idle, deep2, ScanConfig::builder());
+        let _ = attach_idle(&mut tree2, &mut profiles_idle, mid2, SubtreeScan::builder());
+        let _ = attach_idle(
+            &mut tree2,
+            &mut profiles_idle,
+            deep2,
+            SubtreeScan::builder(),
+        );
         assert!(!has_active_standard_descendant(
             &tree2,
             &profiles_idle,
@@ -1488,7 +1499,7 @@ mod tests {
         let mut profiles = ProfileMap::new();
         let root = tree.ensure_root("root", ResourceRole::User);
         mark_dir(&mut tree, root);
-        let p_a = attach_idle(&mut tree, &mut profiles, root, ScanConfig::builder());
+        let p_a = attach_idle(&mut tree, &mut profiles, root, SubtreeScan::builder());
         // A second, distinct Profile co-located at the same Resource: differing `recursive` ⇒
         // differing config_hash (two Profiles sharing a slot must differ in identity). Its config
         // is irrelevant to the assertion — the exclusion is purely structural (the DFS starts at
@@ -1497,7 +1508,7 @@ mod tests {
             &mut tree,
             &mut profiles,
             root,
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
             BurstIntent::Standard,
         );
         assert!(
@@ -1525,16 +1536,16 @@ mod tests {
         for r in [root, c1, c2, c3] {
             mark_dir(&mut tree, r);
         }
-        let p_root = attach_idle(&mut tree, &mut profiles, root, ScanConfig::builder());
-        let _ = attach_idle(&mut tree, &mut profiles, c1, ScanConfig::builder());
+        let p_root = attach_idle(&mut tree, &mut profiles, root, SubtreeScan::builder());
+        let _ = attach_idle(&mut tree, &mut profiles, c1, SubtreeScan::builder());
         let _ = attach_active(
             &mut tree,
             &mut profiles,
             c2,
-            ScanConfig::builder(),
+            SubtreeScan::builder(),
             BurstIntent::Standard,
         );
-        let _ = attach_idle(&mut tree, &mut profiles, c3, ScanConfig::builder());
+        let _ = attach_idle(&mut tree, &mut profiles, c3, SubtreeScan::builder());
         assert!(has_active_standard_descendant(
             &tree,
             &profiles,
@@ -1557,8 +1568,8 @@ mod tests {
                 .expect("test live parent");
             mark_dir(&mut tree, root);
             mark_dir(&mut tree, c);
-            let p_root = attach_idle(&mut tree, &mut profiles, root, ScanConfig::builder());
-            let _ = attach_active(&mut tree, &mut profiles, c, ScanConfig::builder(), intent);
+            let p_root = attach_idle(&mut tree, &mut profiles, root, SubtreeScan::builder());
+            let _ = attach_active(&mut tree, &mut profiles, c, SubtreeScan::builder(), intent);
             has_active_standard_descendant(&tree, &profiles, p_root, &mut PathBuf::new())
         };
         assert!(!topo(BurstIntent::Seed), "Seed descendant never gates");
@@ -1586,23 +1597,23 @@ mod tests {
         for r in [a, mid, deep] {
             mark_dir(&mut tree, r);
         }
-        let p_a = attach_idle(&mut tree, &mut profiles, a, ScanConfig::builder());
+        let p_a = attach_idle(&mut tree, &mut profiles, a, SubtreeScan::builder());
         // Two distinct co-located Profiles at `mid`: differing `recursive` ⇒ differing config_hash
         // ⇒ separate ProfileIds. Both still cover `deep` (it is their depth-1 child, which a
         // non-recursive Profile also covers), so the chain hop is a real smallest-covering-id
         // tie-break, not a fallback to the only covering one.
-        let p_mid_1 = attach_idle(&mut tree, &mut profiles, mid, ScanConfig::builder());
+        let p_mid_1 = attach_idle(&mut tree, &mut profiles, mid, SubtreeScan::builder());
         let p_mid_2 = attach_idle(
             &mut tree,
             &mut profiles,
             mid,
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)),
         );
         let p_deep = attach_active(
             &mut tree,
             &mut profiles,
             deep,
-            ScanConfig::builder(),
+            SubtreeScan::builder(),
             BurstIntent::Standard,
         );
         // Both `mid` Profiles cover `deep` (it is their depth-1 child); the tie-break picks the

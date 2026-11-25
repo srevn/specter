@@ -16,8 +16,8 @@ use specter_core::{
     EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, MintSpec, PatternSpec, PostFireBurst,
     PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome,
     ProbeResponse, ProfileId, ProfileIdentity, ProfileState, ReactionSpec, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor,
-    SubAttachRequest, SubId, SubParams, TimerId, WatchFailure,
+    ResourceKind, ResourceRole, SpawnSpec, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
+    SubParams, SubtreeScan, TimerId, WatchFailure,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -147,7 +147,7 @@ pub fn attach_returning(
     e: &mut Engine,
     name: &str,
     anchor: SubAttachAnchor,
-    cfg: ScanConfig,
+    scan: SubtreeScan,
     mask: ClassSet,
     max_settle: Duration,
     now: Instant,
@@ -156,7 +156,7 @@ pub fn attach_returning(
         Input::AttachSub(SubAttachRequest::for_anchor(
             name.into(),
             anchor,
-            cfg,
+            scan,
             max_settle,
             SETTLE,
             specter_core::testkit::empty_program(),
@@ -178,12 +178,12 @@ pub fn attach(
     e: &mut Engine,
     name: &str,
     anchor: SubAttachAnchor,
-    cfg: ScanConfig,
+    scan: SubtreeScan,
     mask: ClassSet,
     max_settle: Duration,
     now: Instant,
 ) -> (SubId, ProfileId) {
-    let (sid, pid, _) = attach_returning(e, name, anchor, cfg, mask, max_settle, now);
+    let (sid, pid, _) = attach_returning(e, name, anchor, scan, mask, max_settle, now);
     (sid, pid)
 }
 
@@ -194,13 +194,13 @@ pub fn attach_seeded(
     e: &mut Engine,
     name: &str,
     anchor: SubAttachAnchor,
-    cfg: ScanConfig,
+    scan: SubtreeScan,
     mask: ClassSet,
     max_settle: Duration,
     snap: &Arc<DirSnapshot>,
     start: Instant,
 ) -> (SubId, ProfileId, Instant) {
-    let (sid, pid, _) = attach_returning(e, name, anchor, cfg, mask, max_settle, start);
+    let (sid, pid, _) = attach_returning(e, name, anchor, scan, mask, max_settle, start);
     let done = seed_to_idle(e, pid, snap, start);
     (sid, pid, done)
 }
@@ -212,8 +212,8 @@ pub fn attach_seeded(
 /// writes fire `CONTENT` events that this mask drops at the per-Profile class filter. Fire-bearing
 /// bursts on this Profile owe the verdict floor's hash-equality channel.
 ///
-/// Fixture defaults: `MAX_SETTLE`, recursive [`ScanConfig`], name `"build"`. A test needing a
-/// non-recursive scan or a different `max_settle` reaches for [`attach`] directly. The helper
+/// Fixture defaults: `MAX_SETTLE`, the default (unbounded) [`SubtreeScan`], name `"build"`. A test
+/// needing a bounded scan or a different `max_settle` reaches for [`attach`] directly. The helper
 /// exists because the `STRUCTURE`-only mask is the canonical regression scenario (the `scp`
 /// user-reported bug) — every Layer-C inventory test starts here.
 #[must_use]
@@ -226,7 +226,7 @@ pub fn attach_structure_only(
         e,
         "build",
         SubAttachAnchor::Resource(anchor),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::STRUCTURE,
         MAX_SETTLE,
         now,
@@ -648,7 +648,7 @@ pub const fn watch_op_rejected_input(resource: ResourceId) -> Input {
 
 /// The fixture [`MintSpec`] with the default `SubtreeRoot` minted-reaction scope.
 ///
-/// A `recursive` `Subtree` minted identity with `ClassSet::EMPTY` and `MAX_SETTLE`; minted debounce
+/// The default (unbounded) subtree scan under `ClassSet::EMPTY` and `MAX_SETTLE`; minted debounce
 /// `SETTLE`; minted reaction `/bin/true`-shaped (`empty_program`, no log forwarding).
 #[must_use]
 pub fn mint_spec() -> Arc<MintSpec> {
@@ -660,7 +660,7 @@ pub fn mint_spec() -> Arc<MintSpec> {
 #[must_use]
 pub fn mint_spec_scoped(scope: EffectScope) -> Arc<MintSpec> {
     Arc::new(MintSpec {
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, ClassSet::EMPTY),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, ClassSet::EMPTY),
         settle: SETTLE,
         spawn: SpawnSpec::new(specter_core::testkit::empty_program(), scope, false),
     })
@@ -669,13 +669,10 @@ pub fn mint_spec_scoped(scope: EffectScope) -> Arc<MintSpec> {
 /// The discovery-template `SubAttachRequest` the fixtures use — [`attach_discovery_returning`]
 /// steps it directly; config-diff scenarios place it in `SubRegistryDiff` buckets.
 ///
-/// The discovery Sub's own identity mirrors the config lowering's constant-identity shape in
-/// fixture form: `MatchChain(pattern)`, `ClassSet::STRUCTURE` (membership changes are the chain
-/// proof object's only witness classes, so the Profile folds `EventsReliable`), `MAX_SETTLE` /
-/// `SETTLE`. The fixture need not byte-match the lowering's settle constants — those are config
-/// policy, pinned in the config crate. The minted reaction (scope included) lives on `mint`'s spawn
-/// — [`mint_spec_scoped`] threads a non-default scope. `anchor` is explicit (pre-placed `Resource`
-/// or pending `Path`).
+/// The template's own Profile takes the identity every pattern's does
+/// ([`ProfileIdentity::discovery`]); its debounce is the fixtures' `SETTLE`. The minted reaction
+/// (scope included) lives on `mint`'s spawn — [`mint_spec_scoped`] threads a non-default scope.
+/// `anchor` is explicit (pre-placed `Resource` or pending `Path`).
 #[must_use]
 pub fn discovery_req(
     name: &str,
@@ -683,14 +680,11 @@ pub fn discovery_req(
     pattern: &str,
     mint: Arc<MintSpec>,
 ) -> SubAttachRequest {
-    let spec = Arc::new(PatternSpec::parse(pattern).expect("valid test pattern"));
     SubAttachRequest::from_parts(
         anchor,
-        ProfileIdentity::new(
-            ScanConfig::MatchChain(spec),
-            MAX_SETTLE,
-            ClassSet::STRUCTURE,
-        ),
+        ProfileIdentity::discovery(Arc::new(
+            PatternSpec::parse(pattern).expect("valid test pattern"),
+        )),
         SubParams {
             name: name.into(),
             settle: SETTLE,

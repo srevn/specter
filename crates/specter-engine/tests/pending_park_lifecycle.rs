@@ -8,7 +8,7 @@
 use specter_core::testkit::{MockSensor, dir_snap};
 use specter_core::{
     AnchorClaim, ClassSet, Diagnostic, EntryKind, FsEvent, Input, OverflowScope, ProbeFailure,
-    ProbeOutcome, ProbeResponse, ProfileState, ScanConfig, StateLabel, SubAttachAnchor,
+    ProbeOutcome, ProbeResponse, ProfileState, StateLabel, SubAttachAnchor, SubtreeScan,
     WatchFailure, WatchOp,
 };
 use specter_engine::Engine;
@@ -19,8 +19,8 @@ use specter_engine::testkit::{
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-fn cfg() -> ScanConfig {
-    ScanConfig::builder().build()
+fn cfg() -> SubtreeScan {
+    SubtreeScan::builder().build()
 }
 
 /// An event at a co-watched parked anchor re-enters recovery descent and never fires unanchored. A

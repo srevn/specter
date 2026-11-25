@@ -6,8 +6,8 @@ use specter_core::testkit::{dir_snap, empty_program, proven};
 use specter_core::{
     BurstFinish, DedupKey, DetachReason, Diagnostic, DirSnapshot, EffectCompletion, EffectOutcome,
     EffectScope, EntryKind, FsEvent, Input, ProbeOp, ProbeResponse, ProfileId, ProfileState,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest,
-    SubRegistryDiff, WatchOp,
+    ResourceKind, ResourceRole, StepOutput, SubAttachAnchor, SubAttachRequest, SubRegistryDiff,
+    SubtreeScan, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -39,7 +39,7 @@ fn config_diff_add_sub_to_existing_profile() {
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
-    let cfg = ScanConfig::builder().build();
+    let cfg = SubtreeScan::builder().build();
     let now = Instant::now();
     let attach = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
@@ -101,7 +101,7 @@ fn config_diff_remove_sole_sub_reaps_profile() {
     let req = SubAttachRequest::for_anchor(
         "A".into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -150,7 +150,7 @@ fn config_diff_mid_burst_remove_defers_reap() {
         Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
             SubAttachAnchor::Resource(r),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             SETTLE,
             empty_program(),
@@ -214,7 +214,7 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build();
     let attach_out = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
@@ -311,7 +311,7 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build();
     let attach_out = e.step(
         Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
@@ -404,7 +404,7 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
         Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
             SubAttachAnchor::Path(PathBuf::from("/src")),
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             SETTLE,
             empty_program(),
@@ -424,7 +424,7 @@ fn config_diff_modified_identity_validate_failure_leaves_old_sub_in_place() {
     diff.modified_identity.push(SubAttachRequest::for_anchor(
         "A".into(),
         SubAttachAnchor::Path(PathBuf::from("relative/path")),
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -474,7 +474,7 @@ fn effect_complete_after_detach_drops_silently() {
         Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
             SubAttachAnchor::Resource(r),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             SETTLE,
             empty_program(),
@@ -544,7 +544,7 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
         Input::AttachSub(SubAttachRequest::for_anchor(
             "A".into(),
             SubAttachAnchor::Resource(r),
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             SETTLE,
             empty_program(),
@@ -566,7 +566,7 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
     diff.modified_identity.push(SubAttachRequest::for_anchor(
         "A".into(),
         SubAttachAnchor::Path(PathBuf::from("/src")),
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),

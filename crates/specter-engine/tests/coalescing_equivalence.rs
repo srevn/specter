@@ -18,8 +18,8 @@
 use proptest::prelude::*;
 use specter_core::testkit::dir_snap;
 use specter_core::{
-    ClassSet, EntryKind, FsEvent, Input, ProfileStateDiscriminant, ResourceId, ScanConfig,
-    SubAttachAnchor,
+    ClassSet, EntryKind, FsEvent, Input, ProfileStateDiscriminant, ResourceId, SubAttachAnchor,
+    SubtreeScan,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -123,7 +123,7 @@ fn seeded() -> (
         &mut e,
         "build",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::DEFAULT_SUBTREE_ROOT,
         MAX_SETTLE,
         t0,

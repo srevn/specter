@@ -5,7 +5,7 @@
 //! invariant: across an arbitrary attach/detach permutation on Subs sharing one Profile, the derived
 //! count tracks the live set exactly — no drift, since there is no second counter to drift from.
 
-use specter_core::{Input, ResourceRole, ScanConfig, SubAttachAnchor, SubId};
+use specter_core::{Input, ResourceRole, SubAttachAnchor, SubId, SubtreeScan};
 use specter_engine::Engine;
 use specter_engine::testkit::{self, NO_EVENTS};
 use std::time::Instant;
@@ -15,9 +15,9 @@ fn subs_at_len_is_the_sole_derived_count_across_attach_detach() {
     let mut e = Engine::new();
     let r = e.tree_mut().ensure_root("src", ResourceRole::User);
     e.tree_mut().set_kind(r, specter_core::ResourceKind::Dir);
-    // Identical (resource, ScanConfig, max_settle, settle, events) ⇒ identical config_hash ⇒ every
+    // Identical (resource, SubtreeScan, max_settle, settle, events) ⇒ identical config_hash ⇒ every
     // Sub attaches to one shared Profile.
-    let cfg = ScanConfig::builder().build();
+    let cfg = SubtreeScan::builder().build();
     let now = Instant::now();
 
     let attach = |e: &mut Engine, name: &str| -> SubId {

@@ -2,7 +2,7 @@
 
 use specter_config::{Config, ConfigError, IssueKind, WatchTarget};
 use specter_core::program::{BranchTarget, SpawnBody};
-use specter_core::{ArgPart, ClassSet, EffectScope, GlobPattern, Placeholder, ScanConfig};
+use specter_core::{ArgPart, ClassSet, EffectScope, GlobPattern, Placeholder, SubtreeScan};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -45,7 +45,7 @@ fn full_fixture_round_trips_every_field() {
     let glob = |source| GlobPattern::compile(source).expect("fixture glob compiles");
     assert_eq!(
         w.scan,
-        ScanConfig::builder()
+        SubtreeScan::builder()
             .pattern(glob("**/*.{c,h,rs}"))
             .excludes([glob("target/**"), glob("**/node_modules/**")])
             .max_depth(NonZeroU32::new(5))
@@ -136,7 +136,7 @@ fn duplicate_name_fixture_yields_validate_error() {
 fn all_defaults_fixture_applies_documented_defaults() {
     let cfg = Config::from_path(&fixture("all-defaults.toml")).unwrap();
     let w = &cfg.watches[0];
-    assert_eq!(w.scan, ScanConfig::builder().build());
+    assert_eq!(w.scan, SubtreeScan::builder().build());
     assert_eq!(w.scope, EffectScope::SubtreeRoot);
     assert_eq!(w.settle, Duration::from_millis(200));
     assert_eq!(w.max_settle, Duration::from_hours(1));

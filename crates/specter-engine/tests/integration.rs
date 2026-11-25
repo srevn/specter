@@ -13,7 +13,7 @@ use specter_core::testkit::{dir_snap, proven};
 use specter_core::{
     BurstIntent, ClassSet, Diagnostic, DirSnapshot, EntryKind, FsEvent, Input, ProbeCorrelation,
     ProbeOp, ProbeOutcome, ProbeResponse, Profile, ProfileId, ProfileIdentity, ProfileMap,
-    ProfileState, ResourceId, ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor,
+    ProfileState, ResourceId, ResourceKind, ResourceRole, StepOutput, SubAttachAnchor, SubtreeScan,
     Tree, WatchOp,
 };
 use specter_engine::testkit::{
@@ -34,8 +34,8 @@ const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 /// (or a CONTENT-free mask) inline.
 const DEFAULT_EVENTS: ClassSet = ClassSet::DEFAULT_SUBTREE_ROOT;
 
-fn cfg_recursive() -> ScanConfig {
-    ScanConfig::builder().build()
+fn cfg_recursive() -> SubtreeScan {
+    SubtreeScan::builder().build()
 }
 
 fn mark_dir(tree: &mut Tree, id: ResourceId) {
@@ -72,7 +72,7 @@ fn covers_handles_pattern_with_dir_bypass_in_engine_context() {
         Profile::new(
             root,
             ProfileIdentity::new(
-                ScanConfig::builder()
+                SubtreeScan::builder()
                     .pattern(specter_core::GlobPattern::compile("*.rs").unwrap())
                     .build(),
                 MAX_SETTLE,
@@ -338,7 +338,7 @@ fn vanished_during_seed_clears_baseline_and_diagnoses() {
         &mut e,
         "fmt",
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         NO_EVENTS,
         MAX_SETTLE,
         t0,

@@ -949,8 +949,8 @@ mod tests {
     use specter_core::{
         ActionProgram, AnchorClaim, ClassSet, ContribKey, Diagnostic, EffectScope, EntryKind,
         FS_ROOT_SEGMENT, Input, ProbeFailure, ProbeOp, ProbeOutcome, ProbeRequest, ProbeResponse,
-        ProfileIdentity, ReapTrigger, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-        SubAttachAnchor, SubAttachRequest,
+        ProfileIdentity, ReapTrigger, ResourceId, ResourceKind, ResourceRole, SubAttachAnchor,
+        SubAttachRequest, SubtreeScan,
     };
     use std::path::{Path, PathBuf};
     use std::sync::Arc;
@@ -960,8 +960,8 @@ mod tests {
     const MAX_SETTLE: Duration = Duration::from_secs(6);
     const NO_EVENTS: ClassSet = ClassSet::EMPTY;
 
-    fn cfg() -> ScanConfig {
-        ScanConfig::builder().build()
+    fn cfg() -> SubtreeScan {
+        SubtreeScan::builder().build()
     }
 
     fn empty_program() -> Arc<ActionProgram> {
@@ -1784,7 +1784,7 @@ mod tests {
             .expect("non-empty fixture");
         e.tree_mut().set_kind(foo, ResourceKind::Dir);
 
-        let user_cfg = specter_core::ScanConfig::builder()
+        let user_cfg = specter_core::SubtreeScan::builder()
             .pattern(specter_core::GlobPattern::compile("*.c").unwrap())
             .build();
         let req = SubAttachRequest::for_anchor(
@@ -1886,14 +1886,14 @@ mod tests {
     /// `start_pending_recovery`, `dispatch_descent_vanished` rewind).
     #[test]
     fn profile_state_default_is_idle() {
-        use specter_core::{Profile, ProfileState, ScanConfig};
+        use specter_core::{Profile, ProfileState, SubtreeScan};
         use std::num::NonZeroU32;
         let mut e = Engine::new();
         let r = e.tree_mut().ensure_root("anchor", ResourceRole::User);
         let p = Profile::new(
             r,
             ProfileIdentity::new(
-                ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+                SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
                 MAX_SETTLE,
                 NO_EVENTS,
             ),

@@ -7,9 +7,9 @@ use crate::raw::{RawAction, RawConfig, RawExec, RawLogConfig, RawWatch};
 use crate::template;
 use compact_str::CompactString;
 use specter_core::{
-    self as core, ActionProgram, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    MintSpec, PatternSpec, ProfileIdentity, ReactionSpec, ScanConfig, SpawnSpec, SubAttachAnchor,
-    SubAttachRequest, SubParams,
+    self as core, ActionProgram, ArgTemplate, ClassSet, DISCOVERY_SETTLE, EffectScope, ExecAction,
+    GlobPattern, MintSpec, PatternSpec, ProfileIdentity, ReactionSpec, SpawnSpec, SubAttachAnchor,
+    SubAttachRequest, SubParams, SubtreeScan,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -27,23 +27,6 @@ pub(crate) const DEFAULT_MAX_SETTLE: Duration = Duration::from_hours(1);
 /// `max_settle = "200ms"`) and the semantic nonsense of `max_settle ≤ settle` (a single settle
 /// round would already exceed it).
 const MAX_SETTLE_FLOOR_FACTOR: u32 = 4;
-/// Debounce window of a discovery Sub's own Profile — the walk that observes chain membership, not
-/// the user's reaction. Pinned to a constant (never the user's `settle`) so a `settle = "30s"`
-/// reaction debounce cannot become 30 s of mint latency, and so one pattern always maps to one
-/// discovery Profile (`Profile.settle = min over attached Subs` is constant-stable when every
-/// template carries the same pair). 150 ms coalesces an untar-style membership burst into one
-/// reconcile.
-const DISCOVERY_SETTLE: Duration = Duration::from_millis(150);
-/// Forced-fire ceiling of a discovery Profile — bounds mint latency under sustained chain churn.
-/// See [`DISCOVERY_SETTLE`] for why the pair is constant.
-const DISCOVERY_MAX_SETTLE: Duration = Duration::from_secs(2);
-// Compile-time pin of the `validate_settle` floor the constants bypass (they never pass through the
-// raw-field validator): a drift below `4 × settle` would otherwise only surface as `Profile::new`'s
-// debug assertion at attach time.
-const _: () = assert!(
-    DISCOVERY_MAX_SETTLE.as_millis()
-        >= MAX_SETTLE_FLOOR_FACTOR as u128 * DISCOVERY_SETTLE.as_millis()
-);
 /// Hard cap on `[[watch.actions]]` conditional nesting depth. Each `when` / `then` / `else` triple
 /// descends one level of validator recursion; [`validate_action_list`] short-circuits with
 /// [`IssueKind::ConditionalNestedTooDeep`] when the depth bound is exceeded, keeping the
@@ -185,7 +168,7 @@ pub struct SubSpec {
     /// `/dev/null`.
     pub log_output: bool,
     pub settle: Duration,
-    pub scan: ScanConfig,
+    pub scan: SubtreeScan,
     /// The event-class mask: the TOML's `events`, or the scope's default
     /// ([`ClassSet::DEFAULT_SUBTREE_ROOT`], [`ClassSet::DEFAULT_PER_FILE`]).
     pub events: ClassSet,
@@ -218,11 +201,7 @@ impl SubSpec {
             ),
             WatchTarget::Dynamic(pattern) => SubAttachRequest::from_parts(
                 SubAttachAnchor::Path(pattern.literal_prefix_path()),
-                ProfileIdentity::new(
-                    ScanConfig::MatchChain(Arc::clone(pattern)),
-                    DISCOVERY_MAX_SETTLE,
-                    ClassSet::STRUCTURE,
-                ),
+                ProfileIdentity::discovery(Arc::clone(pattern)),
                 SubParams {
                     name: self.name.clone(),
                     settle: DISCOVERY_SETTLE,
@@ -1170,12 +1149,12 @@ fn dynamic_prefix_issue(
 }
 
 /// Validate the `[[watch]]` block's scan-config knobs (`recursive`, `hidden`, `max_depth`,
-/// `pattern`, `exclude`) — orthogonal to the path-vs-pattern dispatch. Returns `Ok(ScanConfig)`
+/// `pattern`, `exclude`) — orthogonal to the path-vs-pattern dispatch. Returns `Ok(SubtreeScan)`
 /// when every field validates; `Err(Vec<ValidationIssue>)` accumulates per-field failures
 /// (max_depth, pattern, and each exclude glob can fire independently).
-fn validate_scan(idx: usize, raw: &RawWatch) -> Result<ScanConfig, Vec<ValidationIssue>> {
+fn validate_scan(idx: usize, raw: &RawWatch) -> Result<SubtreeScan, Vec<ValidationIssue>> {
     let mut errors: Vec<ValidationIssue> = Vec::new();
-    let mut sb = ScanConfig::builder().hidden(raw.hidden);
+    let mut sb = SubtreeScan::builder().hidden(raw.hidden);
     match validate_depth(idx, raw.recursive, raw.max_depth) {
         Ok(bound) => sb = sb.max_depth(bound),
         Err(issue) => errors.push(issue),
@@ -1423,10 +1402,11 @@ mod tests {
     use specter_core::program::SpawnBody;
     use specter_core::{
         ArgPart, ClassSet, EffectScope, GlobPattern, Placeholder, ProfileIdentity, ReactionSpec,
-        ScanConfig,
+        ScanConfig, SubtreeScan,
     };
     use std::num::NonZeroU32;
     use std::path::Path;
+    use std::sync::Arc;
     use std::time::Duration;
 
     const ROOT: &str = "/";
@@ -1581,7 +1561,7 @@ mod tests {
         assert_eq!(w.scope, EffectScope::SubtreeRoot);
         assert_eq!(w.settle, Duration::from_millis(200));
         assert_eq!(w.max_settle, Duration::from_hours(1));
-        assert_eq!(w.scan, ScanConfig::builder().build());
+        assert_eq!(w.scan, SubtreeScan::builder().build());
         let SpawnBody::Exec(exec) = w.program.ops()[0].body() else {
             panic!("expected SpawnBody::Exec");
         };
@@ -1857,7 +1837,7 @@ mod tests {
         let one_level = lowered("max_depth = 1\n");
         assert_eq!(
             one_level.scan,
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build()
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build()
         );
         assert_eq!(lowered("recursive = false\n"), one_level);
         assert_eq!(lowered("recursive = false\nmax_depth = 1\n"), one_level);
@@ -1922,28 +1902,22 @@ mod tests {
     fn brace_expansion_pattern_compiles() {
         let toml = minimal_toml("pattern = \"**/*.{c,h,rs}\"\n");
         let cfg = Config::from_str(&toml).unwrap();
-        let ScanConfig::Subtree { pattern, .. } = &cfg.watches[0].scan else {
-            panic!(
-                "static watch lowers to Subtree, got {:?}",
-                cfg.watches[0].scan
-            );
-        };
-        assert!(pattern.is_some());
+        let pattern = GlobPattern::compile("**/*.{c,h,rs}").expect("valid glob");
+        assert_eq!(
+            cfg.watches[0].scan,
+            SubtreeScan::builder().pattern(pattern).build()
+        );
     }
 
     #[test]
     fn excludes_sorted_by_source_after_validate() {
         let toml = minimal_toml("exclude = [\"z/**\", \"a/**\", \"m/**\"]\n");
         let cfg = Config::from_str(&toml).unwrap();
-        let ScanConfig::Subtree { exclude, .. } = &cfg.watches[0].scan else {
-            panic!(
-                "static watch lowers to Subtree, got {:?}",
-                cfg.watches[0].scan
-            );
-        };
-        let sources: Vec<&str> = exclude
+        let scan = ScanConfig::from(cfg.watches[0].scan.clone());
+        let sources: Vec<&str> = scan
+            .exclude_globs()
             .iter()
-            .map(specter_core::GlobPattern::source)
+            .map(GlobPattern::source)
             .collect();
         assert_eq!(sources, vec!["a/**", "m/**", "z/**"]);
     }
@@ -2176,7 +2150,7 @@ mod tests {
         assert_eq!(w.scope, EffectScope::SubtreeRoot);
         assert_eq!(w.settle, Duration::from_millis(200));
         assert_eq!(w.max_settle, Duration::from_hours(1));
-        assert_eq!(w.scan, ScanConfig::builder().build());
+        assert_eq!(w.scan, SubtreeScan::builder().build());
     }
 
     #[test]
@@ -2436,7 +2410,7 @@ mod tests {
         assert_eq!(w.settle, Duration::from_millis(200));
         assert_eq!(w.max_settle, Duration::from_hours(1));
         assert_eq!(w.events, ClassSet::DEFAULT_SUBTREE_ROOT);
-        assert_eq!(w.scan, ScanConfig::builder().build());
+        assert_eq!(w.scan, SubtreeScan::builder().build());
     }
 
     /// The full lowering grid: a dynamic block's knobs stay on its spec, as a static block's do,
@@ -2467,7 +2441,7 @@ mod tests {
         assert_eq!(w.events, ClassSet::CONTENT);
         assert_eq!(
             w.scan,
-            ScanConfig::builder()
+            SubtreeScan::builder()
                 .hidden(true)
                 .pattern(GlobPattern::compile("*.log").expect("valid glob"))
                 .max_depth(NonZeroU32::new(1))
@@ -2485,8 +2459,10 @@ mod tests {
         assert_eq!(minted.settle, Duration::from_millis(300));
         let hand_built = ProfileIdentity::new(w.scan.clone(), w.max_settle, w.events);
         assert_eq!(minted.identity.config_hash(), hand_built.config_hash());
-        assert_eq!(req.identity.max_settle(), Duration::from_secs(2));
-        assert_eq!(req.identity.events(), ClassSet::STRUCTURE);
+        assert_eq!(
+            req.identity.config_hash(),
+            ProfileIdentity::discovery(Arc::clone(spec)).config_hash()
+        );
     }
 
     /// Dynamic watches accept `pattern` (per-Sub include filter) and `exclude` (per-Sub exclude
@@ -2502,7 +2478,7 @@ mod tests {
         let glob = |source| GlobPattern::compile(source).expect("valid glob");
         assert_eq!(
             cfg.watches[0].scan,
-            ScanConfig::builder()
+            SubtreeScan::builder()
                 .pattern(glob("*.log"))
                 .exclude(glob("*.gz"))
                 .build()

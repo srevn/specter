@@ -21,7 +21,7 @@ use specter_core::{
     DirSnapshot, EffectCompletion, EffectOutcome, EffectScope, EntryKind, FsEvent, FsIdentity,
     Input, LeafEntry, PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation,
     ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileState, ProofAuthority, ResourceId,
-    ResourceKind, ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
+    ResourceKind, ResourceRole, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubtreeScan,
     Termination, TimerKind, TreeSnapshot,
 };
 use specter_engine::Engine;
@@ -75,7 +75,7 @@ fn subtree_request(name: &str, r: ResourceId) -> SubAttachRequest {
     SubAttachRequest::for_anchor(
         name.into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -91,7 +91,7 @@ fn subtree_request_with_content(name: &str, r: ResourceId) -> SubAttachRequest {
     SubAttachRequest::for_anchor(
         name.into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -996,7 +996,7 @@ fn fire_cycle_mixed_ok_failed_decrements_uniformly() {
     let req = SubAttachRequest::for_anchor(
         "fmt".into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -1455,7 +1455,7 @@ fn fire_cycle_perfile_suppresses_post_rebase_phantom_for_non_idempotent_format()
     let req = SubAttachRequest::for_anchor(
         "fmt".into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),
@@ -1559,7 +1559,7 @@ fn fire_cycle_perfile_refires_on_real_change_not_gated_by_fire_history() {
     let req = SubAttachRequest::for_anchor(
         "fmt".into(),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),

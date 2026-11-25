@@ -7,7 +7,7 @@ use crossbeam::channel::{Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
     ChildEntry, DirChild, DirSnapshot, GlobPattern, Input, ProbeCorrelation, ProbeOutcome,
-    ProbeRequest, ProfileId, ProofObligation, ScanConfig,
+    ProbeRequest, ProfileId, ProofObligation, ScanConfig, SubtreeScan,
 };
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::collections::BTreeSet;
@@ -99,7 +99,7 @@ fn recursive_walk_with_max_depth_three_collects_three_levels() {
 
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(3)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(3)).build());
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     // depth 1: a; 2: a/b; 3: a/b/c; 4 (file): excluded.
     assert!(segs.contains("a"));
@@ -121,9 +121,11 @@ fn exclude_target_dir_omits_subtree_contents() {
 
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
-    let cfg = ScanConfig::builder()
-        .exclude(GlobPattern::compile("target/**").unwrap())
-        .build();
+    let cfg = ScanConfig::from(
+        SubtreeScan::builder()
+            .exclude(GlobPattern::compile("target/**").unwrap())
+            .build(),
+    );
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     // No entry under `target/` is emitted (every cumulative path starting with `target/` matches
     // the glob).
@@ -143,9 +145,11 @@ fn pattern_double_star_matches_recursive_files() {
 
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
-    let cfg = ScanConfig::builder()
-        .pattern(GlobPattern::compile("**/*.c").unwrap())
-        .build();
+    let cfg = ScanConfig::from(
+        SubtreeScan::builder()
+            .pattern(GlobPattern::compile("**/*.c").unwrap())
+            .build(),
+    );
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     // Dirs always emit (pattern bypass); .c file emits; .txt does not.
     assert!(segs.contains("src"));
@@ -164,7 +168,7 @@ fn hidden_false_skips_dot_subtree_entirely() {
 
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
-    let cfg = ScanConfig::builder().hidden(false).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().hidden(false).build());
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     assert!(!segs.contains(".git"));
     assert!(!segs.contains(".git/HEAD"));
@@ -181,7 +185,7 @@ fn hidden_true_includes_dot_subtree() {
 
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(sink(tx), nz(1)).unwrap();
-    let cfg = ScanConfig::builder().hidden(true).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().hidden(true).build());
     let segs = segments(&prober, &rx, tmp.path().to_path_buf(), cfg);
     assert!(segs.contains(".git"));
     assert!(segs.contains(".git/HEAD"));

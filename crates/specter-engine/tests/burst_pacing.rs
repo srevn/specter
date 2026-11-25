@@ -12,7 +12,7 @@ use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
     ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope, FsEvent, FsIdentity, Input,
     ProbeOutcome, ProbeResponse, ProfileIdentity, ProofAuthority, ResourceKind, ResourceRole,
-    ScanConfig, SubAttachAnchor, SubAttachRequest, SubParams,
+    SubAttachAnchor, SubAttachRequest, SubParams, SubtreeScan,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{MAX_SETTLE, SETTLE, first_probe_correlation, seed_to_idle};
@@ -30,7 +30,7 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),
@@ -154,7 +154,7 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
     let req = SubAttachRequest {
         anchor: SubAttachAnchor::Resource(r),
         identity: ProfileIdentity::new(
-            ScanConfig::builder().build(),
+            SubtreeScan::builder().build(),
             MAX_SETTLE,
             ClassSet::CONTENT,
         ),

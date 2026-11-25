@@ -36,7 +36,7 @@ use specter_core::{
     MintEntry, ProfileIdentity, Sub, SubAttachAnchor, SubAttachRequest, SubParams, SubRegistry,
 };
 // Per-Resource bookkeeping.
-use specter_core::{ClassSet, ResourceKind};
+use specter_core::ResourceKind;
 // Probe + effect correlation.
 use specter_core::{CorrelationId, ProbeCorrelation};
 // Engine step I/O.
@@ -247,18 +247,6 @@ impl Engine {
             req.identity.config().match_chain().is_some(),
             "attach_sub_inner: ReactionSpec::Mint ⟺ ScanConfig::MatchChain \
              (a template mints; a chain Profile reconciles — neither exists without the other)",
-        );
-        // A chain shape's proof object is its match set; membership changes fold to STRUCTURE and
-        // have no in-place-write analog, so STRUCTURE is exactly the mask a discovery Profile
-        // subscribes (config lowering pins it). A wider mask would derive shape-blind state off
-        // classes the proof object cannot fold — `Profile::new` reads CONTENT/METADATA into
-        // `has_per_file_fds`, installing per-file FDs whose events the chain verdict ignores.
-        debug_assert!(
-            req.identity.config().match_chain().is_none()
-                || req.identity.events() == ClassSet::STRUCTURE,
-            "attach_sub_inner: ScanConfig::MatchChain ⟹ events == STRUCTURE \
-             (the match-set proof object folds membership only; got {:?})",
-            req.identity.events(),
         );
 
         let SubAttachRequest {
@@ -1127,9 +1115,9 @@ impl AnchorResolution {
 mod tests {
     use super::*;
     use specter_core::{
-        DedupKey, EffectCompletion, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeOutcome,
-        ProbeResponse, ProfileId, ResourceId, ScanConfig, StepOutput, SubId, SubRegistryDiff,
-        TimerId, TimerKind, WatchOp,
+        ClassSet, DedupKey, EffectCompletion, EffectOutcome, FsEvent, Input, ProbeCorrelation,
+        ProbeOutcome, ProbeResponse, ProfileId, ResourceId, StepOutput, SubId, SubRegistryDiff,
+        SubtreeScan, TimerId, TimerKind, WatchOp,
     };
     use std::num::NonZeroU32;
     use std::time::{Duration, Instant};
@@ -1416,7 +1404,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "bad".into(),
             SubAttachAnchor::Path(bad.clone()),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
             specter_core::testkit::single_exec_program(std::iter::empty()),
@@ -1449,7 +1437,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "rel".into(),
             SubAttachAnchor::Path(bad.clone()),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
             specter_core::testkit::single_exec_program(std::iter::empty()),
@@ -1495,7 +1483,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "bad".into(),
             SubAttachAnchor::Path(path.clone()),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
             specter_core::testkit::single_exec_program(std::iter::empty()),
@@ -1535,7 +1523,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "stale".into(),
             SubAttachAnchor::Resource(stale),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_millis(100),
             Duration::from_millis(50),
             specter_core::testkit::single_exec_program(std::iter::empty()),
@@ -1603,7 +1591,7 @@ mod tests {
         SubAttachRequest::for_anchor(
             name.into(),
             SubAttachAnchor::Resource(anchor),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_secs(6),
             settle,
             specter_core::testkit::single_exec_program(std::iter::empty()),
@@ -1824,7 +1812,7 @@ mod tests {
         let req = SubAttachRequest::for_anchor(
             "permtest".into(),
             SubAttachAnchor::Resource(anchor),
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             Duration::from_secs(6),
             Duration::from_millis(50),
             specter_core::testkit::single_exec_program(std::iter::empty()),

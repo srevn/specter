@@ -425,7 +425,7 @@ mod tests {
     use specter_core::{
         ChildEntry, ClassSet, Diff, DirChild, DirMeta, DirSnapshot, EntryKind, EntryRef,
         FsIdentity, LeafEntry, Profile, ProfileIdentity, ProfileMap, ResourceId, ResourceKind,
-        ResourceRole, ScanConfig, StepOutput, Tree, TreeSnapshot, WatchOp,
+        ResourceRole, StepOutput, SubtreeScan, Tree, TreeSnapshot, WatchOp,
     };
     use std::collections::BTreeMap;
     use std::num::NonZeroU32;
@@ -485,7 +485,7 @@ mod tests {
             &mut tree,
             Profile::new(
                 r,
-                ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, events),
+                ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, events),
                 SETTLE,
                 None,
             ),
@@ -676,7 +676,7 @@ mod tests {
             Profile::new(
                 r,
                 ProfileIdentity::new(
-                    ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+                    SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
                     MAX_SETTLE,
                     ClassSet::CONTENT,
                 ),

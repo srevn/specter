@@ -390,8 +390,8 @@ mod tests {
     };
     use specter_core::{
         ClassSet, EffectScope, EntryKind, FS_ROOT_SEGMENT, Input, MintEntry, PatternSpec, PriorDir,
-        ProfileIdentity, ReactionSpec, ResourceId, ResourceKind, ResourceRole, ScanConfig,
-        StepOutput, SubAttachAnchor, SubAttachRequest, SubParams, Tree,
+        ProfileIdentity, ReactionSpec, ResourceId, ResourceKind, ResourceRole, StepOutput,
+        SubAttachAnchor, SubAttachRequest, SubParams, SubtreeScan, Tree,
     };
     use std::num::NonZeroU32;
     use std::path::Path;
@@ -555,7 +555,7 @@ mod tests {
             Input::AttachSub(SubAttachRequest::from_parts(
                 SubAttachAnchor::Resource(srv),
                 ProfileIdentity::new(
-                    ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+                    SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
                     MAX_SETTLE,
                     ClassSet::STRUCTURE,
                 ),
@@ -580,13 +580,9 @@ mod tests {
         let _ = e.step(
             Input::AttachSub(SubAttachRequest::from_parts(
                 SubAttachAnchor::Resource(srv),
-                ProfileIdentity::new(
-                    ScanConfig::MatchChain(Arc::new(
-                        PatternSpec::parse("/srv/*").expect("valid pattern"),
-                    )),
-                    MAX_SETTLE,
-                    ClassSet::STRUCTURE,
-                ),
+                ProfileIdentity::discovery(Arc::new(
+                    PatternSpec::parse("/srv/*").expect("valid pattern"),
+                )),
                 SubParams::spawn(
                     "plain".into(),
                     empty_program(),

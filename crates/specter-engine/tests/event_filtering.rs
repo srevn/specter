@@ -12,7 +12,7 @@ use specter_core::testkit::{covered, dir_snap, dir_snap_nested, proven};
 use specter_core::{
     AnchorClaim, BurstFinish, ClassSet, DedupKey, Diagnostic, DirMeta, DirSnapshot, EntryKind,
     FsEvent, FsIdentity, Input, ProbeFailure, ProbeOutcome, ProbeResponse, ProfileId, ProfileState,
-    ResourceId, ResourceKind, ResourceRole, ScanConfig, SubAttachAnchor, WatchOp,
+    ResourceId, ResourceKind, ResourceRole, SubAttachAnchor, SubtreeScan, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -51,7 +51,7 @@ fn it_ef_1_default_subtree_root_emits_per_file_watch_on_leaves() {
         &mut e,
         "build",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::DEFAULT_SUBTREE_ROOT,
         MAX_SETTLE,
         t0,
@@ -108,7 +108,7 @@ fn it_ef_1_structure_only_subtree_does_not_emit_per_file_watch() {
         &mut e,
         "ls-only",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::STRUCTURE,
         MAX_SETTLE,
         t0,
@@ -160,7 +160,7 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
         &mut e,
         "make",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         Instant::now(),
@@ -169,7 +169,7 @@ fn it_ef_2_two_subs_different_masks_fork_separate_profiles() {
         &mut e,
         "audit",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::METADATA,
         MAX_SETTLE,
         Instant::now(),
@@ -210,7 +210,7 @@ fn it_ef_2b_profile_events_invariant_across_sub_attach_detach() {
     let root = anchor_dir(&mut e, "src");
 
     let mask = ClassSet::CONTENT | ClassSet::METADATA;
-    let cfg = || ScanConfig::builder().build();
+    let cfg = || SubtreeScan::builder().build();
 
     let (sid_a, pid_a) = attach(
         &mut e,
@@ -276,7 +276,7 @@ fn it_ef_2_chmod_only_fires_metadata_profile_not_content_profile() {
     // `it_ef_6_descendant_metadata_drops_on_content_only_sub`.
     let mut e = Engine::new();
     let root = anchor_dir(&mut e, "build");
-    let cfg = ScanConfig::builder().build();
+    let cfg = SubtreeScan::builder().build();
     let t0_a = Instant::now();
     let (_sid_a, pid_a, _) = attach_returning(
         &mut e,
@@ -350,7 +350,7 @@ fn it_ef_3_descent_prefix_contributes_structure_only() {
         &mut e,
         "watch",
         SubAttachAnchor::Path(PathBuf::from("/tmp/build/leaf")),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT, // user wants CONTENT only
         MAX_SETTLE,
         Instant::now(),
@@ -407,7 +407,7 @@ fn it_ef_4_anchor_terminal_bypasses_filter_for_narrow_mask() {
         &mut e,
         "watch",
         SubAttachAnchor::Resource(anchor),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0,
@@ -483,7 +483,7 @@ fn it_ef_6_descendant_metadata_drops_on_content_only_sub() {
         &mut e,
         "build",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0,
@@ -545,7 +545,7 @@ fn it_ef_6_descendant_content_changed_drives_burst_on_content_sub() {
         &mut e,
         "build",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0,
@@ -597,7 +597,7 @@ fn it_ef_7_dir_metadata_drops_outside_proof_object() {
         &mut e,
         "w",
         SubAttachAnchor::Resource(x),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::STRUCTURE | ClassSet::CONTENT | ClassSet::METADATA,
         MAX_SETTLE,
         now,
@@ -649,7 +649,7 @@ fn it_ef_7_boundary_dir_structure_drops_for_outer_profile_via_co_located_demand(
         &mut e,
         "outer",
         SubAttachAnchor::Resource(x),
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         ClassSet::STRUCTURE | ClassSet::CONTENT,
         MAX_SETTLE,
         now,
@@ -665,7 +665,7 @@ fn it_ef_7_boundary_dir_structure_drops_for_outer_profile_via_co_located_demand(
         &mut e,
         "inner",
         SubAttachAnchor::Resource(sub),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::STRUCTURE | ClassSet::CONTENT,
         MAX_SETTLE,
         outer_seeded,
@@ -713,7 +713,7 @@ fn it_ef_7_boundary_dir_holds_no_fd_and_events_drop_at_head_guard() {
         &mut e,
         "w",
         SubAttachAnchor::Resource(x),
-        ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
         ClassSet::STRUCTURE | ClassSet::CONTENT,
         MAX_SETTLE,
         now,
@@ -774,7 +774,7 @@ fn it_ef_7_boundary_dir_holds_no_fd_and_events_drop_at_head_guard() {
 fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
     let mut e = Engine::new();
     let root = anchor_dir(&mut e, "root");
-    let cfg = ScanConfig::builder().build();
+    let cfg = SubtreeScan::builder().build();
 
     // Profile A: events = CONTENT only.
     let (_sid_a, _pid_a, attach_a) = attach_returning(
@@ -860,7 +860,7 @@ fn it_ef_5_second_profile_widens_mask_emits_fresh_watch() {
 fn it_ef_2_dedup_keys_disambiguated_by_profile_id() {
     let mut e = Engine::new();
     let root = anchor_dir(&mut e, "build");
-    let cfg = ScanConfig::builder().build();
+    let cfg = SubtreeScan::builder().build();
     let (sid_a, pid_a) = attach(
         &mut e,
         "make",
@@ -915,7 +915,7 @@ fn seed_vanished_releases_anchor_claim_for_recovery() {
         &mut e,
         "watch",
         SubAttachAnchor::Resource(anchor),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0,
@@ -986,7 +986,7 @@ fn seed_vanished_then_recovery_does_not_violate_trichotomy() {
         &mut e,
         "watch",
         SubAttachAnchor::Resource(anchor),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0,
@@ -1056,7 +1056,7 @@ fn seed_failed_releases_anchor_claim() {
         &mut e,
         "watch",
         SubAttachAnchor::Resource(anchor),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0,
@@ -1104,7 +1104,7 @@ fn setup_with_surviving_child(
         e,
         "build",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0,
@@ -1313,7 +1313,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         &mut e,
         "P",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0_p,
@@ -1323,7 +1323,7 @@ fn anchor_terminal_with_reap_pending_multi_profile_each_released_once() {
         &mut e,
         "Q",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE + Duration::from_secs(1),
         t0_q,
@@ -1481,7 +1481,7 @@ fn release_descendant_claim_idle_detach_reaps_covered_leaf() {
         &mut e,
         "build",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0,
@@ -1707,7 +1707,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         &mut e,
         "P",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0_p,
@@ -1717,7 +1717,7 @@ fn release_descendant_claim_multi_profile_preserves_others() {
         &mut e,
         "Q",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE + Duration::from_secs(1),
         t0_q,
@@ -1815,7 +1815,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         &mut e,
         "P",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::CONTENT,
         MAX_SETTLE,
         t0_p,
@@ -1825,7 +1825,7 @@ fn delete_child_during_graft_recompute_skips_releasing_profile() {
         &mut e,
         "Q",
         SubAttachAnchor::Resource(root),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::METADATA,
         MAX_SETTLE + Duration::from_secs(1),
         t0_q,

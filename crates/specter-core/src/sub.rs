@@ -15,7 +15,7 @@
 
 use crate::ids::{ProfileId, ResourceId, SubId};
 use crate::program::ActionProgram;
-use crate::scan_config::{ProfileIdentity, ScanConfig};
+use crate::scan_config::{ProfileIdentity, SubtreeScan};
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use smallvec::SmallVec;
@@ -335,7 +335,7 @@ impl SubAttachRequest {
     pub fn for_anchor(
         name: CompactString,
         anchor: SubAttachAnchor,
-        config: ScanConfig,
+        scan: SubtreeScan,
         max_settle: Duration,
         settle: Duration,
         program: Arc<ActionProgram>,
@@ -345,7 +345,7 @@ impl SubAttachRequest {
     ) -> Self {
         Self::from_parts(
             anchor,
-            ProfileIdentity::new(config, max_settle, events),
+            ProfileIdentity::new(scan, max_settle, events),
             SubParams::spawn(name, program, scope, settle, log_output),
         )
     }
@@ -1105,7 +1105,7 @@ impl SubRegistry {
 mod tests {
     use super::{
         ActionProgram, ClassSet, EffectScope, MintEntry, MintNarration, MintSpec, ProfileIdentity,
-        ReactionSpec, ScanConfig, SpawnSpec, Sub, SubParams, SubRegistry, SubRegistryDiff,
+        ReactionSpec, SpawnSpec, Sub, SubParams, SubRegistry, SubRegistryDiff, SubtreeScan,
     };
     use crate::ids::{ProfileId, SubId};
     use crate::program::{
@@ -1655,7 +1655,7 @@ mod tests {
             crate::SubAttachRequest::for_anchor(
                 "a".into(),
                 crate::SubAttachAnchor::Path(std::path::PathBuf::from("/a")),
-                crate::ScanConfig::builder()
+                crate::SubtreeScan::builder()
                     .max_depth(NonZeroU32::new(1))
                     .build(),
                 Duration::from_hours(1),
@@ -1813,7 +1813,7 @@ mod tests {
     fn mint_spec(scope: EffectScope) -> MintSpec {
         MintSpec {
             identity: ProfileIdentity::new(
-                ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+                SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
                 SETTLE * 4,
                 ClassSet::EMPTY,
             ),

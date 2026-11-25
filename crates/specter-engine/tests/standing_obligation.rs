@@ -12,7 +12,7 @@ use specter_core::testkit::{
 use specter_core::{
     ClassSet, Diagnostic, EffectScope, EntryKind, FsEvent, Input, ProbeOp, ProbeOutcome,
     ProbeRequest, ProbeResponse, ProfileState, ProofAuthority, ProofObligation, ResourceKind,
-    ResourceRole, ScanConfig, SubAttachAnchor, SubAttachRequest,
+    ResourceRole, SubAttachAnchor, SubAttachRequest, SubtreeScan,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{anchor_dir, drain_due, pid_of, seed_to_idle};
@@ -53,7 +53,7 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     let req = SubAttachRequest::for_anchor(
         CompactString::new("test"),
         SubAttachAnchor::Resource(r),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         MAX_SETTLE,
         SETTLE,
         empty_program(),

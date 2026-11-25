@@ -17,8 +17,8 @@ use specter_core::{
     ActiveBurst, ChildEntry, ClassSet, ContribKey, DetachReason, Diagnostic, DirChild, DirSnapshot,
     EffectCompletion, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input,
     MintEntry, MintSpec, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, Profile, ProfileId,
-    ProfileIdentity, ProfileState, ProofAuthority, Resource, ResourceId, ResourceKind, ScanConfig,
-    SpawnSpec, StepOutput, SubAttachAnchor, SubId, TimerKind, WatchOp,
+    ProfileIdentity, ProfileState, ProofAuthority, Resource, ResourceId, ResourceKind, SpawnSpec,
+    StepOutput, SubAttachAnchor, SubId, SubtreeScan, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -1305,7 +1305,7 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
     let now = Instant::now();
 
     let template = Arc::new(MintSpec {
-        identity: ProfileIdentity::new(ScanConfig::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
+        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
         settle: SETTLE,
         spawn: SpawnSpec::new(empty_program(), EffectScope::SubtreeRoot, false),
     });
@@ -1567,7 +1567,7 @@ fn a_mint_at_a_slot_a_watch_rejection_vacated_founds_its_profile_kinded() {
 
     let flat = Arc::new(MintSpec {
         identity: ProfileIdentity::new(
-            ScanConfig::builder().max_depth(NonZeroU32::new(1)).build(),
+            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
             MAX_SETTLE,
             ClassSet::EMPTY,
         ),
@@ -2053,7 +2053,7 @@ fn mid_burst_discovery_descendant_does_not_drain_covering_profile() {
         &mut e,
         "outer",
         SubAttachAnchor::Resource(srv),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         DEFAULT_EVENTS,
         MAX_SETTLE,
         now,
@@ -2114,7 +2114,7 @@ fn mid_burst_minted_descendant_still_drains_through_discovery() {
         &mut e,
         "outer",
         SubAttachAnchor::Resource(srv),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         DEFAULT_EVENTS,
         MAX_SETTLE,
         now,
@@ -2189,7 +2189,7 @@ fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
         &mut e,
         "co-resident",
         SubAttachAnchor::Resource(x),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::EMPTY,
         MAX_SETTLE,
         now,
@@ -2259,7 +2259,7 @@ fn an_appearance_minted_onto_a_standing_profile_owes_its_fire() {
         &mut e,
         "operator",
         SubAttachAnchor::Resource(o),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::EMPTY,
         MAX_SETTLE,
         now,
@@ -2789,7 +2789,7 @@ fn descent_vanish_preserves_co_resident_discovery_contribution() {
         &mut e,
         "deep",
         SubAttachAnchor::Path("/data/missing/deep".into()),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         ClassSet::EMPTY,
         MAX_SETTLE,
         now,

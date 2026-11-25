@@ -10,7 +10,7 @@ use nix::sys::resource::{Resource, getrlimit, setrlimit};
 use slotmap::SlotMap;
 use specter_core::{
     Input, ProbeCorrelation, ProbeFailure, ProbeOutcome, ProbeRequest, ProfileId, ProofObligation,
-    ScanConfig,
+    ScanConfig, SubtreeScan,
 };
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::num::NonZeroUsize;
@@ -55,7 +55,7 @@ fn a_walk_with_no_descriptor_free_fails_transient() {
         correlation: ProbeCorrelation::from(1),
         target_path: Arc::clone(&root),
         anchor_path: root,
-        scan_config: Arc::new(ScanConfig::builder().build()),
+        scan_config: Arc::new(ScanConfig::from(SubtreeScan::builder().build())),
         captured_with: 0,
         baseline_subtree: None,
         obligation: ProofObligation::WholeSubtree,

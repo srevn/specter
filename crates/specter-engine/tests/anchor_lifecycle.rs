@@ -25,7 +25,7 @@ use specter_core::testkit::{anchor_ok, dir_snap, file_leaf, proven};
 use specter_core::{
     AnchorClaim, ClassSet, Diagnostic, EntryKind, FsEvent, Input, ProbeFailure, ProbeOp,
     ProbeOutcome, ProbeRequest, ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind,
-    ResourceRole, ScanConfig, StepOutput, SubAttachAnchor, SubId,
+    ResourceRole, StepOutput, SubAttachAnchor, SubId, SubtreeScan,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -65,7 +65,7 @@ fn attach_at(
         e,
         name,
         SubAttachAnchor::Resource(anchor),
-        ScanConfig::builder().build(),
+        SubtreeScan::builder().build(),
         events,
         max_settle,
         now,

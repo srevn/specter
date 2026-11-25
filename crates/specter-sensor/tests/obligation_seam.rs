@@ -20,8 +20,8 @@ use crossbeam::channel::{Sender, unbounded};
 use slotmap::SlotMap;
 use specter_core::{
     Input, ProbeCorrelation, ProbeOutcome, ProbeRequest, ProfileId, ProofAuthority,
-    ProofObligation, QuiescenceVerdict, QuiescenceWitness, ScanConfig, StableReason, TreeSnapshot,
-    quiescence_verdict,
+    ProofObligation, QuiescenceVerdict, QuiescenceWitness, ScanConfig, StableReason, SubtreeScan,
+    TreeSnapshot, quiescence_verdict,
 };
 use specter_sensor::{ProbeResponse, Prober, ProberResponseSender, SendError, WorkerProber};
 use std::num::NonZeroUsize;
@@ -76,7 +76,7 @@ fn whole_subtree_samples_witness_offchain_inplace_write() {
     let (tx, rx) = unbounded::<Input>();
     let mut prober = WorkerProber::new(Arc::new(TestProberSink { tx }), nz(1)).unwrap();
     let p = fresh_profile_id();
-    let scan_config = Arc::new(ScanConfig::builder().build());
+    let scan_config = Arc::new(ScanConfig::from(SubtreeScan::builder().build()));
     let target: Arc<Path> = Arc::from(root.to_path_buf());
 
     // The shape the engine emits for both the Seed walk and every events-incomplete Standard

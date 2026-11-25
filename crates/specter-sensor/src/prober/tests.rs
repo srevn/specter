@@ -15,6 +15,7 @@ use specter_core::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, EntryKind, FsIdentity, GlobPattern, Input,
     LeafEntry, NonEmptyPathSet, PatternSpec, ProbeCorrelation, ProbeFailure, ProbeOutcome,
     ProbeRequest, ProbeResponse, ProfileId, ProofAuthority, ProofObligation, ScanConfig,
+    SubtreeScan,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
@@ -172,7 +173,7 @@ fn probe_anchor_file_returns_vanished_for_symlink() {
 fn probe_subtree_returns_vanished_for_missing_path() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("nope");
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     assert!(matches!(psub(&path, &cfg), ProbeOutcome::Vanished));
 }
 
@@ -181,14 +182,14 @@ fn probe_subtree_returns_vanished_for_regular_file() {
     let tmp = TempDir::new().unwrap();
     let path = tmp.path().join("file.txt");
     std::fs::write(&path, b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     assert!(matches!(psub(&path, &cfg), ProbeOutcome::Vanished));
 }
 
 #[test]
 fn probe_subtree_empty_dir_returns_zero_entries() {
     let tmp = TempDir::new().unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let result = psub(tmp.path(), &cfg);
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
         panic!("expected Ok(Dir)");
@@ -202,7 +203,7 @@ fn probe_subtree_flat_lists_children() {
     std::fs::write(tmp.path().join("a"), b"1").unwrap();
     std::fs::write(tmp.path().join("b"), b"2").unwrap();
     std::fs::write(tmp.path().join("c"), b"3").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let result = psub(tmp.path(), &cfg);
     let segs = segments(&result);
     assert_eq!(
@@ -217,7 +218,7 @@ fn probe_subtree_recursive_collects_descendants() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
 
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let result = psub(tmp.path(), &cfg);
     let segs = segments(&result);
     assert_eq!(segs, vec!["sub".to_string(), "sub/file.c".to_string()]);
@@ -229,7 +230,7 @@ fn probe_subtree_non_recursive_omits_grandchildren() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
 
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let result = psub(tmp.path(), &cfg);
     let segs = segments(&result);
     assert_eq!(segs, vec!["sub".to_string()]);
@@ -241,7 +242,7 @@ fn probe_subtree_max_depth_one_excludes_grandchildren() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/grand.c"), b"x").unwrap();
 
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let segs = segments(&psub(tmp.path(), &cfg));
     assert_eq!(segs, vec!["sub".to_string()]);
 }
@@ -252,7 +253,7 @@ fn probe_subtree_max_depth_two_includes_grandchildren() {
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/grand.c"), b"x").unwrap();
 
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(2)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(2)).build());
     let segs = segments(&psub(tmp.path(), &cfg));
     assert_eq!(segs, vec!["sub".to_string(), "sub/grand.c".to_string()]);
 }
@@ -263,7 +264,7 @@ fn probe_subtree_max_depth_three_collects_three_levels() {
     std::fs::create_dir_all(tmp.path().join("a/b/c")).unwrap();
     std::fs::write(tmp.path().join("a/b/c/file.c"), b"x").unwrap();
 
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(3)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(3)).build());
     let segs = segments(&psub(tmp.path(), &cfg));
     // Depth 1: "a"; depth 2: "a/b"; depth 3: "a/b/c". File is at depth 4 — excluded by max_depth=3.
     assert_eq!(
@@ -281,7 +282,7 @@ fn probe_subtree_exclude_drops_matched_entries() {
     std::fs::write(tmp.path().join("src/main.c"), b"x").unwrap();
 
     let exclude = GlobPattern::compile("target/**").unwrap();
-    let cfg = ScanConfig::builder().exclude(exclude).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().exclude(exclude).build());
     let segs = segments(&psub(tmp.path(), &cfg));
     // `target/**` matches paths under target (and `target` itself with globset's `**` semantics).
     // `target/foo` is excluded.
@@ -298,10 +299,12 @@ fn probe_subtree_pattern_matches_files_only() {
     std::fs::create_dir(tmp.path().join("subdir")).unwrap();
 
     let pattern = GlobPattern::compile("**/*.c").unwrap();
-    let cfg = ScanConfig::builder()
-        .pattern(pattern)
-        .max_depth(NonZeroU32::new(1))
-        .build();
+    let cfg = ScanConfig::from(
+        SubtreeScan::builder()
+            .pattern(pattern)
+            .max_depth(NonZeroU32::new(1))
+            .build(),
+    );
     let segs = segments(&psub(tmp.path(), &cfg));
     // .c files: in. .txt: out. Subdirs: in (Dir bypass).
     assert!(segs.contains(&"main.c".to_string()));
@@ -317,7 +320,7 @@ fn probe_subtree_pattern_recursive_matches_nested_files() {
     std::fs::write(tmp.path().join("src/foo.txt"), b"x").unwrap();
 
     let pattern = GlobPattern::compile("**/*.c").unwrap();
-    let cfg = ScanConfig::builder().pattern(pattern).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().pattern(pattern).build());
     let segs = segments(&psub(tmp.path(), &cfg));
     assert!(segs.contains(&"src".to_string()));
     assert!(segs.contains(&"src/main.c".to_string()));
@@ -331,7 +334,7 @@ fn probe_subtree_hidden_false_skips_dotfiles() {
     std::fs::write(tmp.path().join(".git/HEAD"), b"x").unwrap();
     std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
 
-    let cfg = ScanConfig::builder().hidden(false).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().hidden(false).build());
     let segs = segments(&psub(tmp.path(), &cfg));
     assert_eq!(segs, vec!["main.c".to_string()]);
 }
@@ -343,7 +346,7 @@ fn probe_subtree_hidden_true_includes_dotfiles() {
     std::fs::write(tmp.path().join(".git/HEAD"), b"x").unwrap();
     std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
 
-    let cfg = ScanConfig::builder().hidden(true).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().hidden(true).build());
     let segs = segments(&psub(tmp.path(), &cfg));
     assert!(segs.contains(&".git".to_string()));
     assert!(segs.contains(&".git/HEAD".to_string()));
@@ -357,7 +360,7 @@ fn probe_subtree_does_not_descend_symlinks() {
     std::fs::write(tmp.path().join("target/file.c"), b"x").unwrap();
     std::os::unix::fs::symlink(tmp.path().join("target"), tmp.path().join("link")).unwrap();
 
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let segs = segments(&psub(tmp.path(), &cfg));
     // `link` is a symlink: emitted as Symlink entry but not descended through. `target` is a real
     // dir: emitted and descended.
@@ -375,7 +378,7 @@ fn probe_subtree_emits_symlink_entry_kind() {
     std::fs::write(&target, b"x").unwrap();
     std::os::unix::fs::symlink(&target, tmp.path().join("link")).unwrap();
 
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let result = psub(tmp.path(), &cfg);
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
         panic!("expected Ok(Dir)");
@@ -399,10 +402,12 @@ fn probe_subtree_pattern_applies_to_symlinks() {
     std::os::unix::fs::symlink(&target, tmp.path().join("link.c")).unwrap();
     std::os::unix::fs::symlink(&target, tmp.path().join("link.log")).unwrap();
 
-    let cfg = ScanConfig::builder()
-        .pattern(GlobPattern::compile("*.c").unwrap())
-        .max_depth(NonZeroU32::new(1))
-        .build();
+    let cfg = ScanConfig::from(
+        SubtreeScan::builder()
+            .pattern(GlobPattern::compile("*.c").unwrap())
+            .max_depth(NonZeroU32::new(1))
+            .build(),
+    );
     let result = psub(tmp.path(), &cfg);
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
         panic!("expected Ok(Dir)");
@@ -431,7 +436,7 @@ fn probe_subtree_recursive_false_emits_uncovered_at_depth_one_dir_child() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/inside.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = psub(tmp.path(), &cfg) else {
         panic!("expected SubtreeProven");
     };
@@ -453,7 +458,7 @@ fn probe_subtree_max_depth_emits_uncovered_at_boundary() {
     // "depth+1" half-open semantic.
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir_all(tmp.path().join("a/b")).unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(2)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(2)).build());
     let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = psub(tmp.path(), &cfg) else {
         panic!("expected SubtreeProven");
     };
@@ -495,7 +500,7 @@ fn probe_then_reprobe_with_baseline(
 fn mtime_skip_returns_arc_clone_when_root_meta_matches() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let (baseline, second) = probe_then_reprobe_with_baseline(tmp.path(), &cfg);
     let ProbeOutcome::SubtreeProven { snapshot: arc2, .. } = second else {
         panic!("second probe failed");
@@ -510,7 +515,7 @@ fn mtime_skip_returns_arc_clone_when_root_meta_matches() {
 fn mtime_skip_does_not_match_when_mtime_differs() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -554,7 +559,7 @@ fn mtime_skip_does_not_match_when_mtime_differs() {
 fn mtime_skip_does_not_match_when_inode_differs() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -600,7 +605,7 @@ fn mtime_skip_does_not_match_when_inode_differs() {
 fn mtime_skip_does_not_match_when_device_differs() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -649,7 +654,7 @@ fn mtime_skip_recursive_propagates_via_subtree_baseline() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -695,7 +700,7 @@ fn mtime_skip_recursive_propagates_via_subtree_baseline() {
 fn chains_with_path_in_set_refuses_skip() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -737,7 +742,7 @@ fn chains_with_descendant_in_set_refuses_skip_at_target() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -775,7 +780,7 @@ fn chains_with_descendant_in_set_refuses_skip_at_target() {
 fn chains_with_unrelated_path_does_not_affect_skip() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -818,7 +823,7 @@ fn chains_propagate_through_recursion_to_descendant() {
     std::fs::create_dir_all(tmp.path().join("dir_a/dir_b")).unwrap();
     std::fs::create_dir(tmp.path().join("dir_c")).unwrap();
     std::fs::write(tmp.path().join("dir_c/x.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -861,7 +866,7 @@ fn chains_propagate_through_recursion_to_descendant() {
 fn forced_true_bypasses_mtime_skip_at_root() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -900,7 +905,7 @@ fn forced_true_bypasses_mtime_skip_in_recursion() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -941,7 +946,7 @@ fn forced_false_default_path_unaffected() {
     // Control: forced=false + mtime match + empty obligation chains → skip.
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let (baseline, second) = probe_then_reprobe_with_baseline(tmp.path(), &cfg);
     let ProbeOutcome::SubtreeProven { snapshot: arc2, .. } = second else {
         panic!("re-probe failed");
@@ -991,7 +996,7 @@ fn baseline_at_unix_epoch(
 fn cache_transfer_matches_baseline_hash_on_identity_match() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"hello").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -1037,7 +1042,7 @@ fn cache_transfer_matches_baseline_hash_on_identity_match() {
 fn cache_transfer_skipped_when_leaf_identity_changes() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"hello").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -1102,7 +1107,7 @@ fn cache_transfer_threads_through_recursion() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"hello").unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let first = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -1179,7 +1184,7 @@ fn dir_snapshot_root_meta_carries_lstat_triple() {
     use std::os::unix::fs::MetadataExt;
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let raw = std::fs::symlink_metadata(tmp.path()).unwrap();
     let result = probe_subtree(
         tmp.path(),
@@ -1202,7 +1207,7 @@ fn dir_snapshot_captured_with_carries_request_value() {
     const STAMP: u64 = 0xCAFE_BABE_DEAD_BEEF;
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("a.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let result = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -1224,7 +1229,7 @@ fn dir_snapshot_uncovered_branches_have_subtree_none() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::create_dir(tmp.path().join("sub/inner")).unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let result = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -1253,10 +1258,12 @@ fn dir_snapshot_pattern_filtered_files_absent() {
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
     std::fs::write(tmp.path().join("foo.txt"), b"x").unwrap();
-    let cfg = ScanConfig::builder()
-        .pattern(GlobPattern::compile("**/*.c").unwrap())
-        .max_depth(NonZeroU32::new(1))
-        .build();
+    let cfg = ScanConfig::from(
+        SubtreeScan::builder()
+            .pattern(GlobPattern::compile("**/*.c").unwrap())
+            .max_depth(NonZeroU32::new(1))
+            .build(),
+    );
     let result = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -1279,9 +1286,11 @@ fn dir_snapshot_excluded_paths_absent() {
     std::fs::create_dir(tmp.path().join("target")).unwrap();
     std::fs::write(tmp.path().join("target/foo"), b"x").unwrap();
     std::fs::write(tmp.path().join("main.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder()
-        .exclude(GlobPattern::compile("target/**").unwrap())
-        .build();
+    let cfg = ScanConfig::from(
+        SubtreeScan::builder()
+            .exclude(GlobPattern::compile("target/**").unwrap())
+            .build(),
+    );
     let result = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -1319,7 +1328,7 @@ fn entries_are_lex_sorted_by_btreemap() {
     std::fs::write(tmp.path().join("zeta"), b"x").unwrap();
     std::fs::write(tmp.path().join("alpha"), b"x").unwrap();
     std::fs::write(tmp.path().join("mu"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let result = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -1347,7 +1356,7 @@ fn dir_hash_recursive_is_deterministic_across_two_probes_on_stable_fs() {
     let tmp = TempDir::new().unwrap();
     std::fs::create_dir(tmp.path().join("sub")).unwrap();
     std::fs::write(tmp.path().join("sub/file.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let r1 = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -1393,9 +1402,11 @@ fn nested_secret_fixture(tmp: &TempDir) -> (PathBuf, ScanConfig, ProofObligation
     let target = tmp.path().join("sub");
     std::fs::create_dir_all(target.join("secret")).unwrap();
     std::fs::write(target.join("secret/a"), b"x").unwrap();
-    let cfg = ScanConfig::builder()
-        .exclude(GlobPattern::compile("secret/**").unwrap())
-        .build();
+    let cfg = ScanConfig::from(
+        SubtreeScan::builder()
+            .exclude(GlobPattern::compile("secret/**").unwrap())
+            .build(),
+    );
     let mut chain = BTreeSet::new();
     chain.insert(Arc::from(target.join("secret/a")));
     (target, cfg, chains_from(chain))
@@ -1445,7 +1456,7 @@ fn depth_is_anchor_relative_when_rooted_below_anchor() {
     let target = tmp.path().join("d");
     std::fs::create_dir(&target).unwrap();
     std::fs::write(target.join("file"), b"x").unwrap();
-    let cfg = ScanConfig::builder().max_depth(NonZeroU32::new(1)).build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build());
     let outcome = probe_subtree(&target, tmp.path(), &cfg, 0, None, &no_obligation(), false);
     let segs = segments(&outcome);
     assert!(
@@ -1508,9 +1519,11 @@ fn on_chain_kinded_drop_omits_and_stays_authoritative() {
     // exclude/hidden/depth bound) admits it — so the drop lands on the kinded gate alone, the path
     // the previous two tests cannot reach.
     std::fs::write(tmp.path().join("build"), b"").unwrap();
-    let cfg = ScanConfig::builder()
-        .pattern(GlobPattern::compile("*.log").unwrap())
-        .build();
+    let cfg = ScanConfig::from(
+        SubtreeScan::builder()
+            .pattern(GlobPattern::compile("*.log").unwrap())
+            .build(),
+    );
     let mut chain = BTreeSet::new();
     chain.insert(Arc::from(tmp.path().join("build")));
     let outcome = probe_subtree(
@@ -1573,7 +1586,7 @@ fn non_utf8_filename_omitted_under_whole_subtree_stays_authoritative() {
     std::fs::write(tmp.path().join("normal.log"), b"x").unwrap();
     write_non_utf8_file(tmp.path());
 
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let outcome = probe_subtree(
         tmp.path(),
         tmp.path(),
@@ -1672,7 +1685,7 @@ fn a_directory_never_read_is_denied_and_named_wherever_it_lies() {
     let on_id = FsIdentity::from_metadata(&std::fs::symlink_metadata(&on_chain).unwrap());
     let _locked = [Mode::set(&on_chain, 0o000), Mode::set(&off_chain, 0o000)];
 
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let leaf = on_chain.join("inside.c");
     let walk = probe_subtree(tmp.path(), tmp.path(), &cfg, 0, None, &chain(&leaf), false);
     let (snapshot, authority) = proven(walk);
@@ -1701,7 +1714,7 @@ fn a_forced_walk_stands_on_an_unmoved_listing_it_cannot_read() {
     let a = tmp.path().join("a");
     std::fs::create_dir(&a).unwrap();
     std::fs::write(a.join("x.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let (baseline, _) = proven(psub(tmp.path(), &cfg));
     let _locked = Mode::set(&a, 0o000);
 
@@ -1734,7 +1747,7 @@ fn a_listed_directory_its_children_refuse_stands_and_is_named() {
     let r = tmp.path().join("r");
     std::fs::create_dir(&r).unwrap();
     std::fs::write(r.join("f"), b"x").unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let (baseline, _) = proven(psub(tmp.path(), &cfg));
     let _list_only = Mode::set(&r, 0o444);
 
@@ -1766,7 +1779,7 @@ fn a_moved_listing_it_cannot_read_stands_and_is_named() {
     let d = tmp.path().join("d");
     std::fs::create_dir(&d).unwrap();
     std::fs::write(d.join("x.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let (real, _) = proven(psub(tmp.path(), &cfg));
     // The same directory listed at another moment: its identity, an older `lstat`.
     let real_d = real.lookup_covered_dir("d").unwrap();
@@ -1817,7 +1830,7 @@ fn a_directory_its_listing_records_denied_stays_denied_unnamed() {
     let d = tmp.path().join("d");
     std::fs::create_dir(&d).unwrap();
     let _locked = Mode::set(&d, 0o000);
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let (baseline, first) = proven(psub(tmp.path(), &cfg));
     assert_eq!(named(&first), [d.as_path()], "first met, it is named");
 
@@ -1846,7 +1859,7 @@ fn a_directory_replaced_by_one_it_cannot_read_is_denied_and_named() {
     let tmp = TempDir::new().unwrap();
     let d = tmp.path().join("d");
     std::fs::create_dir(&d).unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     let (baseline, _) = proven(psub(tmp.path(), &cfg));
     let old_id = baseline
         .lookup_covered_dir("d")
@@ -1892,7 +1905,7 @@ fn a_root_never_read_whole_fails_and_an_empty_one_lists() {
     std::fs::write(full.join("f"), b"x").unwrap();
     std::fs::create_dir(&empty).unwrap();
     let _list_only = [Mode::set(&full, 0o444), Mode::set(&empty, 0o444)];
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
 
     let outcome = psub(&full, &cfg);
     assert!(
@@ -1916,7 +1929,7 @@ fn certify_absent_chain_leaf_is_authoritative_not_undischarged() {
     // legitimate delete (rm -rf, rename-away, editor temp) would wedge into never-fire.
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("kept.c"), b"x").unwrap();
-    let cfg = ScanConfig::builder().build();
+    let cfg = ScanConfig::from(SubtreeScan::builder().build());
     // The obligation references a leaf that does not exist on disk.
     let mut chain = BTreeSet::new();
     chain.insert(Arc::from(tmp.path().join("deleted.c")));
@@ -2707,7 +2720,7 @@ fn deep_tree_walks_on_worker_without_stack_overflow() {
         correlation: ProbeCorrelation::from(1),
         target_path: Arc::clone(&root),
         anchor_path: root,
-        scan_config: Arc::new(ScanConfig::builder().build()),
+        scan_config: Arc::new(ScanConfig::from(SubtreeScan::builder().build())),
         captured_with: 0,
         baseline_subtree: None,
         obligation: ProofObligation::WholeSubtree,
