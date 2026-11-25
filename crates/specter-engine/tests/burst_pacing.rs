@@ -16,7 +16,7 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{MAX_SETTLE, SETTLE, first_probe_correlation, seed_to_idle};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -234,9 +234,7 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
                 correlation: probe_correlation,
                 outcome: ProbeOutcome::SubtreeProven {
                     snapshot: degraded_snap,
-                    authority: ProofAuthority::Undischarged {
-                        first_unread: std::sync::Arc::clone(&unread),
-                    },
+                    authority: ProofAuthority::certify(BTreeSet::from([Arc::clone(&unread)])),
                 },
             }),
             response_at,

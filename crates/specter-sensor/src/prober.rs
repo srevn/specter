@@ -31,10 +31,10 @@ use specter_core::ProbeFailure;
 mod pool;
 mod walk;
 
-/// What a probe answers when the prober itself faults — a worker panic — rather than the filesystem
-/// refusing a read: `Denied` with `EIO`, which no syscall returned. The engine routes it as it
-/// routes any refusal — a burst stops and its Profile parks, a descent keeps its state and waits
-/// for an event — the loud answer a path that should never run deserves.
+/// What a probe answers when the prober itself faults — a worker panic, or a walk that finds its
+/// own scope broken — rather than the filesystem refusing a read: `Denied` with `EIO`, which no
+/// syscall returned. The engine routes it as it routes any refusal, the loud answer a path that
+/// should never run deserves.
 const PROBER_FAULT: ProbeFailure = ProbeFailure::Denied { errno: libc::EIO };
 
 #[cfg(test)]

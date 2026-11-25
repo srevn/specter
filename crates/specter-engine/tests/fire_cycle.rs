@@ -29,7 +29,7 @@ use specter_engine::testkit::{
     anchor_dir, attach_structure_only, complete_effect_to_rebasing, drain_due,
     first_probe_correlation, pid_of, rebase_post_fire_to_idle, seed_to_idle,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -1152,9 +1152,7 @@ fn fire_cycle_zombie_rebase_retry_short_circuits_to_reap() {
     let unread: Arc<std::path::Path> = Arc::from(std::path::Path::new("/src/opaque"));
     let undischarged = || ProbeOutcome::SubtreeProven {
         snapshot: Arc::clone(&snap),
-        authority: ProofAuthority::Undischarged {
-            first_unread: Arc::clone(&unread),
-        },
+        authority: ProofAuthority::certify(BTreeSet::from([Arc::clone(&unread)])),
     };
     let t1 = t_rebase + Duration::from_millis(5);
     let _ = e.step(

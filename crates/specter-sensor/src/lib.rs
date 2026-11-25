@@ -63,24 +63,16 @@ impl WatchFailureExt for WatchFailure {
     }
 }
 
-/// Sensor-side extension on [`ProbeFailure`] that classifies an `io::Error` from a probe-root
-/// syscall.
-///
-/// Cross-crate dual of [`WatchFailureExt`] — `ProbeFailure` lives in `specter-core` (libc-banned),
-/// so the errno-name match lives here. The constructor reads as `ProbeFailure::from_io(&e)` once
-/// the trait is in scope, mirroring the watch-side ergonomics.
+/// Sensor-side extension on [`ProbeFailure`] that classifies an `io::Error` from any read a probe
+/// makes. The dual of [`WatchFailureExt`]: `core` may not name `libc`, so the errno match lives here.
 pub trait ProbeFailureExt: Sized {
-    /// Map an `io::Error` from the walker's probe-root syscalls (`std::fs::symlink_metadata`) into
-    /// the typed routing variant. Called once at the walker stamp sites; the engine never
-    /// re-derives the classification from a raw `i32`.
+    /// Want of a resource, or a refusal by the path. Absence is the caller's to draw first: what
+    /// reads as absent differs between a probe's root and the reads a walk makes below it.
     ///
     /// # Preconditions
     ///
-    /// Classifies errors from **probe-root syscalls only** — `symlink_metadata(target_path)`
-    /// against the probe's anchor / descent prefix. Mid-walk faults skip-and-continue in the walker
-    /// and never reach this trait. `ENOSPC` here is the process-FD-pressure surface (root-`lstat`
-    /// allocates a brief kernel-internal FD), not "disk full"; mirrors
-    /// [`WatchFailureExt::from_io`]'s `ENOSPC` precondition.
+    /// The error comes from a read — an `lstat`, a directory's open or its next entry — so `ENOSPC`
+    /// is never a full disk: a read writes nothing.
     fn from_io(e: &io::Error) -> Self;
 }
 

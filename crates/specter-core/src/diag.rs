@@ -446,25 +446,11 @@ pub enum Diagnostic {
         profile: ProfileId,
         outstanding: u32,
     },
-    /// A `forced` (max-settle) verify returned a probe the walker could not fully discharge: a
-    /// non-observation (an mtime-skipped or degraded frame) lies on an obligation chain at
-    /// `first_unread`, so the response cannot certify quiescence. The engine refuses to act on an
-    /// unprovable tree — it finishes the burst to Idle **without** committing the unread snapshot
-    /// to `current` (an unread region must never become the dedup / Seed baseline) and **without**
-    /// advancing the carrier's certified-sample proof, then releases the probe slot. This is a
-    /// liveness terminal, not a wedge: the next `FsEvent` opens a fresh burst, and a transient
-    /// cause (e.g. an `EACCES` later cleared) recovers on its own. The non-forced case retries
-    /// silently within the burst's settle window and never reaches here.
-    ///
-    /// `intent` preserves which burst hit the ceiling — "a Seed could not establish a baseline" and
-    /// "a Standard could not reconfirm" are distinct operator stories on the same terminal. The
-    /// engine's consequence is identical for both (the single `undischarged_consequence` site); the
-    /// field exists for log readability, exactly as on [`Self::ProbeVanished`] /
-    /// [`Self::ProbeFailed`].
-    ///
-    /// First diagnostic to pair a [`ProfileId`] with an `Arc<Path>`: `first_unread` is the walker's
-    /// path-based ledger entry (the walker has no `Tree` / [`ResourceId`]), so the path is mandated
-    /// by the wire, not chosen by precedent.
+    /// The pre-fire ceiling fired and the walk still could not read a directory it had cause to:
+    /// `first_unread`, the first in path order. The burst finishes without committing — an unread
+    /// region must never become the dedup / Seed baseline — and the next burst re-proves what it
+    /// held. `intent` tells a Seed that could not establish a baseline from a Standard that could
+    /// not reconfirm; the consequence is one.
     QuiescenceCeilingUnreadable {
         profile: ProfileId,
         first_unread: Arc<Path>,
@@ -523,18 +509,10 @@ pub enum Diagnostic {
         intent: BurstIntent,
         observed_change: bool,
     },
-    /// The post-fire rebase loop reached its ceiling and the final `WholeSubtree` read could not
-    /// discharge its obligation: a non-observation (an mtime-skipped / degraded frame) lies on an
-    /// obligation chain at `first_unread`, so the response cannot certify the post-command tree.
-    /// The engine refuses to rebase `baseline := current` blind — it finishes the burst **without**
-    /// committing the unread snapshot and **without** advancing the rebase carrier's proof, leaving
-    /// the prior baseline in place. Not a wedge: the next `FsEvent` opens a fresh burst and a
-    /// transient cause (e.g. an `EACCES` later cleared) recovers on its own.
-    ///
-    /// The post-fire analog of [`Self::QuiescenceCeilingUnreadable`] (which is the *pre-fire*
-    /// verify ceiling); same `Arc<Path>` + `intent` shape, distinct terminal so the operator story
-    /// ("could not reconfirm the post-command tree" vs "could not reconfirm / establish a pre-fire
-    /// baseline") survives.
+    /// The post-fire twin of [`Self::QuiescenceCeilingUnreadable`]: the rebase ceiling fired and
+    /// the walk of the post-command tree still could not read a directory it had cause to,
+    /// `first_unread` the first. The baseline is never rebased blind: it stays as it was, and the
+    /// next burst re-proves the final window.
     RebaseCeilingUnreadable {
         profile: ProfileId,
         first_unread: Arc<Path>,

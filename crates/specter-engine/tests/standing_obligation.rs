@@ -14,6 +14,7 @@ use specter_core::{
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{anchor_dir, drain_due, pid_of, seed_to_idle};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -74,11 +75,10 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     );
 
     let a_path: Arc<Path> = Arc::clone(e.tree().get(file_a).unwrap().path());
+    let a_parent: Arc<Path> = Arc::from(a_path.parent().expect("file `a` sits under the anchor"));
     let undischarged = || ProbeOutcome::SubtreeProven {
         snapshot: Arc::clone(&snap),
-        authority: ProofAuthority::Undischarged {
-            first_unread: Arc::clone(&a_path),
-        },
+        authority: ProofAuthority::certify(BTreeSet::from([Arc::clone(&a_parent)])),
     };
 
     // First (unforced) refusal: Retry → re-Batch for another window.

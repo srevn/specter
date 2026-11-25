@@ -23,7 +23,7 @@ use specter_engine::testkit::{
     anchor_dir, attach_returning, attach_structure_only, batching_settle_id,
     complete_effect_to_rebasing, first_probe_correlation, rebase_post_fire_to_idle, seed_to_idle,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, UNIX_EPOCH};
 
@@ -435,9 +435,7 @@ fn fresh_seed_after_forced_ceiling_single_event_fires_one() {
             correlation: corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: dir_snap(&[]),
-                authority: ProofAuthority::Undischarged {
-                    first_unread: Arc::clone(&unread),
-                },
+                authority: ProofAuthority::certify(BTreeSet::from([Arc::clone(&unread)])),
             },
         }),
         now + MAX_SETTLE + Duration::from_millis(2),

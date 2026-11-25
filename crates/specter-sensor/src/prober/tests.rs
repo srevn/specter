@@ -427,87 +427,11 @@ fn probe_subtree_pattern_applies_to_symlinks() {
     assert_eq!(l.kind(), EntryKind::Symlink);
 }
 
-#[test]
-fn probe_subtree_skips_unreadable_subdir_emits_remaining() {
-    use std::os::unix::fs::PermissionsExt;
-    let tmp = TempDir::new().unwrap();
-    let forbidden = tmp.path().join("forbidden");
-    std::fs::create_dir(&forbidden).unwrap();
-    std::fs::write(forbidden.join("inside.c"), b"x").unwrap();
-    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o000)).unwrap();
-    std::fs::write(tmp.path().join("ok.c"), b"x").unwrap();
-
-    let cfg = ScanConfig::builder().recursive(true).build();
-    let result = psub(tmp.path(), &cfg);
-
-    // Restore perms before TempDir drops (else cleanup fails).
-    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let segs = segments(&result);
-    // `forbidden` is emitted as a Dir entry; readdir on it skips with a warn; siblings still emit.
-    assert!(segs.contains(&"forbidden".to_string()));
-    assert!(segs.contains(&"ok.c".to_string()));
-    // `inside.c` is unreachable.
-    assert!(!segs.iter().any(|s| s.contains("inside")));
-}
-
-/// EACCES contract: `read_dir` failure on a subdir produces `DirChild::Covered(empty_arc)` —
-/// covered-but-empty. The `Uncovered` variant is reserved for the three static-config gates
-/// (`recursive=false`, `max_depth`, cross-filesystem). Transient I/O failures inside the recursive
-/// walk — EACCES on `read_dir`, ENOENT after a raced unlink, ENOTDIR after a kind-flip — all
-/// surface as `Covered(empty_or_partial_arc)` via the walker's benign-empty path. The engine's
-/// reconcile path treats `(Covered, Uncovered)` | `(Uncovered, Covered)` coverage flips on the same
-/// `fs_id` as structurally unreachable, so collapsing a transient failure into an `Uncovered` would
-/// route the perms/race-change through an unreachable arm.
-#[test]
-fn probe_subtree_unreadable_subdir_emits_dir_child_some_empty() {
-    use std::os::unix::fs::PermissionsExt;
-    let tmp = TempDir::new().unwrap();
-    let forbidden = tmp.path().join("forbidden");
-    std::fs::create_dir(&forbidden).unwrap();
-    std::fs::write(forbidden.join("inside.c"), b"x").unwrap();
-    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o000)).unwrap();
-
-    let cfg = ScanConfig::builder().recursive(true).build();
-    let result = psub(tmp.path(), &cfg);
-
-    // Restore perms before TempDir drops, else cleanup fails.
-    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let ProbeOutcome::SubtreeProven { snapshot: arc, .. } = result else {
-        panic!("expected SubtreeProven, got {result:?}");
-    };
-    let forbidden_entry = arc
-        .entries()
-        .get("forbidden")
-        .expect("forbidden entry present in parent map");
-    let ChildEntry::Dir(dc) = forbidden_entry else {
-        panic!("forbidden must be a Dir entry, got {forbidden_entry:?}");
-    };
-    let sub = match dc {
-        DirChild::Covered(s) => s,
-        DirChild::Uncovered(_) | DirChild::Denied(_) => panic!(
-            "EACCES'd subdir must emit DirChild::Covered(empty_arc) — \
-             Uncovered is reserved for the static-config gates only \
-             (recursive=false / max_depth / cross-fs); got {dc:?}",
-        ),
-    };
-    assert!(
-        sub.entries().is_empty(),
-        "EACCES read_dir produces an empty entries map; got {} entries",
-        sub.entries().len(),
-    );
-}
-
 // ---------------------------------------------------------------- walk: static Uncovered emission
 //
-// `DirChild::Uncovered(fs_id)` is reserved for three statically-knowable `ScanConfig` gates checked
-// at the dirent in `build_dir_child`: `!recursive`, `depth + 1 >= max_depth`, and `cmeta.dev() !=
-// root_dev` (cross-filesystem). The tests below pin the first two; cross-fs is hard to set up
-// portably and is documented at the rustdoc level on `DirChild`. Read together with
-// `probe_subtree_unreadable_subdir_emits_dir_child_some_empty`: the EACCES test pins the *negative*
-// contract (transient I/O must NOT emit `Uncovered`); the static tests below pin the *positive*
-// contract (these gates DO emit `Uncovered`).
+// `DirChild::Uncovered(fs_id)` is what the shape's recursion edge emits for a directory it does not
+// enter: `!recursive`, beyond `max_depth`, or on another device. The tests below pin the first two;
+// a mount cannot be built portably (see `walk.rs`'s inline pin of the device gate).
 
 #[test]
 fn probe_subtree_recursive_false_emits_uncovered_at_depth_one_dir_child() {
@@ -1551,14 +1475,12 @@ fn depth_is_anchor_relative_when_rooted_below_anchor() {
 // ---------------------------------------------------------------- walk: on-chain filter-drop
 // tripwire
 //
-// `WalkContext::note_structural_filter_drop` is the runtime witness that walker *structural* scope
-// equals engine `covers`: an obligation-chain leaf the structural gate filters is a scope regression
-// (the engine only chains covers()-accepted paths, structurally walker-accepted under the shared
-// anchor basis — name + depth against frozen config). Feeding the nested-secret fixture with
-// `anchor_path == target` sets the scope basis to the LCA instead of the true anchor, so the
+// The engine chains only a path `covers` admits, and the walker's structural gate measures the same
+// predicate from the same anchor basis, so the gate dropping a dirent on an obligation chain is a
+// scope regression — a walker fault, not a refusal by the filesystem. Feeding the nested-secret
+// fixture with `anchor_path == target` sets the basis to the LCA instead of the true anchor, so the
 // start-anchored `secret/**` matches the LCA-relative `secret/a` and drops the on-chain leaf at the
-// structural (exclude) gate. The walker refuses to certify it: loud in dev, degrade to `Undischarged`
-// in release. The kinded gate carries no such tripwire (its drop is a legitimate atomic-replace
+// exclude gate. The kinded gate carries no such tripwire (its drop is a legitimate atomic-replace
 // identity change) — `on_chain_kinded_drop_omits_and_stays_authoritative` pins that distinction.
 
 #[cfg(debug_assertions)]
@@ -1567,25 +1489,22 @@ fn depth_is_anchor_relative_when_rooted_below_anchor() {
 fn on_chain_filter_drop_trips_debug_assert() {
     let tmp = TempDir::new().unwrap();
     let (target, cfg, obligation) = nested_secret_fixture(&tmp);
-    // anchor == target == the LCA, not the true anchor `<tmp>`. The walker measures the leaf at
-    // LCA-relative `secret/a`, which `secret/**` matches and drops; the drop is on-chain ⇒
-    // debug_assert fires. Called directly (not via the pool, whose `catch_unwind` would convert the
-    // panic to `Failed`).
+    // Called directly, not through the pool, whose `catch_unwind` would turn the panic into `Failed`.
     let _ = probe_subtree(&target, &target, &cfg, 0, None, &obligation, false);
 }
 
 #[cfg(not(debug_assertions))]
 #[test]
-fn on_chain_filter_drop_degrades_to_undischarged_in_release() {
+fn on_chain_filter_drop_stops_the_walk_in_release() {
     let tmp = TempDir::new().unwrap();
     let (target, cfg, obligation) = nested_secret_fixture(&tmp);
     let outcome = probe_subtree(&target, &target, &cfg, 0, None, &obligation, false);
-    let ProbeOutcome::SubtreeProven { authority, .. } = outcome else {
-        panic!("expected SubtreeProven, got {outcome:?}");
-    };
     assert!(
-        matches!(authority, ProofAuthority::Undischarged { .. }),
-        "an on-chain filter drop degrades the frame ⇒ refuse to fire; got {authority:?}",
+        matches!(
+            outcome,
+            ProbeOutcome::Failed(ProbeFailure::Denied { errno: libc::EIO })
+        ),
+        "a walker fault answers as a worker panic does; got {outcome:?}",
     );
 }
 
@@ -1637,22 +1556,18 @@ fn on_chain_kinded_drop_omits_and_stays_authoritative() {
     assert_eq!(
         authority,
         ProofAuthority::Authoritative,
-        "a kinded-gate drop is observed-absent-from-scope, not a degraded frame — the obligation \
-         discharges so the change fires through the diff path; got {authority:?}",
+        "a kinded-gate drop is out of scope, not a refusal — the change fires through the diff \
+         path; got {authority:?}",
     );
 }
 
 // ---------------------------------------------------------------- walk: non-UTF-8 filename omission
 //
 // A non-UTF-8 dirent name is permanently unaddressable: snapshot keys (`CompactString`), obligation
-// chains, config patterns, and attach paths are all UTF-8, so no `Sub` can ever name the entry or
-// anything beneath it. The walker omits it as observed-absent-from-scope and keeps the level
-// `Complete` — the kinded-gate drop's contract — rather than degrading. Degrading would wedge every
-// `WholeSubtree` proof over a tree holding one such name into permanent `Undischarged`, and (via
-// `certify`'s `Chains` arm) every Standard burst whose dirty chain passes through the containing
-// directory. The entry's churn lands on the parent dir's resource, the same accepted blindspot as
-// excluded-file / Boundary-dir churn. Linux-only: APFS rejects non-UTF-8 names at creation
-// (EILSEQ), so these gate on `target_os = "linux"`.
+// chains, config patterns and attach paths are all UTF-8, so no `Sub` can ever name the entry or
+// anything beneath it. The walk leaves it out as out of scope and keeps the level whole; denying the
+// level instead would wedge every proof over its directory. Its churn lands on the parent's resource,
+// the blindspot an excluded file has. Linux-only: APFS rejects non-UTF-8 names at creation (EILSEQ).
 
 /// Create a file whose basename is deliberately not valid UTF-8 and return its path. The `0xFF` byte
 /// never appears in a UTF-8 sequence, so `OsStr::to_str` returns `None` — modelling a real on-disk
@@ -1670,10 +1585,8 @@ fn write_non_utf8_file(dir: &Path) -> PathBuf {
 #[cfg(target_os = "linux")]
 #[test]
 fn non_utf8_filename_omitted_under_whole_subtree_stays_authoritative() {
-    // The Seed / Rebase path. `WholeSubtree` treats any degraded frame as a hole, so the pre-fix
-    // degrade let one mojibake filename poison the whole proof (Retry-loop → forced Abandon → never
-    // pins, never fires). Omission keeps the root frame `Complete` ⇒ `Authoritative`, and the
-    // addressable sibling is observed normally.
+    // A whole-subtree walk reads every level, so one unaddressable name denying its level would keep
+    // the Profile from ever pinning; the level stays whole and its addressable sibling is listed.
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("normal.log"), b"x").unwrap();
     write_non_utf8_file(tmp.path());
@@ -1698,8 +1611,7 @@ fn non_utf8_filename_omitted_under_whole_subtree_stays_authoritative() {
     assert_eq!(
         authority,
         ProofAuthority::Authoritative,
-        "a permanently-unaddressable name is observed-absent-from-scope, not a degraded frame; \
-         got {authority:?}",
+        "a permanently-unaddressable name is out of scope, not a refusal; got {authority:?}",
     );
     assert_eq!(
         snapshot.entries().len(),
@@ -1713,148 +1625,313 @@ fn non_utf8_filename_omitted_under_whole_subtree_stays_authoritative() {
     );
 }
 
-#[cfg(target_os = "linux")]
-#[test]
-fn non_utf8_filename_on_chain_parent_stays_authoritative() {
-    // The Standard-burst blast radius. A dirty chain (`sub/normal.log`) runs *through* the directory
-    // holding the mojibake sibling. Pre-fix, the degraded `sub` frame sat at-or-above the chain ⇒
-    // `certify`'s `Chains` arm flagged `Undischarged` ⇒ a previously-pinned Profile stopped firing
-    // for every event in that subtree. Omission keeps `sub` `Complete`, so the chain discharges.
-    let tmp = TempDir::new().unwrap();
-    let sub = tmp.path().join("sub");
-    std::fs::create_dir(&sub).unwrap();
-    std::fs::write(sub.join("normal.log"), b"x").unwrap();
-    write_non_utf8_file(&sub);
-
-    let cfg = ScanConfig::builder().recursive(true).build();
-    let mut chain = BTreeSet::new();
-    chain.insert(Arc::from(sub.join("normal.log")));
-    let outcome = probe_subtree(
-        tmp.path(),
-        tmp.path(),
-        &cfg,
-        0,
-        None,
-        &chains_from(chain),
-        false,
-    );
-    let ProbeOutcome::SubtreeProven {
-        snapshot,
-        authority,
-    } = outcome
-    else {
-        panic!("expected SubtreeProven, got {outcome:?}");
-    };
-    assert_eq!(
-        authority,
-        ProofAuthority::Authoritative,
-        "a chain through a directory holding a non-UTF-8 sibling must discharge; got {authority:?}",
-    );
-    let sub_snap = snapshot
-        .lookup_covered_dir("sub")
-        .expect("sub is a covered dir");
-    assert_eq!(
-        sub_snap.entries().len(),
-        1,
-        "the non-UTF-8 sibling is omitted from `sub`; only the chain leaf is keyed; got {:?}",
-        sub_snap.entries().keys().collect::<Vec<_>>(),
-    );
-    assert!(sub_snap.entries().contains_key("normal.log"));
-}
-
-// ---------------------------------------------------------------- walk: certify obligation fold
+// ---------------------------------------------------------------- walk: a directory it cannot read
 //
-// `certify` folds the degrade ledger against the obligation. It is unidirectional: a degraded frame
-// `f` flags `Undischarged` only for a chain `p` at-or-below it (`p.starts_with(f)`); a chain off
-// the degraded subtree stays `Authoritative`. And an *absent* (deleted) chain leaf is
-// observed-absent, not a hole — it never degrades a frame, so the obligation discharges. These pin
-// the fold both ways and the delete safety the presence-check form would have broken.
+// A level that cannot be read whole is denied as one. Its earlier listing, matched by name and
+// identity, stands in for it, or `DirChild::Denied` does; the certificate names it when the walk
+// had cause to read it. Like every permission pin, these assume a runner that is not root.
 
-#[test]
-fn certify_on_chain_degraded_frame_is_undischarged() {
-    use std::os::unix::fs::PermissionsExt;
-    let tmp = TempDir::new().unwrap();
-    let forbidden = tmp.path().join("forbidden");
-    std::fs::create_dir(&forbidden).unwrap();
-    std::fs::write(forbidden.join("inside.c"), b"x").unwrap();
-    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o000)).unwrap();
+/// Sets `path`'s mode until the guard drops, then gives its owner `rwx` back, so that `TempDir` can
+/// remove the tree even when an assertion fails first.
+struct Mode(PathBuf);
 
-    let cfg = ScanConfig::builder().recursive(true).build();
-    // The chain runs through the unreadable subtree, so the degraded `forbidden` frame lies
-    // at-or-above it ⇒ Undischarged.
-    let mut chain = BTreeSet::new();
-    chain.insert(Arc::from(forbidden.join("inside.c")));
-    let outcome = probe_subtree(
-        tmp.path(),
-        tmp.path(),
-        &cfg,
-        0,
-        None,
-        &chains_from(chain),
-        false,
-    );
-
-    // Restore perms before TempDir drops, else cleanup fails.
-    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o755)).unwrap();
-
-    let ProbeOutcome::SubtreeProven { authority, .. } = outcome else {
-        panic!("expected SubtreeProven, got {outcome:?}");
-    };
-    let ProofAuthority::Undischarged { first_unread } = authority else {
-        panic!("on-chain degraded frame must yield Undischarged, got {authority:?}");
-    };
-    assert_eq!(
-        first_unread.as_ref(),
-        forbidden.join("inside.c").as_path(),
-        "first_unread names the obligation path whose proof went undischarged",
-    );
+impl Mode {
+    fn set(path: &Path, mode: u32) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode)).unwrap();
+        Self(path.to_path_buf())
+    }
 }
 
+impl Drop for Mode {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&self.0, std::fs::Permissions::from_mode(0o755));
+    }
+}
+
+/// The obligation of a burst whose events named `path`.
+fn chain(path: &Path) -> ProofObligation {
+    chains_from(BTreeSet::from([Arc::from(path)]))
+}
+
+/// The listing and certificate of a walk that answered.
+fn proven(outcome: ProbeOutcome) -> (Arc<DirSnapshot>, ProofAuthority) {
+    match outcome {
+        ProbeOutcome::SubtreeProven {
+            snapshot,
+            authority,
+        } => (snapshot, authority),
+        other => panic!("expected SubtreeProven, got {other:?}"),
+    }
+}
+
+/// The directories a certificate names, in order.
+fn named(authority: &ProofAuthority) -> Vec<&Path> {
+    match authority {
+        ProofAuthority::Authoritative => Vec::new(),
+        ProofAuthority::Undischarged { denied } => denied.iter().map(AsRef::as_ref).collect(),
+    }
+}
+
+/// A directory the walk never listed and cannot read is its identity alone, and the certificate
+/// names the directory wherever it lies — under the leaf an event named, or off every chain. Its
+/// siblings are listed.
 #[test]
-fn certify_off_chain_degraded_frame_stays_authoritative() {
-    use std::os::unix::fs::PermissionsExt;
+fn a_directory_never_read_is_denied_and_named_wherever_it_lies() {
     let tmp = TempDir::new().unwrap();
-    let forbidden = tmp.path().join("forbidden");
-    std::fs::create_dir(&forbidden).unwrap();
-    std::fs::write(forbidden.join("inside.c"), b"x").unwrap();
-    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o000)).unwrap();
-    let other = tmp.path().join("other");
-    std::fs::create_dir(&other).unwrap();
-    std::fs::write(other.join("x.c"), b"x").unwrap();
+    let on_chain = tmp.path().join("on");
+    let off_chain = tmp.path().join("off");
+    for dir in [&on_chain, &off_chain] {
+        std::fs::create_dir(dir).unwrap();
+        std::fs::write(dir.join("inside.c"), b"x").unwrap();
+    }
+    std::fs::write(tmp.path().join("ok.c"), b"x").unwrap();
+    let on_id = FsIdentity::from_metadata(&std::fs::symlink_metadata(&on_chain).unwrap());
+    let _locked = [Mode::set(&on_chain, 0o000), Mode::set(&off_chain, 0o000)];
 
     let cfg = ScanConfig::builder().recursive(true).build();
-    // The chain runs through the readable `other` subtree, off the degraded `forbidden` frame ⇒
-    // Authoritative despite the hole.
-    let mut chain = BTreeSet::new();
-    chain.insert(Arc::from(other.join("x.c")));
-    let outcome = probe_subtree(
+    let leaf = on_chain.join("inside.c");
+    let walk = probe_subtree(tmp.path(), tmp.path(), &cfg, 0, None, &chain(&leaf), false);
+    let (snapshot, authority) = proven(walk);
+
+    assert_eq!(
+        snapshot.entries().get("on"),
+        Some(&ChildEntry::Dir(DirChild::Denied(on_id))),
+        "a directory never read is its identity alone",
+    );
+    assert!(matches!(
+        snapshot.entries().get("off"),
+        Some(ChildEntry::Dir(DirChild::Denied(_)))
+    ));
+    assert!(
+        snapshot.entries().contains_key("ok.c"),
+        "its siblings are listed"
+    );
+    assert_eq!(named(&authority), [off_chain.as_path(), on_chain.as_path()]);
+}
+
+/// A forced walk reads every directory, but one it owed no read — no chain through it, its `lstat`
+/// unmoved — stands on its earlier listing when it cannot be read, unnamed.
+#[test]
+fn a_forced_walk_stands_on_an_unmoved_listing_it_cannot_read() {
+    let tmp = TempDir::new().unwrap();
+    let a = tmp.path().join("a");
+    std::fs::create_dir(&a).unwrap();
+    std::fs::write(a.join("x.c"), b"x").unwrap();
+    let cfg = ScanConfig::builder().recursive(true).build();
+    let (baseline, _) = proven(psub(tmp.path(), &cfg));
+    let _locked = Mode::set(&a, 0o000);
+
+    let walk = probe_subtree(
         tmp.path(),
         tmp.path(),
         &cfg,
         0,
-        None,
-        &chains_from(chain),
+        Some(&baseline),
+        &no_obligation(),
+        true,
+    );
+    let (snapshot, authority) = proven(walk);
+
+    assert!(Arc::ptr_eq(
+        baseline.lookup_covered_dir("a").unwrap(),
+        snapshot
+            .lookup_covered_dir("a")
+            .expect("the earlier listing stands"),
+    ));
+    assert_eq!(authority, ProofAuthority::Authoritative);
+}
+
+/// A listed directory turned `r--` can be listed, but its children refuse their `lstat`, so its
+/// level is denied as one. A chain runs through it: its earlier listing stands, and the certificate
+/// names that directory alone.
+#[test]
+fn a_listed_directory_its_children_refuse_stands_and_is_named() {
+    let tmp = TempDir::new().unwrap();
+    let r = tmp.path().join("r");
+    std::fs::create_dir(&r).unwrap();
+    std::fs::write(r.join("f"), b"x").unwrap();
+    let cfg = ScanConfig::builder().recursive(true).build();
+    let (baseline, _) = proven(psub(tmp.path(), &cfg));
+    let _list_only = Mode::set(&r, 0o444);
+
+    let walk = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&baseline),
+        &chain(&r.join("f")),
         false,
     );
+    let (snapshot, authority) = proven(walk);
 
-    std::fs::set_permissions(&forbidden, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(Arc::ptr_eq(
+        baseline.lookup_covered_dir("r").unwrap(),
+        snapshot
+            .lookup_covered_dir("r")
+            .expect("the earlier listing stands"),
+    ));
+    assert_eq!(named(&authority), [r.as_path()]);
+}
 
-    let ProbeOutcome::SubtreeProven { authority, .. } = outcome else {
-        panic!("expected SubtreeProven, got {outcome:?}");
-    };
-    assert_eq!(
-        authority,
-        ProofAuthority::Authoritative,
-        "a degraded frame off every obligation chain must not flag; got {authority:?}",
+/// A directory whose `lstat` moved since its earlier listing is owed a read with no chain through
+/// it: denied, that listing stands and is named.
+#[test]
+fn a_moved_listing_it_cannot_read_stands_and_is_named() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    std::fs::create_dir(&d).unwrap();
+    std::fs::write(d.join("x.c"), b"x").unwrap();
+    let cfg = ScanConfig::builder().recursive(true).build();
+    let (real, _) = proven(psub(tmp.path(), &cfg));
+    // The same directory listed at another moment: its identity, an older `lstat`.
+    let real_d = real.lookup_covered_dir("d").unwrap();
+    let moved_d = Arc::new(DirSnapshot::new(
+        DirMeta::synthetic(std::time::UNIX_EPOCH, real_d.root_meta().fs_id()),
+        real_d.captured_with(),
+        real_d.entries().clone(),
+    ));
+    let mut entries = real.entries().clone();
+    entries.insert(
+        CompactString::new("d"),
+        ChildEntry::Dir(DirChild::Covered(Arc::clone(&moved_d))),
     );
+    let baseline = Arc::new(DirSnapshot::new(
+        real.root_meta(),
+        real.captured_with(),
+        entries,
+    ));
+    let _locked = Mode::set(&d, 0o000);
+
+    // The chain names a sibling: the root is read, and `d` lies off every chain.
+    let sibling = tmp.path().join("other.c");
+    let walk = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&baseline),
+        &chain(&sibling),
+        false,
+    );
+    let (snapshot, authority) = proven(walk);
+
+    assert!(Arc::ptr_eq(
+        &moved_d,
+        snapshot
+            .lookup_covered_dir("d")
+            .expect("the earlier listing stands"),
+    ));
+    assert_eq!(named(&authority), [d.as_path()]);
+}
+
+/// A refusal the earlier listing already records is not named again, even by a walk that reads the
+/// whole subtree.
+#[test]
+fn a_directory_its_listing_records_denied_stays_denied_unnamed() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    std::fs::create_dir(&d).unwrap();
+    let _locked = Mode::set(&d, 0o000);
+    let cfg = ScanConfig::builder().recursive(true).build();
+    let (baseline, first) = proven(psub(tmp.path(), &cfg));
+    assert_eq!(named(&first), [d.as_path()], "first met, it is named");
+
+    let walk = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&baseline),
+        &ProofObligation::WholeSubtree,
+        false,
+    );
+    let (snapshot, authority) = proven(walk);
+
+    assert!(matches!(
+        snapshot.entries().get("d"),
+        Some(ChildEntry::Dir(DirChild::Denied(_)))
+    ));
+    assert_eq!(authority, ProofAuthority::Authoritative);
+}
+
+/// A directory replaced by another the walk cannot read is a new directory: denied and named, never
+/// standing on the old one's listing.
+#[test]
+fn a_directory_replaced_by_one_it_cannot_read_is_denied_and_named() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    std::fs::create_dir(&d).unwrap();
+    let cfg = ScanConfig::builder().recursive(true).build();
+    let (baseline, _) = proven(psub(tmp.path(), &cfg));
+    let old_id = baseline
+        .lookup_covered_dir("d")
+        .unwrap()
+        .root_meta()
+        .fs_id();
+    // The replacement exists beside the old directory before it takes the name, so the two cannot
+    // share an inode.
+    let staged = tmp.path().join("d.new");
+    std::fs::create_dir(&staged).unwrap();
+    std::fs::rename(&staged, &d).unwrap();
+    let new_id = FsIdentity::from_metadata(&std::fs::symlink_metadata(&d).unwrap());
+    let _locked = Mode::set(&d, 0o000);
+
+    let walk = probe_subtree(
+        tmp.path(),
+        tmp.path(),
+        &cfg,
+        0,
+        Some(&baseline),
+        &chain(&d),
+        false,
+    );
+    let (snapshot, authority) = proven(walk);
+
+    assert_ne!(old_id, new_id);
+    assert_eq!(
+        snapshot.entries().get("d"),
+        Some(&ChildEntry::Dir(DirChild::Denied(new_id))),
+    );
+    assert_eq!(named(&authority), [d.as_path()]);
+}
+
+/// A root the walk can neither read whole nor stand on an earlier listing for is one it cannot
+/// answer for. An `r--` directory lists its names and refuses every child's `lstat`; an empty one
+/// has nothing to refuse, and lists clean.
+#[test]
+fn a_root_never_read_whole_fails_and_an_empty_one_lists() {
+    let tmp = TempDir::new().unwrap();
+    let full = tmp.path().join("full");
+    let empty = tmp.path().join("empty");
+    std::fs::create_dir(&full).unwrap();
+    std::fs::write(full.join("f"), b"x").unwrap();
+    std::fs::create_dir(&empty).unwrap();
+    let _list_only = [Mode::set(&full, 0o444), Mode::set(&empty, 0o444)];
+    let cfg = ScanConfig::builder().recursive(true).build();
+
+    let outcome = psub(&full, &cfg);
+    assert!(
+        matches!(
+            outcome,
+            ProbeOutcome::Failed(ProbeFailure::Denied {
+                errno: libc::EACCES
+            })
+        ),
+        "got {outcome:?}",
+    );
+    let (snapshot, authority) = proven(psub(&empty, &cfg));
+    assert!(snapshot.entries().is_empty());
+    assert_eq!(authority, ProofAuthority::Authoritative);
 }
 
 #[test]
 fn certify_absent_chain_leaf_is_authoritative_not_undischarged() {
-    // A chain leaf created-then-removed within the settle window is absent from `read_dir`, so it
-    // never reaches a filter arm and never degrades a frame. `certify` must return `Authoritative`
-    // (fire), not `Undischarged`: a presence-check on chain leaves would wedge every legitimate
-    // delete (rm -rf, rename-away, editor temp) into never-fire.
+    // A chain leaf created-then-removed within the settle window is absent from `read_dir`: an
+    // absence observed, not a read refused. The walk must answer `Authoritative` (fire), or every
+    // legitimate delete (rm -rf, rename-away, editor temp) would wedge into never-fire.
     let tmp = TempDir::new().unwrap();
     std::fs::write(tmp.path().join("kept.c"), b"x").unwrap();
     let cfg = ScanConfig::builder().recursive(true).build();
@@ -2605,20 +2682,19 @@ fn worker_prober_concurrent_submit_is_safe() {
 
 // ---------------------------------------------------------------- pool: deep-tree worker stack
 //
-// The subtree walker recurses one frame-triple per directory level, bounded by PATH_MAX.
+// The subtree walker recurses one frame per directory level, bounded by PATH_MAX.
 // `PROBER_WORKER_STACK` (32 MiB) sizes each worker so the deepest legal tree walks without a
-// stack-overflow abort — including in an unoptimized (debug) build, where the frame-triple is ~4
-// KiB/level.
+// stack-overflow abort, in an unoptimized build too.
 
 #[test]
 fn deep_tree_walks_on_worker_without_stack_overflow() {
     // Build the deepest absolute-path tree the filesystem allows (to the ENAMETOOLONG wall), then
-    // walk it on a real `WorkerProber` worker (32 MiB stack). A PATH_MAX-deep recursive walk would
-    // overflow the default 2 MiB thread stack and abort the process; this pins that the production
-    // worker stack absorbs the deepest tree the absolute-path walker can encounter. The walk MUST
-    // run on the worker (not this test thread) for the stack under test to be exercised. Meaningful
-    // on Linux (PATH_MAX ~4096 ⇒ ~2000 levels, ~8–9 MiB of stack unoptimized); a shallower smoke
-    // test on macOS (PATH_MAX 1024, ~500 levels).
+    // walk it on a real `WorkerProber` worker. A PATH_MAX-deep recursive walk would overflow the
+    // default 2 MiB thread stack and abort the process; this pins that the production worker stack
+    // absorbs the deepest tree the absolute-path walker can encounter. The walk MUST run on the
+    // worker (not this test thread) for the stack under test to be exercised. Meaningful on Linux
+    // (PATH_MAX ~4096 ⇒ ~2000 levels, ~2.6 MiB of stack unoptimized); a shallower smoke test on
+    // macOS (PATH_MAX 1024, ~500 levels).
     let tmp = TempDir::new().unwrap();
     let mut path = tmp.path().to_path_buf();
     let mut depth = 0u32;

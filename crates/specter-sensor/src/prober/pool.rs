@@ -139,21 +139,17 @@ impl std::fmt::Debug for WorkerProber {
 
 /// Stack size for each `sp-prober-{i}` worker thread.
 ///
-/// The subtree walker recurses one Rust frame-triple per directory level (`snapshot_dir →
-/// enumerate_dir → build_dir_child → snapshot_dir`), bounded only by the filesystem's `PATH_MAX`:
-/// the walker addresses every node by absolute path, so a tree one level too deep fails its
-/// `read_dir` / `lstat` with `ENAMETOOLONG` and that level degrades — the recursion can never
-/// outrun `PATH_MAX` (~4096 bytes, ~2048 two-byte levels on Linux). The frame-triple is ~hundreds
-/// of bytes optimized (~1–2 MiB at that depth) but ~4 KiB unoptimized — ~8–9 MiB in the `test`
-/// profile, where nothing inlines. A stack overflow *aborts* the process (`SIGSEGV` on the guard
-/// page, which [`run_worker`]'s `catch_unwind` cannot intercept), so the reservation must clear the
-/// *debug* peak, not just the optimized one. 32 MiB clears the ~9 MiB debug peak with headroom,
-/// making `ENAMETOOLONG` — not the stack — the binding terminator, so no depth cap or degrade mode
-/// is needed. The reservation is lazily committed, so the headroom costs address space, not RSS.
+/// The subtree walker recurses one `snapshot_dir` frame per directory level, bounded by the
+/// filesystem's `PATH_MAX`: it addresses every directory by absolute path, so a directory one level
+/// too deep fails its `lstat` with `ENAMETOOLONG` and its parent's level is denied — the recursion
+/// cannot outrun `PATH_MAX` (4096 bytes on Linux, ~2048 two-byte levels). The frame is ~1.3 KiB in
+/// an unoptimized build (the `subq` of its prologue), ~2.6 MiB at that depth. A stack overflow
+/// *aborts* the process (`SIGSEGV` on the guard page, which [`run_worker`]'s `catch_unwind` cannot
+/// intercept), so the reservation must clear the debug peak, not just the optimized one; 32 MiB
+/// clears it many times over. It is committed lazily: the headroom costs address space, not RSS.
 ///
-/// Assumes the absolute-path walker. A future `openat`-relative walker (no `PATH_MAX` ceiling)
-/// reintroduces unbounded recursion and must revisit this — with an explicit depth cap or an
-/// iterative heap-stack DFS, not a larger stack.
+/// Assumes the absolute-path walker. An `openat`-relative walker (no `PATH_MAX` ceiling) recurses
+/// without bound and needs an explicit depth cap or an iterative walk, not a larger stack.
 const PROBER_WORKER_STACK: usize = 32 << 20;
 
 impl WorkerProber {

@@ -714,85 +714,40 @@ pub enum StableReason {
     Forced { hash_channel_disagreed: bool },
 }
 
-/// Verdict of one certified probe response — the pure projection of the engine's three-axis
-/// dispatch decision `(ProofAuthority × forced × QuiescenceWitness)` onto the verdict floor.
+/// Verdict of one certified probe response: [`quiescence_verdict`]'s projection of `(ProofAuthority
+/// × forced × QuiescenceWitness)`, and built nowhere else.
 ///
-/// - [`Self::Stable`] — walker certified AND quiescence proven. The inner [`StableReason`]
-///   distinguishes natural fire from the bounded-ceiling fallback (and, on the latter, carries the
-///   diagnostic-selection bit).
-/// - [`Self::Retry`] — non-firing, non-terminal: either the walker certified but the hash channel
-///   observed `prior != Some(response)` at this sample (events-incomplete fire-bearing burst), or
-///   the walker refused on some chain (transient non-observation — `EACCES`, a chmod-000 chain) and
-///   the bounded ceiling has not yet fired. Both origins route the same way at both dispatch sites
-///   (pre-fire re-Batch via `Engine::retry_drives_batching`, post-fire re-Settle via
-///   `Engine::transition_to_settling`); neither commits. `observed_motion` is the one bit on which
-///   they diverge: only a concrete channel disagreement counts toward the burst's `retry_streak`
-///   (the mask-blindspot witness) — a refusal observed nothing, so it holds the streak instead. The
-///   transient `first_unread` is consumed only on the [`Self::Abandon`] terminal, and the
-///   channel-disagreement provenance persists through the burst's `last_certified_hash` carrier for
-///   the eventual forced-ceiling read. The bounded `BurstDeadline` / `RebaseCeiling` eventually
-///   surfaces a [`StableReason::Forced`] (channel-disagreement path) or [`Self::Abandon`]
-///   (walker-refused path) terminal.
-/// - [`Self::Abandon`] — bounded terminal: the ceiling already fired and the walker still refused
-///   on some chain (`first_unread`). No commit; the dispatch diagnoses `*CeilingUnreadable` and
-///   finishes the burst.
+/// - [`Self::Stable`] — the walk read what it had cause to read, and quiescence is proven or the
+///   ceiling forced it.
+/// - [`Self::Retry`] — not yet, and nothing commits: the hash channel saw the tree move, or the
+///   walk could not read a directory it had cause to read and the ceiling has not fired.
+/// - [`Self::Abandon`] — the ceiling fired and the walk still could not read a directory it had
+///   cause to read. Nothing commits: an unread region must never become the dedup / Seed baseline.
 ///
-/// Constructed solely by [`quiescence_verdict`]; the dispatch site consumes the variants and never
-/// re-constructs. Not `Copy` — `Abandon` carries an `Arc<Path>`.
-///
-/// **Over-discrimination axiom.** Every variant must have a dispatch consumer that distinguishes it
-/// from every other variant. A field with no consumer is over-discrimination — collapse to the
-/// next-coarser variant. So `Retry` subsumes the unstable case rather than a separate `Unstable`
-/// variant, and transient `Undischarged` carries no `first_unread` (the dispatch never reads it).
-/// `Retry.observed_motion` earns its keep under the same axiom: the dispatch sites count vs hold
-/// the streak on it. Auditable in one grep: every variant tag must appear in a dispatch arm whose
-/// body diverges from at least one sibling.
+/// **Over-discrimination axiom.** Every variant and every field has a dispatch consumer that tells
+/// it from its siblings; one with none collapses into the next-coarser variant. So `Retry` subsumes
+/// the unstable case and names no directory — only `Abandon`'s is read — and `observed_motion`
+/// earns its place because a dispatch counts the mask-blindspot streak on it.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum QuiescenceVerdict {
-    /// Walker certified + quiescence proven. Fire / pin / rebase against the freshest observation;
-    /// the inner [`StableReason`] captures the proof path (natural vs. bounded-ceiling fallback)
-    /// and the diagnostic-selection bit on the latter.
+    /// Fire / pin / rebase against the freshest observation; [`StableReason`] says whether the
+    /// ceiling forced it.
     Stable(StableReason),
-    /// Non-firing, non-terminal — loop back through the settle window for another sample. Subsumes
-    /// two structurally-distinct origins (hash-channel disagreement; transient walker refusal) that
-    /// share the same routing at both dispatch sites. `observed_motion` is `true` only on a
-    /// concrete channel disagreement (`prior = Some(p)`, `p != response`) — the streak-counting
-    /// fork the dispatch sites read (see the type-level docs); the fold is the only place the
-    /// origin is knowable, exactly as for [`StableReason::Forced`]'s `hash_channel_disagreed`.
+    /// Sample again after another settle window. `observed_motion` is `true` only on a concrete
+    /// channel disagreement (`prior = Some(p)`, `p != response`): a walk that could not read, and a
+    /// first sample, observed none.
     Retry { observed_motion: bool },
-    /// Bounded terminal: the ceiling already fired and the walker still refused on `first_unread`.
-    /// The dispatch surfaces the unread path via `*CeilingUnreadable` and finishes the burst
-    /// without committing — an unread region must never become the dedup / Seed baseline.
+    /// `first_unread` is the first directory, in path order, the walk had cause to read and could
+    /// not.
     Abandon { first_unread: Arc<Path> },
 }
 
-/// Fold the verdict-floor inputs into a [`QuiescenceVerdict`]. Total, pure, side-effect-free —
-/// three axes (`authority × forced × witness`) projected to three variants.
+/// Fold the verdict-floor inputs into a [`QuiescenceVerdict`]. Total and pure.
 ///
-/// - [`ProofAuthority::Undischarged`] + `forced` ⇒ [`QuiescenceVerdict::Abandon`] carrying
-///   `first_unread` verbatim. The witness is irrelevant on this arm: an unread chain blocks the
-///   fire regardless of any hash-channel observation, and the carrier was not advanced anyway (the
-///   cat-(b) edge is Authoritative-only).
-/// - [`ProofAuthority::Undischarged`] + `!forced` ⇒ [`QuiescenceVerdict::Retry`] with
-///   `observed_motion: false` — a refusal observed nothing, so it holds the streak rather than
-///   counting toward the mask-blindspot witness. `first_unread` is dropped at the fold (one
-///   `Arc::drop` instead of clone-then-drop downstream): the transient arm at both dispatch sites
-///   has no consumer for it today, and the carrier was not advanced.
-/// - [`ProofAuthority::Authoritative`] + `forced` ⇒ [`QuiescenceVerdict::Stable`] with
-///   [`StableReason::Forced`]. `hash_channel_disagreed` is `true` iff the channel was active AND
-///   `prior` is `Some(p)` with `p != response` (the strong "tree was visibly still moving" signal).
-///   `EventsReliable` and first-sample [`QuiescenceWitness::HashChannel`] (`prior = None`) both
-///   fold to `false` — there is no observed disagreement, only the absence of confirmation.
-/// - [`ProofAuthority::Authoritative`] + `!forced` ⇒ [`QuiescenceVerdict::Stable`]
-///   ([`StableReason::Natural`]) iff the witness proves quiescence
-///   ([`QuiescenceWitness::EventsReliable`] OR `HashChannel { prior: Some(p), response }` with `p
-///   == response`). Otherwise (`HashChannel` with `prior = None` OR `prior != Some(response)`) ⇒
-///   [`QuiescenceVerdict::Retry`], whose `observed_motion` runs the same witness test as the Forced
-///   arm's `hash_channel_disagreed` — `true` on a concrete `Some(p) != response`, `false` on the
-///   first-sample `None` (absence of confirmation, not observed motion). The channel-disagreement
-///   provenance persists through the burst's `last_certified_hash` carrier; the eventual
-///   forced-ceiling read reconstructs the strong-signal `*CeilingForcedDespiteChange` if
-///   disagreement persists, so no operator-visible signal is lost.
+/// A walk that could not read what it had cause to blocks the verdict whatever the witness says: it
+/// retries until the ceiling, then abandons. Otherwise the ceiling forces `Stable`, and before it the
+/// witness decides. One witness test (`QuiescenceWitness::observed_disagreement`) sets both motion
+/// bits, so `Forced`'s `hash_channel_disagreed` and `Retry`'s `observed_motion` cannot drift apart.
 #[must_use]
 pub fn quiescence_verdict(
     authority: ProofAuthority,
@@ -800,18 +755,13 @@ pub fn quiescence_verdict(
     witness: QuiescenceWitness,
 ) -> QuiescenceVerdict {
     match authority {
-        ProofAuthority::Undischarged { first_unread } if forced => {
-            QuiescenceVerdict::Abandon { first_unread }
-        }
-        ProofAuthority::Undischarged { .. } => {
-            // `first_unread` dropped at the fold — the transient arm at both dispatch sites has no
-            // consumer for it, and the carrier was not advanced (the cat-(b) edge is
-            // Authoritative-only). One `Arc::drop` instead of clone-then-drop downstream. The
-            // refusal observed nothing, so the streak holds.
-            QuiescenceVerdict::Retry {
-                observed_motion: false,
-            }
-        }
+        ProofAuthority::Undischarged { denied } if forced => QuiescenceVerdict::Abandon {
+            first_unread: Arc::clone(denied.first()),
+        },
+        // The walk observed nothing, so the streak holds.
+        ProofAuthority::Undischarged { .. } => QuiescenceVerdict::Retry {
+            observed_motion: false,
+        },
         ProofAuthority::Authoritative if forced => {
             // Ceiling bypass: fire / rebase against freshest observation. The diagnostic-selection
             // bit is the shared witness test — see `QuiescenceWitness::observed_disagreement`.
@@ -3396,17 +3346,11 @@ impl Profile {
         self.state.advance_certified_sample(hash)
     }
 
-    /// Park the live burst's evidence store into the standing obligation — the cat-(b) edge for the
-    /// non-consuming verdict terminals (`Abandon`, a ceiling-forced transient probe failure),
-    /// called by the engine's verdict-terminal router immediately before the burst finish. The
-    /// cascade ([`ProfileState::take_burst_evidence`] → [`ActiveBurst::take_evidence`]) takes
-    /// whichever carrier is live — pre-fire `dirty` or post-fire `final_window_residual` — and
-    /// unions it onto any prior parked content (consecutive parks union; per-id paths are identical
-    /// by [`DirtyProvenance::note`]'s contract). Non-Active states park nothing — an empty take
-    /// absorbed into the set is a no-op.
-    ///
-    /// The drain side is [`Self::take_standing_obligation`]; see the field rustdoc for the
-    /// recovery-rides-a-signal posture.
+    /// Park the live burst's evidence — pre-fire `dirty` or post-fire `final_window_residual` — in
+    /// the standing obligation, unioned onto what is already parked; outside an active burst there
+    /// is none. The cat-(b) edge of the verdict terminals that read nothing (`Abandon`, a
+    /// ceiling-forced transient probe failure): the next pre-fire burst drains it
+    /// ([`Self::take_standing_obligation`]) and re-proves it.
     pub fn park_burst_evidence(&mut self) {
         let evidence = self.state.take_burst_evidence();
         self.standing_obligation.absorb(evidence);
@@ -4699,11 +4643,8 @@ mod tests {
     /// Cases covered: all reachable shapes; the `Authoritative + !forced +
     /// HashChannel(prior≠response)` row produces `Retry`, ruling out the would-be `Stable(Natural)`
     /// mistake. `Retry.observed_motion` is `true` only on the concrete-disagreement row — the
-    /// first-sample `prior=None` and the walker refusal both observed nothing, so they fold `false`
-    /// (the streak holds, it does not inflate). The `Undischarged + !forced` arm drops
-    /// `first_unread` at the fold — the transient retry arm at both dispatch sites has no consumer
-    /// for it (consumption-aligned: an unused `Arc<Path>` is one `Arc::drop` instead of
-    /// clone-then-drop downstream).
+    /// first-sample `prior=None` and a walk that could not read both observed nothing, so they fold
+    /// `false` (the streak holds, it does not inflate).
     ///
     /// - Authoritative × !forced × EventsReliable          → Stable(Natural)
     /// - Authoritative × !forced × HashChannel(prior=None) → Retry { observed_motion: false }
@@ -4713,14 +4654,17 @@ mod tests {
     /// - Authoritative ×  forced × HashChannel(prior=None) → Stable(Forced{disagreed=false})
     /// - Authoritative ×  forced × HashChannel(p==r)       → Stable(Forced{disagreed=false})
     /// - Authoritative ×  forced × HashChannel(p≠r)        → Stable(Forced{disagreed=true})
-    /// - Undischarged   × !forced × *                      → Retry { observed_motion: false } (first_unread dropped at the fold)
-    /// - Undischarged   ×  forced × *                      → Abandon { first_unread }
+    /// - Undischarged   × !forced × *                      → Retry { observed_motion: false }
+    /// - Undischarged   ×  forced × *                      → Abandon { the first denied directory }
     #[test]
     fn quiescence_verdict_folds_three_axes() {
-        let unread: std::sync::Arc<std::path::Path> =
-            std::sync::Arc::from(std::path::Path::new("first/unread"));
-        let undischarged = || ProofAuthority::Undischarged {
-            first_unread: std::sync::Arc::clone(&unread),
+        let undischarged = || {
+            ProofAuthority::certify(
+                ["b/denied", "a/denied"]
+                    .into_iter()
+                    .map(|p| std::sync::Arc::from(std::path::Path::new(p)))
+                    .collect(),
+            )
         };
         let er = QuiescenceWitness::EventsReliable;
         let first = QuiescenceWitness::HashChannel {
@@ -4789,21 +4733,21 @@ mod tests {
             }),
         );
 
-        // Undischarged — witness ignored; forced selects Retry vs Abandon. !forced drops
-        // first_unread at the fold (transient arm — no consumer); forced carries it verbatim on
-        // Abandon. A refusal observed nothing, so it never reports motion.
+        // Undischarged — witness ignored; forced selects Retry vs Abandon. A walk that could not
+        // read observed nothing, so it never reports motion; the abandon names the first directory
+        // in path order.
         assert_eq!(
             quiescence_verdict(undischarged(), false, er),
             QuiescenceVerdict::Retry {
                 observed_motion: false,
             },
-            "Undischarged + !forced ⇒ Retry (first_unread dropped at the fold; no motion observed)",
+            "Undischarged + !forced ⇒ Retry (no motion observed)",
         );
         let v = quiescence_verdict(undischarged(), true, neq);
         assert!(
             matches!(&v, QuiescenceVerdict::Abandon { first_unread }
-                if first_unread.as_ref() == std::path::Path::new("first/unread")),
-            "Undischarged + forced ⇒ Abandon carrying first_unread verbatim; got {v:?}",
+                if first_unread.as_ref() == std::path::Path::new("a/denied")),
+            "Undischarged + forced ⇒ Abandon naming the first denied directory; got {v:?}",
         );
     }
 

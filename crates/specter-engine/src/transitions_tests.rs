@@ -31,7 +31,7 @@ use specter_core::{
     StableReason, StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, Termination,
     TimerKind, TreeSnapshot, WatchOp,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -4918,9 +4918,7 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: degraded,
-                authority: ProofAuthority::Undischarged {
-                    first_unread: unread,
-                },
+                authority: ProofAuthority::certify(BTreeSet::from([unread])),
             },
         }),
         now_a,
@@ -5059,9 +5057,7 @@ fn post_fire_retry_loops_via_settling() {
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: degraded,
-                authority: ProofAuthority::Undischarged {
-                    first_unread: unread,
-                },
+                authority: ProofAuthority::certify(BTreeSet::from([unread])),
             },
         }),
         now_loop,
@@ -5321,8 +5317,8 @@ fn rebase_retry_does_not_poison_current() {
     let baseline_before = baseline_hash(&e, pid);
     let current_before = current_hash(&e, pid);
 
-    // An unread response: the walker could not discharge its obligation at `first_unread`. Fold:
-    // Undischarged + !forced ⇒ Retry.
+    // An unread response — the walk could not read a directory it had cause to — folds to Retry
+    // while unforced.
     let unread: std::sync::Arc<std::path::Path> =
         std::sync::Arc::from(std::path::Path::new("anchor/opaque"));
     let degraded = dir_tree_snap(vec![("ghost", EntryKind::File, 9)]);
@@ -5332,9 +5328,7 @@ fn rebase_retry_does_not_poison_current() {
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: degraded,
-                authority: ProofAuthority::Undischarged {
-                    first_unread: unread,
-                },
+                authority: ProofAuthority::certify(BTreeSet::from([unread])),
             },
         }),
         now + SETTLE * 4,
@@ -5447,9 +5441,7 @@ fn rebase_abandon_refuses_blind_rebase_and_diagnoses() {
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: dir_tree_snap(vec![("ghost", EntryKind::File, 9)]),
-                authority: ProofAuthority::Undischarged {
-                    first_unread: std::sync::Arc::clone(&unread),
-                },
+                authority: ProofAuthority::certify(BTreeSet::from([Arc::clone(&unread)])),
             },
         }),
         now + SETTLE * 5,
@@ -5559,9 +5551,7 @@ fn rebase_ceiling_in_settling_drives_rebasing_with_forced() {
             correlation: rebase_corr,
             outcome: ProbeOutcome::SubtreeProven {
                 snapshot: dir_tree_snap(vec![]),
-                authority: ProofAuthority::Undischarged {
-                    first_unread: unread,
-                },
+                authority: ProofAuthority::certify(BTreeSet::from([unread])),
             },
         }),
         now + SETTLE * 4,

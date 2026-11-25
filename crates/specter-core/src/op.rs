@@ -12,20 +12,11 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
-/// A non-empty, path-ordered set of paths — the carrier of [`ProofObligation::Chains`].
+/// A non-empty set of paths, in lexicographic order.
 ///
-/// The wrapper's value *is* the invariant: it always holds at least one path. Empty input is
-/// rejected at construction ([`Self::new`] returns `None`), and the caller decides what an empty
-/// set means. For the obligation the contract is to degrade to [`ProofObligation::WholeSubtree`] —
-/// an empty chain set would silently certify [`ProofAuthority::Authoritative`] (the walker's
-/// `certify` returns `Authoritative` when no chain matches a degraded frame, and an empty chain set
-/// matches nothing), defeating the proof obligation.
-///
-/// No public mutators — the wrapper is constructed once and consumed read-only. The invariant
-/// composes through `Clone` because [`BTreeSet`]'s non-emptiness is preserved by clone.
-///
-/// Member order follows `BTreeSet<Arc<Path>>` (lex on the path bytes), so a first-hit search over
-/// it and its [`Self::first`] are deterministic across replays.
+/// It carries the chains a walk must read afresh ([`ProofObligation::Chains`]), and the directories
+/// it had cause to read and could not ([`ProofAuthority::Undischarged`]). [`Self::new`] rejects an
+/// empty set, so each caller says what none means.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct NonEmptyPathSet(BTreeSet<Arc<Path>>);
 
@@ -36,9 +27,7 @@ impl NonEmptyPathSet {
         (!set.is_empty()).then_some(Self(set))
     }
 
-    /// Borrowing iterator over every path, in [`BTreeSet`] lex order. The wrapper exposes no other
-    /// iteration shape — the walker's `certify` and tests' membership / cardinality assertions
-    /// compose through this projection.
+    /// Every path, in order.
     pub fn iter(&self) -> impl Iterator<Item = &Arc<Path>> + '_ {
         self.0.iter()
     }
@@ -65,37 +54,21 @@ impl NonEmptyPathSet {
         false
     }
 
-    /// True iff some path is at-or-under `frame` — component-wise, so `/a` holds `/a/b/c` and not
-    /// `/ab`. Composes the walker's `obligation_at_or_under` predicate: a frame on the recursion
-    /// path that is an ancestor of (or equal to) any chain path must not be mtime-skipped, lest the
-    /// kernel's signal at the chain leaf be missed.
+    /// True iff some path is at-or-under `frame`, component-wise: `/a` holds `/a/b/c` and not `/ab`.
     #[must_use]
     pub fn any_at_or_under(&self, frame: &Path) -> bool {
         self.0.iter().any(|p| p.starts_with(frame))
     }
 }
 
-/// What a [`ProbeRequest::Subtree`] walk must freshly observe for its response to certify quiescence.
+/// What a [`ProbeRequest::Subtree`] walk must read afresh. Any other directory whose `lstat` has
+/// not moved since its earlier listing may stand on that listing unread.
 ///
-/// The quiescence verdict is sound only if every entry folding into the response hash was *observed
-/// at this probe* — an mtime-skipped or degraded frame is a non-observation. This enum is the
-/// engine's statement of which subtrees may not be skipped:
-///
-/// - [`Self::Chains`] — Standard. The dirty root→leaf chains (resources whose `FsEvent` drove the
-///   burst, projected to paths). The walker refuses mtime-skip at any directory at-or-above a chain
-///   path; off-chain siblings stay skip-eligible. The [`NonEmptyPathSet`] carrier makes the empty
-///   case unrepresentable: an empty chain set would silently certify
-///   [`ProofAuthority::Authoritative`] (no chain to match a degraded frame), defeating the proof
-///   obligation, so the engine degrades to [`Self::WholeSubtree`] when the source projection yields
-///   nothing.
-/// - [`Self::WholeSubtree`] — Seed / Rebase. No trustworthy prior exists, so nothing under the
-///   anchor may be skipped: the whole subtree is unproven until freshly read. Seed has never
-///   observed the tree; the post-fire rebase must prove the *post-command* tree quiescent, and the
-///   command just mutated it (an in-place descendant edit need not bump an ancestor mtime, so a
-///   chains-only skip would re-clone a stale subtree and certify a false quiet).
-///
-/// `Chains` entries are `Arc::clone`s of the engine's slot paths (shipped without re-allocating);
-/// the underlying `BTreeSet` orders them deterministically for replay.
+/// - [`Self::Chains`] — the root→leaf chains of the paths the burst's events named: off them, the
+///   event stream vouches for what an unmoved directory holds.
+/// - [`Self::WholeSubtree`] — every directory, where nothing vouches for an unmoved one: a walk
+///   with no prior to trust, one whose events cannot witness an in-place write (which need not move
+///   any directory's `lstat`), or the rebase of a tree the command just wrote.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ProofObligation {
     Chains(NonEmptyPathSet),
@@ -129,10 +102,9 @@ pub enum ProbeRequest {
         /// materialised path (`tree.path_of(profile.resource)`) — a refcount bump, no rebuild.
         target_path: Arc<Path>,
     },
-    /// Subtree verify / Seed / Rebase / Standard. Recursive Dir walk honouring `scan_config`.
-    /// Walker returns `ProbeOutcome::SubtreeProven { snapshot, authority }` rooted at `target_path`
-    /// (or `Vanished` / `Failed`); the `authority` certifies whether the response discharged the
-    /// `obligation`.
+    /// Subtree verify / Seed / Rebase / Standard. Recursive Dir walk honouring `scan_config`. Walker
+    /// returns `ProbeOutcome::SubtreeProven { snapshot, authority }` rooted at `target_path` (or
+    /// `Vanished` / `Failed`); the `authority` names what the walk had cause to read and could not.
     Subtree {
         /// Profile the engine demuxes the response back to. Echoed back on `ProbeResponse` and used
         /// by the Sensor's expectation-map insertion.
@@ -147,24 +119,11 @@ pub enum ProbeRequest {
         /// empty path is the lone failure mode (the engine's stale-id sentinel); the walker treats
         /// empty as `Vanished`.
         target_path: Arc<Path>,
-        /// Filesystem path of the Profile **anchor** — the scope basis, distinct from
-        /// `target_path`. The walker measures every dirent's `rel` (hence its depth) as
-        /// `child_path.strip_prefix(anchor_path)`, so `exclude` / `pattern` / `max_depth` /
-        /// `recursive` resolve against the same origin the engine's `covers` uses. Measuring from
-        /// `target_path` instead would silently desync the walker from `covers` whenever the
-        /// recursion root sits below the anchor — an anchor-relative glob re-read against an
-        /// LCA-relative `rel` drops an in-scope obligation leaf and certifies a region it never
-        /// observed.
-        ///
-        /// Equals `target_path` exactly when the walk roots at the anchor — Seed, post-fire Rebase,
-        /// and any Standard burst whose dirty-LCA resolves to the anchor; strictly above it when a
-        /// Standard burst's dirty events share a subtree deeper than the anchor.
-        ///
-        /// **Invariant: `target_path` is at-or-under `anchor_path`.** Producer-guaranteed — the
-        /// engine resolves the recursion root to a covered descendant of the anchor — so the
-        /// walker's `strip_prefix(anchor_path)` is total over the subtree it reads. A violation is
-        /// not unsound: the per-dirent `strip_prefix` fails, drops the dirent, and degrades the
-        /// level ⇒ the proof refuses to fire.
+        /// The Profile anchor: the basis every dirent's scope is measured from
+        /// (`child_path.strip_prefix(anchor_path)`), as the engine's `covers` measures it. Measured
+        /// from `target_path` instead, an anchor-relative glob would drop an in-scope leaf whenever
+        /// the walk roots below the anchor. `target_path` is at-or-under it; a dirent outside it is
+        /// a walker fault that stops the walk.
         anchor_path: Arc<Path>,
         /// `ScanConfig` to honour (recursive, hidden, exclude, pattern, `max_depth`). The Profile's
         /// frozen config behind its sharing handle — a refcount bump at emit time; workers read the
@@ -174,26 +133,13 @@ pub enum ProbeRequest {
         /// so two Profiles sharing a Resource with different filters cannot produce identical
         /// `dir_hash` for divergent in-scope content.
         captured_with: u64,
-        /// Engine's last-known view of `target_path`'s subtree. The walker consults
-        /// `baseline_subtree.root_meta` for mtime-skip and propagates child baselines via each
-        /// child's `DirChild::Covered(arc)`, resolved by name through
-        /// [`crate::DirSnapshot::lookup_covered_dir`]. `None` means "no prior observation": a Profile
-        /// that holds no listing yet, whose walk roots at the anchor. A walk rooted below the anchor
-        /// always ships one — the engine roots it only at a directory its snapshot lists.
-        ///
-        /// Cheap to ship — `Arc::clone` on the channel send. Multiple workers may hold the same Arc
-        /// concurrently: `DirSnapshot` is fully immutable post-construction (hashes are eager
-        /// fields, not a lazy cache).
+        /// The Profile's listing of `target_path`: the walk's prior, matched to each directory's
+        /// earlier self by name and identity ([`crate::PriorDir`]). It stands in for a directory
+        /// the walk owes no fresh read, and for one it could not read. `None` only for a Profile
+        /// that holds no listing yet, whose walk roots at the anchor: the engine roots a walk below
+        /// the anchor only at a directory its snapshot lists.
         baseline_subtree: Option<Arc<DirSnapshot>>,
-        /// The proof obligation: which subtrees this probe MUST freshly observe (refusing
-        /// mtime-skip) for the response to certify quiescence. Populated from the burst's dirty
-        /// resources ([`ProofObligation::Chains`], Standard) or set to
-        /// [`ProofObligation::WholeSubtree`] when there is no trustworthy prior (Seed / Rebase).
-        ///
-        /// The walker refuses mtime-skip at any directory at-or-above a `Chains` path (O(N)
-        /// prefix-match per directory, N typically 1–5) or anywhere within the subtree for
-        /// `WholeSubtree`, and stamps the response's [`ProofAuthority`] `Undischarged` iff a
-        /// skipped / degraded frame lies on an obligation chain.
+        /// What the walk must read afresh.
         obligation: ProofObligation,
         /// `true` ⇒ walker bypasses mtime-skip at every directory regardless of `baseline_subtree`
         /// and `obligation`. Engine sets this when `PreFireBurst.forced` is true (max-settle
@@ -285,57 +231,41 @@ pub struct ProbeResponse {
     pub outcome: ProbeOutcome,
 }
 
-/// Walker-stamped certificate riding a [`ProbeOutcome::SubtreeProven`] (and engine-injected
-/// `Authoritative` for `AnchorOk`).
+/// The walker's certificate on a [`ProbeOutcome::SubtreeProven`]: the directories it had cause to
+/// read and could not.
 ///
-/// `Authoritative` ⟺ every entry that folds into the response hash was freshly observed at this
-/// probe — equivalently, no non-observation (mtime-skip clone or degraded enumeration) lies on an
-/// obligation chain. `Undischarged` is the refuse-to-fire tripwire: the walker could not discharge
-/// the proof obligation at `first_unread`, so the engine must not derive a quiescence verdict from
-/// this response.
-///
-/// Rides **only** the inbound proof outcome — never stamped onto a stored `DirSnapshot` (`current`
-/// / `baseline` stay pure content; stamping would corrupt `dir_hash` equality and conflate "what
-/// the tree is" with "how well we saw it").
+/// It rides the response, never a stored [`DirSnapshot`]: how well a tree was seen is not what the
+/// tree holds, and `dir_hash` equality would split on it.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum ProofAuthority {
+    /// The walk read every directory it had cause to read.
     Authoritative,
-    Undischarged { first_unread: Arc<Path> },
+    /// The walk had cause to read these directories and could not.
+    Undischarged { denied: NonEmptyPathSet },
 }
 
-/// Typed failure stamped on [`ProbeOutcome::Failed`]: what a read the probe could not complete said
-/// — the path refused it, or the daemon lacked a resource.
+impl ProofAuthority {
+    /// The certificate of a walk that could not read `denied`: [`Self::Authoritative`] iff there is
+    /// none.
+    #[must_use]
+    pub fn certify(denied: BTreeSet<Arc<Path>>) -> Self {
+        NonEmptyPathSet::new(denied)
+            .map_or(Self::Authoritative, |denied| Self::Undischarged { denied })
+    }
+}
+
+/// Why a probe could not answer, in what the read said: the path refused it, or the daemon lacked a
+/// resource.
 ///
-/// Each variant names what the read said, not what the engine does with it; the dispatch arms own
-/// the consequence (`dispatch_pre_fire_failed`, `dispatch_rebase_failed`, and the descent's own).
-/// Backends translate libc errnos to this variant once, at the trait boundary in `specter-sensor`,
-/// so no arm re-classifies a raw errno inside the engine; the engine stays free of kernel
-/// vocabulary. `errno` is diagnostic context (operator-visible integer on the IPC wire), not a
-/// behavioural switch.
-///
-/// The `From<io::Error>` translation lives in `specter-sensor` (via `ProbeFailureExt::from_io`)
-/// because errno-name matching needs `libc`, which is banned in `core` per `deny.toml`.
+/// `errno` is the operator's context, never a switch. The sensor classifies the errno
+/// (`ProbeFailureExt::from_io`): `core` may not name `libc`.
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ProbeFailure {
-    /// The path refused the read: a non-`NotFound` I/O error that is not want of a resource
-    /// (`EACCES` / `ELOOP` / `ENOTDIR` / `EIO`) — a fact about the path, not about the daemon's
-    /// resources. A fault in the prober itself (a worker panic) answers as one, with `EIO`.
-    ///
-    /// `ENOENT` is *not* a refusal: the walker collapses "path absent" into
-    /// [`ProbeOutcome::Vanished`] before this enum is reached.
+    /// The path refused the read (`EACCES`, `EIO`, …): a fact about the path. Absence is the
+    /// caller's to draw first. A fault in the prober itself answers as one, with `EIO`.
     Denied { errno: i32 },
-    /// The daemon lacked a resource: the process-wide or system-wide FD ceiling was hit at the
-    /// root-`lstat` syscall, the kernel could not allocate for it, or the walker retried into a
-    /// transient rate-limit (`EMFILE` / `ENFILE` / `ENOSPC` / `ENOMEM` / `EAGAIN`).
-    ///
-    /// The probe observed *nothing* — and says nothing about the anchor's identity. This is the
-    /// epistemic twin of an [`ProofAuthority::Undischarged`] proof ("couldn't observe," not "couldn't
-    /// find"), so the engine routes it to the same consequence the verdict floor gives
-    /// `Undischarged`: retry the window while the burst deadline holds, finish to Idle once it forces
-    /// — the anchor watch and baseline retained throughout (FD pressure is not anchor loss, and it
-    /// correlates with the daemon's own load, so the recovery cannot depend on tearing the watch
-    /// down). Calling the class out at the trait boundary keeps the sensor's kernel-vocabulary
-    /// classifier the single source — the engine never re-derives the retry signal from a raw `i32`.
+    /// The daemon lacked a resource (`EMFILE`, `ENFILE`, `ENOSPC`, `ENOMEM`, `EAGAIN`) at some read
+    /// the probe made: it observed nothing, and says nothing of the path.
     Transient { errno: i32 },
 }
 
@@ -368,10 +298,7 @@ pub enum ProbeOutcome {
     /// definitionally authoritative — the engine injects [`ProofAuthority::Authoritative`] at
     /// dispatch; the wire carries no certificate here.
     AnchorOk(LeafEntry),
-    /// `Subtree` request returned a directory observation **plus** the walker-stamped
-    /// [`ProofAuthority`] certifying whether every entry that folds into the response hash was
-    /// freshly observed at this probe. Sole producer is the walker's `probe_subtree`. The
-    /// `authority` rides only this inbound outcome — never stamped onto the stored snapshot.
+    /// `Subtree` request answered: the walk's listing of `target_path`, and its certificate.
     SubtreeProven {
         snapshot: Arc<DirSnapshot>,
         authority: ProofAuthority,
@@ -387,9 +314,10 @@ pub enum ProbeOutcome {
     /// Path absent (`ENOENT`) or kind mismatch (file probe found dir, dir probe found file). Routed
     /// to whichever `dispatch_*_vanished` corresponds to the Profile's state.
     Vanished,
-    /// I/O error at the *root* of the probe (root `lstat`, permission, `EIO`). Mid-walk errors don't
-    /// surface here — they skip-and-continue with `tracing::warn!`. The inner [`ProbeFailure`] is the
-    /// sensor's classified routing target; the engine never inspects the raw `errno`.
+    /// The probe could not answer. A walk stops at the first read that wants a resource, and fails
+    /// at a root it can neither read whole nor stand on an earlier listing for; a refusal below the
+    /// root answers in the snapshot ([`crate::DirChild::Denied`], or the directory's earlier
+    /// listing) and the certificate instead.
     Failed(ProbeFailure),
 }
 
