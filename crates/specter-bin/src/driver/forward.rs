@@ -405,8 +405,9 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?profile,
             ?intent,
             ?first_unread,
-            "quiescence ceiling unreadable (obligation chain frame mtime-skipped/degraded); \
-             refused to fire/pin, burst finished to Idle (self-recovers if transient)",
+            "quiescence ceiling unreadable (the walk could not read first_unread, a directory it \
+             had cause to read); refused to fire/pin, burst finished to Idle (self-recovers once \
+             readable, or excluded)",
         ),
         Diagnostic::QuiescenceCeilingForcedDespiteChange { profile, intent } => tracing::warn!(
             ?profile,
@@ -448,9 +449,9 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             ?profile,
             ?intent,
             ?first_unread,
-            "post-fire rebase ceiling reached on an unreadable response (obligation chain frame \
-             mtime-skipped/degraded); refused to rebase blind, prior baseline kept, burst \
-             finished to Idle (self-recovers if transient)",
+            "post-fire rebase ceiling reached on an unreadable response (the walk could not read \
+             first_unread, a directory it had cause to read); refused to rebase blind, prior \
+             baseline kept, burst finished to Idle (self-recovers once readable, or excluded)",
         ),
         Diagnostic::ChangeOutsideEventMask {
             profile,
