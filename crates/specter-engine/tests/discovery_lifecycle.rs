@@ -1021,6 +1021,60 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
+/// A match degraded to a symlink has left the set: its directory's listing answers for the name,
+/// and a symlink anchors no watch. The pass reaps the Sub minted there and names the match, while
+/// the match beside it keeps its Sub.
+#[test]
+fn a_match_degraded_to_a_symlink_reaps_its_sub_and_is_named() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(srv),
+        "/srv/*",
+        mint_spec(),
+        now,
+    );
+    let _ = respond(
+        &mut e,
+        pid,
+        &dir_snap(&[("a", EntryKind::Dir, 1), ("s", EntryKind::Dir, 2)]),
+        now,
+    );
+    settle_minted_seeds(&mut e, sid, now);
+    let kept = minted_under(&e, sid, srv, &["a"]);
+    let degraded = minted_under(&e, sid, srv, &["s"]);
+
+    let (out, _) = burst_and_respond(
+        &mut e,
+        pid,
+        srv,
+        &dir_snap(&[("a", EntryKind::Dir, 1), ("s", EntryKind::Symlink, 3)]),
+        now + Duration::from_millis(10),
+    );
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DiscoverySubReaped { sub, .. } if *sub == degraded
+        )),
+        "the Sub at the degraded match is reaped",
+    );
+    assert!(e.subs().get(degraded).is_none());
+    assert_eq!(
+        unsupported_warns(&out),
+        [(sid, "/srv/s".to_string(), EntryKind::Symlink)],
+        "the match the pass went on without is named",
+    );
+    assert_eq!(
+        discovery_subs_of(&e, sid).into_values().collect::<Vec<_>>(),
+        [kept],
+        "the match beside it keeps its Sub",
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
 /// A vanished terminus reaps its minted Sub through the reconcile's removal pass
 /// (`DiscoverySubReaped` + `SubDetached(MatchVanished)`), not through its own anchor terminal — the
 /// loss step parks the minted Profile in a recovery descent (`Pending`), and the certified empty
