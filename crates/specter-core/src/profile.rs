@@ -2255,8 +2255,8 @@ pub enum TimerKind {
 ///   or descent's anchor materialization); cleared on the matching decrement (anchor terminal
 ///   event, reap, clamp purge).
 ///
-/// Encoded as a sum type so the dispatch sites — `release_anchor_claim`, the recompute, every
-/// `dispatch_*_vanished` — read the lifecycle directly rather than combining a flag with
+/// Encoded as a sum type so its readers — `release_anchor_claim`, `reap_profile`'s trichotomy, the
+/// watch-rejection claim walk — read the lifecycle directly rather than combining a flag with
 /// [`ProfileState`]. The trichotomy "materialized / pending / purged" emerges from `(state,
 /// anchor_claim)` rather than from a third variant: every release helper treats Purged identically
 /// to None (no contribution to drop), so distinguishing them at the type level adds no dispatch

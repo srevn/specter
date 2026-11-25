@@ -244,11 +244,11 @@ impl crate::Engine {
     /// ([`DescentState::note_observed_absent`] / [`DescentState::note_observed_present`]); events
     /// never write it.
     ///
-    /// **Ordering: mint → state-flip → add_watch → emit.** Symmetric with
-    /// [`Self::materialize_profile_anchor`]'s state-before-refcount pattern. The mint runs *first*
-    /// so the `Pending` state is constructed with its probe slot already armed — phase-without-
-    /// correlation cannot exist. State-flip *then* refcount keeps the contribution attribution
-    /// coherent with the Profile's claim shape at the moment of the refcount edge.
+    /// **Ordering: mint → state-flip → add_watch → emit.** The mint runs *first* so the `Pending`
+    /// state is constructed with its probe slot already armed — phase-without-correlation cannot
+    /// exist — and the emission runs last because the choke reads the correlation back off that
+    /// slot. The refcount edge's place between them is free: the contribution is attributed by its
+    /// explicit [`ContribKey`], not by the Profile's state.
     ///
     /// **Pre-conditions.** Profile must be `Idle` (a fresh attach) or `Parked` (a recovery
     /// re-entry), and must not hold the anchor claim — a claim-Held Profile entering descent would
@@ -296,9 +296,7 @@ impl crate::Engine {
         // its slot already armed — no window where the phase exists without a correlation.
         let correlation = self.mint_probe_correlation();
 
-        // Step 2: state-flip Idle/Parked → Pending, constructed armed. Done before the refcount
-        // edge so any reader between this point and step 3 sees the Profile's claim shape that the
-        // contribution will attribute to (matches `materialize_profile_anchor`'s sequencing).
+        // Step 2: state-flip Idle/Parked → Pending, constructed armed.
         //
         // Liveness needs no separate guard. The entry `debug_assert` carries the precondition in
         // dev/CI; in release the construct-armed slot enforces liveness structurally — on the
@@ -567,18 +565,17 @@ impl crate::Engine {
     /// [`Self::dispatch_descent_ok`]'s terminal arm — the descent has just resolved its last
     /// remaining segment and the Profile is about to leave `Pending` for `Idle → Active(Seed)`.
     ///
-    /// Sequence (load-bearing):
+    /// Sequence:
     /// 1. Read the witnessed-appearance latch off the descent state — it must happen before step
     ///    3's `Pending → Idle` flip destroys the [`DescentState`] carrying it (the descent's probe
     ///    slot is already disarmed at this depth, so the drop is tripwire-safe).
     /// 2. Promote the slot's role to `User` via [`specter_core::Tree::promote_scaffold`] — a no-op
     ///    if a co-resident peer already gave the slot a real role (`WatchRootParent` / `User`), so
     ///    materialization never clobbers a peer's claim.
-    /// 3. Transition the Profile **before** any refcount op via
-    ///    [`specter_core::Profile::materialize_anchor`] — atomic `Pending → Idle`, claim install,
-    ///    kind pin. The recompute (multi-contributor case) reads `Profile.state` and
-    ///    `Profile.anchor_claim` to attribute contributions; the post-flip world has the prefix's
-    ///    STRUCTURE source gone (state no longer Pending) and the anchor's mask source owed.
+    /// 3. Transition the Profile via [`specter_core::Profile::materialize_anchor`] — atomic `Pending
+    ///    → Idle`, claim install, kind pin. The refcount edges that follow are free in their order
+    ///    relative to it: a contribution is attributed by its explicit [`ContribKey`], never by
+    ///    reading `Profile.state` or `Profile.anchor_claim`.
     /// 4. Sub the prefix's STRUCTURE; add the anchor's mask (captured from `Profile.events`).
     /// 5. Install the watch-root-parent contribution (deferred from `attach_sub_inner` because the
     ///    parent didn't exist on disk when the Profile attached).

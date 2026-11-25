@@ -14,10 +14,9 @@
 //!    contribution is keyed by [`ContribKey::ProfileDescendant`].
 //!
 //! The contribution map is the source of truth for refcounting; removal is by key, not by registry
-//! walk. The per-Profile state field (the matching flag from list above) can be cleared in either
-//! order relative to `sub_watch`. This module clears the flag *first* for consistency with the
-//! pre-existing call ordering and so that subsequent helpers reading owner state see the
-//! post-release shape.
+//! walk, so the per-Profile flag (the matching field from the list above) and its `sub_watch` can
+//! be written in either order. This module clears the flag first throughout, one order for every
+//! helper.
 //!
 //! Each helper is:
 //! - **Idempotent.** Flag-already-cleared ⇒ no-op. Safe to call from any site without first
@@ -274,15 +273,14 @@ impl Engine {
     /// `ProfileMap` chokepoints.
     pub(crate) fn discard_anchor_state(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Order:
-        //   1. release_descendant_claim runs first — it `take()`s `current`. The descendant walk
-        //      and its per-slot recompute need the snapshot, and downstream recomputes (including
-        //      release_anchor_claim's `events_union` walk) must see the post-take world with this
-        //      Profile's descendant contributions already gone.
+        //   1. release_descendant_claim runs first: it `take()`s `current`, whose snapshot names
+        //      every descendant contribution to release — step 2's collapse drops `current`, so
+        //      the reverse order would leak them.
         //   2. clear_anchor_classification collapses File/Dir → Unclassified, atomically capturing
         //      the survival witness from the settled reference. Step 1's take_current left
-        //      `current` None but `settled` intact, so the witness is still available — pure
-        //      Profile-state writes, no Tree-side recompute reads them.
-        //   3. release_anchor_claim runs last so its recompute walks a fully-cleared Profile.
+        //      `current` None but `settled` intact, so the witness is still available.
+        //   3. release_anchor_claim's place is free — its contribution is released by key — and it
+        //      runs last.
         self.release_descendant_claim(pid, out);
 
         if let Some(p) = self.profiles.get_mut(pid) {
@@ -478,8 +476,8 @@ mod tests {
             Some(parent),
             "recovery channel preserved across anchor loss",
         );
-        // Parent's watch_demand still carries this Profile's STRUCTURE contribution — the recompute
-        // walks covering Profiles, finds this one still claims the parent, and keeps the union.
+        // Parent's watch_demand still carries this Profile's STRUCTURE contribution —
+        // discard_anchor_state never releases the `ProfileParent` key.
         assert!(
             e.tree().get(parent).is_some_and(|r| r.watch_demand() >= 1),
             "parent watch_demand preserved",
