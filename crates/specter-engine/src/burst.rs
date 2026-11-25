@@ -1119,8 +1119,8 @@ impl Engine {
     /// entry ([`Self::arm_rebase_loop_ceiling`]); no re-arm here.
     ///
     /// `observed_motion` gates the streak exactly as on the pre-fire mirror: only windows that
-    /// observed sample-to-sample motion count toward [`PostFireBurst::retry_streak`] — a refusal or
-    /// a failed probe says nothing about the post-command tree and holds the streak.
+    /// observed sample-to-sample motion count toward [`specter_core::PostFireBurst::retry_streak`]
+    /// — a refusal or a failed probe says nothing about the post-command tree and holds the streak.
     ///
     /// Writes `phase = Settling { settle_timer }`, pins `last_event_time = Some(now)` (the
     /// unfavorable-response instant), and arms a fresh [`TimerKind::PostFireSettle`] timer. Ceiling
@@ -1512,10 +1512,10 @@ impl Engine {
 /// chain.
 ///
 /// **The clamp.** The walk stops *above* the first depth the shape does not descend into
-/// ([`coverage::descends_at`]), returning the deepest graftable prefix. Graftability of a target at
-/// depth `d` requires a `Covered` snapshot entry at every hop `1..=d` (`splice_dir` looks up a
-/// covered Dir at each hop, the target included), and an entry at depth `k` is `Covered` exactly
-/// when the walker recursed into it — `descends_into(k)`. Both production shapes are
+/// ([`crate::coverage::descends_at`]), returning the deepest graftable prefix. Graftability of a
+/// target at depth `d` requires a `Covered` snapshot entry at every hop `1..=d` (`splice_dir` looks
+/// up a covered Dir at each hop, the target included), and an entry at depth `k` is `Covered`
+/// exactly when the walker recursed into it — `descends_into(k)`. Both production shapes are
 /// downward-closed in depth (`Subtree`: `recursive ∧ k < max_depth`; `MatchChain`: `k <
 /// terminus_depth`), so the first non-descend depth bounds every deeper one and `descends_at(d)`
 /// alone decides graftability. Without the clamp a boundary Dir — a `MatchChain` terminus driven by

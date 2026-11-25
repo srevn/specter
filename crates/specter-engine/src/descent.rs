@@ -76,9 +76,9 @@ use specter_core::{
 use std::time::Instant;
 
 /// Transient-failure retry ceiling for a *signal-bearing* descent probe (one emitted by
-/// [`Engine::try_emit_descent_probe`] — a prefix-event / overflow re-trigger or a raced-signal
-/// repay). When such a probe fails with [`ProbeFailure::Transient`], the descent re-latches a fresh
-/// postdating probe up to this many times before giving up loudly
+/// [`crate::Engine::try_emit_descent_probe`] — a prefix-event / overflow re-trigger or a
+/// raced-signal repay). When such a probe fails with [`ProbeFailure::Transient`], the descent
+/// re-latches a fresh postdating probe up to this many times before giving up loudly
 /// ([`Diagnostic::PendingPathRetriesExhausted`]) and parking for a future event. The bound closes
 /// the micro-blip wedge (a one-shot EMFILE losing the awaited segment's creation) without letting a
 /// persistently-failing prefix spin a tight re-probe loop; sustained kernel-resource pressure is a
