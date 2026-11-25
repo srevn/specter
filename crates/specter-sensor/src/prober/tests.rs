@@ -965,12 +965,12 @@ fn forced_false_default_path_unaffected() {
 // ---------------------------------------------------------------- walk: leaf-hash cache transfer
 //
 // When mtime-skip fails for a directory but a child leaf is observably unchanged, the walker
-// constructs the fresh leaf via `LeafEntry::new_or_inherit`, which inherits the baseline leaf's
-// `leaf_hash` when every identity field matches. Under eager construction the inherited value is
-// byte-equal to what fresh computation would produce (both are pure functions of the fields), so
-// the inheritance is unobservable at the hash level; these tests pin the integration shape and the
-// identity-gate's negative arm — a baseline whose identity fields disagree must NOT leak its hash
-// into the freshly-stat'd output.
+// constructs the fresh leaf via `LeafEntry::from_metadata_or_inherit`, which inherits the baseline
+// leaf's `leaf_hash` when every identity field matches. Under eager construction the inherited
+// value is byte-equal to what fresh computation would produce (both are pure functions of the
+// fields), so the inheritance is unobservable at the hash level; these tests pin the integration
+// shape and the identity-gate's negative arm — a baseline whose identity fields disagree must NOT
+// leak its hash into the freshly-stat'd output.
 
 /// Forge a baseline whose `a.c` entry has the contents `leaf_override` (defaulting to a leaf with
 /// the same identity as the disk file). `root_meta`'s mtime is set to `UNIX_EPOCH` to defeat the

@@ -169,7 +169,7 @@ const fn classify(kind: WaitKind, wire: &WireDiagnostic) -> Match {
 ///
 /// One-shot — `wait` exits after the first match — so the render buffer is allocated locally rather
 /// than threaded from `run`. The 256-byte initial capacity mirrors `tail`'s reused buffer so a
-/// long-field event (e.g. [`WireDiagnostic::DynamicSubReaped`] with a deep path) does not grow on
+/// long-field event (e.g. [`WireDiagnostic::DiscoverySubReaped`] with a deep path) does not grow on
 /// the first hit.
 fn emit_matched(client: &ClientArgs, wire: &WireDiagnostic) -> ExitCode {
     let sty = style::resolve(client.color, style::Stream::Stdout);

@@ -1360,8 +1360,8 @@ impl Engine {
                     self.start_standard_burst(profile_id, event_resource, event_path, now, out);
                 } else {
                     // Thread the triggering FsEvent into the Seed's provenance so an isolated
-                    // post-recovery change (Idle+!baseline reached via the `undischarged_consequence`
-                    // ceiling terminal) is witnessed — symmetric with `start_standard_burst`.
+                    // post-recovery change (Idle+!baseline reached via the `Abandon` ceiling
+                    // terminal) is witnessed — symmetric with `start_standard_burst`.
                     self.start_seed_burst(
                         profile_id,
                         Some((event_resource, Arc::clone(event_path))),
