@@ -1676,8 +1676,9 @@ mod tests {
     const EVENTS_COMPLETE: ClassSet = ClassSet::CONTENT;
 
     /// Build an Engine with a single Profile anchored at `/anchor`. Returns the Engine + the
-    /// `ProfileId`. The anchor claim is installed as `seed_at_anchor` would — the burst
-    /// helpers' Idle entries assert it (an anchorless rest is `Parked`, never a burst entry).
+    /// `ProfileId`. The anchor claim's flag is set, without the Tree contribution no pin here reads,
+    /// because the burst helpers' Idle entries assert it (an anchorless rest is `Parked`, never a
+    /// burst entry).
     fn engine_with_profile() -> (Engine, specter_core::ProfileId) {
         let mut e = Engine::new();
         let r = e.tree.ensure_root("/anchor", ResourceRole::User);

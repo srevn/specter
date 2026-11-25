@@ -944,8 +944,8 @@ impl Engine {
         };
         let anchor = p.resource();
 
-        // Trichotomy invariant: Pending and AnchorClaim::Held are mutually exclusive. Descent flips
-        // Pending → Idle and bumps the anchor atomically in `dispatch_descent_ok`'s anchor branch.
+        // Trichotomy invariant: Pending and AnchorClaim::Held are mutually exclusive. The descent's
+        // terminus flips Pending → Idle before the tail installs the claim, in the same step.
         debug_assert!(
             !matches!(
                 (p.state(), p.anchor_claim()),

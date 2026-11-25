@@ -46,9 +46,10 @@
 //!    witness writers — a prefix event names no segment on either backend, so sibling churn at a
 //!    shared prefix can never masquerade as the anchor appearing.
 //!    - `SegmentObserved { kind: Some(_) }`: the awaited segment exists. Is the anchor →
-//!      materialize (promote to `User`, set kind, bump anchor's `watch_demand`, drop the prefix's,
-//!      transition Pending → Idle, start a Seed burst — cold, or Batching-first triggered when the
-//!      descent's witnessed-appearance latch is set). Not the anchor → advance descent one segment.
+//!      materialize: set its kind, transition Pending → Idle, run the tail every anchor that goes
+//!      live runs (promote to `User`, the anchor's and parent's claims, a Seed burst — cold, or
+//!      Batching-first triggered when the descent's witnessed-appearance latch is set), then drop
+//!      the prefix's claim. Not the anchor → advance descent one segment.
 //!    - `SegmentObserved { kind: None }`: the prefix is healthy but the segment is absent — record
 //!      the absence observation and park awaiting the next event (a witnessed park narrates via
 //!      `PendingPathAwaitingSegment` — the delete-then-write recovery shape).
@@ -502,9 +503,9 @@ impl crate::Engine {
         self.tree.set_kind(new_resource, entry_kind.into());
 
         if is_terminal {
-            // Terminal: materialise the anchor and start the Seed burst. The helper releases the
-            // prefix's STRUCTURE contribution and installs the anchor's as part of its own
-            // state-flip sequence.
+            // Terminal: materialise the anchor. The helper flips the Profile out of `Pending`,
+            // seeds it through the tail an immediate attach runs (the anchor's and parent's claims,
+            // then the Seed), and releases the prefix's descent claim last.
             self.materialize_profile_anchor(owner, prefix, new_resource, entry_kind, now, out);
         } else {
             self.advance_descent(owner, prefix, new_resource, out);

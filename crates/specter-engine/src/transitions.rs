@@ -222,8 +222,9 @@ impl Engine {
     /// every recovery trigger converges on: the event-scan arm of [`Self::classify_event_carriers`]
     /// (a `StructureChanged` at `watch_root_parent` or at the co-claimed anchor slot),
     /// `on_sensor_overflow`'s Parked arm, and `attach_sub_inner`'s `ParkedRejoin` re-arm. **Every
-    /// park exit is a descent entry, never a Seed** — the descent terminus is the one place that
-    /// knows how to re-install the claim, the anchor watch, and the parent edge.
+    /// park exit is a descent entry, never a Seed** — a parked anchor may be gone or refused, so
+    /// its exit probes for it first, and only the descent's terminus, finding it, runs the tail
+    /// that re-installs the claim, the anchor watch and the parent edge (`seed_at_anchor`).
     ///
     /// **The prefix is re-derived from the Profile, not the trigger.** `watch_root_parent` when
     /// cached, else `tree.parent(anchor)` (the Tree chain is retained by the anchor back-ref, so
