@@ -278,8 +278,8 @@ impl Engine {
             return;
         };
         // What `template` minted here sits on the Profile its minted identity keys at this slot.
-        // The identity is frozen for the template's lifetime — an edit to it replaces the template
-        // — so every mint of it carries this hash.
+        // The identity is frozen for the template's lifetime — an edit of it replaces the template,
+        // and a rebind is handed none — so every mint of it carries this hash.
         if self
             .profiles
             .find(m.slot, spec.identity().config_hash())

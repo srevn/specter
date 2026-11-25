@@ -626,35 +626,30 @@ impl Engine {
         }
     }
 
-    /// In-place per-Sub rebind — the `modified_params` arm of [`Self::on_config_diff`]. Replaces
-    /// `sub`'s spawn spec (`program` / `scope` / `log_output`) and `settle` via the engine-internal
-    /// edge method [`SubRegistry::rebind`]; preserves `SubId`, `profile`, `name`, `minted_by`, and
-    /// the fire history.
+    /// In-place rebind — the `modified_params` arm of [`Self::on_config_diff`]: `sub` runs
+    /// `params`, and so, for a template, does every Sub it minted ([`SubRegistry::rebind`]); ids,
+    /// Profiles, names and fire histories stand.
     ///
-    /// Touches no Profile state, no Tree slot, and no kernel watch: the silent biggest win over the
-    /// `modified_identity` detach+attach path is that the anchor's `watch_demand` stays installed
+    /// Touches no Tree slot and no kernel watch: the silent biggest win over the
+    /// `modified_identity` detach+attach path is that every anchor's `watch_demand` stays installed
     /// throughout the rebind — there is no brief "no watcher" window.
     ///
-    /// Bookkeeping is one tiny ledger update: when `params.settle` differs from the prior settle,
-    /// the Profile's `settle` floor (min over its live Subs) is recomputed via
-    /// [`recompute_profile_settle`]. The currently-armed settle timer (if any) keeps its existing
-    /// deadline; the *next* settle window uses the new floor.
+    /// Each Profile the edge reached has its settle floor refolded ([`recompute_profile_settle`]):
+    /// `sub`'s, and each minted Sub's, where an operator's Sub may sit beside it. Each one, not
+    /// only where the template's settle moved: a minted Sub rebound by its own name runs apart from
+    /// its template until the template's next rebind restores it, so the template's settle does not
+    /// say whose moved. An armed settle timer keeps its deadline; the next settle window uses the
+    /// new floor.
     ///
-    /// On a stale [`SubId`] (the rebind invariant says the dispatcher just resolved through
-    /// `find_by_name`, so this is structurally unexpected), emits [`Diagnostic::RebindUnknownSub`]
-    /// and returns without mutating engine state.
-    pub(crate) fn rebind_sub_inner(
-        &mut self,
-        sub: SubId,
-        new_params: SubParams,
-        out: &mut StepOutput,
-    ) {
-        let new_settle = new_params.settle;
-        let Some((prior_settle, profile)) = self.subs.rebind(sub, new_params) else {
+    /// On a stale [`SubId`] (the dispatcher just resolved it through `find_by_name`, so this is
+    /// structurally unexpected), emits [`Diagnostic::RebindUnknownSub`] and changes nothing.
+    pub(crate) fn rebind_sub_inner(&mut self, sub: SubId, params: SubParams, out: &mut StepOutput) {
+        if self.subs.rebind(sub, params).is_none() {
             out.diagnostics.push(Diagnostic::RebindUnknownSub { sub });
             return;
-        };
-        if prior_settle != new_settle {
+        }
+        let rebound = std::iter::once(sub).chain(self.subs.minted(sub));
+        for profile in rebound.filter_map(|rebound| self.subs.get(rebound).map(Sub::profile)) {
             recompute_profile_settle(&self.subs, &mut self.profiles, profile);
         }
         out.diagnostics.push(Diagnostic::SubRebound { sub });

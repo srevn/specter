@@ -98,7 +98,8 @@ impl SpawnSpec {
 /// Sealed by the engine, once per template attach, from the request's knobs ([`Self::new`]): the
 /// identity is built from a subtree scan, so no minted Sub sits on a chain. It is the mint dedup's
 /// key, and its sealed hash the Profile partition key, one source by construction; it is frozen for
-/// the template's lifetime, and an edit of it replaces the template.
+/// the template's lifetime, and an edit of it replaces the template, where an edit of the params
+/// rebinds them ([`SubRegistry::rebind`]).
 #[derive(Debug)]
 pub struct MintSpec {
     identity: ProfileIdentity,
@@ -297,11 +298,11 @@ pub struct SubAttachRequest {
 ///   The engine asks the attach's gate first, then performs `detach_old → attach_new`; a refused
 ///   target leaves the old Sub in place — structural rollback at the composition layer.
 /// - **Params change** (`modified_params`): the target and identity are unchanged; only the params
-///   differ (`program`, `scope`, `settle`, `log_output`). The engine rebinds the live Sub in place
-///   via [`SubRegistry::rebind`]: no Profile churn, no kernel-watch flap, no baseline loss. On the
-///   rare case where the prior attach failed and the Sub never entered the registry, the engine
-///   degrades the entry to a fresh attach ([`crate::Diagnostic::ConfigDiffRebindFallbackAttach`]
-///   narrates the reason).
+///   differ (`program`, `scope`, `settle`, `log_output`). The engine rebinds the live Sub in place,
+///   a template with the set it minted ([`SubRegistry::rebind`]): no Profile churn, no kernel-watch
+///   flap, no baseline loss. On the rare case where the prior attach failed and the Sub never
+///   entered the registry, the engine degrades the entry to a fresh attach
+///   ([`crate::Diagnostic::ConfigDiffRebindFallbackAttach`] narrates the reason).
 ///
 /// Engine processes `removed → modified_params → modified_identity → added` atomically in one step.
 /// The four buckets are name-disjoint by diff construction.
@@ -490,6 +491,16 @@ pub enum Reaction {
         spec: MintSpec,
         state: MintState,
     },
+}
+
+impl Reaction {
+    /// The params an edit of this Sub replaces: a firing Sub's own, or those a template stamps.
+    const fn params_mut(&mut self) -> &mut SubParams {
+        match self {
+            Self::Spawn { params, .. } => params,
+            Self::Mint { spec, .. } => &mut spec.params,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -897,45 +908,39 @@ impl SubRegistry {
         }
     }
 
-    /// Replace `sub`'s params in place — the `modified_params` arm of hot-reload's
-    /// [`SubRegistryDiff`] split.
+    /// Replace `sub`'s params in place, and those of every Sub it minted — the `modified_params`
+    /// arm of hot-reload's [`SubRegistryDiff`] split. A template's edit reaches its minted set in
+    /// the one edge, so no Sub of the set runs params its template no longer holds.
     ///
-    /// **Preserves**: [`SubId`], `profile`, `name`, `minted_by`, and the whole [`FireHistory`]. The
-    /// first two are structural (the slotmap key and the Profile join are invariants of this Sub's
-    /// lifetime), and a request carries no provenance to change `minted_by` with; `name` is the key
-    /// the caller found `sub` by ([`Self::find_by_name`]), and params carry none. `has_fired` is
-    /// preserved because the B1 dedup floor reads it as "this Sub has already announced the current
-    /// stable tree state"; a program swap changes *what runs*, not *whether the tree changed*. The
-    /// three observational counters are preserved for the same reason — they record this Sub's
-    /// history under its operator-facing name, and a `modified_params` rebind leaves both identity
-    /// and history intact.
+    /// **Preserves**: every [`SubId`], `profile`, `name` and `minted_by`, every [`FireHistory`], a
+    /// template's [`MintState`], and its spec's identity — the edge is handed none, so the mint
+    /// dedup's key outlives every rebind. Ids and Profile joins are invariants of a Sub's lifetime,
+    /// and a request carries no provenance to change `minted_by` with; `name` is the key the caller
+    /// found `sub` by ([`Self::find_by_name`]), and params carry none. `has_fired` is preserved
+    /// because the B1 dedup floor reads it as "this Sub has already announced the current stable
+    /// tree state"; a program swap changes *what runs*, not *whether the tree changed*. The three
+    /// observational counters are preserved for the same reason — they record a Sub's history under
+    /// its operator-facing name. A template's enumeration stands as it was, so a match that appears
+    /// after the edit is still an appearance.
     ///
-    /// **Replaces**: the [`SubParams`] wholesale — the sealed [`SpawnSpec`] (`needs_diff`
-    /// pre-derived at [`SpawnSpec::new`], no recompute here to forget) and `settle`.
+    /// **Replaces**: the [`SubParams`] wholesale — a firing Sub's own, or a template's spec's and
+    /// each of its minted Subs' copy. The sealed [`SpawnSpec`] carries `needs_diff` pre-derived at
+    /// [`SpawnSpec::new`], so there is no recompute here to forget.
     ///
-    /// Returns the Sub's settle before the rebind and its Profile, whose settle floor the caller
-    /// recomputes when the settle moved; `None` for a stale id.
-    ///
-    /// A template rebinds on neither side: the params it stamps run on every Sub it minted, and this
-    /// edge reaches none of them, so the config diff classifies any edit of a dynamic watch as
-    /// `modified_identity` (wholesale reap + reattach). A template reaching here is a routing breach
-    /// — loud in dev, and in release the rebind is refused (`None`, surfaced through the caller's
-    /// `RebindUnknownSub` narration) rather than leaving its minted set on params it no longer holds.
-    pub fn rebind(&mut self, sub: SubId, params: SubParams) -> Option<(Duration, ProfileId)> {
-        let s = self.subs.get_mut(sub)?;
-        match &mut s.reaction {
-            Reaction::Spawn { params: live, .. } => {
-                Some((std::mem::replace(live, params).settle, s.profile))
-            }
-            Reaction::Mint { .. } => {
-                debug_assert!(
-                    false,
-                    "rebind never touches a Mint reaction — the Subs it minted run its params, \
-                     and this edge reaches none of them",
-                );
-                None
-            }
+    /// Returns the params `sub` held; `None` for a stale id. The settle floors of the Profiles the
+    /// edge reached — `sub`'s, and each minted Sub's — are the caller's to refold.
+    #[must_use]
+    pub fn rebind(&mut self, sub: SubId, params: SubParams) -> Option<SubParams> {
+        for &minted in self.by_template.get(&sub).into_iter().flatten() {
+            self.subs
+                .get_mut(minted)
+                .expect("a minted set holds live Subs")
+                .reaction
+                .params_mut()
+                .clone_from(&params);
         }
+        let live = self.subs.get_mut(sub)?.reaction.params_mut();
+        Some(std::mem::replace(live, params))
     }
 
     /// Clear `sub`'s fire history — the `EffectComplete::Failed` clear. A failed Effect produced no
@@ -1039,8 +1044,8 @@ impl SubRegistry {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionProgram, ClassSet, EffectScope, MintEntry, MintNarration, MintSpec, SpawnSpec, Sub,
-        SubAttachAnchor, SubAttachRequest, SubAttachTarget, SubParams, SubRegistry,
+        ActionProgram, ClassSet, EffectScope, MintEntry, MintNarration, MintSpec, MintState,
+        SpawnSpec, Sub, SubAttachAnchor, SubAttachRequest, SubAttachTarget, SubParams, SubRegistry,
         SubRegistryDiff, SubtreeScan,
     };
     use crate::ids::{ProfileId, SubId};
@@ -1549,10 +1554,11 @@ mod tests {
             },
         );
 
+        let prior = prior.expect("a live Sub rebinds");
         assert_eq!(
-            prior,
-            Some((SETTLE, pid)),
-            "rebind returns the prior settle and the host Profile",
+            (prior.settle, prior.spawn.scope()),
+            (SETTLE, EffectScope::SubtreeRoot),
+            "rebind hands back the params it replaced",
         );
         let s = reg.get(sid).expect("Sub preserved across rebind");
         let h = s.fire_history().expect("spawn reaction carries history");
@@ -1667,16 +1673,83 @@ mod tests {
         assert_eq!(miss(&reg), MintEntry::Appeared);
     }
 
-    /// Rebind tripwire: a `Mint` reaction never rebinds in place — the Subs it minted run its
-    /// params, and the edge reaches none of them. The config diff classifies any edit of a dynamic
-    /// watch as `modified_identity` (reap + reattach); the refusal here is the core-side floor
-    /// under that rule.
+    /// A template's rebind gives the params to its spec and to every Sub it minted, and to no other
+    /// Sub on their Profiles — an operator's, or another template's mint; the template's identity
+    /// and state stand, as does each minted Sub's history.
     #[test]
-    #[should_panic(expected = "rebind never touches a Mint")]
-    fn rebind_panics_on_template_bearing_sub() {
+    fn rebind_of_a_template_reaches_what_it_minted_and_nothing_beside() {
+        let profile = |n| ProfileId::from(slotmap::KeyData::from_ffi(n));
+        let (discovery, at_a, at_b) = (profile(1), profile(2), profile(3));
         let mut reg = SubRegistry::new();
-        let sid = reg.insert(template(ProfileId::default(), "disc"));
-        let _ = reg.rebind(sid, params(anchor_only_program(), EffectScope::SubtreeRoot));
+        let disc = reg.insert(template(discovery, "disc"));
+        let other = reg.insert(template(discovery, "other"));
+        let a = reg.insert(minted(at_a, "disc@/a", disc));
+        let b = reg.insert(minted(at_b, "disc@/b", disc));
+        let beside = [
+            reg.insert(minted(at_a, "other@/a", other)),
+            reg.insert(declared(at_a, "op")),
+        ];
+        reg.mark_fired(a);
+        reg.close_enumeration(disc);
+        let identity = |reg: &SubRegistry| {
+            let spec = reg
+                .get(disc)
+                .and_then(Sub::mint_spec)
+                .expect("live template");
+            spec.identity().config_hash()
+        };
+        let frozen = identity(&reg);
+
+        let program = program_with(Placeholder::Created);
+        let prior = reg.rebind(
+            disc,
+            SubParams {
+                settle: SETTLE * 2,
+                spawn: SpawnSpec::new(Arc::clone(&program), EffectScope::SubtreeRoot, false),
+            },
+        );
+
+        assert_eq!(
+            prior.map(|p| p.settle),
+            Some(SETTLE),
+            "what the template stamped comes back"
+        );
+        let runs = |sid| {
+            reg.get(sid)
+                .and_then(Sub::spawn_spec)
+                .is_some_and(|spec| Arc::ptr_eq(spec.program(), &program))
+        };
+        assert!(
+            runs(a) && runs(b),
+            "every Sub it minted runs the new program"
+        );
+        assert_eq!(
+            [a, b].map(|sid| reg.get(sid).map(Sub::settle)),
+            [Some(SETTLE * 2); 2],
+            "and the new settle",
+        );
+        assert!(
+            !beside.into_iter().any(runs),
+            "no other Sub on their Profiles moves"
+        );
+        let stamped = reg
+            .get(disc)
+            .and_then(Sub::mint_spec)
+            .expect("live template");
+        assert!(
+            Arc::ptr_eq(stamped.params().spawn.program(), &program),
+            "the template stamps the new params from now on",
+        );
+        assert_eq!(identity(&reg), frozen, "its identity stands");
+        assert_eq!(
+            reg.get(disc).and_then(Sub::mint_state).map(MintState::miss),
+            Some(MintEntry::Appeared),
+            "its state stands",
+        );
+        assert!(
+            reg.get(a).is_some_and(Sub::has_fired),
+            "a minted Sub's history stands"
+        );
     }
 
     /// A per-file scope on a template's *spawn* is minted-reaction payload, not this Profile's

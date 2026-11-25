@@ -211,8 +211,7 @@ impl SubSpec {
     /// filter, so neither reaches here. Field-derived, so no [`core::ProfileIdentity`] is built to
     /// be compared and dropped.
     ///
-    /// Every edit of a dynamic watch is identity: the registry's rebind refuses a template
-    /// ([`specter_core::SubRegistry::rebind`]), so a params edit replaces the template and the set
+    /// Every edit of a dynamic watch is identity: a params edit replaces the template and the set
     /// it minted.
     #[must_use]
     pub(crate) fn requires_new_profile(&self, other: &Self) -> bool {

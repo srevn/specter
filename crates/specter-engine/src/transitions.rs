@@ -956,9 +956,9 @@ impl Engine {
     ///    name whose prior attach failed and never entered the registry — nothing to detach).
     /// 2. **Sub `modified_params`** — target + identity unchanged; only the params differ. Resolve
     ///    the name; on `Some`, [`Self::rebind_sub_inner`] rebinds the Sub in place via the
-    ///    [`specter_core::SubRegistry::rebind`] edge — no Profile churn, no kernel-watch flap, no
-    ///    baseline loss. On `None`, the prior attach failed and the Sub never entered the registry;
-    ///    the engine degrades the entry to a fresh attach
+    ///    [`specter_core::SubRegistry::rebind`] edge, a template with the set it minted — no
+    ///    Profile churn, no kernel-watch flap, no baseline loss. On `None`, the prior attach failed
+    ///    and the Sub never entered the registry; the engine degrades the entry to a fresh attach
     ///    ([`Diagnostic::ConfigDiffRebindFallbackAttach`] narrates the reason).
     /// 3. **Sub `modified_identity`** — target / scan / max_settle / events changed; the Sub must
     ///    move to a different Profile partition. The attach's own gate

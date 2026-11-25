@@ -2,17 +2,17 @@
 //! mid-burst handling; in-flight Effect race after detach.
 
 use compact_str::CompactString;
-use specter_core::testkit::{dir_snap, empty_program, proven};
+use specter_core::testkit::{dir_snap, empty_program, proven, single_exec_program};
 use specter_core::{
-    BurstFinish, DedupKey, DetachReason, Diagnostic, DirSnapshot, EffectCompletion, EffectOutcome,
-    EffectScope, EntryKind, FsEvent, Input, ProbeOp, ProbeResponse, ProfileId, ProfileState,
-    ResourceKind, ResourceRole, StepOutput, SubAttachAnchor, SubAttachRequest, SubRegistryDiff,
-    SubtreeScan, WatchOp,
+    ArgPart, ArgTemplate, BurstFinish, DedupKey, DetachReason, Diagnostic, DirSnapshot,
+    EffectCompletion, EffectOutcome, EffectScope, EntryKind, FsEvent, Input, MintEntry, ProbeOp,
+    ProbeResponse, ProfileId, ProfileState, ResourceKind, ResourceRole, SpawnSpec, StepOutput, Sub,
+    SubAttachAnchor, SubAttachRequest, SubRegistryDiff, SubtreeScan, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
-    DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, discovery_req, discovery_subs_of, drain_due,
-    pid_of, pre_place_dir, seed_to_idle, verify,
+    DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, attach_request, discovery_req,
+    discovery_subs_of, drain_due, pid_of, pre_place_dir, seed_to_idle, verify,
 };
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -653,11 +653,10 @@ fn config_diff_add_dynamic_with_missing_prefix_goes_pending() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// `modified_identity` on a template-bearing pair — the diff layer's classification for *any* field
-/// change on a dynamic block: the old template detaches under `ConfigDiffIdentityChanged`, its minted
-/// set cascades under `DiscoverySourceDetached` (a mid-cold-Seed minted probe is cancelled cleanly),
-/// and the replacement attaches in the same step. Its first reconcile re-mints fresh `SubId`s — never
-/// an in-place rebind, which would strand minted `Arc`s of the old template's program.
+/// `modified_identity` naming a template replaces it: the old template detaches under
+/// `ConfigDiffIdentityChanged`, its minted set cascades under `DiscoverySourceDetached` (a
+/// mid-cold-Seed minted probe is cancelled cleanly), and the replacement attaches in the same step.
+/// Its first reconcile re-mints fresh `SubId`s — a replace, never a rebind.
 #[test]
 fn config_diff_modify_template_cascades_and_remints() {
     let mut e = Engine::new();
@@ -788,4 +787,168 @@ fn config_diff_remove_dynamic_cascades() {
         0,
         "every minted Profile reaped with the family",
     );
+}
+
+/// A diff whose one entry is `req`, in the params bucket.
+fn params_edit(req: SubAttachRequest) -> Input {
+    Input::ConfigDiff(SubRegistryDiff {
+        modified_params: vec![req],
+        ..SubRegistryDiff::default()
+    })
+}
+
+/// `modified_params` naming a template rebinds it and the set it minted in place: one `SubRebound`
+/// and no other line — nothing detached, reaped or attached — no watch op, and every minted Sub
+/// keeps its id. A match's next fire runs the new program, and a match that appears after the edit
+/// is an appearance: the template's enumeration stands closed.
+#[test]
+fn config_diff_modified_params_rebinds_a_template_and_the_set_it_minted() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    // A content mask, so one sample proves each minted Seed and burst.
+    let mut watch = discovery_req("disc", "/data/*");
+    watch.events = DEFAULT_EVENTS;
+    let (template, discovery, _) = attach_request(&mut e, watch.clone(), now);
+    let listing = [("a", EntryKind::Dir, 1), ("b", EntryKind::Dir, 2)];
+    let _ = respond(&mut e, discovery, &dir_snap(&listing), now);
+    let minted = discovery_subs_of(&e, template);
+    for &sub in minted.values() {
+        let pid = pid_of(&e, sub);
+        let _ = respond(&mut e, pid, &dir_snap(&[]), now);
+    }
+
+    let program = single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/new")])]);
+    let mut edit = watch;
+    edit.params.spawn = SpawnSpec::new(Arc::clone(&program), EffectScope::SubtreeRoot, false);
+    let t1 = now + SETTLE;
+    let out = e.step(params_edit(edit), t1);
+    assert_eq!(
+        out.diagnostics.as_slice(),
+        [Diagnostic::SubRebound { sub: template }],
+        "one line: nothing detached, reaped or attached",
+    );
+    assert!(out.watch_ops.is_empty(), "no watch op: {:?}", out.watch_ops);
+    assert_eq!(
+        discovery_subs_of(&e, template),
+        minted,
+        "every minted Sub keeps its id"
+    );
+
+    let (&a, &a_sub) = minted.iter().next().expect("two matches");
+    let _ = e.step(
+        Input::FsEvent {
+            resource: a,
+            event: FsEvent::StructureChanged,
+        },
+        t1,
+    );
+    let t2 = t1 + SETTLE * 2;
+    drain_due(&mut e, t2);
+    let a_pid = pid_of(&e, a_sub);
+    let fired = respond(&mut e, a_pid, &dir_snap(&[("f", EntryKind::File, 3)]), t2);
+    assert!(
+        matches!(&fired.effects()[..], [effect] if Arc::ptr_eq(&effect.program, &program)),
+        "the match's next fire runs the new program; got {:?}",
+        fired.effects(),
+    );
+
+    let _ = e.step(
+        Input::FsEvent {
+            resource: data,
+            event: FsEvent::StructureChanged,
+        },
+        t2,
+    );
+    let t3 = t2 + SETTLE * 2;
+    drain_due(&mut e, t3);
+    let grown = [listing[0], listing[1], ("c", EntryKind::Dir, 4)];
+    let out = respond(&mut e, discovery, &dir_snap(&grown), t3);
+    assert!(
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DiscoveryMinted { source, entry: MintEntry::Appeared, .. }
+                if *source == template
+        )),
+        "a match after the edit is an appearance; got {:?}",
+        out.diagnostics,
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// A template's rebind refolds the floor of each Profile it reached over every Sub there — an
+/// operator's beside the minted one included — whatever the template's own settle did: a Sub it
+/// minted, rebound apart by its own name, comes back to the template's params on the template's
+/// next rebind, and its Profile's floor with it.
+#[test]
+fn config_diff_modified_params_of_a_template_refolds_each_minted_floor() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let watch = discovery_req("disc", "/srv/*");
+    let (template, discovery, _) = attach_request(&mut e, watch.clone(), now);
+    let _ = respond(
+        &mut e,
+        discovery,
+        &dir_snap(&[("x", EntryKind::Dir, 1)]),
+        now,
+    );
+    let minted = e.subs().minted(template).next().expect("one match");
+    let profile = pid_of(&e, minted);
+    let x = e.tree().lookup(Some(srv), "x").expect("the match's slot");
+    let operator = SubAttachRequest::for_anchor(
+        "op".into(),
+        SubAttachAnchor::Resource(x),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE * 3,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
+    let (_, joined, _) = attach_request(&mut e, operator, now);
+    assert_eq!(
+        joined, profile,
+        "premise: the operator's Sub shares the minted Profile"
+    );
+    let floor = |e: &Engine| e.profiles().get(profile).map(|p| p.settle);
+
+    let mut slow = watch.clone();
+    slow.params.settle = SETTLE * 5;
+    let _ = e.step(params_edit(slow.clone()), now);
+    assert_eq!(
+        floor(&e),
+        Some(SETTLE * 3),
+        "folded over the operator's Sub"
+    );
+
+    let mut apart = watch;
+    apart.name = e.subs().get(minted).expect("live").name.clone();
+    apart.params.settle = SETTLE / 2;
+    let _ = e.step(params_edit(apart), now);
+    assert_eq!(
+        floor(&e),
+        Some(SETTLE / 2),
+        "premise: the minted Sub runs apart"
+    );
+
+    let mut command = slow;
+    command.params.spawn = SpawnSpec::new(
+        single_exec_program([ArgTemplate::new([ArgPart::literal("/bin/new")])]),
+        EffectScope::SubtreeRoot,
+        false,
+    );
+    let _ = e.step(params_edit(command), now);
+    assert_eq!(
+        e.subs().get(minted).map(Sub::settle),
+        Some(SETTLE * 5),
+        "the template's rebind restores the Sub it minted",
+    );
+    assert_eq!(
+        floor(&e),
+        Some(SETTLE * 3),
+        "and refolds its floor, the template's settle unmoved",
+    );
+    let _ = e.cancel_all_in_flight_probes();
 }
