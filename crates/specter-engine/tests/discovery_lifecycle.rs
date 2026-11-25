@@ -10,15 +10,15 @@
 //! probe cadence is an implementation detail; only the resulting registry is the contract.
 
 use specter_core::testkit::{
-    anchor_ok, covered, dir_snap, dir_snap_nested, empty_program, file_leaf, leaf, proven,
-    uncovered,
+    anchor_ok, covered, covered_at, denied, dir_snap, dir_snap_nested, empty_program, file_leaf,
+    leaf, proven, uncovered,
 };
 use specter_core::{
-    ActiveBurst, ClassSet, ContribKey, DetachReason, Diagnostic, DirSnapshot, EffectCompletion,
-    EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, MintTemplate,
-    OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileIdentity, ProfileState,
-    ResourceId, ResourceKind, ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor, SubId, TimerKind,
-    WatchOp,
+    ActiveBurst, ChildEntry, ClassSet, ContribKey, DetachReason, Diagnostic, DirSnapshot,
+    EffectCompletion, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input,
+    MintTemplate, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileIdentity,
+    ProfileState, ResourceId, ResourceKind, ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor,
+    SubId, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -324,6 +324,148 @@ fn witnessed_appearance_mints_sub_that_fires() {
         Some(1),
         "exactly one first fire",
     );
+}
+
+/// The `DiscoveryMinted` narration in emission order, projected to `(path, appeared)`.
+fn minted_entries(out: &StepOutput) -> Vec<(String, bool)> {
+    out.diagnostics
+        .iter()
+        .filter_map(|d| match d {
+            Diagnostic::DiscoveryMinted { path, appeared, .. } => {
+                Some((path.display().to_string(), *appeared))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// The Sub `sid` minted at the slot `segments` names under `srv`.
+fn minted_under(e: &Engine, sid: SubId, srv: ResourceId, segments: &[&str]) -> SubId {
+    let slot = segments.iter().fold(srv, |parent, segment| {
+        e.tree()
+            .lookup(Some(parent), segment)
+            .expect("minted slot live")
+    });
+    discovery_subs_of(e, sid)[&slot]
+}
+
+/// A branch that opens mints cold. The baseline holds `b` and `d` as directories the walk was
+/// denied; the next listing reads `b` — the same directory — and `d`, now another directory, beside
+/// `c`, new under a standing `/srv`. The enumeration is established, yet `b/log` was first seen
+/// when its branch opened, so it mints cold: its Seed probes at once and owes no fire. `c/log` and
+/// `d/log` appeared under watch, so each mints as an appearance, its Seed batching first. One
+/// classification feeds the witness and the line.
+#[test]
+fn opened_branch_mints_cold_beside_appearances() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(srv),
+        "/srv/*/log",
+        mint_template(),
+        now,
+    );
+    let a = || covered(dir_snap_nested(&[("log", uncovered(10))]));
+    let out = respond(
+        &mut e,
+        pid,
+        &dir_snap_nested(&[("a", a()), ("b", denied(20)), ("d", denied(40))]),
+        now,
+    );
+    assert_eq!(
+        minted_entries(&out),
+        [("/srv/a/log".to_string(), false)],
+        "the first enumeration mints what it could read, cold",
+    );
+    settle_minted_seeds(&mut e, sid, now);
+
+    let (out, _) = burst_and_respond(
+        &mut e,
+        pid,
+        srv,
+        &dir_snap_nested(&[
+            ("a", a()),
+            ("b", covered_at(20, &[("log", uncovered(21))])),
+            ("c", covered_at(30, &[("log", uncovered(31))])),
+            ("d", covered_at(41, &[("log", uncovered(42))])),
+        ]),
+        now + Duration::from_millis(10),
+    );
+    assert_eq!(
+        minted_entries(&out),
+        [
+            ("/srv/b/log".to_string(), false),
+            ("/srv/c/log".to_string(), true),
+            ("/srv/d/log".to_string(), true),
+        ],
+        "the opened branch is an enumeration; a new and a replaced branch are appearances",
+    );
+    let probing = |segments: &[&str]| {
+        e.pending_probe_for(pid_of(&e, minted_under(&e, sid, srv, segments)))
+            .is_some()
+    };
+    assert!(probing(&["b", "log"]), "a cold Seed probes at once");
+    assert!(
+        !probing(&["c", "log"]),
+        "an appearance's Seed batches first"
+    );
+    assert!(
+        !probing(&["d", "log"]),
+        "an appearance's Seed batches first"
+    );
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// Removal is certified absence. `b` is replaced by a directory the walk is denied: beneath it the
+/// snapshot certifies nothing, so the Sub minted at `b/log` stays. When `b` opens and lists no
+/// `log`, a listing answers for the match, and the Sub is reaped.
+#[test]
+fn minted_sub_beneath_a_denied_directory_is_kept_until_a_listing_answers() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(srv),
+        "/srv/*/log",
+        mint_template(),
+        now,
+    );
+    let _ = respond(
+        &mut e,
+        pid,
+        &dir_snap_nested(&[("b", covered_at(20, &[("log", uncovered(21))]))]),
+        now,
+    );
+    settle_minted_seeds(&mut e, sid, now);
+    let mid = minted_under(&e, sid, srv, &["b", "log"]);
+    let reaped = |out: &StepOutput| {
+        out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::DiscoverySubReaped { sub, .. } if *sub == mid))
+    };
+
+    let t1 = now + Duration::from_millis(10);
+    let (out, t2) = burst_and_respond(&mut e, pid, srv, &dir_snap_nested(&[("b", denied(22))]), t1);
+    assert!(
+        !reaped(&out),
+        "nothing is certified beneath a denied directory"
+    );
+    assert!(e.subs().get(mid).is_some(), "the Sub stays as it is");
+
+    let (out, _) = burst_and_respond(
+        &mut e,
+        pid,
+        srv,
+        &dir_snap_nested(&[("b", covered_at(22, &[]))]),
+        t2 + Duration::from_millis(10),
+    );
+    assert!(reaped(&out), "a listing that lacks the match reaps it");
+    assert!(e.subs().get(mid).is_none());
 }
 
 /// A storm of chain events inside one settle window coalesces into one Batching window, one probe,
@@ -1821,6 +1963,64 @@ fn fanout_threshold_warns_exactly_once() {
     let (out2, _) = burst_and_respond(&mut e, pid, big, &huge, now + Duration::from_millis(10));
     assert_eq!(minted_paths(&out2), [] as [(SubId, String); 0]);
     assert_eq!(warns(&out2), 0, "the latch silences later reconciles");
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// A Sub kept beneath a denied directory is live, so it counts toward the fan-out: a pass that
+/// mints one match beside a thousand kept ones crosses the threshold.
+#[test]
+fn subs_kept_beneath_a_denied_directory_count_toward_fanout() {
+    let mut e = Engine::new();
+    let big = pre_place_dir(&mut e, &["big"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(big),
+        "/big/*/*",
+        mint_template(),
+        now,
+    );
+    let names: Vec<String> = (0..1000).map(|i| format!("m{i:04}")).collect();
+    let held: Vec<(&str, ChildEntry)> = names
+        .iter()
+        .zip(1..)
+        .map(|(n, inode)| (n.as_str(), uncovered(inode)))
+        .collect();
+    let warned = |o: &StepOutput| {
+        o.diagnostics.iter().any(|d| {
+            matches!(
+                d,
+                Diagnostic::DiscoveryFanoutThreshold { source, count }
+                    if *source == sid && *count == 1001
+            )
+        })
+    };
+
+    let out = respond(
+        &mut e,
+        pid,
+        &dir_snap_nested(&[("held", covered_at(5000, &held))]),
+        now,
+    );
+    assert_eq!(minted_paths(&out).len(), 1000);
+    assert!(!warned(&out), "a thousand is the threshold, not past it");
+
+    let (out, _) = burst_and_respond(
+        &mut e,
+        pid,
+        big,
+        &dir_snap_nested(&[
+            ("fresh", covered_at(6000, &[("m", uncovered(6001))])),
+            ("held", denied(5001)),
+        ]),
+        now + Duration::from_millis(10),
+    );
+    assert_eq!(minted_paths(&out).len(), 1, "one new match mints");
+    assert!(
+        warned(&out),
+        "the kept thousand and the new one cross the threshold"
+    );
     let _ = e.cancel_all_in_flight_probes();
 }
 

@@ -14,18 +14,23 @@
 //! — so cold-Seed first enumeration, Standard re-reconcile, post-recovery reconcile, and
 //! forced-ceiling reconcile are the same set reconciliation (a diff-based fast path would see nothing
 //! on the Seed pass, where `baseline == current`). A mint classifies by its template's `enumerated`
-//! latch (closed at the end of the template's first completed pass, never re-opened): un-enumerated ⇒
-//! cold (restart parity — re-enumeration must not fire), enumerated ⇒ a witnessed appearance whose
-//! triggered Seed owes the first fire. The classifier keys on the latch, never on the reconciling
-//! burst's intent, so an overflow or recovery reseed still fires for termini that appeared inside the
-//! blind window — the minted set `M` is the durable prior-match-set witness (it survives anchor loss,
-//! overflow, and baseline clears; `baseline` does not). Membership is anchor-*slot* identity:
-//! `(parent, segment)` survives delete-and-recreate, so an atomically replaced terminus stays in `M ∩
-//! T` — the minted Sub keeps its `SubId`, fire history, and B1 dedup identity across the replace, and
-//! its own anchor-loss descent (not discovery) drives the recovery fire. Removal consumes only
-//! certified post-graft snapshots — reconcile is reached from `Stable` verdicts alone, and an
-//! unenumerable root returns early rather than reading as "all matches vanished" — so a degraded read
-//! can never reap a live match.
+//! latch (closed at the end of the template's first completed pass, never re-opened) and by its
+//! [`Branch`]: un-enumerated ⇒ cold (restart parity — re-enumeration must not fire); enumerated ⇒ a
+//! witnessed appearance whose triggered Seed owes the first fire, unless the terminus sits beneath a
+//! chain directory the baseline recorded denied — a branch that opened, whose matches are first seen
+//! now and may predate the watch, so they mint cold. The classifier keys on the latch and the
+//! baseline, never on the reconciling burst's intent, so an overflow or recovery reseed still fires
+//! for termini that appeared inside the blind window — the minted set `M` is the durable
+//! prior-match-set witness (it survives anchor loss, overflow, and baseline clears; `baseline` does
+//! not, so a branch that opened across an anchor loss enters by the latch, as appearances).
+//! Membership is anchor-*slot* identity: `(parent, segment)` survives delete-and-recreate, so an
+//! atomically replaced terminus stays in `M ∩ T` — the minted Sub keeps its `SubId`, fire history,
+//! and B1 dedup identity across the replace, and its own anchor-loss descent (not discovery) drives
+//! the recovery fire. Removal is certified absence: it consumes only certified post-graft snapshots —
+//! reconcile is reached from `Stable` verdicts alone, and an unenumerable root returns early rather
+//! than reading as "all matches vanished" — and it keeps a minted Sub beneath a chain directory the
+//! snapshot holds denied, where the walk certified nothing present or absent. So a degraded read can
+//! never reap a live match.
 //!
 //! Determinism: termini surface in `BTreeMap` (lexicographic) order, templates in sorted-`SubId`
 //! order, victims in sorted `(source, anchor slot)` order, so mint and reap order — and therefore
@@ -37,8 +42,8 @@ use crate::path::empty_path;
 use compact_str::{CompactString, format_compact};
 use smallvec::SmallVec;
 use specter_core::{
-    ChildEntry, DetachReason, Diagnostic, DirChild, DirSnapshot, EntryKind, MintTemplate, Profile,
-    ProfileId, ReactionSpec, ResourceId, ResourceRole, StepOutput, SubAttachAnchor,
+    ChildEntry, DetachReason, Diagnostic, DirChild, DirSnapshot, EntryKind, MintTemplate, PriorDir,
+    Profile, ProfileId, ReactionSpec, ResourceId, ResourceRole, StepOutput, SubAttachAnchor,
     SubAttachRequest, SubId, SubParams,
 };
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,8 +58,19 @@ use std::time::Instant;
 /// lifetime by construction.
 pub(crate) const FANOUT_WARNING_THRESHOLD: usize = 1000;
 
-/// One matched chain terminus: the anchor-relative path as root-first snapshot entry names, plus
-/// the snapshot's kind for the matched entry.
+/// How the branch a terminus sits in stood in the baseline the pass reconciles against.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Branch {
+    /// The baseline read the branch, or did not hold it at all: a terminus it lacks appeared under
+    /// watch.
+    Standing,
+    /// A chain directory above the terminus was this same directory, recorded denied in the
+    /// baseline: the terminus was first seen when its branch opened.
+    Opened,
+}
+
+/// One matched chain terminus: the anchor-relative path as root-first snapshot entry names, the
+/// snapshot's kind for the matched entry, and how its branch stood in the baseline.
 ///
 /// Segments stay the snapshot's own `CompactString` keys end to end — the slot walk keys
 /// `Tree::ensure_child` per segment and the absolute path is built by joining them onto the anchor
@@ -63,30 +79,48 @@ pub(crate) const FANOUT_WARNING_THRESHOLD: usize = 1000;
 pub(crate) struct ChainTerminus {
     pub(crate) segments: SmallVec<[CompactString; 4]>,
     pub(crate) kind: EntryKind,
+    pub(crate) branch: Branch,
 }
 
-/// Collect every chain terminus reachable from `root` — the entries at anchor-relative depth
-/// `terminus_depth` under `Covered` directories only.
+/// Collect every chain terminus reachable from `now` — the entries at anchor-relative depth
+/// `terminus_depth` under `Covered` directories only — each with its [`Branch`], read off `before`:
+/// what the baseline holds for `now`'s root.
 ///
 /// Pure free function over the pruned snapshot a `MatchChain` walk produces: chain directories
-/// strictly above the terminus are `Covered` (the shape's `descends_into` recursed), terminus
-/// directories are `Uncovered`, terminus files ordinary leaves. The `Covered`-only descent is
-/// totality, not policy — a `Leaf` or `Uncovered` Dir above the terminus is skipped because the
-/// walker never emits one (mid-chain non-dirs are filter-dropped at the kinded gate), so the skip
-/// only absorbs adversarial hand-built snapshots.
+/// strictly above the terminus are `Covered` (the shape's `descends_into` recursed) or `Denied`,
+/// terminus directories are `Uncovered`, terminus files ordinary leaves. A `Denied` chain directory
+/// holds no listing, so nothing beneath it is collected — and nothing beneath it is certified
+/// absent either ([`denied_above`]). A `Leaf` or `Uncovered` Dir above the terminus is skipped as
+/// totality, not policy: the walker never emits one (mid-chain non-dirs are filter-dropped at the
+/// kinded gate), so the skip only absorbs adversarial hand-built snapshots.
 ///
 /// Per-level `BTreeMap` iteration ⇒ lexicographic terminus order ⇒ deterministic mint order.
-pub(crate) fn collect_chain_termini(root: &DirSnapshot, terminus_depth: u32) -> Vec<ChainTerminus> {
+pub(crate) fn collect_chain_termini(
+    now: &DirSnapshot,
+    before: PriorDir<'_>,
+    terminus_depth: u32,
+) -> Vec<ChainTerminus> {
     let mut out = Vec::new();
     let mut prefix: SmallVec<[CompactString; 4]> = SmallVec::new();
-    collect_into(root, terminus_depth, 1, &mut prefix, &mut out);
+    collect_into(
+        now,
+        before,
+        Branch::Standing,
+        terminus_depth,
+        1,
+        &mut prefix,
+        &mut out,
+    );
     out
 }
 
 /// DFS body of [`collect_chain_termini`]. `entry_depth` is the depth of `dir`'s *entries* (anchor
 /// children = 1); recursion depth is bounded by the chain length, so the stack stays shallow.
+/// `before` is what the baseline holds for `dir`, and `branch` how `dir`'s branch stood.
 fn collect_into(
     dir: &DirSnapshot,
+    before: PriorDir<'_>,
+    branch: Branch,
     terminus_depth: u32,
     entry_depth: u32,
     prefix: &mut SmallVec<[CompactString; 4]>,
@@ -99,13 +133,48 @@ fn collect_into(
             out.push(ChainTerminus {
                 segments,
                 kind: child.kind(),
+                branch,
             });
         } else if let ChildEntry::Dir(DirChild::Covered(sub)) = child {
+            // `Opened` is sticky down the branch: below a directory the baseline could not read it
+            // saw nothing, so `before` turns `Unseen` there while the branch stays opened.
+            let before = before.child(name, sub.root_meta().fs_id());
+            let branch = match before {
+                PriorDir::Denied => Branch::Opened,
+                PriorDir::Listed(_) | PriorDir::Unseen => branch,
+            };
             prefix.push(name.clone());
-            collect_into(sub, terminus_depth, entry_depth + 1, prefix, out);
+            collect_into(
+                sub,
+                before,
+                branch,
+                terminus_depth,
+                entry_depth + 1,
+                prefix,
+                out,
+            );
             prefix.pop();
         }
     }
+}
+
+/// True iff `root` holds a chain directory on the way to `rel` as denied: the walk certified
+/// nothing beneath it, present or absent. A path a listing answers for — a chain directory that
+/// lists no such name, or a directory above it that is itself absent — is not.
+fn denied_above(root: &DirSnapshot, rel: &Path) -> bool {
+    let mut frame = root;
+    for component in rel.components() {
+        match component
+            .as_os_str()
+            .to_str()
+            .and_then(|name| frame.entries().get(name))
+        {
+            Some(ChildEntry::Dir(DirChild::Covered(sub))) => frame = sub,
+            Some(ChildEntry::Dir(DirChild::Denied(_))) => return true,
+            _ => return false,
+        }
+    }
+    false
 }
 
 /// Owned capture of one template Sub's mint inputs, collected before the reconcile loop takes `&mut
@@ -117,10 +186,11 @@ struct TemplateCapture {
     tpl: Arc<MintTemplate>,
     name: CompactString,
     /// The template's enumeration latch, captured **pre-pass**: every dedup miss in one pass
-    /// classifies uniformly by the state the template entered with — within a minting pass, later
-    /// termini for a *new* template stay cold even though earlier termini in the same pass already
-    /// minted for it. `false` ⇒ this pass is the template's first enumeration (cold mints, restart
-    /// parity); `true` ⇒ a miss is a witnessed appearance (triggered mint, owes its first fire).
+    /// classifies by the state the template entered with — within a minting pass, later termini for
+    /// a *new* template stay cold even though earlier termini in the same pass already minted for
+    /// it. `false` ⇒ this pass is the template's first enumeration (cold mints, restart parity);
+    /// `true` ⇒ a miss in a standing branch is a witnessed appearance (triggered mint, owes its
+    /// first fire), and a miss in a branch that opened is still an enumeration (cold).
     enumerated: bool,
     /// Subs minted for this template by this pass — the end-of-pass fan-out sweep's gate and its
     /// contribution to the live count. `0` at capture; the mint arm increments it.
@@ -141,14 +211,15 @@ impl Engine {
     /// nothing, and the seal reaps the Profile.
     ///
     /// Each mint runs the ordinary `attach_sub_inner` pipeline with a witness classified per
-    /// template ([`SeedWitness`], read off the pre-pass `enumerated` capture): a first-enumeration
-    /// mint enters its own cold Seed (probe emitted within the same `StepOutput`); a mint against
-    /// an established enumeration is a witnessed appearance — its Seed opens triggered
-    /// (Batching-first, debouncing a terminus still being written) and owes the first fire.
-    /// Discovery's "fire" is a batch of attachments. Each reap runs the ordinary `detach_sub_inner`
-    /// pipeline, so a victim's Profile follows the standard detach lifecycle (`ReapNow` from Idle /
-    /// Pending — common, since a vanished terminus usually parked its minted Profile in a recovery
-    /// descent — deferred to burst end from Active).
+    /// template and terminus ([`SeedWitness`], read off the pre-pass `enumerated` capture and the
+    /// terminus's [`Branch`]): an enumeration mint — the template's first, or one in a branch that
+    /// opened — enters its own cold Seed (probe emitted within the same `StepOutput`); a mint
+    /// against an established enumeration in a standing branch is a witnessed appearance — its Seed
+    /// opens triggered (Batching-first, debouncing a terminus still being written) and owes the
+    /// first fire. Discovery's "fire" is a batch of attachments. Each reap runs the ordinary
+    /// `detach_sub_inner` pipeline, so a victim's Profile follows the standard detach lifecycle
+    /// (`ReapNow` from Idle / Pending — common, since a vanished terminus usually parked its minted
+    /// Profile in a recovery descent — deferred to burst end from Active).
     pub(crate) fn reconcile_matches(
         &mut self,
         profile_id: ProfileId,
@@ -174,6 +245,9 @@ impl Engine {
             // machinery owns whatever replaced the anchor.
             return;
         };
+        // The baseline the pass reconciles against, read before the seal rebases it onto `root`: a
+        // chain directory it recorded denied marks what is found beneath it as a branch that opened.
+        let before = profile.baseline_dir().map(Arc::clone);
 
         let mut templates: Vec<TemplateCapture> = self
             .subs
@@ -239,7 +313,12 @@ impl Engine {
         // thrash-recovering against a kind that can never anchor a watch.
         let mut live_slots: BTreeSet<ResourceId> = BTreeSet::new();
 
-        for terminus in collect_chain_termini(&root, spec.terminus_depth()) {
+        let termini = collect_chain_termini(
+            &root,
+            PriorDir::root(before.as_ref(), root.root_meta().fs_id()),
+            spec.terminus_depth(),
+        );
+        for terminus in termini {
             // The absolute path (name suffix + diag payload) materialises lazily — on the first
             // dedup miss, or on a newly-latched unsupported-kind warning: a steady-state pass where
             // every template already minted (or already warned) allocates no paths — O(termini)
@@ -306,16 +385,17 @@ impl Engine {
                     continue;
                 }
                 let abs = abs.get_or_insert_with(|| build_abs(&terminus.segments));
-                // The mint-arm classifier: a dedup miss while the template's enumeration is
-                // established means the terminus *appeared* — the discovery Profile observed the
-                // driving event and certified the set delta, so the mint carries that witness and
-                // its Seed owes the first fire. A miss on an un-enumerated template is first
-                // enumeration: cold, restart parity — re-enumeration after a daemon restart (or a
-                // mid-life template join) must not fire.
-                let witness = if t.enumerated {
-                    SeedWitness::Appeared
-                } else {
-                    SeedWitness::Cold
+                // The mint-arm classifier, read once for the Seed witness and the narration: a
+                // dedup miss while the template's enumeration is established, in a branch that
+                // stood, means the terminus *appeared* — the discovery Profile observed the driving
+                // event and certified the set delta, so the mint carries that witness and its Seed
+                // owes the first fire. Any other miss is an enumeration and mints cold: the
+                // template's first (restart parity — re-enumeration after a daemon restart, or a
+                // mid-life template join, must not fire), or a branch the daemon could not read
+                // until now, whose matches may predate the watch.
+                let witness = match (t.enumerated, terminus.branch) {
+                    (true, Branch::Standing) => SeedWitness::Appeared,
+                    (false, _) | (true, Branch::Opened) => SeedWitness::Cold,
                 };
                 // `format_compact!` writes straight into the `CompactString` that becomes
                 // `SubParams.name`; the `@` byte is reserved at config validation, so synthesised
@@ -355,21 +435,24 @@ impl Engine {
                     // reach the mint, so the `ResourceKind` projection loses nothing and names
                     // exactly the kind the Tree stamped.
                     kind: terminus.kind.into(),
-                    appeared: t.enumerated,
+                    appeared: matches!(witness, SeedWitness::Appeared),
                 });
                 t.minted += 1;
             }
         }
 
-        // Removal pass — `M ∖ T`: every projected minted Sub whose anchor slot the certified walk
-        // did not enumerate has genuinely left the match set. A *replaced* terminus never lands
-        // here: its slot survives the replace (`(parent, segment)` identity), so it sits in `M ∩ T`
-        // and its own recovery descent drives the fire. Iteration is over the local projection, so
-        // the registry mutation inside `detach_sub_inner` cannot invalidate it; the victim's anchor
-        // slot is alive even from a Pending Profile (back-ref retention), so `path_of` resolves for
-        // the narration, and the slot cascades once `detach_sub_inner` reaps the Profile. Narration
-        // precedes the detach so the source-keyed `DiscoverySubReaped` reads causally before its
-        // per-Sub `SubDetached(MatchVanished)`.
+        // Removal pass — `M ∖ T`, where a listing answers for the match: a projected minted Sub whose
+        // anchor slot the certified walk did not enumerate has left the match set, unless a chain
+        // directory above its terminus is one the snapshot holds denied — beneath it the walk
+        // certified nothing, present or absent, so the Sub stays as it is until that directory is
+        // read. A *replaced* terminus never lands here: its slot survives the replace (`(parent,
+        // segment)` identity), so it sits in `M ∩ T` and its own recovery descent drives the fire.
+        // Iteration is over the local projection, so the registry mutation inside `detach_sub_inner`
+        // cannot invalidate it; the victim's anchor slot is alive even from a Pending Profile
+        // (back-ref retention), so `path_of` resolves for the narration, and the slot cascades once
+        // `detach_sub_inner` reaps the Profile. Narration precedes the detach so the source-keyed
+        // `DiscoverySubReaped` reads causally before its per-Sub `SubDetached(MatchVanished)`.
+        let mut reaped: BTreeSet<(SubId, ResourceId)> = BTreeSet::new();
         for (&(source, slot), &victim) in &minted_index {
             if live_slots.contains(&slot) {
                 continue;
@@ -382,6 +465,13 @@ impl Engine {
                 );
                 empty_path()
             });
+            if path
+                .strip_prefix(&anchor_path)
+                .is_ok_and(|rel| denied_above(&root, rel))
+            {
+                continue;
+            }
+            reaped.insert((source, slot));
             out.diagnostics.push(Diagnostic::DiscoverySubReaped {
                 source,
                 sub: victim,
@@ -393,13 +483,14 @@ impl Engine {
         // End-of-pass fan-out sweep, gated on minted-this-pass. The live count crosses the
         // threshold upward only via a mint and mints happen only in the loop above, so a pass that
         // minted nothing cannot be the crossing pass — quiet steady-state reconciles never touch
-        // the latch. The count derives from the pass's own sets — projected survivors plus this
-        // pass's mints — so no extra registry scan runs; `SubRegistry::latch_fanout_warning`'s
-        // atomic check-and-latch keeps the once-per-template-lifetime property structural.
+        // the latch. The count derives from the pass's own sets — the projection less what this
+        // pass reaped (a Sub kept beneath a denied directory is live), plus this pass's mints — so
+        // no extra registry scan runs; `SubRegistry::latch_fanout_warning`'s atomic check-and-latch
+        // keeps the once-per-template-lifetime property structural.
         for t in templates.iter().filter(|t| t.minted > 0) {
             let survivors = minted_index
                 .keys()
-                .filter(|(src, slot)| *src == t.sid && live_slots.contains(slot))
+                .filter(|key| key.0 == t.sid && !reaped.contains(key))
                 .count();
             if let Some(count) = self.subs.latch_fanout_warning(
                 t.sid,
@@ -431,7 +522,7 @@ mod tests {
     //! template ⟺ `MatchChain` attach boundary, and the reconcile's non-Dir-anchor totality arm.
     //! The end-to-end reconcile lifecycle lives in `tests/discovery_lifecycle.rs`.
 
-    use super::{ChainTerminus, collect_chain_termini};
+    use super::{Branch, ChainTerminus, collect_chain_termini};
     use crate::Engine;
     use crate::testkit::{MAX_SETTLE, SETTLE};
     use crate::testkit::{attach_discovery, discovery_subs_of, mint_template, pre_place_dir};
@@ -440,16 +531,18 @@ mod tests {
         covered, dir_snap, dir_snap_nested, empty_program, leaf, uncovered,
     };
     use specter_core::{
-        ClassSet, EffectScope, EntryKind, Input, PatternSpec, ProfileIdentity, ReactionSpec,
-        ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubParams,
+        ClassSet, EffectScope, EntryKind, Input, PatternSpec, PriorDir, ProfileIdentity,
+        ReactionSpec, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubParams,
     };
     use std::sync::Arc;
     use std::time::Instant;
 
+    /// A terminus in a branch that stood: the collector pins below walk with no baseline.
     fn terminus(segments: &[&str], kind: EntryKind) -> ChainTerminus {
         ChainTerminus {
             segments: segments.iter().map(|s| CompactString::new(s)).collect(),
             kind,
+            branch: Branch::Standing,
         }
     }
 
@@ -464,7 +557,7 @@ mod tests {
             ("b.log", EntryKind::File, 2),
         ]);
         assert_eq!(
-            collect_chain_termini(&root, 1),
+            collect_chain_termini(&root, PriorDir::Unseen, 1),
             vec![
                 terminus(&["a"], EntryKind::Dir),
                 terminus(&["b.log"], EntryKind::File),
@@ -490,7 +583,7 @@ mod tests {
             )])),
         )]);
         assert_eq!(
-            collect_chain_termini(&root, 3),
+            collect_chain_termini(&root, PriorDir::Unseen, 3),
             vec![
                 terminus(&["x", "y", "log"], EntryKind::Dir),
                 terminus(&["x", "y", "w"], EntryKind::Dir),
@@ -510,11 +603,11 @@ mod tests {
             ("chain", covered(dir_snap_nested(&[("log", uncovered(3))]))),
         ]);
         assert_eq!(
-            collect_chain_termini(&root, 2),
+            collect_chain_termini(&root, PriorDir::Unseen, 2),
             vec![terminus(&["chain", "log"], EntryKind::Dir)],
         );
         assert_eq!(
-            collect_chain_termini(&dir_snap(&[]), 1),
+            collect_chain_termini(&dir_snap(&[]), PriorDir::Unseen, 1),
             [] as [ChainTerminus; 0]
         );
     }
