@@ -738,17 +738,15 @@ pub fn attach_discovery(
     (sid, pid)
 }
 
-/// The live `(anchor → SubId)` set minted by discovery template `sid`, derived from `SubRegistry`
-/// truth — registry scan, no cached index, so it converges with whatever the engine actually holds.
+/// The Subs discovery template `sid` minted, keyed by each one's anchor slot.
 #[must_use]
 pub fn discovery_subs_of(e: &Engine, sid: SubId) -> BTreeMap<ResourceId, SubId> {
     e.subs()
-        .iter()
-        .filter(|(_, s)| s.minted_by() == Some(sid))
-        .map(|(mid, s)| {
+        .minted(sid)
+        .map(|mid| {
             let anchor = e
                 .profiles()
-                .get(s.profile())
+                .get(pid_of(e, mid))
                 .expect("a live minted Sub's Profile is live")
                 .resource();
             (anchor, mid)

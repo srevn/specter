@@ -125,12 +125,7 @@ fn project_details(
             minted_settle_ms: settle_ms(t.spec().settle),
             minted_scope: WireEffectScope::from(t.spec().spawn.scope()),
             minted_program: program::render(t.spec().spawn.program()),
-            // The discovery fan-out warning's scan, run at IPC cadence: O(total Subs).
-            minted_live: engine
-                .subs()
-                .iter()
-                .filter(|(_, s)| s.minted_by() == Some(sid))
-                .count(),
+            minted_live: engine.subs().minted(sid).len(),
         },
     };
     SubDetails {
@@ -556,9 +551,8 @@ mod tests {
         }
     }
 
-    /// `minted_live` counts the template's live minted Subs — the registry scan keyed on
-    /// `minted_by`, so a hand-attached minted Sub (the projection-side stand-in for a discovery
-    /// reconcile's mint) moves the counter while an unrelated template stays at zero.
+    /// `minted_live` is the length of the template's minted set, which a hand-attached minted Sub
+    /// (the projection-side stand-in for a discovery reconcile's mint) joins.
     #[test]
     fn show_template_minted_live_counts_its_minted_subs() {
         let tmp = tempfile::TempDir::new().unwrap();

@@ -19,7 +19,7 @@ use crate::scan_config::{ProfileIdentity, ScanConfig};
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use smallvec::SmallVec;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -164,7 +164,7 @@ pub struct FireHistory {
 /// - `Spawn` — run a program when the Profile settles. `minted_by` is the Sub-side provenance axis:
 ///   `Some` iff a discovery reconcile minted this Sub. Living *inside* the variant, a minted
 ///   template is unrepresentable, and the detach cascade is structurally depth-one (a minted Sub is
-///   always `Spawn`, so the cascade's recursive frames never re-enter the template arm).
+///   always `Spawn`, which mints nothing).
 /// - `Mint` — attach a dynamic Sub per matched chain terminus. Coupled iff with the `MatchChain`
 ///   Profile shape (the engine's attach boundary asserts both directions: a mint reaction on a
 ///   non-chain Profile and a spawn reaction on a chain Profile are equally unconstructable). `Arc`:
@@ -694,9 +694,8 @@ impl Sub {
     }
 
     /// The discovery template that minted this Sub — `None` for operator-declared Subs, discovery
-    /// templates included. The canonical Sub-side provenance read: the detach cascade reaps a
-    /// detached template's minted set by it, the mint dedup resolves "already minted for this
-    /// anchor?" through it, and the IPC projections render it.
+    /// templates included. Written once, at [`Self::from_request`]: the registry files the Sub
+    /// under it, in its template's minted set ([`SubRegistry::minted`]).
     #[must_use]
     pub const fn minted_by(&self) -> Option<SubId> {
         match &self.reaction {
@@ -754,7 +753,10 @@ impl Sub {
     }
 }
 
-/// Slotmap-backed Sub store with two secondary indices.
+/// Slotmap-backed Sub store with three secondary indices.
+///
+/// Each index keys on a field no edge writes after [`Self::insert`] — a Sub's `profile`, `name` and
+/// `minted_by` — so `insert` and [`Self::remove`] are the only writers of every index.
 ///
 /// - `by_profile` groups Subs by `ProfileId` (insertion order within a Profile).
 /// - `by_name` resolves an operator-facing or synthesised name to its `SubId`. Indexes **every**
@@ -764,15 +766,17 @@ impl Sub {
 ///   the static-vs-dynamic discrimination read [`Sub::is_dynamic`] on the resolved Sub. The index
 ///   is load-bearing — hot-reload resolves every `removed`/`modified` name to an id through
 ///   [`Self::find_by_name`] (O(log N)).
+/// - `by_template` holds each template's minted set ([`Self::minted`]), keyed on the `minted_by`
+///   every minted Sub carries. An entry leaves with its last member, or with its template, whose
+///   removal hands the members back ([`Removed::orphans`]).
 ///
-/// `by_name` mirrors the slotmap entry's lifetime: [`Self::insert`] populates it, [`Self::remove`]
-/// clears it id-checked. The `insert` `debug_assert!` is the dev/CI signal for a duplicate name; the
-/// validator (static side) and the discovery reconcile's registry-derived dedup (dynamic side) make a
-/// collision unreachable in correct operation, and the `@`-disjointness keeps the two construction
-/// sites from racing each other. A release-mode breach is contained by the id-checked `remove`:
-/// `by_name` last-writer-wins, so the name resolves to the later id, and the id-check refuses to
-/// clear that mapping when the earlier (shadowed) id is removed — the *mapping* stays 1:1, the wrong
-/// name→id edge never forms. The shadowed Sub is **not** inert, though: its slotmap entry stays in
+/// A duplicate name is loud in dev — `insert`'s `debug_assert!` — and unreachable in correct
+/// operation: the validator (static side) and the discovery reconcile's dedup (dynamic side)
+/// prevent it, and the `@`-disjointness keeps the two construction sites from racing each other. A
+/// release-mode breach is contained by `remove`'s id-checked clear of `by_name`: the index is
+/// last-writer-wins, so the name resolves to the later id, and the id-check refuses to clear that
+/// mapping when the earlier (shadowed) id is removed — the *mapping* stays 1:1, the wrong name→id
+/// edge never forms. The shadowed Sub is **not** inert, though: its slotmap entry stays in
 /// `by_profile` and keeps firing on its Profile's verdicts until that Profile is reaped — it is
 /// merely unreachable by name. Containment bounds the damage; it does not erase the duplicate.
 #[derive(Debug, Default)]
@@ -780,6 +784,17 @@ pub struct SubRegistry {
     subs: SlotMap<SubId, Sub>,
     by_profile: BTreeMap<ProfileId, SmallVec<[SubId; 2]>>,
     by_name: BTreeMap<CompactString, SubId>,
+    by_template: BTreeMap<SubId, BTreeSet<SubId>>,
+}
+
+/// What [`SubRegistry::remove`] took out: the Sub, and what it minted.
+#[derive(Debug)]
+#[must_use = "a removed template hands back the Subs it minted; the caller owes their detach"]
+pub struct Removed {
+    pub sub: Sub,
+    /// The Subs that name `sub` their template ([`Sub::minted_by`]), in id order — still
+    /// registered, their template gone. Empty for any Sub that minted nothing.
+    pub orphans: BTreeSet<SubId>,
 }
 
 impl SubRegistry {
@@ -788,18 +803,12 @@ impl SubRegistry {
         Self::default()
     }
 
-    /// Insert a Sub; the returned slotmap [`SubId`] is its identity authority (the Sub carries no
-    /// `id` field). Both secondary indices update in lockstep — `by_profile` and `by_name` are
-    /// populated for every Sub.
-    ///
-    /// The `debug_assert!` fires on a duplicate name — the dev/CI signal only. Static-name
-    /// uniqueness is validator-enforced; dynamic-name uniqueness is reconcile-enforced (the
-    /// registry-derived dedup mints one Sub per terminus per template); cross-population uniqueness
-    /// is structural via the `@`-byte reservation. A release-mode breach is contained by the
-    /// id-checked [`Self::remove`] (the mapping stays consistent).
+    /// Insert a Sub and file it in every index; the returned slotmap [`SubId`] is its identity
+    /// authority (the Sub carries no `id` field).
     pub fn insert(&mut self, sub: Sub) -> SubId {
         let profile = sub.profile;
         let name = sub.name.clone();
+        let template = sub.minted_by();
         let id = self.subs.insert(sub);
         self.by_profile.entry(profile).or_default().push(id);
         debug_assert!(
@@ -807,14 +816,17 @@ impl SubRegistry {
             "duplicate Sub name escaped registration: {name:?}",
         );
         self.by_name.insert(name, id);
+        if let Some(template) = template {
+            self.by_template.entry(template).or_default().insert(id);
+        }
         id
     }
 
-    /// Remove a Sub by id, returning the owned value. Clears both secondary indices. The `by_name`
-    /// clear is **id-checked** — the entry drops only if it still points at `id`, so removing a
-    /// duplicate-name escape's shadowed id (a release-mode diff bug) cannot clobber the live id's
-    /// mapping. Returns `None` for a stale id.
-    pub fn remove(&mut self, id: SubId) -> Option<Sub> {
+    /// Remove a Sub by id and clear it from every index; `None` for a stale id. A template leaves
+    /// with its minted set: the members stay registered and come back as [`Removed::orphans`],
+    /// whose detach the caller owes.
+    #[must_use]
+    pub fn remove(&mut self, id: SubId) -> Option<Removed> {
         let sub = self.subs.remove(id)?;
         if let Some(v) = self.by_profile.get_mut(&sub.profile) {
             v.retain(|sid| *sid != id);
@@ -825,7 +837,17 @@ impl SubRegistry {
         if self.by_name.get(&sub.name) == Some(&id) {
             self.by_name.remove(&sub.name);
         }
-        Some(sub)
+        // No entry is an orphan's: its template's removal already took the set it was filed in.
+        if let Some(template) = sub.minted_by()
+            && let Some(minted) = self.by_template.get_mut(&template)
+        {
+            minted.remove(&id);
+            if minted.is_empty() {
+                self.by_template.remove(&template);
+            }
+        }
+        let orphans = self.by_template.remove(&id).unwrap_or_default();
+        Some(Removed { sub, orphans })
     }
 
     #[must_use]
@@ -837,6 +859,15 @@ impl SubRegistry {
     #[must_use]
     pub fn at(&self, profile: ProfileId) -> &[SubId] {
         self.by_profile.get(&profile).map_or(&[], |v| v.as_slice())
+    }
+
+    /// The Subs `template` minted, in id order; empty for a Sub that minted nothing.
+    pub fn minted(&self, template: SubId) -> impl ExactSizeIterator<Item = SubId> {
+        self.by_template
+            .get(&template)
+            .map(BTreeSet::iter)
+            .unwrap_or_default()
+            .copied()
     }
 
     pub fn iter(&self) -> impl Iterator<Item = (SubId, &Sub)> {
@@ -962,28 +993,17 @@ impl SubRegistry {
     /// **Replaces**: the sealed [`SpawnSpec`] wholesale (`program` / `scope` / `log_output` with
     /// `needs_diff` pre-derived at [`SpawnSpec::new`] — no recompute here to forget) and `settle`.
     ///
-    /// Returns `Some((prior_settle, profile))` on success: `prior_settle` is the per-Sub settle the
-    /// caller compares against `new_params.settle` to gate a Profile-settle recompute; `profile` is
-    /// the rebound Sub's host Profile, threaded out so the wrapper avoids a second `get(sub)` for
-    /// the recompute target. Both reads fold into the same `get_mut` the mutation uses — the
-    /// wrapper's recompute gate becomes a single comparison with no follow-up lookup. `Sub.profile`
-    /// is invariant for the Sub's lifetime, so returning it costs nothing observable on the rebind
-    /// itself.
+    /// Returns the Sub's settle before the rebind and its Profile, whose settle floor the caller
+    /// recomputes when the settle moved; `None` for a stale id.
     ///
-    /// Returns `None` on a stale [`SubId`]. The invariant is that the dispatcher resolves through
-    /// [`Self::find_by_name`] in the same step as the rebind, so a stale id is structurally
-    /// unexpected; the caller surfaces it via [`crate::Diagnostic::RebindUnknownSub`].
-    ///
-    /// The `debug_assert!`s pin the `name` / `minted_by` invariants — a release-mode breach would
-    /// silently rewrite the identifying fields under the registry's `by_name` index; the assertions
-    /// catch the breach at the call site (release preserves the live `minted_by` and rebinds the
-    /// rest). The variant match is the `Mint` wall: any field change on a template-bearing spec
-    /// classifies as `modified_identity` (wholesale reap + reattach) at the config diff, never an
-    /// in-place rebind — the minted Subs hold `Arc`s of the template's program, so a rebind would
-    /// strand them on stale reaction state. The config-diff head guard is the outer wall; the
-    /// variant mismatch here is the inner one — loud in dev, and in release it refuses the rebind
-    /// (`None`, surfaced through the caller's `RebindUnknownSub` narration) rather than silently
-    /// clobbering a template.
+    /// The `debug_assert!`s catch a request whose `name` or `minted_by` differs from the live Sub's;
+    /// release keeps the live ones — the registry's indices key on both — and rebinds the rest. The
+    /// variant match is the `Mint` wall: any field change on a template-bearing spec classifies as
+    /// `modified_identity` (wholesale reap + reattach) at the config diff, never an in-place rebind —
+    /// the minted Subs hold `Arc`s of the template's program, so a rebind would strand them on stale
+    /// reaction state. The config-diff head guard is the outer wall; the variant mismatch here is the
+    /// inner one — loud in dev, and in release it refuses the rebind (`None`, surfaced through the
+    /// caller's `RebindUnknownSub` narration) rather than silently clobbering a template.
     pub fn rebind(&mut self, sub: SubId, new_params: SubParams) -> Option<(Duration, ProfileId)> {
         let s = self.subs.get_mut(sub)?;
         debug_assert_eq!(
@@ -1291,7 +1311,7 @@ mod tests {
         assert_eq!(h.last_fired_at, Some(t1), "timestamp advances");
 
         // Stale id is a silent no-op.
-        reg.remove(sid).expect("removed");
+        let _ = reg.remove(sid).expect("removed");
         reg.record_fired(sid, 1, t1); // would otherwise panic on missing entry
     }
 
@@ -1323,7 +1343,7 @@ mod tests {
         );
         assert!(!h.has_fired, "suppression does not touch has_fired");
 
-        reg.remove(sid).expect("removed");
+        let _ = reg.remove(sid).expect("removed");
         reg.record_dedup_suppressed(sid); // stale id is a silent no-op
     }
 
@@ -1388,7 +1408,7 @@ mod tests {
         let a = reg.insert(mk("a"));
         let b = reg.insert(mk("b"));
         let c = reg.insert(mk("c"));
-        reg.remove(b);
+        let _ = reg.remove(b);
 
         let mut iter_keys: Vec<SubId> = reg
             .iter()
@@ -1452,7 +1472,7 @@ mod tests {
                 false,
             ),
         ));
-        reg.remove(id);
+        let _ = reg.remove(id);
         assert!(reg.find_by_name("build").is_none());
     }
 
@@ -1522,7 +1542,7 @@ mod tests {
         ));
         assert_eq!(reg.find_by_name("p@/tmp/x"), Some(dynamic_id));
 
-        reg.remove(dynamic_id).expect("dynamic removed");
+        let _ = reg.remove(dynamic_id).expect("dynamic removed");
         assert!(
             reg.find_by_name("p@/tmp/x").is_none(),
             "dynamic Sub's by_name entry dropped on remove",
@@ -1553,6 +1573,64 @@ mod tests {
         assert!(reg.get(sid).is_none());
         assert_eq!(reg.at(pid), []);
         assert_eq!(reg.len(), 0);
+    }
+
+    /// The minted set follows the two edges: `insert` files a minted Sub under its template and
+    /// `remove` takes it out; a template's removal hands back what it still minted — registered
+    /// until its detach — and no entry outlives the Subs it holds.
+    #[test]
+    fn minted_set_follows_insert_and_remove_and_leaves_with_its_template() {
+        let mut reg = SubRegistry::new();
+        let pid = ProfileId::default();
+        let template = reg.insert(Sub::from_request(pid, template_params("disc")));
+        let mint = |reg: &mut SubRegistry, name: &str| {
+            reg.insert(Sub::from_request(
+                pid,
+                SubParams::minted(
+                    name.into(),
+                    anchor_only_program(),
+                    EffectScope::SubtreeRoot,
+                    SETTLE,
+                    false,
+                    template,
+                ),
+            ))
+        };
+        let a = mint(&mut reg, "disc@/a");
+        let b = mint(&mut reg, "disc@/b");
+        let _ = reg.insert(Sub::from_request(
+            pid,
+            SubParams::spawn(
+                "build".into(),
+                anchor_only_program(),
+                EffectScope::SubtreeRoot,
+                SETTLE,
+                false,
+            ),
+        ));
+        assert_eq!(reg.minted(template).collect::<Vec<_>>(), [a, b]);
+
+        let removed = reg.remove(a).expect("live");
+        assert!(removed.orphans.is_empty(), "a minted Sub mints nothing");
+        assert_eq!(reg.minted(template).collect::<Vec<_>>(), [b]);
+
+        let removed = reg.remove(template).expect("live");
+        assert_eq!(
+            removed.orphans.into_iter().collect::<Vec<_>>(),
+            [b],
+            "the template leaves with what it still minted",
+        );
+        assert_eq!(reg.minted(template).len(), 0);
+        assert!(
+            reg.get(b).is_some(),
+            "an orphan stays registered until its detach"
+        );
+
+        let _ = reg.remove(b).expect("live");
+        assert!(
+            reg.by_template.is_empty(),
+            "no entry outlives the Subs it holds"
+        );
     }
 
     /// The spawn program is reference-counted: cloning it bumps the strong count without copying
@@ -1757,7 +1835,7 @@ mod tests {
                 false,
             ),
         ));
-        reg.remove(sid).expect("removed");
+        let _ = reg.remove(sid).expect("removed");
         let res = reg.rebind(
             sid,
             SubParams::spawn(
@@ -1860,7 +1938,7 @@ mod tests {
             ProfileId::default(),
             template_params("disc"),
         ));
-        reg.remove(sid).expect("removed");
+        let _ = reg.remove(sid).expect("removed");
         assert_eq!(
             reg.latch_fanout_warning(sid, 0, 10),
             None,

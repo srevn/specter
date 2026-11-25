@@ -8,29 +8,32 @@
 //! ordinary silent seal (`seal_baseline_silently`) — discovery fires attachments and detachments,
 //! never Effects, so nothing here touches burst state or crosses the Draining gate.
 //!
-//! Reconcile is the **single lifecycle authority for minted Subs** and is idempotent: one walk of
-//! `current` yields the certified terminus set `T`, one registry projection yields the minted set
-//! `M`, and the pass mints `T ∖ M` and reaps `M ∖ T` ([`specter_core::DetachReason::MatchVanished`])
-//! — so cold-Seed first enumeration, Standard re-reconcile, post-recovery reconcile, and
-//! forced-ceiling reconcile are the same set reconciliation (a diff-based fast path would see nothing
-//! on the Seed pass, where `baseline == current`). A mint classifies by its template's `enumerated`
-//! latch (closed at the end of the template's first completed pass, never re-opened) and by its
-//! [`Branch`]: un-enumerated ⇒ cold (restart parity — re-enumeration must not fire); enumerated ⇒ a
-//! witnessed appearance whose triggered Seed owes the first fire, unless the terminus sits beneath a
-//! chain directory the baseline recorded denied — a branch that opened, whose matches are first seen
-//! now and may predate the watch, so they mint cold. The classifier keys on the latch and the
-//! baseline, never on the reconciling burst's intent, so an overflow or recovery reseed still fires
-//! for termini that appeared inside the blind window — the minted set `M` is the durable
-//! prior-match-set witness (it survives anchor loss, overflow, and baseline clears; `baseline` does
-//! not, so a branch that opened across an anchor loss enters by the latch, as appearances).
-//! Membership is anchor-*slot* identity: `(parent, segment)` survives delete-and-recreate, so an
-//! atomically replaced terminus stays in `M ∩ T` — the minted Sub keeps its `SubId`, fire history,
-//! and B1 dedup identity across the replace, and its own anchor-loss descent (not discovery) drives
-//! the recovery fire. Removal is certified absence: it consumes only certified post-graft snapshots —
-//! reconcile is reached from `Stable` verdicts alone, and an unenumerable root returns early rather
-//! than reading as "all matches vanished" — and it keeps a minted Sub beneath a chain directory the
-//! snapshot holds denied, where the walk certified nothing present or absent. So a degraded read can
-//! never reap a live match.
+//! This module is the **single lifecycle authority for minted Subs**: the pass mints and reaps them
+//! as the tree moves, and [`Engine::reap_orphans`] detaches what a template minted when the
+//! template leaves, whatever removed it.
+//!
+//! The pass is idempotent: one walk of `current` yields the certified terminus set `T`, one registry
+//! projection yields the minted set `M`, and the pass mints `T ∖ M` and reaps `M ∖ T`
+//! ([`specter_core::DetachReason::MatchVanished`]) — so cold-Seed first enumeration, Standard
+//! re-reconcile, post-recovery reconcile, and forced-ceiling reconcile are the same set
+//! reconciliation (a diff-based fast path would see nothing on the Seed pass, where `baseline ==
+//! current`). A mint classifies by its template's `enumerated` latch (closed at the end of the
+//! template's first completed pass, never re-opened) and by its [`Branch`]: un-enumerated ⇒ cold
+//! (restart parity — re-enumeration must not fire); enumerated ⇒ a witnessed appearance whose
+//! triggered Seed owes the first fire, unless the terminus sits beneath a chain directory the
+//! baseline recorded denied — a branch that opened, whose matches are first seen now and may predate
+//! the watch, so they mint cold. The classifier keys on the latch and the baseline, never on the
+//! reconciling burst's intent, so an overflow or recovery reseed still fires for termini that
+//! appeared inside the blind window — the minted set `M` is the durable prior-match-set witness (it
+//! survives anchor loss, overflow, and baseline clears; `baseline` does not, so a branch that opened
+//! across an anchor loss enters by the latch, as appearances). Membership is anchor-*slot* identity:
+//! `(parent, segment)` survives delete-and-recreate, so an atomically replaced terminus stays in `M ∩
+//! T` — the minted Sub keeps its `SubId`, fire history, and B1 dedup identity across the replace, and
+//! its own anchor-loss descent (not discovery) drives the recovery fire. Removal is certified
+//! absence: it consumes only certified post-graft snapshots — reconcile is reached from `Stable`
+//! verdicts alone, and an unenumerable root returns early rather than reading as "all matches
+//! vanished" — and it keeps a minted Sub beneath a chain directory the snapshot holds denied, where
+//! the walk certified nothing present or absent. So a degraded read can never reap a live match.
 //!
 //! Determinism: termini surface in `BTreeMap` (lexicographic) order, templates in sorted-`SubId`
 //! order, victims in sorted `(source, anchor slot)` order, so mint and reap order — and therefore
@@ -540,6 +543,15 @@ impl Engine {
         // walk still classifies as enumeration, not as a storm of appearances.
         for t in &templates {
             self.subs.mark_enumerated(t.sid);
+        }
+    }
+
+    /// A template left the registry: what it minted follows, whatever removed it, each under
+    /// [`DetachReason::DiscoverySourceDetached`]. Depth one — a minted Sub mints nothing, so no
+    /// detach here hands back orphans of its own.
+    pub(crate) fn reap_orphans(&mut self, orphans: BTreeSet<SubId>, out: &mut StepOutput) {
+        for orphan in orphans {
+            self.detach_sub_inner(orphan, DetachReason::DiscoverySourceDetached, out);
         }
     }
 }

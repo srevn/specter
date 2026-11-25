@@ -667,115 +667,55 @@ impl Engine {
         (pid, ProfileOrigin::Fresh)
     }
 
-    /// Detach a Sub by id.
+    /// Detach a Sub by id. The last Sub to leave a Profile reaps it, at once or at burst end
+    /// ([`DetachLifecycle`]); otherwise the Profile's settle floor is recomputed over the Subs that
+    /// remain. A stale id narrates [`Diagnostic::DetachUnknownSub`] and changes nothing; `reason`
+    /// rides the [`Diagnostic::SubDetached`] of a Sub that left.
     ///
-    /// Recomputes `Profile.settle = min(remaining_subs.settles)`. If no Subs remain on the Profile
-    /// (`subs.at(pid)` empty):
-    /// - **Idle / Pending Profile:** reap immediately. Release anchor `watch_demand` (1→0 emits
-    ///   Unwatch), release `watch_root_parent` contribution, and `try_reap` the anchor Resource.
-    /// - **Active Profile:** flip the burst's [`BurstFinish::Reap`] directive via
-    ///   [`ProfileState::mark_active_for_reap`]. The active burst runs to completion; on
-    ///   `finish_burst_to_idle`, the Engine skips Effect emission (`emit_effects` reads the
-    ///   directive) and reaps the Profile in the same step as the Active → Idle transition (any
-    ///   pre-fire phase converges through `finish_burst_to_idle`).
+    /// Takes no `now`: nothing here schedules a timer or moves a burst, and a burst on a detached
+    /// Profile runs on under its own schedule.
     ///
-    /// If the count remains > 0, the Profile stays alive; only `Profile.settle` is recomputed.
-    ///
-    /// Idempotent on stale `SubId` ([`Diagnostic::DetachUnknownSub`] + drop). Sole public entry is
-    /// [`Input::DetachSub`] via [`Self::step`]; the `pub(crate)` inner survives because
-    /// [`Self::on_config_diff`] composes multiple detach/attach operations into one [`StepOutput`]
-    /// on hot reload.
-    ///
-    /// `reason` is the per-call-site lifecycle attribution carried on the emitted
-    /// [`Diagnostic::SubDetached`]. Callers pass the [`DetachReason`] variant that names their
-    /// origin ([`Input::DetachSub`] is canonically [`DetachReason::IpcDisabled`]; internal call
-    /// sites supply their own — `ConfigDiffRemoved` / `ConfigDiffIdentityChanged` from hot-reload,
-    /// `DiscoverySourceDetached` from the discovery cascade). The diagnostic is emitted iff the Sub
-    /// was actually removed (the `DetachUnknownSub` early-return suppresses it — no lifecycle
-    /// change happened).
-    ///
-    /// Time-independent: detach is a pure registry/refcount operation (no timer scheduling, no
-    /// burst transitions that need a `now`). Bursts running on detached Profiles continue under
-    /// their existing schedule until `finish_burst_to_idle`.
-    ///
-    /// **Detaching a discovery template cascades to its minted set**: every Sub it minted
-    /// (`minted_by() == Some(sub)`) detaches recursively under
-    /// [`DetachReason::DiscoverySourceDetached`], whatever `reason` removed the template (IPC
-    /// disable, config removal, identity change). Depth is structurally one — minted Subs are never
-    /// themselves templates, so the recursive frames never re-enter the cascade arm.
+    /// **A template's minted set follows it**, whatever `reason` removed the template (IPC disable,
+    /// config removal, identity change): [`SubRegistry::remove`] hands back what it minted and
+    /// [`Self::reap_orphans`] detaches each.
     pub(crate) fn detach_sub_inner(
         &mut self,
         sub: SubId,
         reason: DetachReason,
         out: &mut StepOutput,
     ) {
-        let (profile_id, was_template) = match self.subs.remove(sub) {
-            Some(s) => (s.profile(), s.is_template()),
-            None => {
-                out.diagnostics.push(Diagnostic::DetachUnknownSub { sub });
-                return;
-            }
+        let Some(removed) = self.subs.remove(sub) else {
+            out.diagnostics.push(Diagnostic::DetachUnknownSub { sub });
+            return;
         };
-        // Emit the lifecycle signal once per real detach — *after* the removal succeeded (the
-        // `DetachUnknownSub` arm above means no Sub left the registry, so there's nothing to
-        // narrate) and *before* the post-detach reap branches (so an immediate reap emitting
-        // `ProfileReaped` lands after the `SubDetached` that caused it). `sort_for_emission`
-        // reseals only the order-determined streams; diagnostics keep their insertion order, so
-        // emission-site order *is* the operator-visible order — emitting in causal order here is
-        // what makes the reaped Profile read as the consequence of the detach.
+        let profile_id = removed.sub.profile();
+        // Narrated before the cascade and the reap below: `sort_for_emission` leaves diagnostics in
+        // insertion order, so emitting in causal order is what makes a reaped Profile read as the
+        // consequence of its Sub's detach.
         out.diagnostics.push(Diagnostic::SubDetached {
             sub,
             profile: profile_id,
             reason,
         });
 
-        // Cascade a detached template's minted set before the template's own Profile bookkeeping:
-        // each minted Sub's detach fully resolves (its Profile reaps) while causally downstream of
-        // the template's `SubDetached` above. Collect before detaching — no iteration over a
-        // mutating registry. Minted Subs live on terminus Profiles, never on the discovery Profile
-        // (termini sit at depth ≥ 1 and chain configs hash-fork from non-chain), so the cascade
-        // cannot perturb the `remaining_subs` count read below.
-        if was_template {
-            let minted: Vec<SubId> = self
-                .subs
-                .iter()
-                .filter(|(_, s)| s.minted_by() == Some(sub))
-                .map(|(id, _)| id)
-                .collect();
-            for mid in minted {
-                self.detach_sub_inner(mid, DetachReason::DiscoverySourceDetached, out);
-            }
-        }
+        // A template's orphans detach before its own Profile bookkeeping: each minted Sub's detach
+        // fully resolves (its Profile reaps) while causally downstream of the template's
+        // `SubDetached` above. Minted Subs live on terminus Profiles, never on the discovery
+        // Profile (termini sit at depth ≥ 1 and chain configs hash-fork from non-chain), so the
+        // cascade cannot perturb the Sub count read below.
+        self.reap_orphans(removed.orphans, out);
 
-        // A live Sub's `.profile()` is live by the attach invariant; this guard is defence-in-depth
-        // — same effect as the get_mut-borrow bail it replaces, but no Profile write happens here
-        // (the post-detach count is derived from the registry).
+        // A live Sub's Profile is live by the attach invariant; the guard is defence in depth.
         if self.profiles.get(profile_id).is_none() {
             return;
         }
-        // Post-`remove` count, read straight from the Sub registry — `Profile.sub_refcount` was a
-        // denormalised mirror of this and has been removed.
-        let remaining_subs = self.subs.at(profile_id).len();
-
-        // No fire-history purge: the detached Sub's `FireHistory` died with it at
-        // `self.subs.remove(sub)` above. The history is per-Sub and slotmap-scoped, so a future
-        // drift verdict on this Profile structurally cannot re-fire a detached Sub (and a
-        // hot-reload-modified Sub re-attaches under a fresh `SubId` starting unfired) — there is no
-        // per-Profile fire container to purge.
-        if remaining_subs > 0 {
-            // Recompute Profile.settle = min(remaining_subs.settles).
-            //
-            // Every Sub on a Profile shares the same `events` mask (events folds into `config_hash`);
-            // detaching one Sub cannot flip `Profile.has_per_file_fds` or `Profile.events`.
+        if !self.subs.at(profile_id).is_empty() {
+            // Every Sub on a Profile shares its `events` mask (it folds into `config_hash`), so
+            // only the settle floor can move.
             self.recompute_profile_settle(profile_id);
             return;
         }
 
-        // No Subs remain: classify the reap path via the typed [`ProfileState::detach_lifecycle`]
-        // projection — `ReapNow` for Idle / Pending Profiles (no burst to drain), `DeferToBurstEnd`
-        // for Active Profiles (the burst's Draining-sweep reconfirm must run first). Pending
-        // Profiles reap synchronously alongside Idle: there is no `finish_burst_to_idle` to resolve
-        // a deferred reap.
         let lifecycle = self
             .profiles
             .get(profile_id)
@@ -788,7 +728,7 @@ impl Engine {
                 // `recompute_profile_settle` is deliberately skipped — the Profile is about to drop
                 // on burst end, so the recompute would be wasted. A revival via fresh
                 // `attach_sub_inner` (zombie-revival branch) un-defers the reap and runs the
-                // recompute symmetrically. (No fire-history purge exists to skip — it is per-Sub.)
+                // recompute symmetrically.
                 let marked = self
                     .profiles
                     .get_mut(profile_id)
