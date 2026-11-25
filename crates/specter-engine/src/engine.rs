@@ -579,11 +579,12 @@ impl Engine {
 
     /// The path of an anchor slot — a live Profile's, or the terminus a mint is about to anchor:
     /// the event path an observed appearance carries into a Seed's trigger or an existing burst's
-    /// `dirty`, and a minted Sub's name. The slot is held — by the Profile's back-reference, or by
-    /// the pass that just resolved the terminus — so the path resolves; a miss is a state-machine
-    /// breach, loud in debug, and degrades to the empty path in release rather than dropping the
-    /// appearance (an empty path in `dirty` still counts as activity).
-    fn anchor_path(&self, anchor: ResourceId) -> Arc<Path> {
+    /// `dirty`, a minted Sub's name, and the line a reaped one leaves. The slot is held — by the
+    /// Profile's back-reference, or by the pass that just resolved the terminus — so the path
+    /// resolves; a miss is a state-machine breach, loud in debug, and degrades to the empty path in
+    /// release rather than dropping the appearance (an empty path in `dirty` still counts as
+    /// activity).
+    pub(crate) fn anchor_path(&self, anchor: ResourceId) -> Arc<Path> {
         self.tree.path_of(anchor).unwrap_or_else(|| {
             debug_assert!(
                 false,

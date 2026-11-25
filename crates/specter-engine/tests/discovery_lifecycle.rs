@@ -2,8 +2,8 @@
 //!
 //! Drives one `Engine` per scenario through attach → cold-Seed reconcile (mint per terminus ×
 //! template) → Standard re-reconcile → vanish/recovery/overflow/cascade with synthetic
-//! [`ProbeResponse`] injections. The inline tests (`src/discovery.rs`) pin the pure collector and
-//! the attach-boundary asserts; this file pins the composed behaviour: consequence routing, dedup
+//! [`ProbeResponse`] injections. The inline tests (`src/discovery.rs`) pin the pass's walk and the
+//! attach-boundary asserts; this file pins the composed behaviour: consequence routing, dedup
 //! convergence, lifecycle diagnostics, and the Draining-gate shape filter.
 //!
 //! Assertions are **converged-state** (the minted registry after quiescence), never step traces —
