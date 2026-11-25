@@ -10,6 +10,7 @@ use crate::op::{ProbeFailure, WatchFailure};
 use crate::profile::{AbsorbMode, BurstIntent, ProfileStateDiscriminant};
 use crate::resource::ResourceKind;
 use crate::snapshot::EntryKind;
+use crate::sub::MintEntry;
 use compact_str::CompactString;
 use std::path::Path;
 use std::sync::Arc;
@@ -657,15 +658,13 @@ pub enum Diagnostic {
     /// stamped at mint. The sibling [`Self::DiscoveryUnsupportedAnchorKind`] deliberately carries
     /// [`EntryKind`] instead; see its rustdoc.
     ///
-    /// `appeared` carries the mint-arm classification: `false` for a first-enumeration mint (the
-    /// template's first completed pass — cold, pins silently), `true` for a witnessed appearance
-    /// against an established enumeration (triggered — the mint owes its first fire). The split
-    /// answers the triage question "why did / didn't this mint react" straight from the log.
+    /// `entry` is how the match entered the template's set — an enumeration pins cold, an
+    /// appearance owes its first fire — so the log answers "why did / didn't this mint react".
     DiscoveryMinted {
         source: SubId,
         path: Arc<Path>,
         kind: ResourceKind,
-        appeared: bool,
+        entry: MintEntry,
     },
     /// A discovery reconcile matched a chain terminus whose kind can never anchor a minted Sub —
     /// `Symlink` or `Other` (fifo / socket / device) — and skipped the mint wholesale: no Sub
@@ -675,10 +674,10 @@ pub enum Diagnostic {
     /// reconcile — a mint→reap round-trip per chain event, forever, precisely on the patterns
     /// symlink farms match (`/srv/*/current`).
     ///
-    /// One-shot per template lifetime (the `unsupported_kind_warned` latch on the template
-    /// carrier): later unsupported matches under the same template skip silently. The latch gates
-    /// only this narration — the terminus kind is read fresh off the snapshot each pass, so
-    /// replacing the symlink with a regular file at the same path mints normally.
+    /// Once per template lifetime ([`crate::SubRegistry::narrate_once`]): later unsupported matches
+    /// under the same template skip silently. Only this line is once — the terminus kind is read
+    /// fresh off the snapshot each pass, so replacing the symlink with a regular file at the same
+    /// path mints normally.
     ///
     /// `kind` is [`EntryKind`], **not** [`ResourceKind`]: the Tree projection folds `Symlink`/`Other`
     /// into `File`, which would make the narration name the one kind the terminus isn't.
@@ -689,8 +688,8 @@ pub enum Diagnostic {
     },
     /// A discovery template's live minted-Sub count (derived from `SubRegistry`) crossed the
     /// warning threshold for the first time — the pattern is matching more targets than typical
-    /// (likely too broad, e.g. `/*` without further constraint). One-shot per template lifetime;
-    /// the latch on the template carrier (`DiscoveryTemplate::fanout_warned`) suppresses repeats.
+    /// (likely too broad, e.g. `/*` without further constraint). Once per template lifetime
+    /// ([`crate::SubRegistry::narrate_once`]).
     DiscoveryFanoutThreshold { source: SubId, count: usize },
     /// A dynamic Sub minted by the discovery template `source` at `path` was reaped because the
     /// reconcile's certified match set no longer contains its terminus — the removal half of the

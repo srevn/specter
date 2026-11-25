@@ -1,12 +1,12 @@
 //! Discovery reconcile — the `MatchChain` Profile's stable-verdict consequence.
 //!
 //! A discovery Profile's scan shape is [`specter_core::ScanConfig::MatchChain`] and its Subs are
-//! discovery templates ([`specter_core::MintTemplate`]-bearing — the attach boundary asserts the
-//! coupling in both directions). A stable verdict on such a Profile *reconciles the match set* in
-//! both directions: mint a dynamic Sub per (chain terminus × template) the registry doesn't know,
-//! reap every minted Sub whose terminus left the certified set. The burst then exits through the
-//! ordinary silent seal (`seal_baseline_silently`) — discovery fires attachments and detachments,
-//! never Effects, so nothing here touches burst state or crosses the Draining gate.
+//! discovery templates (each carrying a [`specter_core::MintSpec`] — the attach boundary asserts
+//! the coupling in both directions). A stable verdict on such a Profile *reconciles the match set*
+//! in both directions: mint a dynamic Sub per (chain terminus × template) the registry doesn't
+//! know, reap every minted Sub whose terminus left the certified set. The burst then exits through
+//! the ordinary silent seal (`seal_baseline_silently`) — discovery fires attachments and
+//! detachments, never Effects, so nothing here touches burst state or crosses the Draining gate.
 //!
 //! This module is the **single lifecycle authority for minted Subs**: the pass mints and reaps them
 //! as the tree moves, and [`Engine::reap_orphans`] detaches what a template minted when the
@@ -17,48 +17,45 @@
 //! reaps `M ∖ T` ([`specter_core::DetachReason::MatchVanished`]) — so cold-Seed first enumeration,
 //! Standard re-reconcile, post-recovery reconcile, and forced-ceiling reconcile are the same set
 //! reconciliation (a diff-based fast path would see nothing on the Seed pass, where `baseline ==
-//! current`). A mint classifies by its template's `enumerated` latch (closed at the end of the
-//! template's first completed pass, never re-opened) and by its [`Branch`]: un-enumerated ⇒ cold
-//! (restart parity — re-enumeration must not fire); enumerated ⇒ a witnessed appearance whose
-//! triggered Seed owes the first fire, unless the terminus sits beneath a chain directory the
-//! baseline recorded denied — a branch that opened, whose matches are first seen now and may predate
-//! the watch, so they mint cold. The classifier keys on the latch and the baseline, never on the
-//! reconciling burst's intent, so an overflow or recovery reseed still fires for termini that
-//! appeared inside the blind window — the minted set `M` is the durable prior-match-set witness (it
-//! survives anchor loss, overflow, and baseline clears; `baseline` does not, so a branch that opened
-//! across an anchor loss enters by the latch, as appearances). Membership is anchor-*slot* identity:
-//! `(parent, segment)` survives delete-and-recreate, so an atomically replaced terminus stays in `M ∩
-//! T` — the minted Sub keeps its `SubId`, fire history, and B1 dedup identity across the replace, and
-//! its own anchor-loss descent (not discovery) drives the recovery fire. Removal is certified
-//! absence: it consumes only certified post-graft snapshots — reconcile is reached from `Stable`
-//! verdicts alone, and an unenumerable root returns early rather than reading as "all matches
-//! vanished" — and it keeps a minted Sub beneath a chain directory the snapshot holds denied, where
-//! the walk certified nothing present or absent. So a degraded read can never reap a live match.
+//! current`). A mint enters as its template's miss ([`specter_core::MintState::miss`]: an enumeration
+//! until the template's first completed pass, an appearance ever after) in a [`Branch`] that stood,
+//! and as an enumeration beneath a chain directory the baseline recorded denied — a branch that
+//! opened, whose matches are first seen now and may predate the watch. An enumeration mints cold
+//! (restart parity — re-enumeration must not fire); an appearance's triggered Seed owes the first
+//! fire. The classifier keys on the template's state and the baseline, never on the reconciling
+//! burst's intent, so an overflow or recovery reseed still fires for termini that appeared inside the
+//! blind window — the minted set `M` is the durable prior-match-set witness (it survives anchor loss,
+//! overflow, and baseline clears; `baseline` does not, so a branch that opened across an anchor loss
+//! enters by the template's miss, as appearances). Membership is anchor-*slot* identity: `(parent,
+//! segment)` survives delete-and-recreate, so an atomically replaced terminus stays in `M ∩ T` — the
+//! minted Sub keeps its `SubId`, fire history, and B1 dedup identity across the replace, and its own
+//! anchor-loss descent (not discovery) drives the recovery fire. Removal is certified absence: it
+//! consumes only certified post-graft snapshots — reconcile is reached from `Stable` verdicts alone,
+//! and an unenumerable root returns early rather than reading as "all matches vanished" — and it
+//! keeps a minted Sub beneath a chain directory the snapshot holds denied, where the walk certified
+//! nothing present or absent. So a degraded read can never reap a live match.
 //!
 //! Determinism: termini surface in `BTreeMap` (lexicographic) order, templates in sorted-`SubId`
 //! order, victims in sorted `(template, anchor slot)` order, so mint and reap order — and therefore
 //! minted `SubId`s and the `StepOutput` — is deterministic across identically-driven engines.
 
 use crate::Engine;
-use crate::engine::SeedWitness;
 use crate::path::empty_path;
 use compact_str::{CompactString, format_compact};
 use smallvec::SmallVec;
 use specter_core::{
-    ChildEntry, DetachReason, Diagnostic, DirChild, DirSnapshot, EntryKind, MintTemplate,
-    NonEmptyPathSet, PriorDir, ProfileId, ReactionSpec, ResourceId, ResourceRole, StepOutput, Sub,
-    SubAttachAnchor, SubAttachRequest, SubId, SubParams,
+    ChildEntry, DetachReason, Diagnostic, DirChild, DirSnapshot, EntryKind, MintEntry,
+    MintNarration, MintSpec, NonEmptyPathSet, PriorDir, ProfileId, ReactionSpec, ResourceId,
+    ResourceRole, StepOutput, Sub, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
 };
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
-/// Threshold beyond which the engine emits a one-shot [`Diagnostic::DiscoveryFanoutThreshold`] for
-/// a discovery template. Operator signal that the pattern is matching more targets than typical —
-/// likely a too-broad pattern. The registry-side check-and-latch
-/// (`SubRegistry::latch_fanout_warning`) is atomic, so a steady-state busy source warns once per
-/// lifetime by construction.
+/// A template whose minted set holds more Subs than this makes
+/// [`Diagnostic::DiscoveryFanoutThreshold`], once in its lifetime: the pattern is matching more
+/// targets than typical — likely a too-broad pattern.
 pub(crate) const FANOUT_WARNING_THRESHOLD: usize = 1000;
 
 /// How the branch a terminus sits in stood in the baseline the pass reconciles against.
@@ -186,15 +183,12 @@ fn denied_above(root: &DirSnapshot, rel: &Path) -> bool {
 /// reaction); only the Sub's `name` (the synthesized-name prefix) rides alongside.
 struct TemplateCapture {
     sid: SubId,
-    tpl: Arc<MintTemplate>,
+    tpl: Arc<MintSpec>,
     name: CompactString,
-    /// The template's enumeration latch, captured **pre-pass**: every dedup miss in one pass
-    /// classifies by the state the template entered with — within a minting pass, later termini for
-    /// a *new* template stay cold even though earlier termini in the same pass already minted for
-    /// it. `false` ⇒ this pass is the template's first enumeration (cold mints, restart parity);
-    /// `true` ⇒ a miss in a standing branch is a witnessed appearance (triggered mint, owes its
-    /// first fire), and a miss in a branch that opened is still an enumeration (cold).
-    enumerated: bool,
+    /// The template's miss, captured **pre-pass**: every dedup miss in one pass enters by the state
+    /// the template came in with — within a template's first pass, later termini stay enumerations
+    /// even though earlier ones in the same pass already minted for it.
+    miss: MintEntry,
 }
 
 impl Engine {
@@ -242,16 +236,14 @@ impl Engine {
     /// minted set) is simply absent here, so the in-flight burst's reconcile mints nothing, reaps
     /// nothing, and the seal reaps the Profile.
     ///
-    /// Each mint runs the ordinary `attach_sub_inner` pipeline with a witness classified per
-    /// template and terminus ([`SeedWitness`], read off the pre-pass `enumerated` capture and the
-    /// terminus's [`Branch`]): an enumeration mint — the template's first, or one in a branch that
-    /// opened — enters its own cold Seed (probe emitted within the same `StepOutput`); a mint
-    /// against an established enumeration in a standing branch is a witnessed appearance — its Seed
-    /// opens triggered (Batching-first, debouncing a terminus still being written) and owes the
-    /// first fire. Discovery's "fire" is a batch of attachments. Each reap runs the ordinary
-    /// `detach_sub_inner` pipeline, so a victim's Profile follows the standard detach lifecycle
-    /// (`ReapNow` from Idle / Pending — common, since a vanished terminus usually parked its minted
-    /// Profile in a recovery descent — deferred to burst end from Active).
+    /// Each mint runs the ordinary `attach_sub_inner` pipeline with the witness its [`MintEntry`]
+    /// names (read off the pre-pass capture of the template's miss and the terminus's [`Branch`]):
+    /// an enumeration enters its own cold Seed (probe emitted within the same `StepOutput`); an
+    /// appearance's Seed opens triggered (Batching-first, debouncing a terminus still being
+    /// written) and owes the first fire. Discovery's "fire" is a batch of attachments. Each reap
+    /// runs the ordinary `detach_sub_inner` pipeline, so a victim's Profile follows the standard
+    /// detach lifecycle (`ReapNow` from Idle / Pending — common, since a vanished terminus usually
+    /// parked its minted Profile in a recovery descent — deferred to burst end from Active).
     pub(crate) fn reconcile_matches(
         &mut self,
         profile_id: ProfileId,
@@ -286,12 +278,11 @@ impl Engine {
             .into_iter()
             .filter_map(|sid| {
                 let s = self.subs.get(sid)?;
-                let t = s.discovery_template()?;
                 Some(TemplateCapture {
                     sid,
-                    tpl: Arc::clone(t.spec()),
+                    tpl: Arc::clone(s.mint_spec()?),
                     name: s.name.clone(),
-                    enumerated: t.enumerated(),
+                    miss: s.mint_state()?.miss(),
                 })
             })
             .collect();
@@ -322,7 +313,7 @@ impl Engine {
         );
         for terminus in termini {
             // The absolute path (name suffix + diag payload) materialises lazily — on the first
-            // dedup miss, or on a newly-latched unsupported-kind warning: a steady-state pass where
+            // dedup miss, or on a template's first unsupported-kind line: a steady-state pass where
             // every template already minted (or already warned) allocates no paths — O(termini)
             // allocations would otherwise recur on every no-op reconcile.
             let build_abs = |segments: &[CompactString]| -> Arc<Path> {
@@ -333,21 +324,23 @@ impl Engine {
                 Arc::from(p)
             };
 
-            // A `Symlink` / `Other` (fifo / socket / device) terminus skips the mint wholesale —
-            // the slot dance never runs (the post-graft reconciler's own diff bookkeeping is
-            // independent of this arm), no kind is stamped, no Sub attaches, and the slot stays out
-            // of `live_slots`. Minting one would be a lie the state machine immediately unwinds:
-            // the kind projects to a File slot, the minted Profile's first anchor probe `lstat`s
-            // and folds `Vanished` on `!is_file()`, parking it in a recovery descent the next
-            // reconcile's removal pass then reaps — a mint→park→reap round-trip per chain event,
-            // forever, exactly on the patterns symlink farms match (`/srv/*/current`). Narrated
-            // once per template lifetime through the registry's check-and-latch; the latch gates
-            // only the diagnostic — kind is read fresh off the snapshot each pass, so a real file
-            // replacing the symlink at the same path mints normally below.
+            // A `Symlink` / `Other` (fifo / socket / device) terminus skips the mint wholesale — the
+            // slot dance never runs (the post-graft reconciler's own diff bookkeeping is independent
+            // of this arm), no kind is stamped, no Sub attaches, and the slot stays out of
+            // `live_slots`. Minting one would be a lie the state machine immediately unwinds: the
+            // kind projects to a File slot, the minted Profile's first anchor probe `lstat`s and
+            // folds `Vanished` on `!is_file()`, parking it in a recovery descent the next reconcile's
+            // removal pass then reaps — a mint→park→reap round-trip per chain event, forever, exactly
+            // on the patterns symlink farms match (`/srv/*/current`). Narrated once per template
+            // lifetime; only the line is once — kind is read fresh off the snapshot each pass, so a
+            // real file replacing the symlink at the same path mints normally below.
             if !matches!(terminus.kind, EntryKind::File | EntryKind::Dir) {
                 let mut abs: Option<Arc<Path>> = None;
                 for t in &templates {
-                    if !self.subs.latch_unsupported_kind_warning(t.sid) {
+                    if !self
+                        .subs
+                        .narrate_once(t.sid, MintNarration::UnsupportedAnchorKind)
+                    {
                         continue;
                     }
                     let abs = abs.get_or_insert_with(|| build_abs(&terminus.segments));
@@ -396,17 +389,12 @@ impl Engine {
                     continue;
                 }
                 let abs = abs.get_or_insert_with(|| build_abs(&terminus.segments));
-                // The mint-arm classifier, read once for the Seed witness and the narration: a
-                // dedup miss while the template's enumeration is established, in a branch that
-                // stood, means the terminus *appeared* — the discovery Profile observed the driving
-                // event and certified the set delta, so the mint carries that witness and its Seed
-                // owes the first fire. Any other miss is an enumeration and mints cold: the
-                // template's first (restart parity — re-enumeration after a daemon restart, or a
-                // mid-life template join, must not fire), or a branch the daemon could not read
-                // until now, whose matches may predate the watch.
-                let witness = match (t.enumerated, terminus.branch) {
-                    (true, Branch::Standing) => SeedWitness::Appeared,
-                    (false, _) | (true, Branch::Opened) => SeedWitness::Cold,
+                // In a branch that stood, a miss enters as the template's miss says; in a branch
+                // the daemon could not read until now, it is an enumeration whatever the template
+                // holds — its matches may predate the watch.
+                let entry = match terminus.branch {
+                    Branch::Standing => t.miss,
+                    Branch::Opened => MintEntry::Enumerated,
                 };
                 // `format_compact!` writes straight into the `CompactString` that becomes
                 // `SubParams.name`; the `@` byte is reserved at config validation, so synthesised
@@ -431,7 +419,7 @@ impl Engine {
                             },
                         },
                     ),
-                    witness,
+                    entry.into(),
                     now,
                     out,
                 )
@@ -446,7 +434,7 @@ impl Engine {
                     // reach the mint, so the `ResourceKind` projection loses nothing and names
                     // exactly the kind the Tree stamped.
                     kind: terminus.kind.into(),
-                    appeared: matches!(witness, SeedWitness::Appeared),
+                    entry,
                 });
             }
         }
@@ -498,24 +486,25 @@ impl Engine {
 
         // Each template's pass closes on its minted set as the pass leaves it: its length is the
         // fan-out the threshold is held to — the live total, a Sub kept beneath a denied directory
-        // included — and the registry's check-and-latch warns once per template lifetime. A
-        // completed pass *is* the enumeration, so the latch closes here, unconditionally and
-        // idempotently (a template detached by an interleaved cascade is a silent miss at the
-        // registry edge), and nowhere earlier: the early returns above (no Dir `current`, empty
-        // template set, unresolvable anchor path) walked nothing, so a template leaving such a pass
-        // still classifies its first *real* walk as an enumeration, not as a storm of appearances.
+        // included — compared before the line is spent, so a pass below the threshold leaves it
+        // unmade. A completed pass *is* the enumeration, so it closes here, idempotently (a
+        // template detached by an interleaved cascade is a silent miss at the registry edge), and
+        // nowhere earlier: the early returns above (no Dir `current`, empty template set,
+        // unresolvable anchor path) walked nothing, so a template leaving such a pass still
+        // classifies its first *real* walk as an enumeration, not as a storm of appearances.
         for t in &templates {
-            let live = self.subs.minted(t.sid).len();
-            if let Some(count) =
-                self.subs
-                    .latch_fanout_warning(t.sid, FANOUT_WARNING_THRESHOLD, live)
+            let count = self.subs.minted(t.sid).len();
+            if count > FANOUT_WARNING_THRESHOLD
+                && self
+                    .subs
+                    .narrate_once(t.sid, MintNarration::FanoutThreshold)
             {
                 out.diagnostics.push(Diagnostic::DiscoveryFanoutThreshold {
                     source: t.sid,
                     count,
                 });
             }
-            self.subs.mark_enumerated(t.sid);
+            self.subs.close_enumeration(t.sid);
         }
     }
 
@@ -538,13 +527,13 @@ mod tests {
     use super::{Branch, ChainTerminus, collect_chain_termini};
     use crate::Engine;
     use crate::testkit::{MAX_SETTLE, SETTLE};
-    use crate::testkit::{attach_discovery, discovery_subs_of, mint_template, pre_place_dir};
+    use crate::testkit::{attach_discovery, discovery_subs_of, mint_spec, pre_place_dir};
     use compact_str::CompactString;
     use specter_core::testkit::{
         covered, dir_snap, dir_snap_nested, empty_program, leaf, uncovered,
     };
     use specter_core::{
-        ClassSet, EffectScope, EntryKind, Input, PatternSpec, PriorDir, ProfileIdentity,
+        ClassSet, EffectScope, EntryKind, Input, MintEntry, PatternSpec, PriorDir, ProfileIdentity,
         ReactionSpec, ScanConfig, StepOutput, SubAttachAnchor, SubAttachRequest, SubParams,
     };
     use std::sync::Arc;
@@ -643,7 +632,7 @@ mod tests {
                 SubParams {
                     name: "disc".into(),
                     settle: SETTLE,
-                    reaction: ReactionSpec::Mint(mint_template()),
+                    reaction: ReactionSpec::Mint(mint_spec()),
                 },
             )),
             Instant::now(),
@@ -683,8 +672,8 @@ mod tests {
     /// The reconcile's non-Dir-anchor totality arm: with no Dir `current` (the cold probe hasn't
     /// answered yet — the same shape as an anchor replaced by a file), reconcile walks no termini
     /// and mints nothing; the recovery machinery owns whatever replaced the anchor. An
-    /// early-returned pass is **not** an enumeration — the template's latch stays open, so its
-    /// first real walk still classifies as first enumeration, not as a storm of appearances.
+    /// early-returned pass is **not** an enumeration — the template's enumeration stays open, so
+    /// its first real walk still mints enumerations, not a storm of appearances.
     #[test]
     fn reconcile_without_dir_current_mints_nothing() {
         let mut e = Engine::new();
@@ -695,7 +684,7 @@ mod tests {
             "disc",
             SubAttachAnchor::Resource(srv),
             "/srv/*",
-            mint_template(),
+            mint_spec(),
             now,
         );
 
@@ -707,14 +696,10 @@ mod tests {
             out.diagnostics,
         );
         assert!(discovery_subs_of(&e, sid).is_empty(), "nothing minted");
-        assert!(
-            !e.subs()
-                .get(sid)
-                .unwrap()
-                .discovery_template()
-                .unwrap()
-                .enumerated(),
-            "an early-returned pass walked nothing — the enumeration latch stays open",
+        assert_eq!(
+            e.subs().get(sid).unwrap().mint_state().unwrap().miss(),
+            MintEntry::Enumerated,
+            "an early-returned pass walked nothing — the enumeration stays open",
         );
         let _ = e.cancel_all_in_flight_probes();
     }

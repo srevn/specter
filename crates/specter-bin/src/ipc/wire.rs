@@ -67,7 +67,7 @@ use jiff::Timestamp;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use specter_core::{
     AbsorbMode, BurstHelper, BurstIntent, ClaimKind, DetachReason, Diagnostic, EffectScope,
-    EntryKind, FsEvent, OverflowScope, ProfileStateDiscriminant, Reaction, ReapTrigger,
+    EntryKind, FsEvent, MintEntry, OverflowScope, ProfileStateDiscriminant, Reaction, ReapTrigger,
     ResourceKind, SpliceFailureCause, StateLabel, WatchFailure,
 };
 use std::path::{Path, PathBuf};
@@ -874,13 +874,13 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 source,
                 path,
                 kind,
-                appeared,
+                entry,
             } => Self::DiscoveryMinted {
                 at: at.clone(),
                 source: WireId::from(*source),
                 path: WirePath::from(path),
                 kind: WireResourceKind::from(*kind),
-                appeared: *appeared,
+                appeared: *entry == MintEntry::Appeared,
             },
             Diagnostic::DiscoveryUnsupportedAnchorKind { source, path, kind } => {
                 Self::DiscoveryUnsupportedAnchorKind {
@@ -1891,7 +1891,7 @@ impl From<&Reaction> for WireReactionKind {
     fn from(r: &Reaction) -> Self {
         match r {
             Reaction::Spawn { .. } => Self::Spawn,
-            Reaction::Mint(_) => Self::Mint,
+            Reaction::Mint { .. } => Self::Mint,
         }
     }
 }

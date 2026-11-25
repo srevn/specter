@@ -12,7 +12,7 @@ use specter_core::{
 use specter_engine::Engine;
 use specter_engine::testkit::{
     DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, discovery_req, discovery_subs_of, drain_due,
-    mint_template, pid_of, pre_place_dir, seed_to_idle, verify,
+    mint_spec, pid_of, pre_place_dir, seed_to_idle, verify,
 };
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -598,7 +598,7 @@ fn config_diff_add_dynamic_attaches_and_first_reconcile_mints() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
     ));
     let out = e.step(Input::ConfigDiff(diff), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("diff added the template");
@@ -636,7 +636,7 @@ fn config_diff_add_dynamic_with_missing_prefix_goes_pending() {
         "disc",
         SubAttachAnchor::Path(PathBuf::from("/data/x")),
         "/data/x/*",
-        mint_template(),
+        mint_spec(),
     ));
     let out = e.step(Input::ConfigDiff(diff), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("diff added the template");
@@ -673,7 +673,7 @@ fn config_diff_modify_template_cascades_and_remints() {
             "disc",
             SubAttachAnchor::Resource(data),
             "/data/*",
-            mint_template(),
+            mint_spec(),
         )),
         now,
     );
@@ -699,7 +699,7 @@ fn config_diff_modify_template_cascades_and_remints() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
     ));
     let out = e.step(Input::ConfigDiff(diff), t1);
 
@@ -758,7 +758,7 @@ fn config_diff_remove_dynamic_cascades() {
             "disc",
             SubAttachAnchor::Resource(data),
             "/data/*",
-            mint_template(),
+            mint_spec(),
         )),
         now,
     );

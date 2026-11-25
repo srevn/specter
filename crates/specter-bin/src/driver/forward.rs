@@ -22,7 +22,7 @@
 use super::EngineDriver;
 use crate::ipc::wire::WireTime;
 use crossbeam::channel::TrySendError;
-use specter_core::{Diagnostic, EffectOp, Input, ProbeOp, StepOutput, SubId};
+use specter_core::{Diagnostic, EffectOp, Input, MintEntry, ProbeOp, StepOutput, SubId};
 use specter_sensor::FsWatcher;
 use std::ops::ControlFlow;
 use std::time::SystemTime;
@@ -536,12 +536,12 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             source,
             path,
             kind,
-            appeared,
+            entry,
         } => tracing::debug!(
             ?source,
             path = %path.display(),
             ?kind,
-            appeared,
+            appeared = *entry == MintEntry::Appeared,
             "discovery reconcile minted a dynamic Sub",
         ),
         Diagnostic::DiscoveryUnsupportedAnchorKind { source, path, kind } => tracing::warn!(

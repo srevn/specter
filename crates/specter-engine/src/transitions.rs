@@ -2831,7 +2831,7 @@ impl Engine {
                     // the fire fork. Reaching here is a routing breach; the skip is the
                     // semantically correct degrade (a Mint must not fire), loud in dev so the
                     // misrouting dispatcher gets fixed, never daemon-fatal in release.
-                    Reaction::Mint(_) => {
+                    Reaction::Mint { .. } => {
                         debug_assert!(
                             false,
                             "emit_effects reached a Mint Sub \

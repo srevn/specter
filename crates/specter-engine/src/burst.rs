@@ -264,8 +264,8 @@ impl Engine {
     /// - `on_sensor_overflow` Active path — after `finish_burst_to_idle` flushes the in-flight
     ///   burst (cold).
     /// - `attach_sub_inner`'s template join-reseed — a discovery template joining an Idle discovery
-    ///   Profile drives one fresh certified walk (cold; the joiner's mints classify by its own
-    ///   enumeration latch, never by this burst's intent).
+    ///   Profile drives one fresh certified walk (cold; the joiner's mints enter by its own miss,
+    ///   never by this burst's intent).
     /// - [`Self::seed_at_anchor`] — the tail every anchor that goes live runs (a fresh attach whose
     ///   anchor is on disk, a descent's terminus), selected by its [`crate::engine::SeedWitness`]:
     ///   an observed appearance of the anchor — a discovery mint classified as one, a descent whose

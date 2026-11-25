@@ -41,9 +41,9 @@ pub enum SubAttachAnchor {
 ///
 /// Construction-sealed: [`Self::new`] derives `needs_diff` once from the scope and the program's
 /// placeholder set, and private fields make a desynced `needs_diff` unconstructable — there is no
-/// way to swap `program` or `scope` without re-deriving. One derivation per *spec*: a
-/// [`MintTemplate`] derives at config lowering, not once per mint (each minted Sub clones the
-/// sealed value — an Arc bump plus `Copy` fields).
+/// way to swap `program` or `scope` without re-deriving. One derivation per *spec*: a [`MintSpec`]
+/// derives at config lowering, not once per mint (each minted Sub clones the sealed value — an Arc
+/// bump plus `Copy` fields).
 #[derive(Clone, Debug)]
 pub struct SpawnSpec {
     program: Arc<ActionProgram>,
@@ -93,20 +93,20 @@ impl SpawnSpec {
     }
 }
 
-/// The mint spec a discovery Sub stamps onto its dynamic Subs — the second identity a dynamic
-/// `[[watch]]` carries beyond the discovery Sub's own.
+/// What a template stamps onto each Sub it mints — the second identity a dynamic `[[watch]]`
+/// carries beyond the template's own.
 ///
-/// A discovery Sub's *reaction* is to mint Subs that run `spawn` on each match; its Profile fires
-/// attachments, never Effects. The template carries everything a mint needs: the minted Profiles'
+/// A template's *reaction* is to mint Subs that run `spawn` on each match; its Profile fires
+/// attachments, never Effects. The spec carries everything a mint needs: the minted Profiles'
 /// identity (the user's scan / events / `max_settle` knobs), the minted Subs' debounce, and the
-/// minted reaction itself. The discovery Sub's own identity is pinned to discovery constants at
-/// config lowering — every user knob lands here instead, so the `[[watch]]` surface keeps its
-/// meaning (`settle` debounces the *reaction*, not the discovery walk).
+/// minted reaction itself. The template's own identity is pinned to discovery constants at config
+/// lowering — every user knob lands here instead, so the `[[watch]]` surface keeps its meaning
+/// (`settle` debounces the *reaction*, not the discovery walk).
 ///
 /// Plain frozen carrier — no derived cache: the sealed [`ProfileIdentity`] carries its own eager
 /// hash, so the mint-dedup key and the Profile partition key share one source by construction.
 #[derive(Clone, Debug)]
-pub struct MintTemplate {
+pub struct MintSpec {
     /// Minted Profiles' identity (the user's scan / events / `max_settle` knobs).
     pub identity: ProfileIdentity,
     /// Minted Subs' debounce (the user's `settle`). Together with `identity.max_settle()` it must
@@ -122,9 +122,9 @@ pub struct MintTemplate {
 
 /// Per-Sub Effect fire history — the four spawn-state fields in one home; `Default` is "never fired".
 ///
-/// Lives on the `Spawn` reaction variant, not on [`SpawnSpec`]: a [`MintTemplate`]'s `spawn` is
-/// shared immutable config, while each minted Sub needs its own history — state and spec must not
-/// share a struct. Mutated only through the registry edges ([`SubRegistry::mark_fired`] /
+/// Lives on the `Spawn` reaction variant, not on [`SpawnSpec`]: a [`MintSpec`]'s `spawn` is shared
+/// immutable config, while each minted Sub needs its own history — state and spec must not share a
+/// struct. Mutated only through the registry edges ([`SubRegistry::mark_fired`] /
 /// [`SubRegistry::clear_fired`] / [`SubRegistry::record_fired`] /
 /// [`SubRegistry::record_dedup_suppressed`]; the registry holds the sole `&mut Sub`), and its
 /// lifetime *is* the slotmap entry's — detach drops it with the Sub, so a detached or
@@ -156,10 +156,71 @@ pub struct FireHistory {
     pub dedup_suppressed_count: u64,
 }
 
+/// How a terminus entered a template's match set — what a mint's Seed owes, and what
+/// [`crate::Diagnostic::DiscoveryMinted`] says of it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MintEntry {
+    /// Found by an enumeration — the template's first pass, or a branch the daemon could not read
+    /// until now. It may predate the watch, so its Seed pins cold.
+    Enumerated,
+    /// Missing from a set the template had certified, in a branch the daemon had read: it appeared
+    /// under watch, and its Seed owes the first fire.
+    Appeared,
+}
+
+/// A line a template makes once in its lifetime ([`SubRegistry::narrate_once`]).
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum MintNarration {
+    /// [`crate::Diagnostic::DiscoveryFanoutThreshold`]: its minted set grew past the warning
+    /// threshold.
+    FanoutThreshold,
+    /// [`crate::Diagnostic::DiscoveryUnsupportedAnchorKind`]: a match whose kind can anchor no watch.
+    UnsupportedAnchorKind,
+}
+
+impl MintNarration {
+    /// This narration's bit in [`MintState`]'s record.
+    const fn bit(self) -> u8 {
+        1 << self as u8
+    }
+}
+
+/// A template's state beside its frozen [`MintSpec`]: how its next miss enters, and which lines it
+/// has made.
+///
+/// It lives as long as the template's slotmap entry and changes only through the registry's edges
+/// ([`SubRegistry::close_enumeration`], [`SubRegistry::narrate_once`]).
+#[derive(Debug)]
+pub struct MintState {
+    /// How a terminus the template has not minted enters its set, in a branch the daemon had read:
+    /// `Enumerated` until a pass over the template completes, `Appeared` ever after. It never
+    /// reopens: the minted set it is read against outlives anchor loss, overflow and baseline
+    /// clears, so a miss after a blind window did appear in it.
+    miss: MintEntry,
+    /// The [`MintNarration`]s made, one bit each.
+    narrated: u8,
+}
+
+impl MintState {
+    const fn new() -> Self {
+        Self {
+            miss: MintEntry::Enumerated,
+            narrated: 0,
+        }
+    }
+
+    /// How a terminus this template has not minted enters its set, where the daemon had read the
+    /// branch it sits in.
+    #[must_use]
+    pub const fn miss(&self) -> MintEntry {
+        self.miss
+    }
+}
+
 /// The reaction half of [`SubParams`] — pure intent, no runtime state.
 ///
-/// [`Sub::from_request`] enriches it into a [`Reaction`]: `Spawn` gains a fresh [`FireHistory`],
-/// `Mint` wraps the per-template warning latches.
+/// [`Sub::from_request`] gives it the state it carries at rest: `Spawn` a fresh [`FireHistory`],
+/// `Mint` a fresh [`MintState`].
 ///
 /// - `Spawn` — run a program when the Profile settles. `minted_by` is the Sub-side provenance axis:
 ///   `Some` iff a discovery reconcile minted this Sub. Living *inside* the variant, a minted
@@ -168,15 +229,15 @@ pub struct FireHistory {
 /// - `Mint` — attach a dynamic Sub per matched chain terminus. Coupled iff with the `MatchChain`
 ///   Profile shape (the engine's attach boundary asserts both directions: a mint reaction on a
 ///   non-chain Profile and a spawn reaction on a chain Profile are equally unconstructable). `Arc`:
-///   every reconcile pass collects the Profile's template set before minting — a refcount bump per
-///   pass instead of re-borrowing the registry per mint, and `SubParams: Clone` stays cheap.
+///   a mint holds its template's spec across the engine's `&mut` work for a refcount bump, not a
+///   copy, and `SubParams: Clone` stays cheap.
 #[derive(Clone, Debug)]
 pub enum ReactionSpec {
     Spawn {
         spec: SpawnSpec,
         minted_by: Option<SubId>,
     },
-    Mint(Arc<MintTemplate>),
+    Mint(Arc<MintSpec>),
 }
 
 impl ReactionSpec {
@@ -463,18 +524,17 @@ impl ClassSet {
     /// span the window invisibly, so a STRUCTURE-covering mask folds the verdict via
     /// `EventsReliable` — N=1, no hash-channel ride.
     ///
-    /// **HAZARD — an "equal hash ⇒ skip reconcile" shortcut has two obstructions.** The
-    /// load-bearing one is registry-delta starvation: a discovery template can join its Profile
-    /// with no tree event in sight (hot reload, mid-life join), and its mints are then owed on an
-    /// *unchanged* tree — a hash gate would skip exactly the pass that owes them. The template's
-    /// [`DiscoveryTemplate::enumerated`] latch is the disarm: gating additionally on "every
-    /// captured template already enumerated" makes the skip sound, because a joining template
-    /// arrives un-enumerated and defeats the gate. The second obstruction is hash noise: a matched
-    /// *file* terminus still folds `{mtime, size, leaf_hash}` into the pruned snapshot hash, so an
-    /// unwatched in-place append moves the hash without an event — under this witness the hash is
-    /// never consulted for the verdict and reconciliation depends only on names and kinds, so the
-    /// drift is cosmetic baseline noise, but it keeps "equal hash" needlessly strict until terminus
-    /// leaves fold identity-only.
+    /// **HAZARD — an "equal hash ⇒ skip reconcile" shortcut has two obstructions.** The load-bearing
+    /// one is registry-delta starvation: a discovery template can join its Profile with no tree event
+    /// in sight (hot reload, mid-life join), and its mints are then owed on an *unchanged* tree — a
+    /// hash gate would skip exactly the pass that owes them. The template's [`MintState::miss`] is
+    /// the disarm: gating additionally on "every template's miss is already an appearance" makes the
+    /// skip sound, because a joining template arrives with its enumeration open and defeats the gate.
+    /// The second obstruction is hash noise: a matched *file* terminus still folds `{mtime, size,
+    /// leaf_hash}` into the pruned snapshot hash, so an unwatched in-place append moves the hash
+    /// without an event — under this witness the hash is never consulted for the verdict and
+    /// reconciliation depends only on names and kinds, so the drift is cosmetic baseline noise, but
+    /// it keeps "equal hash" needlessly strict until terminus leaves fold identity-only.
     pub const MEMBERSHIP_CHANGES: Self = Self::STRUCTURE;
 
     /// True iff every bit in `other` is set in `self` AND `other` is non-empty.
@@ -533,82 +593,25 @@ impl std::ops::BitAndAssign for ClassSet {
     }
 }
 
-/// A discovery template's runtime carrier — the `Mint` payload of [`Reaction`]: the intent
-/// ([`MintTemplate`], frozen at attach) plus the per-template-lifetime state that has no meaning
-/// off a template.
-///
-/// Every field is module-private. The frozen spec reads through [`Self::spec`]; the three latches
-/// mutate *only* through their registry edges ([`SubRegistry::latch_fanout_warning`] /
-/// [`SubRegistry::latch_unsupported_kind_warning`] / [`SubRegistry::mark_enumerated`] — the
-/// registry holds the sole `&mut Sub`). The latches share one discipline — same as
-/// [`FireHistory::has_fired`]: a plain bool whose lifetime *is* the slotmap entry's, one-shot per
-/// template lifetime. Homing them on the `Mint` variant *behind private access* makes a latched
-/// non-template unrepresentable and keeps the registry edge the sole writer — the contract rests on
-/// the type, not on every call site remembering it.
-#[derive(Debug)]
-pub struct DiscoveryTemplate {
-    spec: Arc<MintTemplate>,
-    /// `true` once this template's live minted-Sub count first crossed the fan-out warning
-    /// threshold. Mutated only through [`SubRegistry::latch_fanout_warning`].
-    fanout_warned: bool,
-    /// `true` once a reconcile pass observed a `Symlink`/`Other` chain terminus under this template
-    /// and narrated the skip. Mutated only through [`SubRegistry::latch_unsupported_kind_warning`].
-    /// Gates only the *diagnostic*, never the skip itself — the terminus kind is read fresh off the
-    /// snapshot each pass, so a symlink later replaced by a regular file at the same path mints
-    /// normally.
-    unsupported_kind_warned: bool,
-    /// `true` once this template completed its first reconcile pass — a full certified walk of the
-    /// match set, however many mints it produced. Mutated only through
-    /// [`SubRegistry::mark_enumerated`].
-    ///
-    /// The mint-arm classifier reads it: a dedup miss while un-enumerated is *first enumeration*
-    /// (cold mint — restart parity, attach-over-existing must not fire), while a miss against an
-    /// established enumeration is a witnessed *appearance* (triggered mint — the operator contract
-    /// owes a fire when a new match settles). The minted set is the durable prior-match-set witness
-    /// — it survives anchor loss, overflow, and baseline clears — so this one bool is the only
-    /// state the classifier needs, and it deliberately never resets: a post-blind-window miss
-    /// genuinely means the terminus appeared while the kernel channel was down.
-    enumerated: bool,
-}
-
-impl DiscoveryTemplate {
-    /// The frozen mint spec — the minted Profiles' identity, the minted Subs' debounce, and the
-    /// minted reaction. The reconcile pass clones it (one `Arc` bump) onto each mint; the IPC
-    /// `show` projection reads its fields. Read-only by construction: a template change is a
-    /// config-layer identity change (reap + reattach), never an in-place edit.
-    #[must_use]
-    pub const fn spec(&self) -> &Arc<MintTemplate> {
-        &self.spec
-    }
-
-    /// Whether this template has completed its first reconcile pass — the mint-arm classifier's
-    /// pre-pass capture (see the field rustdoc for the cold/appeared split it decides).
-    #[must_use]
-    pub const fn enumerated(&self) -> bool {
-        self.enumerated
-    }
-}
-
-/// A live Sub's reaction — the [`ReactionSpec`] intent enriched with per-Sub runtime state.
-///
-/// [`Sub::from_request`] performs the enrichment: `Spawn` gains a fresh (never-fired)
-/// [`FireHistory`]; `Mint` wraps the template in its [`DiscoveryTemplate`] carrier with every
-/// per-lifetime latch open. The same idiom on both variants: frozen spec in,
-/// spec-plus-lifetime-state out.
+/// A live Sub's reaction: a frozen spec, and the state it carries at rest — a fire history on the
+/// spawn side, a [`MintState`] on the mint side.
 ///
 /// Every spawn-field consumer dispatches on this sum, so the template case cannot be forgotten — a
 /// `Mint` Sub has no `scope`, `program`, or fire history of its own (the minted Subs' reaction
-/// lives on its template; the mint never fires an Effect).
+/// lives on its spec; the mint never fires an Effect).
 #[derive(Debug)]
 pub enum Reaction {
     Spawn {
         spec: SpawnSpec,
-        /// Discovery template that minted this Sub — `None` for operator-declared Subs. Never
-        /// mutated post-attach ([`SubRegistry::rebind`] asserts equality).
+        /// Template that minted this Sub — `None` for operator-declared Subs. Never mutated
+        /// post-attach ([`SubRegistry::rebind`] asserts equality).
         minted_by: Option<SubId>,
         history: FireHistory,
     },
-    Mint(DiscoveryTemplate),
+    Mint {
+        spec: Arc<MintSpec>,
+        state: MintState,
+    },
 }
 
 #[derive(Debug)]
@@ -629,18 +632,18 @@ pub struct Sub {
     pub settle: Duration,
     /// What this Sub does when its Profile settles. Module-private: external consumers read through
     /// [`Self::reaction`] and the typed projections ([`Self::minted_by`] / [`Self::is_template`] /
-    /// [`Self::spawn_spec`] / [`Self::fire_history`]), and every mutation flows through its registry
-    /// edge (fire-history writes, warning latches, rebind — the registry holds the sole `&mut Sub`).
-    /// A `Mint`'s [`MintTemplate`] is never mutated post-attach: a template change is an identity
-    /// change at the config layer (reap + reattach), never an in-place rebind — the minted Subs hold
-    /// `Arc`s of the template's program, so a rebind would strand them on stale reaction state.
+    /// [`Self::spawn_spec`] / [`Self::fire_history`] / [`Self::mint_spec`] / [`Self::mint_state`]),
+    /// and every mutation flows through its registry edge (fire history, the template's state,
+    /// rebind — the registry holds the sole `&mut Sub`). A `Mint`'s [`MintSpec`] is never mutated
+    /// post-attach: a template change is an identity change at the config layer (reap + reattach),
+    /// never an in-place rebind — the minted Subs hold `Arc`s of the spec's program, so a rebind
+    /// would strand them on stale reaction state.
     reaction: Reaction,
 }
 
 impl Sub {
-    /// Construct a Sub from its [`ProfileId`] and the per-Sub [`SubParams`], enriching the reaction
-    /// with its runtime state: a `Spawn` starts with a fresh (never-fired) [`FireHistory`]; a `Mint`
-    /// wraps the template in its [`DiscoveryTemplate`] carrier with every per-lifetime latch open.
+    /// Construct a Sub from its [`ProfileId`] and the per-Sub [`SubParams`], giving the reaction the
+    /// state it carries at rest: a `Spawn` starts never fired, a `Mint` with a fresh [`MintState`].
     ///
     /// The slotmap key is the Sub's identity authority — there is no `id` field. `params.name`
     /// (`CompactString`) and the spawn spec (with its program Arc) move through unchanged (no
@@ -658,12 +661,10 @@ impl Sub {
                     minted_by,
                     history: FireHistory::default(),
                 },
-                ReactionSpec::Mint(spec) => Reaction::Mint(DiscoveryTemplate {
+                ReactionSpec::Mint(spec) => Reaction::Mint {
                     spec,
-                    fanout_warned: false,
-                    unsupported_kind_warned: false,
-                    enumerated: false,
-                }),
+                    state: MintState::new(),
+                },
             },
         }
     }
@@ -700,7 +701,7 @@ impl Sub {
     pub const fn minted_by(&self) -> Option<SubId> {
         match &self.reaction {
             Reaction::Spawn { minted_by, .. } => *minted_by,
-            Reaction::Mint(_) => None,
+            Reaction::Mint { .. } => None,
         }
     }
 
@@ -708,17 +709,7 @@ impl Sub {
     /// Effects. Coupled iff with the Profile's `MatchChain` shape at the engine's attach boundary.
     #[must_use]
     pub const fn is_template(&self) -> bool {
-        matches!(self.reaction, Reaction::Mint(_))
-    }
-
-    /// The discovery-template carrier when this Sub is a template: the frozen mint spec plus the
-    /// per-lifetime warning latches the reconcile pass reads.
-    #[must_use]
-    pub const fn discovery_template(&self) -> Option<&DiscoveryTemplate> {
-        match &self.reaction {
-            Reaction::Mint(t) => Some(t),
-            Reaction::Spawn { .. } => None,
-        }
+        matches!(self.reaction, Reaction::Mint { .. })
     }
 
     /// The spawn payload when this Sub's reaction is `Spawn` — `None` for a `Mint` Sub, which has
@@ -727,7 +718,7 @@ impl Sub {
     pub const fn spawn_spec(&self) -> Option<&SpawnSpec> {
         match &self.reaction {
             Reaction::Spawn { spec, .. } => Some(spec),
-            Reaction::Mint(_) => None,
+            Reaction::Mint { .. } => None,
         }
     }
 
@@ -737,7 +728,25 @@ impl Sub {
     pub const fn fire_history(&self) -> Option<&FireHistory> {
         match &self.reaction {
             Reaction::Spawn { history, .. } => Some(history),
-            Reaction::Mint(_) => None,
+            Reaction::Mint { .. } => None,
+        }
+    }
+
+    /// What this template stamps onto each Sub it mints — `None` for a `Spawn` Sub.
+    #[must_use]
+    pub const fn mint_spec(&self) -> Option<&Arc<MintSpec>> {
+        match &self.reaction {
+            Reaction::Mint { spec, .. } => Some(spec),
+            Reaction::Spawn { .. } => None,
+        }
+    }
+
+    /// This template's state — `None` for a `Spawn` Sub.
+    #[must_use]
+    pub const fn mint_state(&self) -> Option<&MintState> {
+        match &self.reaction {
+            Reaction::Mint { state, .. } => Some(state),
+            Reaction::Spawn { .. } => None,
         }
     }
 
@@ -748,7 +757,7 @@ impl Sub {
     pub const fn has_fired(&self) -> bool {
         match &self.reaction {
             Reaction::Spawn { history, .. } => history.has_fired,
-            Reaction::Mint(_) => false,
+            Reaction::Mint { .. } => false,
         }
     }
 }
@@ -919,7 +928,7 @@ impl SubRegistry {
     fn spawn_history_mut(&mut self, sub: SubId, edge: &str) -> Option<&mut FireHistory> {
         match &mut self.subs.get_mut(sub)?.reaction {
             Reaction::Spawn { history, .. } => Some(history),
-            Reaction::Mint(_) => {
+            Reaction::Mint { .. } => {
                 debug_assert!(
                     false,
                     "{edge} reached a Mint Sub — discovery fires attachments, never Effects \
@@ -930,21 +939,17 @@ impl SubRegistry {
         }
     }
 
-    /// The `Mint` arm's mutable template carrier for `sub` — the shared body of the discovery
-    /// per-lifetime latch edges, and the structural dual of [`Self::spawn_history_mut`]. Two
-    /// misses, two loudnesses: a stale id is a silent `None` (the template already died with the
-    /// slotmap entry — a benign detach race), while a `Spawn` hit is a **debug-loud** `None` (a
-    /// discovery-latch write on a firing Sub is a routing logic error — the latches live only on
-    /// templates, the mirror of `spawn_history_mut`'s "fire history lives only on `Spawn`"). `edge`
-    /// names the calling edge in the assert. Centralising the resolution keeps the two-loudness
-    /// contract in one place — every latch edge inherits it instead of restating it.
-    fn discovery_template_mut(&mut self, sub: SubId, edge: &str) -> Option<&mut DiscoveryTemplate> {
+    /// The `Mint` arm's mutable state for `sub` — the shared body of the template edges, and the
+    /// dual of [`Self::spawn_history_mut`]: a stale id is a silent `None` (the template died with
+    /// its slotmap entry — a benign detach race), a `Spawn` hit a **debug-loud** `None` (a
+    /// template's state lives only on `Mint`). `edge` names the calling edge in the assert.
+    fn mint_state_mut(&mut self, sub: SubId, edge: &str) -> Option<&mut MintState> {
         match &mut self.subs.get_mut(sub)?.reaction {
-            Reaction::Mint(t) => Some(t),
+            Reaction::Mint { state, .. } => Some(state),
             Reaction::Spawn { .. } => {
                 debug_assert!(
                     false,
-                    "{edge} reached a Spawn Sub — discovery latches live only on Mint templates \
+                    "{edge} reached a Spawn Sub — a template's state lives only on Mint \
                      (sub = {sub:?})",
                 );
                 None
@@ -1088,51 +1093,24 @@ impl SubRegistry {
             .collect()
     }
 
-    /// One-shot fan-out warning latch for the discovery template `sub`.
-    ///
-    /// `count` is the caller's *live* minted-Sub tally for this template, derived from registry
-    /// truth — no mirror to drift. Returns `Some(count)` the first time `count` exceeds `threshold`
-    /// and latches [`DiscoveryTemplate::fanout_warned`] so later crossings return `None` — a
-    /// pathological pattern warns once per template lifetime. The check-and-latch is atomic here,
-    /// so the one-shot property is structural rather than a caller convention. Carrier resolution
-    /// and its two-loudness miss contract (stale id silent, `Spawn` hit debug-loud) live in
-    /// [`Self::discovery_template_mut`].
-    pub fn latch_fanout_warning(
-        &mut self,
-        sub: SubId,
-        threshold: usize,
-        count: usize,
-    ) -> Option<usize> {
-        let t = self.discovery_template_mut(sub, "latch_fanout_warning")?;
-        (count > threshold && !t.fanout_warned).then(|| {
-            t.fanout_warned = true;
-            count
-        })
+    /// Whether `template` makes `what` now: `true` the first time, `false` ever after — the check
+    /// and the record are one edge, so a line is made once per template lifetime by construction. A
+    /// stale id is `false`.
+    pub fn narrate_once(&mut self, template: SubId, what: MintNarration) -> bool {
+        self.mint_state_mut(template, "narrate_once")
+            .is_some_and(|state| {
+                let first = state.narrated & what.bit() == 0;
+                state.narrated |= what.bit();
+                first
+            })
     }
 
-    /// One-shot unsupported-terminus warning latch for the discovery template `sub` — the sibling
-    /// of [`Self::latch_fanout_warning`] for the `Symlink`/`Other` mint-skip narration.
-    ///
-    /// Returns `true` exactly once per template lifetime: the first call latches
-    /// [`DiscoveryTemplate::unsupported_kind_warned`] and reports "newly latched"; later calls
-    /// return `false`. The check-and-latch is atomic here, so the one-shot property is structural
-    /// rather than a caller convention. Carrier resolution and its two-loudness miss contract
-    /// (stale id silent, `Spawn` hit debug-loud) live in [`Self::discovery_template_mut`].
-    pub fn latch_unsupported_kind_warning(&mut self, sub: SubId) -> bool {
-        self.discovery_template_mut(sub, "latch_unsupported_kind_warning")
-            .is_some_and(|t| !std::mem::replace(&mut t.unsupported_kind_warned, true))
-    }
-
-    /// Record that the discovery template `sub` completed a reconcile pass — the
-    /// [`DiscoveryTemplate::enumerated`] latch's sole write edge. Idempotent: the latch only ever
-    /// moves open → closed, and there is nothing to report (no narration rides it). The caller
-    /// invokes it exclusively at the *end* of a completed certified walk — a pass that bailed
-    /// before walking (no Dir anchor, unresolvable anchor path) established no enumeration and must
-    /// not reach here. Carrier resolution and its two-loudness miss contract (stale id silent,
-    /// `Spawn` hit debug-loud) live in [`Self::discovery_template_mut`].
-    pub fn mark_enumerated(&mut self, sub: SubId) {
-        if let Some(t) = self.discovery_template_mut(sub, "mark_enumerated") {
-            t.enumerated = true;
+    /// `template` holds a certified set: from now on a miss in a branch the daemon had read is an
+    /// appearance ([`MintState::miss`]). Idempotent. Only a pass that walked a certified snapshot
+    /// may close it — one that walked nothing established no set.
+    pub fn close_enumeration(&mut self, template: SubId) {
+        if let Some(state) = self.mint_state_mut(template, "close_enumeration") {
+            state.miss = MintEntry::Appeared;
         }
     }
 
@@ -1162,8 +1140,8 @@ impl SubRegistry {
 #[cfg(test)]
 mod tests {
     use super::{
-        ActionProgram, ClassSet, EffectScope, MintTemplate, ProfileIdentity, ReactionSpec,
-        ScanConfig, SpawnSpec, Sub, SubParams, SubRegistry, SubRegistryDiff,
+        ActionProgram, ClassSet, EffectScope, MintEntry, MintNarration, MintSpec, ProfileIdentity,
+        ReactionSpec, ScanConfig, SpawnSpec, Sub, SubParams, SubRegistry, SubRegistryDiff,
     };
     use crate::ids::{ProfileId, SubId};
     use crate::program::{
@@ -1922,7 +1900,7 @@ mod tests {
         SubParams {
             name: name.into(),
             settle: SETTLE,
-            reaction: ReactionSpec::Mint(Arc::new(MintTemplate {
+            reaction: ReactionSpec::Mint(Arc::new(MintSpec {
                 identity: ProfileIdentity::new(
                     ScanConfig::builder().build(),
                     SETTLE * 4,
@@ -1934,47 +1912,25 @@ mod tests {
         }
     }
 
-    /// The fan-out latch crossing edge: strict-greater (`count == threshold` does not cross), the
-    /// first crossing returns the count and latches, later crossings are silent — one warning per
-    /// template lifetime, structural in the check-and-latch.
+    /// Each line is made once per template lifetime, and making one leaves the other unmade.
     #[test]
-    fn latch_fanout_warning_crosses_strict_greater_exactly_once() {
+    fn narrate_once_makes_each_line_once() {
         let mut reg = SubRegistry::new();
         let sid = reg.insert(Sub::from_request(
             ProfileId::default(),
             template_params("disc"),
         ));
-        assert_eq!(
-            reg.latch_fanout_warning(sid, 3, 3),
-            None,
-            "count == threshold does not cross (strict greater)",
-        );
-        assert!(
-            !reg.get(sid)
-                .unwrap()
-                .discovery_template()
-                .unwrap()
-                .fanout_warned,
-            "a non-crossing probe leaves the latch open",
-        );
-        assert_eq!(
-            reg.latch_fanout_warning(sid, 3, 4),
-            Some(4),
-            "first crossing returns the count and latches",
-        );
-        assert_eq!(
-            reg.latch_fanout_warning(sid, 3, 5),
-            None,
-            "latched: later crossings are silent",
-        );
+        assert!(reg.narrate_once(sid, MintNarration::FanoutThreshold));
+        assert!(!reg.narrate_once(sid, MintNarration::FanoutThreshold));
+        assert!(reg.narrate_once(sid, MintNarration::UnsupportedAnchorKind));
+        assert!(!reg.narrate_once(sid, MintNarration::UnsupportedAnchorKind));
     }
 
-    /// A `Spawn` Sub has no latch home: routing the fan-out latch at one is a logic error, so the
-    /// shared carrier resolution is debug-loud — the structural dual of `spawn_history_mut`'s
-    /// `Mint`-hit assert. Pins the loud arm of `discovery_template_mut` for every latch edge.
+    /// A template edge aimed at a `Spawn` Sub is a routing error: loud in a debug build, and in a
+    /// release build no line is made.
     #[test]
-    #[should_panic(expected = "reached a Spawn Sub")]
-    fn latch_fanout_warning_panics_on_non_template() {
+    #[cfg_attr(debug_assertions, should_panic(expected = "reached a Spawn Sub"))]
+    fn narrate_once_on_a_spawn_sub_is_loud_in_debug_and_makes_no_line() {
         let mut reg = SubRegistry::new();
         let plain = reg.insert(Sub::from_request(
             ProfileId::default(),
@@ -1986,49 +1942,36 @@ mod tests {
                 false,
             ),
         ));
-        let _ = reg.latch_fanout_warning(plain, 0, 10);
+        assert!(!reg.narrate_once(plain, MintNarration::FanoutThreshold));
     }
 
-    /// A stale id is a silent `None` — the template died with the slotmap entry, a benign detach
-    /// race. The quiet arm of `discovery_template_mut`, distinct from the loud non-template arm.
+    /// A stale id makes no line, quietly: the template died with its slotmap entry.
     #[test]
-    fn latch_fanout_warning_silent_for_stale_id() {
+    fn narrate_once_makes_no_line_for_a_stale_id() {
         let mut reg = SubRegistry::new();
         let sid = reg.insert(Sub::from_request(
             ProfileId::default(),
             template_params("disc"),
         ));
         let _ = reg.remove(sid).expect("removed");
-        assert_eq!(
-            reg.latch_fanout_warning(sid, 0, 10),
-            None,
-            "stale id: silent miss",
-        );
+        assert!(!reg.narrate_once(sid, MintNarration::FanoutThreshold));
     }
 
-    /// The enumeration latch's lifecycle at its registry edge: a fresh template is un-enumerated,
-    /// `mark_enumerated` closes the latch, and the write is idempotent — the latch never re-opens
-    /// for the template's lifetime. The loud/quiet miss arms are `discovery_template_mut`'s,
-    /// already pinned by the fan-out latch tests.
+    /// A fresh template's miss is an enumeration; closing its enumeration makes every later miss an
+    /// appearance, for good.
     #[test]
-    fn mark_enumerated_closes_the_latch_once_for_the_lifetime() {
+    fn close_enumeration_makes_a_miss_an_appearance_for_good() {
         let mut reg = SubRegistry::new();
         let sid = reg.insert(Sub::from_request(
             ProfileId::default(),
             template_params("disc"),
         ));
-        let enumerated = |reg: &SubRegistry| {
-            reg.get(sid)
-                .unwrap()
-                .discovery_template()
-                .unwrap()
-                .enumerated()
-        };
-        assert!(!enumerated(&reg), "a fresh template is un-enumerated");
-        reg.mark_enumerated(sid);
-        assert!(enumerated(&reg), "the edge closes the latch");
-        reg.mark_enumerated(sid);
-        assert!(enumerated(&reg), "idempotent — the latch never re-opens");
+        let miss = |reg: &SubRegistry| reg.get(sid).unwrap().mint_state().unwrap().miss();
+        assert_eq!(miss(&reg), MintEntry::Enumerated);
+        reg.close_enumeration(sid);
+        assert_eq!(miss(&reg), MintEntry::Appeared);
+        reg.close_enumeration(sid);
+        assert_eq!(miss(&reg), MintEntry::Appeared);
     }
 
     /// Rebind tripwire: `minted_by` is a synthesis-origin identity axis — crossing the

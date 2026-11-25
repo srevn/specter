@@ -16,15 +16,15 @@ use specter_core::testkit::{
 use specter_core::{
     ActiveBurst, ChildEntry, ClassSet, ContribKey, DetachReason, Diagnostic, DirChild, DirSnapshot,
     EffectCompletion, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input,
-    MintTemplate, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileIdentity,
-    ProfileState, ProofAuthority, ResourceId, ResourceKind, ScanConfig, SpawnSpec, StepOutput,
-    SubAttachAnchor, SubId, TimerKind, WatchOp,
+    MintEntry, MintSpec, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId,
+    ProfileIdentity, ProfileState, ProofAuthority, ResourceId, ResourceKind, ScanConfig, SpawnSpec,
+    StepOutput, SubAttachAnchor, SubId, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
     DEFAULT_EVENTS, MAX_SETTLE, SETTLE, attach, attach_discovery, attach_discovery_returning,
     complete_effect_to_rebasing, descent_advance, discovery_subs_of, drain_due, fire_standard_once,
-    is_draining, last_probe_path, mint_template, mint_template_scoped, pid_of, pre_place_dir,
+    is_draining, last_probe_path, mint_spec, mint_spec_scoped, pid_of, pre_place_dir,
     respond_anchor_file, seed_to_idle, seed_to_idle_with,
 };
 use std::collections::BTreeSet;
@@ -71,11 +71,11 @@ fn burst_and_respond(
 /// for that entry alone); the convergence loop then answers whatever probe the burst surfaces (cold
 /// walk, verify, re-sample, rebase) with a byte-identical kind-appropriate sample (File anchors
 /// `AnchorOk`, Dir anchors an empty subtree), completes any fired effect, and advances the clock a
-/// settle window when the burst waits on a timer. The EMPTY-mask `mint_template` folds
-/// `HashChannel` verdicts, so each certification needs two equal samples. An enumeration mint's
-/// cold Seed pins on its single sample without a clock advance; an appearance mint opens triggered
-/// (Batching-first, no probe in flight at mint time), so the loop drains its settle window, then
-/// fires and rebases. Returns the instant the Profile rests at Idle.
+/// settle window when the burst waits on a timer. The EMPTY-mask `mint_spec` folds `HashChannel`
+/// verdicts, so each certification needs two equal samples. An enumeration mint's cold Seed pins on
+/// its single sample without a clock advance; an appearance mint opens triggered (Batching-first,
+/// no probe in flight at mint time), so the loop drains its settle window, then fires and rebases.
+/// Returns the instant the Profile rests at Idle.
 fn settle_minted(e: &mut Engine, mid: SubId, kind: Option<EntryKind>, mut at: Instant) -> Instant {
     let pid = pid_of(e, mid);
     if matches!(
@@ -174,7 +174,7 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
         "disc",
         SubAttachAnchor::Resource(srv),
         "/srv/*/log",
-        mint_template(),
+        mint_spec(),
         now,
     );
 
@@ -282,7 +282,7 @@ fn witnessed_appearance_mints_sub_that_fires() {
         "disc",
         SubAttachAnchor::Resource(srv),
         "/srv/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     // First enumeration over an empty dir: a completed pass with nothing to mint — the template's
@@ -307,7 +307,7 @@ fn witnessed_appearance_mints_sub_that_fires() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::DiscoveryMinted { source, appeared: true, .. } if *source == sid
+            Diagnostic::DiscoveryMinted { source, entry: MintEntry::Appeared, .. } if *source == sid
         )),
         "the narration carries the appearance classification",
     );
@@ -327,13 +327,13 @@ fn witnessed_appearance_mints_sub_that_fires() {
     );
 }
 
-/// The `DiscoveryMinted` narration in emission order, projected to `(path, appeared)`.
-fn minted_entries(out: &StepOutput) -> Vec<(String, bool)> {
+/// The `DiscoveryMinted` narration in emission order, projected to `(path, entry)`.
+fn minted_entries(out: &StepOutput) -> Vec<(String, MintEntry)> {
     out.diagnostics
         .iter()
         .filter_map(|d| match d {
-            Diagnostic::DiscoveryMinted { path, appeared, .. } => {
-                Some((path.display().to_string(), *appeared))
+            Diagnostic::DiscoveryMinted { path, entry, .. } => {
+                Some((path.display().to_string(), *entry))
             }
             _ => None,
         })
@@ -366,7 +366,7 @@ fn opened_branch_mints_cold_beside_appearances() {
         "disc",
         SubAttachAnchor::Resource(srv),
         "/srv/*/log",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let a = || covered(dir_snap_nested(&[("log", uncovered(10))]));
@@ -378,7 +378,7 @@ fn opened_branch_mints_cold_beside_appearances() {
     );
     assert_eq!(
         minted_entries(&out),
-        [("/srv/a/log".to_string(), false)],
+        [("/srv/a/log".to_string(), MintEntry::Enumerated)],
         "the first enumeration mints what it could read, cold",
     );
     settle_minted_seeds(&mut e, sid, now);
@@ -398,9 +398,9 @@ fn opened_branch_mints_cold_beside_appearances() {
     assert_eq!(
         minted_entries(&out),
         [
-            ("/srv/b/log".to_string(), false),
-            ("/srv/c/log".to_string(), true),
-            ("/srv/d/log".to_string(), true),
+            ("/srv/b/log".to_string(), MintEntry::Enumerated),
+            ("/srv/c/log".to_string(), MintEntry::Appeared),
+            ("/srv/d/log".to_string(), MintEntry::Appeared),
         ],
         "the opened branch is an enumeration; a new and a replaced branch are appearances",
     );
@@ -433,7 +433,7 @@ fn minted_sub_beneath_a_denied_directory_is_kept_until_a_listing_answers() {
         "disc",
         SubAttachAnchor::Resource(srv),
         "/srv/*/log",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(
@@ -527,7 +527,7 @@ fn a_pattern_at_its_ceiling_names_what_it_was_denied_and_goes_on() {
             name,
             SubAttachAnchor::Resource(srv),
             "/srv/*/log",
-            mint_template(),
+            mint_spec(),
             now,
         )
     };
@@ -569,11 +569,11 @@ fn a_pattern_at_its_ceiling_names_what_it_was_denied_and_goes_on() {
         .iter()
         .position(|d| matches!(d, Diagnostic::DiscoveryMinted { .. }));
     assert!(last_named < first_minted, "the lines precede the pass");
-    let minted: Vec<(String, bool)> = diagnostics
+    let minted: Vec<(String, MintEntry)> = diagnostics
         .iter()
         .filter_map(|d| match d {
-            Diagnostic::DiscoveryMinted { path, appeared, .. } => {
-                Some((path.display().to_string(), *appeared))
+            Diagnostic::DiscoveryMinted { path, entry, .. } => {
+                Some((path.display().to_string(), *entry))
             }
             _ => None,
         })
@@ -581,8 +581,8 @@ fn a_pattern_at_its_ceiling_names_what_it_was_denied_and_goes_on() {
     assert_eq!(
         minted,
         [
-            ("/srv/a/log".to_string(), false),
-            ("/srv/a/log".to_string(), false),
+            ("/srv/a/log".to_string(), MintEntry::Enumerated),
+            ("/srv/a/log".to_string(), MintEntry::Enumerated),
         ],
         "each template mints what was read, cold",
     );
@@ -619,7 +619,7 @@ fn a_branch_denied_at_the_ceiling_opens_cold_through_an_overflow_reseed() {
         "disc",
         SubAttachAnchor::Resource(srv),
         "/srv/*/log",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let a = || ("a", covered_at(10, &[("log", uncovered(11))]));
@@ -648,8 +648,8 @@ fn a_branch_denied_at_the_ceiling_opens_cold_through_an_overflow_reseed() {
     assert_eq!(
         minted_entries(&out),
         [
-            ("/srv/b/log".to_string(), true),
-            ("/srv/x/log".to_string(), false),
+            ("/srv/b/log".to_string(), MintEntry::Appeared),
+            ("/srv/x/log".to_string(), MintEntry::Enumerated),
         ],
         "the opened branch is an enumeration; the new one an appearance",
     );
@@ -674,7 +674,7 @@ fn storm_coalesces_to_one_probe_and_one_reconcile() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(&mut e, pid, &dir_snap(&[]), now);
@@ -727,7 +727,7 @@ fn terminus_churn_drops_for_discovery_and_drives_only_the_minted_profile() {
         "disc",
         SubAttachAnchor::Resource(srv),
         "/srv/*/log",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
@@ -803,7 +803,7 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
         "disc",
         SubAttachAnchor::Resource(srv),
         "/srv/*/log",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
@@ -922,7 +922,7 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
         "disc",
         SubAttachAnchor::Resource(srv),
         "/srv/*/current",
-        mint_template(),
+        mint_spec(),
         now,
     );
 
@@ -1039,7 +1039,7 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(
@@ -1163,7 +1163,7 @@ fn ancestor_rename_reaps_old_minted_and_mints_new() {
         "disc",
         SubAttachAnchor::Resource(srv),
         "/srv/*/log",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let chain_a = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
@@ -1249,7 +1249,7 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
 
-    let template = Arc::new(MintTemplate {
+    let template = Arc::new(MintSpec {
         identity: ProfileIdentity::new(
             ScanConfig::builder().recursive(true).build(),
             MAX_SETTLE,
@@ -1400,7 +1400,7 @@ fn detach_discovery_template_cascades_to_minted_subs() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(
@@ -1454,7 +1454,7 @@ fn second_template_shares_profile_and_walk_mints_per_template() {
         "disc1",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let (sid2, pid2) = attach_discovery(
@@ -1462,7 +1462,7 @@ fn second_template_shares_profile_and_walk_mints_per_template() {
         "disc2",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     assert_eq!(pid, pid2, "same pattern ⇒ one discovery Profile");
@@ -1499,7 +1499,7 @@ fn template_join_on_idle_discovery_profile_reseeds_and_mints_cold() {
         "disc1",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
@@ -1516,7 +1516,7 @@ fn template_join_on_idle_discovery_profile_reseeds_and_mints_cold() {
         "disc2",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         t1,
     );
     assert_eq!(pid2, pid, "same pattern ⇒ one discovery Profile");
@@ -1538,18 +1538,14 @@ fn template_join_on_idle_discovery_profile_reseeds_and_mints_cold() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::DiscoveryMinted { source, appeared: false, .. } if *source == sid2
+            Diagnostic::DiscoveryMinted { source, entry: MintEntry::Enumerated, .. } if *source == sid2
         )),
         "a first-enumeration mint narrates cold",
     );
-    assert!(
-        e.subs()
-            .get(sid2)
-            .unwrap()
-            .discovery_template()
-            .unwrap()
-            .enumerated(),
-        "the completed reseed pass latches the joiner's enumeration",
+    assert_eq!(
+        e.subs().get(sid2).unwrap().mint_state().unwrap().miss(),
+        MintEntry::Appeared,
+        "the completed reseed pass closes the joiner's enumeration",
     );
     let mid2 = *discovery_subs_of(&e, sid2).values().next().expect("minted");
     let t2 = settle_minted(&mut e, mid2, None, t1);
@@ -1577,7 +1573,7 @@ fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template_scoped(EffectScope::PerStableFile),
+        mint_spec_scoped(EffectScope::PerStableFile),
         now,
     );
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
@@ -1657,9 +1653,9 @@ fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
 
 /// Overflow force-reseeds the discovery Profile (Idle and mid-burst arms); the reseed's reconcile
 /// recovers mints missed inside the unreliable window — and those mints **fire**: the reseed burst
-/// is cold, but mints classify by the template's enumeration latch, never by the reconciling
-/// burst's intent, so the certified-set delta is the appearance witness (mirroring the Standard
-/// Profile's overflow drift-fire).
+/// is cold, but mints enter by the template's miss, never by the reconciling burst's intent, so the
+/// certified-set delta is the appearance witness (mirroring the Standard Profile's overflow
+/// drift-fire).
 #[test]
 fn overflow_reseed_recovers_missed_mints() {
     let mut e = Engine::new();
@@ -1670,7 +1666,7 @@ fn overflow_reseed_recovers_missed_mints() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
@@ -1700,9 +1696,13 @@ fn overflow_reseed_recovers_missed_mints() {
         "the missed match mints on the reseed reconcile",
     );
     assert!(
-        out.diagnostics
-            .iter()
-            .any(|d| matches!(d, Diagnostic::DiscoveryMinted { appeared: true, .. })),
+        out.diagnostics.iter().any(|d| matches!(
+            d,
+            Diagnostic::DiscoveryMinted {
+                entry: MintEntry::Appeared,
+                ..
+            }
+        )),
         "the reseed burst is cold, but the latched miss classifies as an appearance",
     );
 
@@ -1771,7 +1771,7 @@ fn overflow_resource_scope_skips_profile_holding_descendant_fds_inside_scope() {
         "disc",
         SubAttachAnchor::Resource(srv),
         "/srv/*/log",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
@@ -1838,7 +1838,7 @@ fn absorb_window_is_inert_for_discovery() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(&mut e, pid, &dir_snap(&[]), now);
@@ -1888,7 +1888,7 @@ fn forced_ceiling_reconciles_and_seals() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(&mut e, pid, &dir_snap(&[]), now);
@@ -1944,7 +1944,7 @@ fn mid_burst_discovery_descendant_does_not_drain_covering_profile() {
         "disc",
         SubAttachAnchor::Resource(apps),
         "/srv/apps/*/log",
-        mint_template(),
+        mint_spec(),
         seed_done,
     );
     let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
@@ -2005,7 +2005,7 @@ fn mid_burst_minted_descendant_still_drains_through_discovery() {
         "disc",
         SubAttachAnchor::Resource(apps),
         "/srv/apps/*/log",
-        mint_template(),
+        mint_spec(),
         seed_done,
     );
     let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
@@ -2054,7 +2054,7 @@ fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
@@ -2062,8 +2062,8 @@ fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
     let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
     let x = e.tree().lookup(Some(data), "x").expect("terminus slot");
 
-    // Join the minted Profile with a static Sub of the identical identity (the mint_template
-    // fixture's: recursive Subtree, EMPTY mask, MAX_SETTLE).
+    // Join the minted Profile with a static Sub of the identical identity (the mint_spec fixture's:
+    // recursive Subtree, EMPTY mask, MAX_SETTLE).
     let (_, co_pid) = attach(
         &mut e,
         "co-resident",
@@ -2127,7 +2127,7 @@ fn fanout_threshold_warns_exactly_once() {
         "disc",
         SubAttachAnchor::Resource(big),
         "/big/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let names: Vec<String> = (0..=1000).map(|i| format!("d{i:04}")).collect();
@@ -2172,7 +2172,7 @@ fn subs_kept_beneath_a_denied_directory_count_toward_fanout() {
         "disc",
         SubAttachAnchor::Resource(big),
         "/big/*/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let names: Vec<String> = (0..1000).map(|i| format!("m{i:04}")).collect();
@@ -2231,7 +2231,7 @@ fn identically_driven_engines_mint_identically() {
             "alpha",
             SubAttachAnchor::Resource(data),
             "/data/*",
-            mint_template(),
+            mint_spec(),
             now,
         );
         let (sid2, _) = attach_discovery(
@@ -2239,7 +2239,7 @@ fn identically_driven_engines_mint_identically() {
             "beta",
             SubAttachAnchor::Resource(data),
             "/data/*",
-            mint_template(),
+            mint_spec(),
             now,
         );
         let out = respond(
@@ -2271,7 +2271,7 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
         "disc",
         SubAttachAnchor::Path("/data/x".into()),
         "/data/x/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     assert!(
@@ -2306,12 +2306,12 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// The mint classifier keys on the template's enumeration latch, never on the reconciling burst's
-/// intent — the cold direction: a discovery anchor that appears *while the descent watches* (a
-/// witnessed appearance of the anchor itself) materialises into a triggered Seed, yet the mints of
-/// its first reconcile stay cold — the template was never enumerated, so pre-existing termini
-/// inside the new anchor are first enumeration, not appearances. Accepted residue: continued writes
-/// inside such termini drive the minted Standard bursts anyway.
+/// The mint classifier keys on the template's miss, never on the reconciling burst's intent — the
+/// cold direction: a discovery anchor that appears *while the descent watches* (a witnessed
+/// appearance of the anchor itself) materialises into a triggered Seed, yet the mints of its first
+/// reconcile stay cold — the template's enumeration never closed, so pre-existing termini inside
+/// the new anchor are first enumeration, not appearances. Accepted residue: continued writes inside
+/// such termini drive the minted Standard bursts anyway.
 #[test]
 fn witnessed_descent_first_enumeration_still_mints_cold() {
     let mut e = Engine::new();
@@ -2321,7 +2321,7 @@ fn witnessed_descent_first_enumeration_still_mints_cold() {
         "disc",
         SubAttachAnchor::Path("/data".into()),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     assert!(
@@ -2360,7 +2360,7 @@ fn witnessed_descent_first_enumeration_still_mints_cold() {
         out.diagnostics.iter().any(|d| matches!(
             d,
             Diagnostic::DiscoveryMinted {
-                appeared: false,
+                entry: MintEntry::Enumerated,
                 ..
             }
         )),
@@ -2388,7 +2388,7 @@ fn root_pattern_installs_no_parent_edge() {
         "disc",
         SubAttachAnchor::Path("/".into()),
         "/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let p = e.profiles().get(pid).expect("discovery Profile live");
@@ -2430,7 +2430,7 @@ fn second_template_detach_leaves_siblings_minted_set_intact() {
         "disc1",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let (sid2, _) = attach_discovery(
@@ -2438,7 +2438,7 @@ fn second_template_detach_leaves_siblings_minted_set_intact() {
         "disc2",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let snap = dir_snap(&[("x", EntryKind::Dir, 1)]);
@@ -2502,7 +2502,7 @@ fn minted_seed_burst_deadline_derives_from_reconcile_now() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
 
@@ -2541,7 +2541,7 @@ fn descent_vanish_preserves_co_resident_discovery_contribution() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(&mut e, disc_pid, &dir_snap(&[]), now);
@@ -2622,7 +2622,7 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
         "disc",
         SubAttachAnchor::Resource(c),
         "/a/b/c/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
@@ -2737,7 +2737,7 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
         "disc",
         SubAttachAnchor::Resource(data),
         "/data/*",
-        mint_template(),
+        mint_spec(),
         now,
     );
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);

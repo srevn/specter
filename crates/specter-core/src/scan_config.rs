@@ -577,11 +577,11 @@ pub(crate) fn compute_config_hash(
 /// Sealed: private fields, a sole constructor, and the hash computed once inside it. "The hash
 /// agrees with its preimage" is thereby a structural property, not a documented convention — no
 /// construction or mutation path can produce an identity whose `hash` disagrees with its axes, so
-/// every downstream carrier (the Profile, each `MintTemplate` identity clone, the reconcile
-/// capture) reads the same precomputed key instead of re-deriving it.
+/// every downstream carrier (the Profile, each `MintSpec` identity clone, the reconcile capture)
+/// reads the same precomputed key instead of re-deriving it.
 ///
 /// `config` sits behind an `Arc`: an identity is frozen at construction and then travels — onto the
-/// Profile, into every `MintTemplate` identity clone at mint time, and (the config half alone) onto
+/// Profile, into every `MintSpec` identity clone at mint time, and (the config half alone) onto
 /// each `ProbeRequest::Subtree` wire — so each of those is a refcount bump, never a `ScanConfig`
 /// deep-copy. [`Self::new`] is the sole minting point of the handle; the other fields are `Copy`,
 /// so `ProfileIdentity: Clone` is cheap by construction.

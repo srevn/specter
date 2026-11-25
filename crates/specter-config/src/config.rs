@@ -8,8 +8,8 @@ use crate::template;
 use compact_str::CompactString;
 use specter_core::{
     self as core, ActionProgram, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    MintTemplate, PatternSpec, ProfileIdentity, ReactionSpec, ScanConfig, SpawnSpec,
-    SubAttachAnchor, SubAttachRequest, SubParams,
+    MintSpec, PatternSpec, ProfileIdentity, ReactionSpec, ScanConfig, SpawnSpec, SubAttachAnchor,
+    SubAttachRequest, SubParams,
 };
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -219,14 +219,13 @@ pub struct SubSpec {
 /// The user's knobs of a dynamic `[[watch]]` block.
 ///
 /// Everything here is what the minted Subs (not the discovery Sub itself) run under, lowered
-/// verbatim into a [`specter_core::MintTemplate`] by [`SubSpec::to_attach_request`].
+/// verbatim into a [`specter_core::MintSpec`] by [`SubSpec::to_attach_request`].
 ///
-/// Config-side mirror rather than `MintTemplate` directly: `MintTemplate`/`ProfileIdentity`
-/// deliberately carry no `Eq` (the hash is the engine's only identity comparison), while the diff
-/// layer compares *specs* structurally — its existing discipline. The mirror keeps that discipline
-/// without weakening the core types, and keeps the sealed `SpawnSpec` / eager identity hash out of
-/// the `Eq` derive (the spec's flat `program`/`scope`/`log_output` already carry the same
-/// information for comparison).
+/// Config-side mirror rather than `MintSpec` directly: `MintSpec`/`ProfileIdentity` deliberately
+/// carry no `Eq` (the hash is the engine's only identity comparison), while the diff layer compares
+/// *specs* structurally — its existing discipline. The mirror keeps that discipline without weakening
+/// the core types, and keeps the sealed `SpawnSpec` / eager identity hash out of the `Eq` derive (the
+/// spec's flat `program`/`scope`/`log_output` already carry the same information for comparison).
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct TemplateSpec {
     /// Minted Profiles' scan — the `Subtree` built from the block's `recursive` / `hidden` /
@@ -255,10 +254,10 @@ impl SubSpec {
                 name: self.name.clone(),
                 settle: self.settle,
                 reaction: match &self.template {
-                    // The projection adds nothing: the template's knobs land in the MintTemplate
+                    // The projection adds nothing: the template's knobs land in the MintSpec
                     // verbatim, so the minted Profiles' identity hash equals one hand-built over
                     // the same user fields.
-                    Some(t) => ReactionSpec::Mint(Arc::new(MintTemplate {
+                    Some(t) => ReactionSpec::Mint(Arc::new(MintSpec {
                         identity: ProfileIdentity::new(t.scan.clone(), t.max_settle, t.events),
                         settle: t.settle,
                         spawn,
@@ -2596,11 +2595,11 @@ mod tests {
         assert!(*recursive);
     }
 
-    /// The full lowering grid: a dynamic block's user knobs land on the template *verbatim* (`scan` /
-    /// `events` / `settle` / `max_settle`), `program`/`scope`/`log_output` stay on the Sub (doubling
-    /// as the minted reaction spec), and the Sub's own identity is pinned to the discovery constants
-    /// with the literal-prefix anchor. The projected `MintTemplate`'s identity hash equals a
-    /// hand-built [`ProfileIdentity`] over the same knobs — the projection adds nothing.
+    /// The full lowering grid: a dynamic block's user knobs land on the template *verbatim* (`scan`
+    /// / `events` / `settle` / `max_settle`), `program`/`scope`/`log_output` stay on the Sub
+    /// (doubling as the minted reaction spec), and the Sub's own identity is pinned to the
+    /// discovery constants with the literal-prefix anchor. The projected `MintSpec`'s identity hash
+    /// equals a hand-built [`ProfileIdentity`] over the same knobs — the projection adds nothing.
     #[test]
     fn dynamic_block_lowers_to_discovery_sub_spec() {
         let toml = "[[watch]]\nname = \"logs\"\npath = \"/srv/log/*\"\n\

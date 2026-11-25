@@ -121,10 +121,10 @@ fn project_details(
             fire_count: history.fire_count,
             dedup_suppressed_count: history.dedup_suppressed_count,
         },
-        Reaction::Mint(t) => WireReaction::Mint {
-            minted_settle_ms: settle_ms(t.spec().settle),
-            minted_scope: WireEffectScope::from(t.spec().spawn.scope()),
-            minted_program: program::render(t.spec().spawn.program()),
+        Reaction::Mint { spec, .. } => WireReaction::Mint {
+            minted_settle_ms: settle_ms(spec.settle),
+            minted_scope: WireEffectScope::from(spec.spawn.scope()),
+            minted_program: program::render(spec.spawn.program()),
             minted_live: engine.subs().minted(sid).len(),
         },
     };

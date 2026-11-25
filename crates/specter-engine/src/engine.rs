@@ -32,7 +32,7 @@ use specter_core::{
 };
 // Registries.
 use specter_core::{
-    ProfileIdentity, Sub, SubAttachAnchor, SubAttachRequest, SubParams, SubRegistry,
+    MintEntry, ProfileIdentity, Sub, SubAttachAnchor, SubAttachRequest, SubParams, SubRegistry,
 };
 // Per-Resource bookkeeping.
 use specter_core::ClassSet;
@@ -1114,6 +1114,16 @@ enum ProfileOrigin {
 pub(crate) enum SeedWitness {
     Cold,
     Appeared,
+}
+
+impl From<MintEntry> for SeedWitness {
+    /// A minted Profile's anchor was seen appearing exactly when its match appeared under watch.
+    fn from(entry: MintEntry) -> Self {
+        match entry {
+            MintEntry::Enumerated => Self::Cold,
+            MintEntry::Appeared => Self::Appeared,
+        }
+    }
 }
 
 /// Outcome of `attach_sub_inner`'s Phase 1 anchor resolution. The two variants encode the semantic
