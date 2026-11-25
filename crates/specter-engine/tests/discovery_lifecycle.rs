@@ -2485,14 +2485,12 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
-/// The mint classifier keys on the template's miss, never on the reconciling burst's intent — the
-/// cold direction: a discovery anchor that appears *while the descent watches* (a witnessed
-/// appearance of the anchor itself) materialises into a triggered Seed, yet the mints of its first
-/// reconcile stay cold — the template's enumeration never closed, so pre-existing termini inside
-/// the new anchor are first enumeration, not appearances. Accepted residue: continued writes inside
-/// such termini drive the minted Standard bursts anyway.
+/// A prefix the descent finds at once enumerates cold, whatever its parent reported: an event there
+/// only owes the descent a re-probe, and a presence no absence preceded witnesses no appearance. So
+/// the terminus Seed is cold, the template's enumeration stays open, and the first pass mints each
+/// match as an enumeration that pins silently.
 #[test]
-fn witnessed_descent_first_enumeration_still_mints_cold() {
+fn a_prefix_found_at_once_enumerates_cold() {
     let mut e = Engine::new();
     let now = Instant::now();
     let (sid, pid, _) = attach_discovery_returning(
@@ -2515,9 +2513,8 @@ fn witnessed_descent_first_enumeration_still_mints_cold() {
         .lookup(None, FS_ROOT_SEGMENT)
         .expect("FS root bootstrapped by the pending attach");
 
-    // The anchor dir is created (with content) while the descent's prefix watch is live: the
-    // STRUCTURE event reaches the descent and latches its appearance witness; the next response
-    // finds the awaited segment and materialises into a *triggered* Seed, Batching-first.
+    // A change at the prefix's parent while the attach-time probe is in flight; the probe then
+    // finds the prefix present, never having seen it absent.
     let t1 = now + Duration::from_millis(10);
     let _ = e.step(
         Input::FsEvent {
@@ -2543,13 +2540,13 @@ fn witnessed_descent_first_enumeration_still_mints_cold() {
                 ..
             }
         )),
-        "the Seed is triggered, but the un-enumerated template classifies the mint cold",
+        "a prefix never seen absent leaves the enumeration open: the mint is cold",
     );
     let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
     let _ = settle_minted(&mut e, mid, None, t2);
     assert!(
         !e.subs().get(mid).unwrap().has_fired(),
-        "first enumeration pins silently even under a witnessed-descent Seed",
+        "a first enumeration pins silently",
     );
     let _ = e.cancel_all_in_flight_probes();
 }
