@@ -228,10 +228,10 @@ impl Engine {
     ///   post-recovery isolated change reached via the `undischarged_consequence` ceiling
     ///   terminal), or an anchor went live under an observed appearance of its own — a discovery
     ///   mint classified as one, or a descent whose witnessed-activity latch was set
-    ///   (`seed_at_anchor` threads the anchor as the trigger). The trigger threads into
-    ///   `dirty` so `seed_owes_first_fire` sees the activity witness it owes a fire on. The burst
-    ///   opens in `Batching { settle_timer }` exactly like `start_standard_burst`, so further
-    ///   `FsEvent`s debounce identically; `last_event_time = Some(now)` seeds the settle deadline.
+    ///   (`seed_at_anchor` threads the anchor as the trigger). The trigger threads into `dirty` so
+    ///   `seed_owes_first_fire` sees the activity witness it owes a fire on. The burst opens in
+    ///   `Batching { settle_timer }` exactly like `start_standard_burst`, so further `FsEvent`s
+    ///   debounce identically; `last_event_time = Some(now)` seeds the settle deadline.
     ///
     /// **`burst_deadline` armed in both arms.** The pre-fire bound holds across the two paths: a
     /// triggered Seed's settle / verify loop, or a cold Seed whose walk runs > `max_settle` (slow
@@ -285,10 +285,10 @@ impl Engine {
             return;
         }
         // Every legitimate Idle entry holds the anchor claim: `seed_at_anchor` installs it before
-        // seeding, and a burst-end Idle never released it. An anchorless
-        // Profile is `Parked` (which `require_idle` rejected above), so a claim-less Profile here
-        // is a consumer that re-derived "which Idle?" wrongly — the next forgotten consumer trips
-        // in CI instead of fabricating a baseline.
+        // seeding, and a burst-end Idle never released it. An anchorless Profile is `Parked` (which
+        // `require_idle` rejected above), so a claim-less Profile here is a consumer that
+        // re-derived "which Idle?" wrongly — the next forgotten consumer trips in CI instead of
+        // fabricating a baseline.
         debug_assert!(
             self.profiles
                 .get(profile_id)
@@ -1676,9 +1676,9 @@ mod tests {
     const EVENTS_COMPLETE: ClassSet = ClassSet::CONTENT;
 
     /// Build an Engine with a single Profile anchored at `/anchor`. Returns the Engine + the
-    /// `ProfileId`. The anchor claim's flag is set, without the Tree contribution no pin here reads,
-    /// because the burst helpers' Idle entries assert it (an anchorless rest is `Parked`, never a
-    /// burst entry).
+    /// `ProfileId`. The anchor claim's flag is set, without the Tree contribution no pin here
+    /// reads, because the burst helpers' Idle entries assert it (an anchorless rest is `Parked`,
+    /// never a burst entry).
     fn engine_with_profile() -> (Engine, specter_core::ProfileId) {
         let mut e = Engine::new();
         let r = e.tree.ensure_root("/anchor", ResourceRole::User);

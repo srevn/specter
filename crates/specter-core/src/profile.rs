@@ -2814,15 +2814,14 @@ impl Profile {
         self.anchor = AnchorClassification::Unclassified { witness };
     }
 
-    /// Atomically install a descent-materialised anchor: transition `Pending → Idle` and classify
-    /// the anchor with the discovered `kind`, **carrying the survival witness forward**
-    /// (`Unclassified { witness } ⇒ File/Dir { current: None, settled: Witness(h) | Unset }`).
-    /// Reached only through [`ProfileMap::materialize_anchor`] (which reconciles the carrier count
-    /// across the `Pending → Idle` edge). The anchor claim is not written here: the engine installs
-    /// it together with its Tree contribution, in the same step, before it launches the Seed burst
-    /// — the `Idle` written here is a structural intermediate, never observed. Both writes run
-    /// under one `&mut self` so no reader sees a partial one. Inverse of
-    /// [`Self::clear_anchor_classification`].
+    /// Atomically install a descent-materialised anchor: transition `Pending → Idle` and classify the
+    /// anchor with the discovered `kind`, **carrying the survival witness forward** (`Unclassified
+    /// { witness } ⇒ File/Dir { current: None, settled: Witness(h) | Unset }`). Reached only through
+    /// [`ProfileMap::materialize_anchor`] (which reconciles the carrier count across the `Pending →
+    /// Idle` edge). The anchor claim is not written here: the engine installs it together with its
+    /// Tree contribution, in the same step, before it launches the Seed burst — the `Idle` written
+    /// here is a structural intermediate, never observed. Both writes run under one `&mut self` so no
+    /// reader sees a partial one. Inverse of [`Self::clear_anchor_classification`].
     ///
     /// Debug-asserts the fresh-materialisation preconditions (`state == Pending`, no claim, anchor
     /// `Unclassified`); release builds compile the asserts out and still classify atomically.
@@ -3666,12 +3665,11 @@ impl ProfileMap {
     }
 
     /// The counter-reconciling wrapper over [`Profile::materialize_anchor`]'s two-field atomic
-    /// `Pending → (Idle, classified)` write — the chokepoint sibling of
-    /// [`Self::transition_state`] / [`Self::map_state`] for the one documented `state` write that
-    /// bypasses [`Profile::transition_state`]. Under the pure-state [`Profile::is_nonsteady`]
-    /// predicate that bypass is a genuine `true → false` counting edge (`Pending` counted, `Idle`
-    /// not), so it must reconcile here or the engine's debug full-recount tripwire fires on the
-    /// next delivered event.
+    /// `Pending → (Idle, classified)` write — the chokepoint sibling of [`Self::transition_state`] /
+    /// [`Self::map_state`] for the one documented `state` write that bypasses
+    /// [`Profile::transition_state`]. Under the pure-state [`Profile::is_nonsteady`] predicate that
+    /// bypass is a genuine `true → false` counting edge (`Pending` counted, `Idle` not), so it must
+    /// reconcile here or the engine's debug full-recount tripwire fires on the next delivered event.
     ///
     /// Silently no-ops on a stale id — the same policy as `transition_state`'s `None` return; the
     /// sole caller (`Engine::materialize_profile_anchor`, the descent terminus) operates on an

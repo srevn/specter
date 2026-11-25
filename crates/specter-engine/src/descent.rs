@@ -259,13 +259,13 @@ impl crate::Engine {
     /// both. ("No in-flight probe" is implied, not separately asserted: neither `Idle` nor `Parked`
     /// carries a `DescentState`, so the Profile structurally has no probe slot.)
     ///
-    /// **Recovery-overlap invariant.** When called from `start_pending_recovery`, the Profile already
-    /// holds a `+1 STRUCTURE` contribution on the parent via `Profile.watch_root_parent` (set at the
-    /// original anchor materialization, never cleared on `on_anchor_terminal_event`). This helper
-    /// bumps `+1 STRUCTURE` again on the same resource, giving `+2`. At re-materialization the
-    /// descent contribution is subbed and the `watch_root_parent` contribution persists —
-    /// [`Self::install_watch_root_parent_claim`] is idempotent on the recovery path (it
-    /// short-circuits when the cache already names the parent).
+    /// **Recovery-overlap invariant.** When called from `start_pending_recovery`, the Profile
+    /// already holds a `+1 STRUCTURE` contribution on the parent via `Profile.watch_root_parent`
+    /// (set at the original anchor materialization, never cleared on `on_anchor_terminal_event`).
+    /// This helper bumps `+1 STRUCTURE` again on the same resource, giving `+2`. At
+    /// re-materialization the descent contribution is subbed and the `watch_root_parent`
+    /// contribution persists — [`Self::install_watch_root_parent_claim`] is idempotent on the
+    /// recovery path (it short-circuits when the cache already names the parent).
     pub(crate) fn enter_pending_descent(
         &mut self,
         profile_id: ProfileId,
@@ -569,16 +569,16 @@ impl crate::Engine {
     /// Sequence:
     /// 1. Read the witnessed-appearance latch into the tail's [`SeedWitness`] — before step 2's
     ///    `Pending → Idle` flip destroys the [`DescentState`] carrying it (the descent's probe slot
-    ///    is already disarmed at this depth, so the drop is tripwire-safe). A witnessed descent owes
-    ///    its terminus Seed the appearance; an unwitnessed one (every segment found on first
+    ///    is already disarmed at this depth, so the drop is tripwire-safe). A witnessed descent
+    ///    owes its terminus Seed the appearance; an unwitnessed one (every segment found on first
     ///    observation — no absence half was ever observed) stays cold: attach-over-existing pins
     ///    silently, the restart-safe doctrine.
-    /// 2. Transition the Profile via [`specter_core::Profile::materialize_anchor`] — atomic `Pending
-    ///    → Idle`, kind pin.
+    /// 2. Transition the Profile via [`specter_core::Profile::materialize_anchor`] — atomic
+    ///    `Pending → Idle`, kind pin.
     /// 3. Narrate [`Diagnostic::PendingPathMaterialized`] before the Seed, so the stream reads
     ///    recovery-complete → baseline-established in order.
-    /// 4. Seed at the anchor ([`Self::seed_at_anchor`]): its claim and its parent's, then the Seed —
-    ///    the tail an immediate attach runs too.
+    /// 4. Seed at the anchor ([`Self::seed_at_anchor`]): its claim and its parent's, then the Seed
+    ///    — the tail an immediate attach runs too.
     /// 5. Release the descent's prefix claim, last. At the terminus the prefix is the anchor's
     ///    parent, so the parent claim the tail just installed takes the slot over before the
     ///    descent lets go — make before break: the slot's contributions go `{descent} → {descent,
@@ -1073,8 +1073,8 @@ mod tests {
 
     /// At a descent's terminus the prefix is the anchor's parent, and the parent claim takes the
     /// slot over before the descent's claim lets go: no watch op reaches the parent — its kernel
-    /// watch is neither closed and reopened nor re-registered — and the parent claim alone holds
-    /// it afterwards.
+    /// watch is neither closed and reopened nor re-registered — and the parent claim alone holds it
+    /// afterwards.
     #[test]
     fn terminus_hands_the_parent_slot_over_without_a_watch_op() {
         let (mut e, _sid, pid) = setup_pending_one_level();

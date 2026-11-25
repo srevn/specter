@@ -281,15 +281,15 @@ impl Engine {
             }
 
             // Slot dance, get-or-create per segment. The graft has already ensured every slot this
-            // snapshot lists (`apply_diff_to_tree` ensures each created entry, termini included), so
-            // `ensure_child` re-creates a slot only where a minted Profile's reap took it since: a
-            // terminus holds no watch of this Profile's — a Dir terminus is the shape's boundary
-            // (`wants_descendant_watch` is interior-gated), a File terminus a leaf under a mask with
-            // no per-file watches — so watch demand there is the minted Profile's alone, and the
-            // slot lives only while a minted Profile anchors it. Stamping the observed kind — only
-            // `File | Dir` reaches here, so the `EntryKind → ResourceKind` projection is faithful —
-            // lets `Profile.kind` cache at attach instead of waiting for the minted Profile's first
-            // Seed probe.
+            // snapshot lists (`apply_diff_to_tree` ensures each created entry, termini included),
+            // so `ensure_child` re-creates a slot only where a minted Profile's reap took it since:
+            // a terminus holds no watch of this Profile's — a Dir terminus is the shape's boundary
+            // (`wants_descendant_watch` is interior-gated), a File terminus a leaf under a mask
+            // with no per-file watches — so watch demand there is the minted Profile's alone, and
+            // the slot lives only while a minted Profile anchors it. Stamping the observed kind —
+            // only `File | Dir` reaches here, so the `EntryKind → ResourceKind` projection is
+            // faithful — lets `Profile.kind` cache at attach instead of waiting for the minted
+            // Profile's first Seed probe.
             let mut slot = anchor;
             for seg in &terminus.segments {
                 slot = self

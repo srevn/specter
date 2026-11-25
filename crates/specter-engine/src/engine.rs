@@ -583,13 +583,13 @@ impl Engine {
     /// 3. Start the Seed burst, selected by `witness`: `Cold` opens the cold arm (`Verifying` at
     ///    construction); `Appeared` threads the anchor as the trigger, so the Seed opens
     ///    `Batching`-first and its stable verdict owes the first fire. The trigger's only job is
-    ///    landing in the Seed's `dirty`, where `seed_owes_first_fire` finds the witness — every Seed
-    ///    probe targets the anchor regardless. The settle window debounces only what the anchor's
-    ///    own watch delivers — a file's writes, a directory's direct entries; below a directory
-    ///    nothing is watched until the verdict's graft installs it.
+    ///    landing in the Seed's `dirty`, where `seed_owes_first_fire` finds the witness — every
+    ///    Seed probe targets the anchor regardless. The settle window debounces only what the
+    ///    anchor's own watch delivers — a file's writes, a directory's direct entries; below a
+    ///    directory nothing is watched until the verdict's graft installs it.
     ///
-    /// Touches no descent state: the descent terminus finishes its own — the flip, its prefix
-    /// claim — around this call.
+    /// Touches no descent state: the descent terminus finishes its own — the flip, its prefix claim
+    /// — around this call.
     pub(crate) fn seed_at_anchor(
         &mut self,
         profile_id: ProfileId,
@@ -1156,10 +1156,9 @@ enum ProfileOrigin {
     ZombieRevival,
 }
 
-/// Whether a live observation of the anchor's *own appearance* stands behind the anchor going live
-/// — the parameter of the anchor-materialisation tail ([`Engine::seed_at_anchor`]). The attach
-/// pipeline hands its caller's to the tail; the descent terminus reads its witnessed-activity
-/// latch into one.
+/// Whether a live observation of the anchor's *own appearance* stands behind the anchor going live —
+/// the parameter of the anchor-materialisation tail ([`Engine::seed_at_anchor`]). The attach pipeline
+/// hands its caller's to the tail; the descent terminus reads its witnessed-activity latch into one.
 ///
 /// Deliberately an engine-internal parameter, **not** a [`SubAttachRequest`] field: the request
 /// crosses channels (config load, hot reload, IPC), and a fire-owing witness must not be claimable
@@ -1190,9 +1189,8 @@ enum AnchorResolution {
     Immediate { anchor: ResourceId },
     /// The anchor is a `DescentScaffold`-roled slot awaiting materialisation. `prefix` is the
     /// deepest existing ancestor (where the descent probe is currently watching) and `remaining`
-    /// carries the path components from `prefix` (exclusive) down to `anchor` (inclusive).
-    /// A fresh Profile enters `ProfileState::Pending(_)` and descends
-    /// ([`Engine::enter_pending_descent`]).
+    /// carries the path components from `prefix` (exclusive) down to `anchor` (inclusive). A fresh
+    /// Profile enters `ProfileState::Pending(_)` and descends ([`Engine::enter_pending_descent`]).
     Pending {
         anchor: ResourceId,
         prefix: ResourceId,

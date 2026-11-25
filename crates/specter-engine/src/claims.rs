@@ -14,8 +14,8 @@
 //!    contribution is keyed by [`ContribKey::ProfileDescendant`].
 //!
 //! A claim's flag and its contribution are written together, by one edge per direction. The anchor
-//! and watch-root parent claims install here, beside their releases, when the anchor goes live.
-//! The descent prefix installs with the descent's own entry and advance, the descendants with each
+//! and watch-root parent claims install here, beside their releases, when the anchor goes live. The
+//! descent prefix installs with the descent's own entry and advance, the descendants with each
 //! graft's diff; both release here too, because teardown (`reap_profile`, `discard_anchor_state`)
 //! crosses every claim at once.
 //!
@@ -63,8 +63,8 @@ impl Engine {
     }
 
     /// Release the Profile's anchor claim if held. Idempotent (flag already `None` ⇒ no-op). Safe
-    /// on a post-vacate slot — [`crate::refcounts::sub_watch`] silently skips an absent key (see the
-    /// [`crate::refcounts`] module rustdoc).
+    /// on a post-vacate slot — [`crate::refcounts::sub_watch`] silently skips an absent key (see
+    /// the [`crate::refcounts`] module rustdoc).
     ///
     /// Does NOT call `try_reap` on the anchor — the Profile's own back-reference still anchors the
     /// slot. Callers that detach the Profile (e.g., `reap_profile`) try-reap the anchor afterwards.
@@ -93,9 +93,9 @@ impl Engine {
     /// parent in the Tree and gets no claim; root rename detection is then unavailable.
     ///
     /// **Idempotent across recovery.** Anchor loss keeps this claim (it is the recovery channel),
-    /// so a recovery descent's terminus finds the cache already naming the parent and adds
-    /// nothing: the anchor slot's `(parent, segment)` identity is write-once, so a cached parent is
-    /// always this one.
+    /// so a recovery descent's terminus finds the cache already naming the parent and adds nothing:
+    /// the anchor slot's `(parent, segment)` identity is write-once, so a cached parent is always
+    /// this one.
     ///
     /// **Anchor sourced from owner state.** The anchor is read back via
     /// [`specter_core::Profile::resource`] rather than taken as a parameter: the slot is the
@@ -350,8 +350,8 @@ impl Engine {
     pub(crate) fn discard_anchor_state(&mut self, pid: ProfileId, out: &mut StepOutput) {
         // Order:
         //   1. release_descendant_claim runs first: it `take()`s `current`, whose snapshot names
-        //      every descendant contribution to release — step 2's collapse drops `current`, so
-        //      the reverse order would leak them.
+        //      every descendant contribution to release — step 2's collapse drops `current`, so the
+        //      reverse order would leak them.
         //   2. clear_anchor_classification collapses File/Dir → Unclassified, atomically capturing
         //      the survival witness from the settled reference. Step 1's take_current left
         //      `current` None but `settled` intact, so the witness is still available.
@@ -1017,8 +1017,8 @@ mod tests {
     }
 
     /// A recovery descent's terminus re-installs the watch-root parent claim on a Profile whose
-    /// claim outlived the anchor's loss: the cache already names the parent, so the install adds
-    /// no second contribution and emits nothing.
+    /// claim outlived the anchor's loss: the cache already names the parent, so the install adds no
+    /// second contribution and emits nothing.
     #[test]
     fn watch_root_parent_claim_install_is_idempotent_across_recovery() {
         let (mut e, _sid, pid, _anchor, parent) = engine_with_materialised_profile(ClassSet::EMPTY);
