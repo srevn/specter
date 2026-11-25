@@ -280,14 +280,16 @@ impl Engine {
                 continue;
             }
 
-            // Slot dance, get-or-create per segment: `ensure_child` is idempotent over the chain-dir
-            // slots the post-graft reconciler already created (role `User`) and creates only the
-            // terminus slots. A terminus is the discovery shape's boundary — its interior is no part
-            // of the proof object — so the reconciler installs no descendant watch there
-            // (`wants_descendant_watch` is interior-gated) and leaves anchor demand at the slot
-            // entirely to the minted Profile. Stamping the observed kind — only `File | Dir` reaches
-            // here, so the `EntryKind → ResourceKind` projection is faithful — lets `Profile.kind`
-            // cache at attach instead of waiting for the minted Profile's first Seed probe.
+            // Slot dance, get-or-create per segment. The graft has already ensured every slot this
+            // snapshot lists (`apply_diff_to_tree` ensures each created entry, termini included), so
+            // `ensure_child` re-creates a slot only where a minted Profile's reap took it since: a
+            // terminus holds no watch of this Profile's — a Dir terminus is the shape's boundary
+            // (`wants_descendant_watch` is interior-gated), a File terminus a leaf under a mask with
+            // no per-file watches — so watch demand there is the minted Profile's alone, and the
+            // slot lives only while a minted Profile anchors it. Stamping the observed kind — only
+            // `File | Dir` reaches here, so the `EntryKind → ResourceKind` projection is faithful —
+            // lets `Profile.kind` cache at attach instead of waiting for the minted Profile's first
+            // Seed probe.
             let mut slot = anchor;
             for seg in &terminus.segments {
                 slot = self

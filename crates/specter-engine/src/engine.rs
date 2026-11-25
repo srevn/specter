@@ -604,10 +604,11 @@ impl Engine {
     /// 4. Start the Seed burst, witness-selected — the descent terminus's twin
     ///    (`materialize_profile_anchor`): a `Cold` attach opens the cold arm (`Verifying`-first,
     ///    pins silently); an `Appeared` attach threads the anchor as the trigger, so the Seed opens
-    ///    `Batching`-first (the settle window absorbs a terminus still being written,
-    ///    post-watch-install) and its stable verdict owes the first fire. Either way the baseline
-    ///    is established once the settle-spaced quiescence proof converges (the Seed-Ok pin in
-    ///    `fire_or_seal`), not on the first probe.
+    ///    `Batching`-first and its stable verdict owes the first fire. The settle window debounces
+    ///    only what the anchor's own watch delivers — a file's writes, a directory's direct
+    ///    entries; below a directory nothing is watched until the verdict's graft installs it.
+    ///    Either way the baseline is established once the settle-spaced quiescence proof
+    ///    converges (the Seed-Ok pin in `fire_or_seal`), not on the first probe.
     ///
     /// (No parent-edge step: the `Draining → Verifying` reconfirm is a fresh `coverage` query, so
     /// an attach maintains no per-Profile ancestor cache.)

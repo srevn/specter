@@ -183,11 +183,15 @@ impl Engine {
             //   classes mkdir/rmdir backrefs (`NOTE_LINK`) as STRUCTURE, so dropping Dir-METADATA
             //   loses no structural signal.
             //
-            // Identity events are exempt: a deleted terminus folds to STRUCTURE at the boundary slot
-            // and must drive the discovery reconcile's reap. Driving a burst on a proof-irrelevant
-            // event could only end in a `nothing_changed` verdict — which a never-fired Sub converts
-            // into a spurious first fire — and the guard sits before `drive_burst`, so post-fire
-            // absorbs are equally stopped (a proof-irrelevant event must not extend a settle loop).
+            // Identity events are exempt: a boundary Dir's own identity folds into the proof object
+            // where its parent lists it, so its deletion or rename moves the proof even though churn
+            // inside it cannot. A discovery terminus is the common case — a Dir terminus's deletion
+            // drives the discovery burst beside its parent chain directory's own STRUCTURE event,
+            // while a File terminus's folds to CONTENT and is class-dropped above. Driving a burst
+            // on a proof-irrelevant event could only end in a `nothing_changed` verdict — which a
+            // never-fired Sub converts into a spurious first fire — and the guard sits before
+            // `drive_burst`, so post-fire absorbs are equally stopped (a proof-irrelevant event must
+            // not extend a settle loop).
             if !is_anchor && !is_identity {
                 let dir_kinded = matches!(resource_kind, ResourceKind::Dir);
                 if matches!(class, CoverageClass::Boundary)
