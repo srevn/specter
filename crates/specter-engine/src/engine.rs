@@ -297,8 +297,9 @@ impl Engine {
     }
 
     /// Seat the Sub `template` mints at `terminus`, entering its match set as `entry` — the one way
-    /// a minted Sub comes to be. `terminus` is a live slot the pass has resolved and kinded, and
-    /// holds no Sub of `template`'s (the pass's dedup); nothing is resolved or parsed here.
+    /// a minted Sub comes to be. `terminus` is a live slot the pass has resolved, its snapshot
+    /// lists it as `kind`, and it holds no Sub of `template`'s (the pass's dedup); nothing is
+    /// resolved or parsed here.
     ///
     /// The Profile is found or created at `terminus` under the spec's minted identity. A fresh one
     /// seeds at its anchor with the entry's witness: an enumeration pins cold, an appearance owes
@@ -312,6 +313,7 @@ impl Engine {
         &mut self,
         template: SubId,
         terminus: ResourceId,
+        kind: ResourceKind,
         entry: MintEntry,
         now: Instant,
         out: &mut StepOutput,
@@ -336,6 +338,10 @@ impl Engine {
             spec.identity.config().match_chain().is_none(),
             "mint_sub: a minted identity is never a MatchChain (template = {template:?})",
         );
+        // A Profile takes its anchor's kind from the slot when it is founded, and the pass meets
+        // slots the graft never kinded: one a watch rejection reset, one a reap took and the pass
+        // made anew.
+        self.tree.set_kind(terminus, kind);
         let (profile_id, origin) =
             self.find_or_create_profile(terminus, spec.identity.clone(), spec.settle);
         self.register_sub(Sub::minted(profile_id, name, template, &spec), out);
@@ -355,10 +361,6 @@ impl Engine {
                 }
             }
         }
-        let kind = self
-            .tree
-            .get(terminus)
-            .map_or(ResourceKind::Unknown, specter_core::Resource::kind_raw);
         out.diagnostics.push(Diagnostic::DiscoveryMinted {
             source: template,
             path,

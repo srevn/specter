@@ -320,16 +320,16 @@ impl Engine {
                 Arc::from(p)
             };
 
-            // A `Symlink` / `Other` (fifo / socket / device) terminus skips the mint wholesale — the
-            // slot dance never runs (the post-graft reconciler's own diff bookkeeping is independent
-            // of this arm), no kind is stamped, no Sub attaches, and the slot stays out of
-            // `live_slots`. Minting one would be a lie the state machine immediately unwinds: the
-            // kind projects to a File slot, the minted Profile's first anchor probe `lstat`s and
-            // folds `Vanished` on `!is_file()`, parking it in a recovery descent the next reconcile's
-            // removal pass then reaps — a mint→park→reap round-trip per chain event, forever, exactly
-            // on the patterns symlink farms match (`/srv/*/current`). Narrated once per template
-            // lifetime; only the line is once — kind is read fresh off the snapshot each pass, so a
-            // real file replacing the symlink at the same path mints normally below.
+            // A `Symlink` / `Other` (fifo / socket / device) terminus skips the mint wholesale —
+            // the slot dance never runs (the post-graft reconciler's own diff bookkeeping is
+            // independent of this arm), no Sub attaches, and the slot stays out of `live_slots`.
+            // Minting one would be a lie the state machine immediately unwinds: the kind projects
+            // to a File slot, the minted Profile's first anchor probe `lstat`s and folds `Vanished`
+            // on `!is_file()`, parking it in a recovery descent the next reconcile's removal pass
+            // then reaps — a mint→park→reap round-trip per chain event, forever, exactly on the
+            // patterns symlink farms match (`/srv/*/current`). Narrated once per template lifetime;
+            // only the line is once — kind is read fresh off the snapshot each pass, so a real file
+            // replacing the symlink at the same path mints normally below.
             if !matches!(terminus.kind, EntryKind::File | EntryKind::Dir) {
                 let mut abs: Option<Arc<Path>> = None;
                 for t in &templates {
@@ -356,10 +356,7 @@ impl Engine {
             // a terminus holds no watch of this Profile's — a Dir terminus is the shape's boundary
             // (`wants_descendant_watch` is interior-gated), a File terminus a leaf under a mask
             // with no per-file watches — so watch demand there is the minted Profile's alone, and
-            // the slot lives only while a minted Profile anchors it. Stamping the observed kind —
-            // only `File | Dir` reaches here, so the `EntryKind → ResourceKind` projection is
-            // faithful — lets `Profile.kind` cache at attach instead of waiting for the minted
-            // Profile's first Seed probe.
+            // the slot lives only while a minted Profile anchors it.
             let mut slot = anchor;
             for seg in &terminus.segments {
                 slot = self
@@ -367,7 +364,6 @@ impl Engine {
                     .ensure_child(slot, seg, ResourceRole::User)
                     .expect("chain slots held alive by the discovery Profile's anchor claim");
             }
-            self.tree.set_kind(slot, terminus.kind.into());
             live_slots.insert(slot);
 
             for t in &templates {
@@ -390,7 +386,8 @@ impl Engine {
                     Branch::Standing => t.miss,
                     Branch::Opened => MintEntry::Enumerated,
                 };
-                self.mint_sub(t.sid, slot, entry, now, out);
+                // Only `File | Dir` reaches here, so the kind the mint is handed is faithful.
+                self.mint_sub(t.sid, slot, terminus.kind.into(), entry, now, out);
             }
         }
 
