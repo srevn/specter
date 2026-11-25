@@ -85,9 +85,8 @@ pub enum IssueKind {
     /// segment, non-absolute, Windows prefix, or a malformed glob segment. Detail carries the
     /// rendered [`specter_core::PatternError`] message.
     InvalidPattern,
-    /// The watch's effective event mask (the static entry's `events`, or a dynamic entry's template
-    /// `events`) does not cover the classes its scan shape needs to witness quiescence over a
-    /// settle window — for a subtree watch, CONTENT. Advisory, never fatal: emitted by
+    /// The watch's event mask does not cover the classes its scan shape needs to witness quiescence
+    /// over a settle window — for a subtree watch, CONTENT. Advisory, never fatal: emitted by
     /// [`crate::Config::warnings`], never by `validate`. The configuration is documented and
     /// intended (the hash-channel safety net for `mmap` / async-I/O / `splice(2)` writers whose
     /// in-place writes the kernel may not surface as events), but its price is structural: every

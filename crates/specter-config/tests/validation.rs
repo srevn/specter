@@ -272,11 +272,11 @@ fn dynamic_prefix_inaccessible_is_fatal() {
     assert_eq!(errors[0].field, "path");
 }
 
-/// [`Config::warnings`], the events-incomplete advisory: a mask that cannot witness its scan shape's
-/// quiescence classes engages the hash-channel safety net (two consecutive agreeing full subtree
-/// walks per fire), which is supported but expensive — the warning surfaces the cost. The checked
-/// identity is the one the firing Profiles run under: a static entry's own `events`, a dynamic
-/// entry's template `events`. The scope-conditional default mask carries CONTENT and stays silent.
+/// [`Config::warnings`], the events-incomplete advisory: a mask that cannot witness its scan
+/// shape's quiescence classes engages the hash-channel safety net (two consecutive agreeing full
+/// subtree walks per fire), which is supported but expensive — the warning surfaces the cost. The
+/// checked mask is the one the firing Profiles run under, a static or a dynamic entry's own
+/// `events`. The scope-conditional default mask carries CONTENT and stays silent.
 #[test]
 fn warnings_flag_events_incomplete_mask() {
     let toml = format!(

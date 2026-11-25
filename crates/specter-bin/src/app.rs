@@ -152,8 +152,8 @@ pub fn run(args: DaemonArgs) -> ExitCode {
     };
     // Emit the same `disabled_watches` summary as the config-loaded log so an operator booting
     // Specter with a mostly-disabled config sees *which* entries are suppressed at startup, not
-    // just a watch count that omits them. `discovery` is the template-bearing subset of `watches` —
-    // the operator's "how many patterns" view.
+    // just a watch count that omits them. `discovery` counts the dynamic entries of `watches` — the
+    // operator's "how many patterns" view.
     let disabled_watches = initial_config.disabled_names();
     tracing::info!(
         level = ?log_cfg.level,

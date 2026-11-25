@@ -437,10 +437,10 @@ mod tests {
         assert!(d.modified_params.is_empty());
     }
 
-    /// A **program-only** change on a template-bearing pair classifies `modified_identity` — the same
-    /// edit on a static spec lands in `modified_params` (see
-    /// [`different_command_lands_in_modified_params`]). Minted Subs hold `Arc`s of the template Sub's
-    /// program; an in-place rebind would strand them, so any discovery edit is a wholesale replace.
+    /// A **program-only** change on a dynamic pair classifies `modified_identity` — the same edit on
+    /// a static spec lands in `modified_params` (see [`different_command_lands_in_modified_params`]).
+    /// Minted Subs hold `Arc`s of the template Sub's program; an in-place rebind would strand them,
+    /// so any discovery edit is a wholesale replace.
     #[test]
     fn discovery_command_change_lands_in_modified_identity() {
         let old_blocks = [dyn_block("logs", "/srv/log/*", "echo")];
