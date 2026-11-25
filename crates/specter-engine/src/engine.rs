@@ -251,8 +251,13 @@ impl Engine {
         let Some(resolved) = self.resolve_attach_anchor(&anchor, out) else {
             return;
         };
-        let (profile_id, origin) =
-            self.find_or_create_profile(resolved.anchor(), identity, params.settle);
+        let (profile_id, origin) = find_or_create_profile(
+            &mut self.profiles,
+            &mut self.tree,
+            resolved.anchor(),
+            &identity,
+            params.settle,
+        );
         self.register_sub(Sub::from_request(profile_id, params), out);
         match origin {
             ProfileOrigin::Fresh => match resolved {
@@ -305,7 +310,7 @@ impl Engine {
         // minted one in `by_name`, and the first `@` splits prefix from path — no two mints
         // synthesise one name.
         let Some((name, spec)) = self.subs.get(template).and_then(|t| {
-            let spec = Arc::clone(t.mint_spec()?);
+            let spec = t.mint_spec()?;
             Some((format_compact!("{}@{}", t.name, path.display()), spec))
         }) else {
             // A missed mint costs one pass: the pass is idempotent, and the next one mints it.
@@ -324,9 +329,15 @@ impl Engine {
         // slots the graft never kinded: one a watch rejection reset, one a reap took and the pass
         // made anew.
         self.tree.set_kind(terminus, kind);
-        let (profile_id, origin) =
-            self.find_or_create_profile(terminus, spec.identity.clone(), spec.settle);
-        self.register_sub(Sub::minted(profile_id, name, template, &spec), out);
+        let (profile_id, origin) = find_or_create_profile(
+            &mut self.profiles,
+            &mut self.tree,
+            terminus,
+            &spec.identity,
+            spec.settle,
+        );
+        let sub = Sub::minted(profile_id, name, template, spec);
+        self.register_sub(sub, out);
         match origin {
             ProfileOrigin::Fresh => self.seed_at_anchor(profile_id, entry.into(), now, out),
             ProfileOrigin::Existing(join) => {
@@ -435,7 +446,7 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        self.recompute_profile_settle(profile_id);
+        recompute_profile_settle(&self.subs, &mut self.profiles, profile_id);
         match join {
             Join::Zombie => self.revive_zombie(profile_id, out),
             Join::Parked => self.start_pending_recovery(profile_id, out),
@@ -532,35 +543,6 @@ impl Engine {
         })
     }
 
-    /// Find the Profile at `(anchor, identity.config_hash())`, classifying how a Sub joins it, or
-    /// create one whose settle floor is the attaching Sub's `settle`.
-    ///
-    /// `identity` is taken by value: the `Fresh` arm moves it straight into [`Profile::new`]; a
-    /// standing Profile drops it. The anchor's classified kind is read from the Tree slot and
-    /// threaded through the constructor: `None` for a `DescentScaffold` anchor (descent
-    /// materialisation classifies it) or a freshly-`ensure`d-but-unprobed slot (the first Seed-Ok
-    /// classifies it). `profiles.attach` registers only Profile-side indices on the slot, never its
-    /// `kind`, so the read before construction is the read after.
-    fn find_or_create_profile(
-        &mut self,
-        anchor: ResourceId,
-        identity: ProfileIdentity,
-        settle: Duration,
-    ) -> (ProfileId, ProfileOrigin) {
-        if let Some(pid) = self.profiles.find(anchor, identity.config_hash()) {
-            let join = match self.profiles.get(pid).map(Profile::state) {
-                Some(ProfileState::Active(_, BurstFinish::Reap)) => Join::Zombie,
-                Some(ProfileState::Parked) => Join::Parked,
-                _ => Join::Live,
-            };
-            return (pid, ProfileOrigin::Existing(join));
-        }
-        let anchor_kind = self.tree.get(anchor).and_then(specter_core::Resource::kind);
-        let p = Profile::new(anchor, identity, settle, anchor_kind);
-        let pid = self.profiles.attach(&mut self.tree, p);
-        (pid, ProfileOrigin::Fresh)
-    }
-
     /// Detach a Sub by id. The last Sub to leave a Profile reaps it, at once or at burst end
     /// ([`DetachLifecycle`]); otherwise the Profile's settle floor is recomputed over the Subs that
     /// remain. A stale id narrates [`Diagnostic::DetachUnknownSub`] and changes nothing; `reason`
@@ -606,7 +588,7 @@ impl Engine {
         if !self.subs.at(profile_id).is_empty() {
             // Every Sub on a Profile shares its `events` mask (it folds into `config_hash`), so
             // only the settle floor can move.
-            self.recompute_profile_settle(profile_id);
+            recompute_profile_settle(&self.subs, &mut self.profiles, profile_id);
             return;
         }
 
@@ -648,8 +630,8 @@ impl Engine {
     ///
     /// Bookkeeping is one tiny ledger update: when `params.settle` differs from the prior settle,
     /// the Profile's `settle` floor (min over its live Subs) is recomputed via
-    /// [`Self::recompute_profile_settle`]. The currently-armed settle timer (if any) keeps its
-    /// existing deadline; the *next* settle window uses the new floor.
+    /// [`recompute_profile_settle`]. The currently-armed settle timer (if any) keeps its existing
+    /// deadline; the *next* settle window uses the new floor.
     ///
     /// On a stale [`SubId`] (the rebind invariant says the dispatcher just resolved through
     /// `find_by_name`, so this is structurally unexpected), emits [`Diagnostic::RebindUnknownSub`]
@@ -666,7 +648,7 @@ impl Engine {
             return;
         };
         if prior_settle != new_settle {
-            self.recompute_profile_settle(profile);
+            recompute_profile_settle(&self.subs, &mut self.profiles, profile);
         }
         out.diagnostics.push(Diagnostic::SubRebound { sub });
     }
@@ -838,32 +820,6 @@ impl Engine {
         });
     }
 
-    /// Recompute `Profile.settle = min(remaining_subs.settles)` after a Sub addition or removal.
-    /// O(subs-on-profile), bounded — typically 1–2 in v1 because `max_settle` already partitions
-    /// Profiles.
-    ///
-    /// Uses `.map(...).expect(...)` rather than a defensive `.filter_map(...)`:
-    /// [`SubRegistry::insert`] and [`SubRegistry::remove`] keep the `by_profile` index and the
-    /// slotmap in lockstep, so every id returned by [`SubRegistry::at`] is live in
-    /// [`SubRegistry::get`] by construction. A `None` here would be a structural invariant breach;
-    /// the `expect` is the surface that names it.
-    pub(crate) fn recompute_profile_settle(&mut self, profile_id: ProfileId) {
-        let new_min: Option<Duration> = self
-            .subs
-            .at(profile_id)
-            .iter()
-            .map(|sid| {
-                self.subs
-                    .get(*sid)
-                    .expect("by_profile index keeps SubIds live for SubRegistry::at")
-                    .settle
-            })
-            .min();
-        if let (Some(s), Some(p)) = (new_min, self.profiles.get_mut(profile_id)) {
-            p.settle = s;
-        }
-    }
-
     /// Read-only view of the Engine's `Tree`.
     ///
     /// The bin uses this to inspect Resource topology; tests use it for setup verification.
@@ -963,6 +919,45 @@ pub(crate) fn is_timer_referenced(
         .get(profile)
         .and_then(|p| p.state().timer_token(kind))
         .is_some_and(|live| live == id)
+}
+
+/// Find the Profile at `(anchor, identity.config_hash())`, classifying how a Sub joins it, or found
+/// one whose settle floor is the attaching Sub's `settle`.
+///
+/// A function of the two registries it writes, borrowing its identity, so a mint holds its
+/// template's spec across it — the Sub registry is left free — and the identity is cloned only into
+/// a Profile founded here. The anchor's classified kind is read from the Tree slot and threaded
+/// through the constructor: `None` for a `DescentScaffold` anchor (descent materialisation
+/// classifies it) or a freshly-`ensure`d-but-unprobed slot (the first Seed-Ok classifies it).
+/// `profiles.attach` registers only Profile-side indices on the slot, never its `kind`, so the read
+/// before construction is the read after.
+fn find_or_create_profile(
+    profiles: &mut ProfileMap,
+    tree: &mut Tree,
+    anchor: ResourceId,
+    identity: &ProfileIdentity,
+    settle: Duration,
+) -> (ProfileId, ProfileOrigin) {
+    if let Some(pid) = profiles.find(anchor, identity.config_hash()) {
+        let join = match profiles.get(pid).map(Profile::state) {
+            Some(ProfileState::Active(_, BurstFinish::Reap)) => Join::Zombie,
+            Some(ProfileState::Parked) => Join::Parked,
+            _ => Join::Live,
+        };
+        return (pid, ProfileOrigin::Existing(join));
+    }
+    let anchor_kind = tree.get(anchor).and_then(specter_core::Resource::kind);
+    let profile = Profile::new(anchor, identity.clone(), settle, anchor_kind);
+    (profiles.attach(tree, profile), ProfileOrigin::Fresh)
+}
+
+/// Refold `profile`'s settle floor ([`SubRegistry::settle_floor`]) after its Sub set, or the settle
+/// of a Sub on it, moved. A function of the registry it reads and the one it writes, as
+/// [`is_timer_referenced`] is of the one it reads.
+fn recompute_profile_settle(subs: &SubRegistry, profiles: &mut ProfileMap, profile: ProfileId) {
+    if let (Some(floor), Some(p)) = (subs.settle_floor(profile), profiles.get_mut(profile)) {
+        p.settle = floor;
+    }
 }
 
 /// Whether an attach or a mint found its Profile or founded it — read once, so no arm re-derives

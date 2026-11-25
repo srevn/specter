@@ -2560,9 +2560,7 @@ impl Profile {
     /// `identity` ([`ProfileIdentity`] = `{config, max_settle, events, hash}`) is the Profile
     /// partition key's config half, taken by value: it arrives already sealed over its canonical
     /// hash, and `ProfileConfig::new` derives the `exclude_strings` / `has_per_file_fds`
-    /// projections from it. There is no path to a Profile with an unset or stale hash. The sole
-    /// production caller (`find_or_create_profile`) already holds the `ProfileIdentity` and moves
-    /// it straight in — no field unpack, no clone.
+    /// projections from it. There is no path to a Profile with an unset or stale hash.
     ///
     /// `settle` is the per-Profile mutable debounce interval (recomputed by the engine as
     /// `min(remaining_subs.settles)`), distinct from the identity's `max_settle`. The `settle <=

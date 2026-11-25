@@ -262,9 +262,9 @@ impl ReactionSpec {
 #[derive(Clone, Debug)]
 pub struct SubParams {
     pub name: CompactString,
-    /// Per-Sub debounce floor — min-folded across the Profile's Subs by the engine's
-    /// `recompute_profile_settle`. Distinct from `max_settle`, which is identity (folds into
-    /// `config_hash`) and lives on [`ProfileIdentity`].
+    /// Per-Sub debounce — the least on a Profile is its floor ([`SubRegistry::settle_floor`]).
+    /// Distinct from `max_settle`, which is identity (folds into `config_hash`) and lives on
+    /// [`ProfileIdentity`].
     pub settle: Duration,
     /// What this Sub does when its Profile settles — see [`ReactionSpec`].
     pub reaction: ReactionSpec,
@@ -1054,6 +1054,23 @@ impl SubRegistry {
             .copied()
             .filter(|sid| self.subs.get(*sid).is_some_and(Sub::has_fired))
             .collect()
+    }
+
+    /// The least settle of the Subs on `profile` — the floor its Profile debounces at; `None` for a
+    /// Profile with no Sub. Loud, not filtered: `insert` and `remove` keep `by_profile` and the
+    /// slotmap in lockstep, so an id one holds and the other does not is a breach of this
+    /// registry's own invariant, and a floor folded past it would be silently too high.
+    #[must_use]
+    pub fn settle_floor(&self, profile: ProfileId) -> Option<Duration> {
+        self.at(profile)
+            .iter()
+            .map(|&sid| {
+                self.subs
+                    .get(sid)
+                    .expect("by_profile and the slotmap move in lockstep")
+                    .settle
+            })
+            .min()
     }
 
     /// Whether `template` makes `what` now: `true` the first time, `false` ever after — the check
