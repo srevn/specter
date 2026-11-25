@@ -178,18 +178,21 @@ fn listed_slot(tree: &mut Tree, dir: ResourceId, name: &str) -> ResourceId {
 }
 
 impl Engine {
-    /// The templates on the discovery Profile `discovery`, in id order — the order a pass mints in
-    /// and a ceiling names what it went on without. `SubRegistry::at` yields attach order, which
-    /// slot reuse can decouple from id order.
-    fn templates_at(&self, discovery: ProfileId) -> SmallVec<[SubId; 2]> {
-        let mut templates: SmallVec<[SubId; 2]> = self
-            .subs
-            .at(discovery)
-            .iter()
-            .copied()
-            .filter(|&sid| self.subs.get(sid).is_some_and(Sub::is_template))
-            .collect();
-        templates.sort_unstable();
+    /// The templates on `profile`, in id order — the order a pass mints in and a ceiling names what
+    /// it went on without: every Sub of a discovery Profile, and none of any other. Only a
+    /// [`specter_core::SubAttachTarget::Pattern`] request seats a Sub on a chain Profile, and it
+    /// seats a template, so the Profile's shape is the one discriminant. `SubRegistry::at` yields
+    /// attach order, which slot reuse can decouple from id order.
+    fn templates_at(&self, profile: ProfileId) -> SmallVec<[SubId; 2]> {
+        let mut templates = SmallVec::new();
+        if self
+            .profiles
+            .get(profile)
+            .is_some_and(|p| p.config().match_chain().is_some())
+        {
+            templates.extend_from_slice(self.subs.at(profile));
+            templates.sort_unstable();
+        }
         templates
     }
 
@@ -367,7 +370,7 @@ impl Engine {
     ///
     /// The tail every anchor goes live through calls this for any appearance it witnessed
     /// ([`Self::seed_at_anchor`]); on a firing Profile it closes nothing, as [`Self::templates_at`]
-    /// keeps only the Subs whose reaction mints.
+    /// answers none there.
     pub(crate) fn prefix_appeared(&mut self, discovery: ProfileId) {
         for template in self.templates_at(discovery) {
             self.subs.close_enumeration(template);
