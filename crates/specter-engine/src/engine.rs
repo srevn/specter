@@ -15,11 +15,10 @@
 
 use crate::counter::MonotonicCounter;
 use crate::path::empty_path;
-use crate::refcounts::add_watch;
 use crate::timer::{TimerEntry, TimerHeap};
 use crate::transitions::ParkNarration;
-// Only the inline test module needs `CompactString` now that `register_sub` moves the request's own
-// (it reaches it via `use super::*`); gating keeps the lib build warning-free.
+// Only the inline test module needs `CompactString` — `register_sub` moves the request's own — and
+// it reaches it via `use super::*`; gating keeps the lib build warning-free.
 #[cfg(test)]
 use compact_str::CompactString;
 // Identity.
@@ -36,7 +35,7 @@ use specter_core::{
     ProfileIdentity, Sub, SubAttachAnchor, SubAttachRequest, SubParams, SubRegistry,
 };
 // Per-Resource bookkeeping.
-use specter_core::{ClassSet, ContribKey};
+use specter_core::ClassSet;
 // Probe + effect correlation.
 use specter_core::{CorrelationId, ProbeCorrelation};
 // Engine step I/O.
@@ -596,12 +595,11 @@ impl Engine {
     /// disk at attach time).
     ///
     /// Sequence:
-    /// 1. Install the Profile's anchor [`ContribKey::ProfileAnchor`] contribution at `events_union`
-    ///    mask.
-    /// 2. Flip [`AnchorClaim::Held`].
-    /// 3. Set up the `watch_root_parent` (STRUCTURE contribution at the anchor's parent, for
-    ///    anchor-reappearance detection).
-    /// 4. Start the Seed burst, witness-selected — the descent terminus's twin
+    /// 1. Install the anchor claim ([`Engine::install_anchor_claim`]: [`AnchorClaim::Held`] and its
+    ///    contribution at the Profile's mask).
+    /// 2. Install the watch-root parent claim ([`Engine::install_watch_root_parent_claim`]: a
+    ///    STRUCTURE contribution at the anchor's parent, for anchor-reappearance detection).
+    /// 3. Start the Seed burst, witness-selected — the descent terminus's twin
     ///    (`materialize_profile_anchor`): a `Cold` attach opens the cold arm (`Verifying`-first,
     ///    pins silently); an `Appeared` attach threads the anchor as the trigger, so the Seed opens
     ///    `Batching`-first and its stable verdict owes the first fire. The settle window debounces
@@ -625,23 +623,8 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // Capture the Profile's mask before any &mut borrows.
-        let events_union = self
-            .profiles
-            .get(profile_id)
-            .map_or(ClassSet::EMPTY, Profile::events);
-
-        add_watch(
-            &mut self.tree,
-            anchor,
-            ContribKey::ProfileAnchor(profile_id),
-            events_union,
-            out,
-        );
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.install_anchor_claim_held();
-        }
-        self.set_watch_root_parent(profile_id, out);
+        self.install_anchor_claim(profile_id, out);
+        self.install_watch_root_parent_claim(profile_id, out);
 
         // A witnessed appearance threads the anchor as the Seed trigger — the trigger's only job is
         // landing in `dirty` so `seed_owes_first_fire` sees the witness; the degrade keeps it (an
@@ -730,79 +713,6 @@ impl Engine {
         let p = Profile::new(anchor, identity, params.settle, anchor_kind);
         let pid = self.profiles.attach(&mut self.tree, p);
         (pid, ProfileOrigin::Fresh)
-    }
-
-    /// Set up the Profile's watch-root parent contribution. For each User-role Profile P, the
-    /// Engine ensures `P.resource.parent` (if it exists) carries a `+1` `watch_demand` contribution
-    /// from P. The parent's role is promoted to `WatchRootParent` only if it was previously a bare
-    /// `DescentScaffold`; `User` parents stay `User` (never demote User). The role tag is metadata
-    /// — retention runs through the [`ContribKey::ProfileParent`] entry installed below.
-    ///
-    /// Caches the parent id on `Profile.watch_root_parent` so `reap_profile` can release the
-    /// contribution without re-deriving. `None` if the anchor has no parent in the Tree (a root
-    /// anchor) — root rename detection is then unavailable.
-    ///
-    /// Sole call sites: `attach_sub_inner` (immediate-Seed path, where the anchor exists on disk
-    /// and so does its parent) and `descent::dispatch_descent_ok` (anchor materialization).
-    ///
-    /// **Anchor sourced from owner state.** The anchor is read back via [`Profile::resource`]
-    /// rather than taken as a parameter: the slot is the Profile's own identity axis, write-once
-    /// for the Profile's lifetime (the slot identity `(parent, segment)` is itself write-once in
-    /// the Tree). A caller-passes-wrong-anchor breach class is unrepresentable — the seam reads the
-    /// single source of truth at every entry, so the cache cannot drift against the Tree's
-    /// `parent(resource)` under a routing mistake.
-    ///
-    /// **Per-file recovery limitation.** This parent-edge channel is what makes `rm -rf anchor`
-    /// survivable: the anchor re-materialises via descent and a post-recovery Seed-Ok rebases
-    /// `baseline := observed`. The Subtree side re-fires its drifted Subs across the loss window,
-    /// but a `PerStableFile` Sub's reactions to changes that occurred during the loss are dropped —
-    /// v1 keeps no per-leaf survival witness on the per-file path. This (witness-bearing) drop is
-    /// surfaced to operators via [`Diagnostic::PerFileDriftDroppedOnRecovery`], which is
-    /// witness-gated: a plain `Input::SensorOverflow` reseed of a healthy `Snapshot`-baseline
-    /// Profile drops per-file overflow-window reactions the same way but carries no witness, so
-    /// that subclass is a further v1 limitation the diagnostic does not cover (deferred with the
-    /// per-leaf-witness work).
-    pub(crate) fn set_watch_root_parent(&mut self, profile_id: ProfileId, out: &mut StepOutput) {
-        let Some((anchor, cached_parent)) = self
-            .profiles
-            .get(profile_id)
-            .map(|p| (p.resource(), p.watch_root_parent()))
-        else {
-            return;
-        };
-        let Some(parent_id) = self.tree.parent(anchor) else {
-            return;
-        };
-
-        // Idempotent: "Watch root deletion" recovery re-enters descent on a Profile whose
-        // `watch_root_parent` field was set at the original materialization and never cleared on
-        // `on_anchor_terminal_event`. When recovery's descent advances back to anchor materialization
-        // it would otherwise call this helper again, double-bumping the parent's `watch_demand` for
-        // the same Profile. Skip the bump if the cache already points at the same parent id.
-        if cached_parent == Some(parent_id) {
-            return;
-        }
-
-        // Promote role: DescentScaffold → WatchRootParent. User and existing WatchRootParent stay
-        // as they are (the helper preserves non-scaffold roles).
-        self.tree
-            .promote_scaffold(parent_id, specter_core::ResourceRole::WatchRootParent);
-
-        // The watch-root parent is engine infrastructure (used to detect anchor reappearance after
-        // a `rm -rf` of the anchor). Contribution is `STRUCTURE` regardless of the Sub's user mask.
-        // The corresponding bookkeeping flag is `Profile.watch_root_parent == Some(parent_id)`,
-        // written below.
-        add_watch(
-            &mut self.tree,
-            parent_id,
-            ContribKey::ProfileParent(profile_id),
-            ClassSet::STRUCTURE,
-            out,
-        );
-
-        if let Some(p) = self.profiles.get_mut(profile_id) {
-            p.set_watch_root_parent(parent_id);
-        }
     }
 
     /// Detach a Sub by id.
@@ -1350,8 +1260,8 @@ mod tests {
     use super::*;
     use specter_core::{
         DedupKey, EffectCompletion, EffectOutcome, FsEvent, Input, ProbeCorrelation, ProbeOutcome,
-        ProbeResponse, ProfileId, ProfileIdentity, ResourceId, ScanConfig, StepOutput, SubId,
-        SubRegistryDiff, TimerId, TimerKind, WatchOp,
+        ProbeResponse, ProfileId, ResourceId, ScanConfig, StepOutput, SubId, SubRegistryDiff,
+        TimerId, TimerKind, WatchOp,
     };
     use std::time::{Duration, Instant};
 
@@ -1815,54 +1725,6 @@ mod tests {
         assert!(
             !saw_wrong,
             "detach miss must NOT emit EffectCompleteForUnknownSub",
-        );
-    }
-
-    // ===== set_watch_root_parent idempotence =====
-
-    #[test]
-    fn set_watch_root_parent_idempotent_on_recovery_path() {
-        // "Watch root deletion" recovery re-enters descent on a Profile whose `watch_root_parent`
-        // was set at the original materialization. When recovery's descent advances back to anchor
-        // materialization, set_watch_root_parent must not double-bump the parent's watch_demand.
-        let mut e = Engine::new();
-        let parent = e.tree.ensure_root("p", specter_core::ResourceRole::User);
-        let anchor = e
-            .tree
-            .ensure_child(parent, "a", specter_core::ResourceRole::User)
-            .expect("test live parent");
-        let profile = specter_core::Profile::new(
-            anchor,
-            ProfileIdentity::new(
-                ScanConfig::builder().build(),
-                Duration::from_secs(1),
-                specter_core::ClassSet::EMPTY,
-            ),
-            Duration::from_millis(50),
-            None,
-        );
-        let pid = e.profiles.attach(&mut e.tree, profile);
-
-        // First call: bumps parent's watch_demand and caches it on Profile.
-        let mut out = StepOutput::default();
-        e.set_watch_root_parent(pid, &mut out);
-        let after_first = e.tree.get(parent).unwrap().watch_demand();
-        assert_eq!(after_first, 1, "first call bumps parent watch_demand");
-        assert_eq!(
-            e.profiles.get(pid).unwrap().watch_root_parent(),
-            Some(parent)
-        );
-
-        // Second call against the same Profile: must be a no-op (no bump). The anchor is sourced
-        // from `Profile::resource()` — write-once for the Profile's lifetime — so the second call
-        // sees the cache equal to `tree.parent(Profile::resource())` and short-circuits.
-        let mut out2 = StepOutput::default();
-        e.set_watch_root_parent(pid, &mut out2);
-        let after_second = e.tree.get(parent).unwrap().watch_demand();
-        assert_eq!(after_second, 1, "second call does NOT double-bump");
-        assert!(
-            out2.watch_ops.is_empty(),
-            "no Watch op emitted on second call"
         );
     }
 

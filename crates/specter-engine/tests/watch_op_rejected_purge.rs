@@ -241,7 +241,7 @@ fn watch_root_parent_claim_purged_then_reap_no_panic() {
     let t0 = Instant::now();
     let (sid, pid) = attach_subtree_root(&mut e, "watch", anchor, MAX_SETTLE, t0);
     let _ = seed_to_idle(&mut e, pid, &dir_snap(&[]), t0);
-    // `set_watch_root_parent` ran at attach; parent has +1 STRUCTURE.
+    // The attach installed the watch-root parent claim; parent has +1 STRUCTURE.
     assert_eq!(
         e.profiles().get(pid).unwrap().watch_root_parent(),
         Some(parent),

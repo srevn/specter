@@ -1,4 +1,4 @@
-//! Profile-claim release helpers.
+//! Profile-claim helpers: the edges that install and release a Profile's Resource-side claims.
 //!
 //! A Profile holds at most four Resource-side claims, each keyed by a distinct [`ContribKey`]
 //! variant in the per-Resource contributions map (`specter-core/resource.rs`):
@@ -13,49 +13,127 @@
 //!    (reached via `graft` on a probe response, or `release_descendant_claim` on teardown); each
 //!    contribution is keyed by [`ContribKey::ProfileDescendant`].
 //!
-//! The contribution map is the source of truth for refcounting; removal is by key, not by registry
-//! walk, so the per-Profile flag (the matching field from the list above) and its `sub_watch` can
-//! be written in either order. This module clears the flag first throughout, one order for every
-//! helper.
+//! A claim's flag and its contribution are written together, by one edge per direction. The anchor
+//! and watch-root parent claims install here, beside their releases, when the anchor goes live.
+//! The descent prefix installs with the descent's own entry and advance, the descendants with each
+//! graft's diff; both release here too, because teardown (`reap_profile`, `discard_anchor_state`)
+//! crosses every claim at once.
+//!
+//! The contribution map is the source of truth for refcounting; attribution is by key, not by
+//! registry walk, so a flag and its `add_watch` / `sub_watch` can be written in either order. This
+//! module writes the flag first throughout, one order for every helper.
 //!
 //! Each helper is:
-//! - **Idempotent.** Flag-already-cleared ⇒ no-op. Safe to call from any site without first
-//!   checking the claim's presence.
+//! - **Idempotent.** Flag already in the edge's target state ⇒ no-op. Safe to call from any site
+//!   without first checking the claim.
 //! - **Safe in any post-vacate state.** [`crate::refcounts::sub_watch`] silently skips an absent
 //!   key — reachable after [`specter_core::Tree::vacate`] cleared the map.
 
 use crate::Engine;
 use crate::reconcile::apply_diff_to_tree;
-use crate::refcounts::{sub_watch, sub_watch_then_try_reap};
+use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use crate::transitions::ParkNarration;
 use specter_core::{
-    AnchorClaim, ContribKey, DescentState, Diff, ProfileId, StepOutput, TreeSnapshot,
+    AnchorClaim, ClassSet, ContribKey, DescentState, Diff, ProfileId, ResourceRole, StepOutput,
+    TreeSnapshot,
 };
 
 impl Engine {
-    /// Release the Profile's anchor contribution if held. Idempotent (flag-false ⇒ no-op). Safe on
-    /// a post-vacate slot — [`crate::refcounts::sub_watch`] silently skips an absent key (see the
+    /// Install the Profile's anchor claim: [`AnchorClaim::Held`] and its
+    /// [`ContribKey::ProfileAnchor`] contribution at `Profile.resource`, at the Profile's `events`
+    /// mask — one edge, the mirror of [`Self::release_anchor_claim`]. Idempotent (flag already
+    /// `Held` ⇒ no-op): this edge is the only writer of `Held`, so a held flag means its
+    /// contribution stands.
+    pub(crate) fn install_anchor_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
+        let Some(p) = self.profiles.get_mut(pid) else {
+            return;
+        };
+        let AnchorClaim::None = p.anchor_claim() else {
+            return;
+        };
+        p.install_anchor_claim_held();
+        let (resource, events) = (p.resource(), p.events());
+        add_watch(
+            &mut self.tree,
+            resource,
+            ContribKey::ProfileAnchor(pid),
+            events,
+            out,
+        );
+    }
+
+    /// Release the Profile's anchor claim if held. Idempotent (flag already `None` ⇒ no-op). Safe
+    /// on a post-vacate slot — [`crate::refcounts::sub_watch`] silently skips an absent key (see the
     /// [`crate::refcounts`] module rustdoc).
     ///
     /// Does NOT call `try_reap` on the anchor — the Profile's own back-reference still anchors the
     /// slot. Callers that detach the Profile (e.g., `reap_profile`) try-reap the anchor afterwards.
     pub(crate) fn release_anchor_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
-        let Some(p) = self.profiles.get(pid) else {
+        let Some(p) = self.profiles.get_mut(pid) else {
             return;
         };
         let AnchorClaim::Held = p.anchor_claim() else {
             return;
         };
+        p.release_anchor_claim_now();
         let resource = p.resource();
-
-        if let Some(p) = self.profiles.get_mut(pid) {
-            p.release_anchor_claim_now();
-        }
-
         sub_watch(
             &mut self.tree,
             resource,
             ContribKey::ProfileAnchor(pid),
+            out,
+        );
+    }
+
+    /// Install the Profile's watch-root parent claim: a [`ContribKey::ProfileParent`] contribution
+    /// at the anchor's parent slot, cached on `Profile.watch_root_parent` so the release needs no
+    /// re-derivation. The claim is engine infrastructure — the parent's watch is what sees the
+    /// anchor itself deleted or renamed — so it subscribes `STRUCTURE` whatever the Sub's mask.
+    /// Installed wherever the anchor goes live, beside the anchor claim. A root anchor has no
+    /// parent in the Tree and gets no claim; root rename detection is then unavailable.
+    ///
+    /// **Idempotent across recovery.** Anchor loss keeps this claim (it is the recovery channel),
+    /// so a recovery descent's terminus finds the cache already naming the parent and adds
+    /// nothing: the anchor slot's `(parent, segment)` identity is write-once, so a cached parent is
+    /// always this one.
+    ///
+    /// **Anchor sourced from owner state.** The anchor is read back via
+    /// [`specter_core::Profile::resource`] rather than taken as a parameter: the slot is the
+    /// Profile's own identity axis, write-once for its lifetime, so a caller passing the wrong
+    /// anchor is unrepresentable.
+    ///
+    /// The parent's role tag flips from `DescentScaffold` to `WatchRootParent`; a `User` parent
+    /// stays `User` (a real role is never demoted). The tag is metadata — retention runs through
+    /// the contribution.
+    ///
+    /// **Per-file recovery limitation.** This parent-edge channel is what makes `rm -rf anchor`
+    /// survivable: the anchor re-materialises via descent and a post-recovery Seed-Ok rebases
+    /// `baseline := observed`. The Subtree side re-fires its drifted Subs across the loss window,
+    /// but a `PerStableFile` Sub's reactions to changes that occurred during the loss are dropped —
+    /// v1 keeps no per-leaf survival witness on the per-file path. This (witness-bearing) drop is
+    /// surfaced to operators via [`specter_core::Diagnostic::PerFileDriftDroppedOnRecovery`], which
+    /// is witness-gated: a plain `Input::SensorOverflow` reseed of a healthy `Snapshot`-baseline
+    /// Profile drops per-file overflow-window reactions the same way but carries no witness, so
+    /// that subclass is a further v1 limitation the diagnostic does not cover (deferred with the
+    /// per-leaf-witness work).
+    pub(crate) fn install_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
+        let Some(p) = self.profiles.get_mut(pid) else {
+            return;
+        };
+        let Some(parent) = self.tree.parent(p.resource()) else {
+            return;
+        };
+        if p.watch_root_parent() == Some(parent) {
+            return;
+        }
+        p.set_watch_root_parent(parent);
+        self.tree
+            .promote_scaffold(parent, ResourceRole::WatchRootParent);
+        add_watch(
+            &mut self.tree,
+            parent,
+            ContribKey::ProfileParent(pid),
+            ClassSet::STRUCTURE,
             out,
         );
     }
@@ -69,9 +147,7 @@ impl Engine {
     /// [`specter_core::Tree::try_reap`] on the eventual anchor reap walks back up and frees the
     /// parent in that same step.
     pub(crate) fn release_watch_root_parent_claim(&mut self, pid: ProfileId, out: &mut StepOutput) {
-        // `take_watch_root_parent` reads and clears the cached id in one move, so the
-        // read-then-null pair collapses to a single `get_mut` (was a `get` for the presence check,
-        // then a `get_mut` to null it).
+        // `take_watch_root_parent` reads and clears the cached id in one move, under one `get_mut`.
         let Some(parent) = self
             .profiles
             .get_mut(pid)
@@ -885,40 +961,84 @@ mod tests {
         assert!(matches!(p.state(), specter_core::ProfileState::Parked));
     }
 
-    /// `release_anchor_claim` flips a materialised `Held` claim to `None` and is idempotent — a
-    /// second call is a no-op on both the claim and the Tree (the early-return guard on
-    /// `anchor_claim`), so it emits no further watch op. Isolates the helper that
-    /// `discard_anchor_state` composes; pins the materialise ↔ release symmetry directly.
+    /// The anchor claim's two edges are mirrors and both idempotent. Release flips a materialised
+    /// `Held` to `None` and drops the anchor's contribution; a second release changes nothing and
+    /// emits no watch op (its guard reads the flag). Install restores `Held` with the contribution
+    /// at the Profile's mask — the anchor's union is the Profile's own again — and a second install
+    /// changes nothing either: the flag says the contribution stands.
     #[test]
-    fn release_anchor_claim_is_symmetric_and_idempotent() {
-        let (mut e, _sid, pid, _anchor, _parent) =
-            engine_with_materialised_profile(ClassSet::EMPTY);
-
+    fn anchor_claim_edges_are_mirrors_and_idempotent() {
+        let (mut e, _sid, pid, anchor, _parent) =
+            engine_with_materialised_profile(ClassSet::CONTENT);
+        let claim = |e: &Engine| e.profiles().get(pid).unwrap().anchor_claim();
         assert_eq!(
-            e.profiles().get(pid).unwrap().anchor_claim(),
+            claim(&e),
             AnchorClaim::Held,
-            "fixture materialised the anchor → claim Held",
+            "fixture materialised the anchor"
         );
 
         let mut out = StepOutput::default();
         e.release_anchor_claim(pid, &mut out);
-        assert_eq!(
-            e.profiles().get(pid).unwrap().anchor_claim(),
-            AnchorClaim::None,
-            "release flips Held → None (symmetric with materialise)",
+        assert_eq!(claim(&e), AnchorClaim::None, "release flips Held → None");
+        assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 0);
+
+        let mut out = StepOutput::default();
+        e.release_anchor_claim(pid, &mut out);
+        assert_eq!(claim(&e), AnchorClaim::None, "a second release stays None");
+        assert!(
+            out.watch_ops.is_empty(),
+            "a second release emits nothing: {:?}",
+            out.watch_ops
         );
 
-        let mut out2 = StepOutput::default();
-        e.release_anchor_claim(pid, &mut out2);
+        let mut out = StepOutput::default();
+        e.install_anchor_claim(pid, &mut out);
+        assert_eq!(claim(&e), AnchorClaim::Held, "install flips None → Held");
+        let slot = e.tree().get(anchor).unwrap();
         assert_eq!(
-            e.profiles().get(pid).unwrap().anchor_claim(),
-            AnchorClaim::None,
-            "second release is idempotent — stays None",
+            slot.watch_demand(),
+            1,
+            "install adds the contribution with the flag"
+        );
+        assert_eq!(
+            slot.events_union(),
+            ClassSet::CONTENT,
+            "at the Profile's mask"
+        );
+
+        let mut out = StepOutput::default();
+        e.install_anchor_claim(pid, &mut out);
+        assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 1);
+        assert!(
+            out.watch_ops.is_empty(),
+            "a second install emits nothing: {:?}",
+            out.watch_ops
+        );
+    }
+
+    /// A recovery descent's terminus re-installs the watch-root parent claim on a Profile whose
+    /// claim outlived the anchor's loss: the cache already names the parent, so the install adds
+    /// no second contribution and emits nothing.
+    #[test]
+    fn watch_root_parent_claim_install_is_idempotent_across_recovery() {
+        let (mut e, _sid, pid, _anchor, parent) = engine_with_materialised_profile(ClassSet::EMPTY);
+        assert_eq!(
+            e.profiles().get(pid).unwrap().watch_root_parent(),
+            Some(parent)
+        );
+        assert_eq!(e.tree().get(parent).unwrap().watch_demand(), 1);
+
+        let mut out = StepOutput::default();
+        e.install_watch_root_parent_claim(pid, &mut out);
+        assert_eq!(
+            e.tree().get(parent).unwrap().watch_demand(),
+            1,
+            "no second bump on the cached parent",
         );
         assert!(
-            out2.watch_ops.is_empty(),
-            "idempotent release emits no further Tree watch op: {:?}",
-            out2.watch_ops,
+            out.watch_ops.is_empty(),
+            "no Watch op re-emitted: {:?}",
+            out.watch_ops
         );
     }
 }

@@ -2251,9 +2251,9 @@ pub enum TimerKind {
 ///   (descent prefix carries the STRUCTURE watch instead), `Purged` (`Input::WatchOpRejected`
 ///   clamped the slot), or freshly constructed pre-attach.
 /// - [`Self::Held`] — Profile contributes `+1` (at its `events` mask) to its anchor's
-///   `watch_demand`. Set on the path that bumped the counter (immediate-Seed in `attach_sub_inner`
-///   or descent's anchor materialization); cleared on the matching decrement (anchor terminal
-///   event, reap, clamp purge).
+///   `watch_demand`. Set with that contribution by `Engine::install_anchor_claim` when the anchor
+///   goes live (an immediate attach, a descent's terminus); cleared with it on the matching
+///   decrement (anchor terminal event, reap, clamp purge).
 ///
 /// Encoded as a sum type so its readers — `release_anchor_claim`, `reap_profile`'s trichotomy, the
 /// watch-rejection claim walk — read the lifecycle directly rather than combining a flag with
@@ -2814,14 +2814,15 @@ impl Profile {
         self.anchor = AnchorClassification::Unclassified { witness };
     }
 
-    /// Atomically install a descent-materialised anchor: transition `Pending → Idle`, install the
-    /// claim, and classify the anchor with the discovered `kind`, **carrying the survival witness
-    /// forward** (`Unclassified { witness } ⇒ File/Dir { current: None, settled: Witness(h) | Unset
-    /// }`). Reached only through [`ProfileMap::materialize_anchor`] (which reconciles the carrier
-    /// count across the `Pending → Idle` edge); the engine's descent terminus launches the Seed
-    /// burst on the next statement — the `Idle` written here is a structural intermediate, never
-    /// observed. The whole sequence runs under one `&mut self` so no reader sees a partial write.
-    /// Inverse of [`Self::clear_anchor_classification`].
+    /// Atomically install a descent-materialised anchor: transition `Pending → Idle` and classify
+    /// the anchor with the discovered `kind`, **carrying the survival witness forward**
+    /// (`Unclassified { witness } ⇒ File/Dir { current: None, settled: Witness(h) | Unset }`).
+    /// Reached only through [`ProfileMap::materialize_anchor`] (which reconciles the carrier count
+    /// across the `Pending → Idle` edge). The anchor claim is not written here: the engine installs
+    /// it together with its Tree contribution, in the same step, before it launches the Seed burst
+    /// — the `Idle` written here is a structural intermediate, never observed. Both writes run
+    /// under one `&mut self` so no reader sees a partial one. Inverse of
+    /// [`Self::clear_anchor_classification`].
     ///
     /// Debug-asserts the fresh-materialisation preconditions (`state == Pending`, no claim, anchor
     /// `Unclassified`); release builds compile the asserts out and still classify atomically.
@@ -2844,7 +2845,6 @@ impl Profile {
             AnchorClassification::File { .. } | AnchorClassification::Dir { .. } => None,
         };
         self.state = ProfileState::Idle;
-        self.contributions.anchor_claim = AnchorClaim::Held;
         self.anchor = match kind {
             ResourceKind::Dir => AnchorClassification::Dir {
                 current: None,
@@ -2905,9 +2905,9 @@ impl Profile {
     /// moves — is [`Self::map_state`]. Preconditions live at the engine boundary (`require_idle` /
     /// `require_active_pre_fire`), not here.
     ///
-    /// [`Self::materialize_anchor`] is the single documented bypass — a three-field atomic `Pending
-    /// → (Idle, AnchorClaim::Held, classified)` write; [`ProfileMap::materialize_anchor`] is its
-    /// counter-reconciling wrapper (the bypass is a genuine `Pending → Idle` carrier-count edge).
+    /// [`Self::materialize_anchor`] is the single documented bypass — a two-field atomic `Pending →
+    /// (Idle, classified)` write; [`ProfileMap::materialize_anchor`] is its counter-reconciling
+    /// wrapper (the bypass is a genuine `Pending → Idle` carrier-count edge).
     pub const fn transition_state(&mut self, new: ProfileState) -> ProfileState {
         std::mem::replace(&mut self.state, new)
     }
@@ -2935,9 +2935,9 @@ impl Profile {
         r
     }
 
-    /// Install the anchor claim. Idempotent against `Held`. Production caller:
-    /// `Engine::bootstrap_immediate`. (The descent-materialised claim rides
-    /// [`Self::materialize_anchor`]'s bundled write instead.)
+    /// Install the anchor claim — the one writer of [`AnchorClaim::Held`]. Idempotent against
+    /// `Held`. Production caller: `Engine::install_anchor_claim`, which writes the claim's Tree
+    /// contribution with it.
     pub const fn install_anchor_claim_held(&mut self) {
         self.contributions.anchor_claim = AnchorClaim::Held;
     }
@@ -2950,17 +2950,16 @@ impl Profile {
 
     /// The cached watch-root parent Resource, if this Profile owes a `ContribKey::ProfileParent`
     /// STRUCTURE contribution there. `None` for a root anchor. Read seam over the release-ledger
-    /// field; `Engine::set_watch_root_parent` uses it for the cache-coherence and idempotence
-    /// checks, `classify_event_carriers` for the anchor-recovery channel.
+    /// field; `Engine::install_watch_root_parent_claim` uses it for its idempotence check,
+    /// `classify_event_carriers` for the anchor-recovery channel.
     #[must_use]
     pub const fn watch_root_parent(&self) -> Option<ResourceId> {
         self.contributions.watch_root_parent
     }
 
     /// Cache the watch-root parent id. The single write seam, wrapped by
-    /// `Engine::set_watch_root_parent` (which also installs the Tree-side `add_watch` and the
-    /// cache-coherence `debug_assert!`). Plain set — idempotence and coherence are the engine
-    /// wrapper's concern, not duplicated here.
+    /// `Engine::install_watch_root_parent_claim` (which also installs the Tree-side contribution).
+    /// Plain set — idempotence is the engine wrapper's concern, not duplicated here.
     pub const fn set_watch_root_parent(&mut self, parent: ResourceId) {
         self.contributions.watch_root_parent = Some(parent);
     }
@@ -3666,8 +3665,8 @@ impl ProfileMap {
         Some(r)
     }
 
-    /// The counter-reconciling wrapper over [`Profile::materialize_anchor`]'s three-field atomic
-    /// `Pending → (Idle, Held, classified)` write — the chokepoint sibling of
+    /// The counter-reconciling wrapper over [`Profile::materialize_anchor`]'s two-field atomic
+    /// `Pending → (Idle, classified)` write — the chokepoint sibling of
     /// [`Self::transition_state`] / [`Self::map_state`] for the one documented `state` write that
     /// bypasses [`Profile::transition_state`]. Under the pure-state [`Profile::is_nonsteady`]
     /// predicate that bypass is a genuine `true → false` counting edge (`Pending` counted, `Idle`
@@ -5867,7 +5866,11 @@ mod tests {
         p.materialize_anchor(ResourceKind::Dir);
 
         assert!(matches!(p.state(), ProfileState::Idle));
-        assert_eq!(p.anchor_claim(), AnchorClaim::Held);
+        assert_eq!(
+            p.anchor_claim(),
+            AnchorClaim::None,
+            "the claim is the engine's to install, with its Tree contribution",
+        );
         assert_eq!(p.kind(), Some(ResourceKind::Dir));
         assert!(!p.current_is_some(), "materialised, not yet grafted");
         assert_eq!(p.settled_hash(), None, "fresh: no witness, no baseline");

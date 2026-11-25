@@ -263,8 +263,8 @@ impl crate::Engine {
     /// original anchor materialization, never cleared on `on_anchor_terminal_event`). This helper
     /// bumps `+1 STRUCTURE` again on the same resource, giving `+2`. At re-materialization the
     /// descent contribution is subbed and the `watch_root_parent` contribution persists —
-    /// `set_watch_root_parent` is idempotent on the recovery path (`engine.rs::set_watch_root_parent`
-    /// short-circuits when the cache already points at the same parent).
+    /// [`Self::install_watch_root_parent_claim`] is idempotent on the recovery path (it
+    /// short-circuits when the cache already names the parent).
     pub(crate) fn enter_pending_descent(
         &mut self,
         profile_id: ProfileId,
@@ -573,12 +573,14 @@ impl crate::Engine {
     ///    if a co-resident peer already gave the slot a real role (`WatchRootParent` / `User`), so
     ///    materialization never clobbers a peer's claim.
     /// 3. Transition the Profile via [`specter_core::Profile::materialize_anchor`] — atomic `Pending
-    ///    → Idle`, claim install, kind pin. The refcount edges that follow are free in their order
-    ///    relative to it: a contribution is attributed by its explicit [`ContribKey`], never by
-    ///    reading `Profile.state` or `Profile.anchor_claim`.
-    /// 4. Sub the prefix's STRUCTURE; add the anchor's mask (captured from `Profile.events`).
-    /// 5. Install the watch-root-parent contribution (deferred from `attach_sub_inner` because the
-    ///    parent didn't exist on disk when the Profile attached).
+    ///    → Idle`, kind pin. The refcount edges that follow are free in their order relative to it:
+    ///    a contribution is attributed by its explicit [`ContribKey`], never by reading
+    ///    `Profile.state` or `Profile.anchor_claim`.
+    /// 4. Release the prefix's descent claim; install the anchor claim
+    ///    ([`Self::install_anchor_claim`]: `AnchorClaim::Held` and its contribution at the Profile's
+    ///    mask).
+    /// 5. Install the watch-root parent claim ([`Self::install_watch_root_parent_claim`]) now that
+    ///    the anchor is live — a no-op for a recovery descent, whose claim outlived the loss.
     /// 6. Start the Seed burst — triggered with the anchor as provenance iff the descent witnessed
     ///    activity, cold otherwise. The trigger's only job is landing in the Seed's `dirty` so
     ///    `seed_owes_first_fire` sees the witness (every Seed probe targets the anchor regardless);
@@ -611,13 +613,8 @@ impl crate::Engine {
         // User.
         self.tree.promote_scaffold(new_resource, ResourceRole::User);
 
-        let events_union = self
-            .profiles
-            .get(profile_id)
-            .map_or(ClassSet::EMPTY, specter_core::Profile::events);
-
-        // Through the ProfileMap chokepoint: the bundled `Pending → (Idle, Held, classified)` write
-        // is a carrier-count edge (`Pending` counted, `Idle` not) the wrapper reconciles.
+        // Through the ProfileMap chokepoint: the bundled `Pending → (Idle, classified)` write is a
+        // carrier-count edge (`Pending` counted, `Idle` not) the wrapper reconciles.
         self.profiles
             .materialize_anchor(profile_id, ResourceKind::from(entry_kind));
 
@@ -636,15 +633,8 @@ impl crate::Engine {
             ContribKey::ProfileDescent(profile_id),
             out,
         );
-        add_watch(
-            &mut self.tree,
-            new_resource,
-            ContribKey::ProfileAnchor(profile_id),
-            events_union,
-            out,
-        );
-
-        self.set_watch_root_parent(profile_id, out);
+        self.install_anchor_claim(profile_id, out);
+        self.install_watch_root_parent_claim(profile_id, out);
 
         // The terminus is the descent lifecycle's single positive narration: the awaited anchor is
         // now live and the Profile is leaving Pending. Emit before the Seed burst so the stream
