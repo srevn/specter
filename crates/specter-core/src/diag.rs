@@ -90,12 +90,10 @@ pub enum BurstHelper {
 ///   snapshot. The walker recorded the slot's identity but did not recurse, so the splice path
 ///   cannot navigate through it.
 ///
-/// [`Self::IntermediateUncovered`] is the only variant reachable through legitimate filesystem state
-/// — and only via cross-filesystem boundaries, where the walker stores an intermediate as `Uncovered`
-/// because its `cmeta.dev()` differs from the anchor's `root_dev`. The engine's pre-fire clamp keeps
-/// Standard probe targets on the shape's descend chain but is device-blind (Tree slots carry no
-/// device), so a mount below the anchor is exactly the coverage gap it cannot see. The other two
-/// remain v1-unreachable; reaching them signals an upstream LCA / Tree lifecycle regression.
+/// None is reachable through legitimate filesystem state: the engine roots every Standard probe at
+/// a directory the Profile's snapshot lists, so each hop of the splice resolves through a listing
+/// of the snapshot it splices into. Reaching any of them signals an upstream target / Tree
+/// lifecycle regression.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SpliceFailureCause {
     TargetOutsideAnchorSubtree,
@@ -402,12 +400,11 @@ pub enum Diagnostic {
         prior_kind: ResourceKind,
         response_kind: ResourceKind,
     },
-    /// `splice` could not navigate from the prior snapshot's anchor down to `target`; `cause` demuxes
-    /// the structural failure mode (see [`SpliceFailureCause`]). The engine contract is "graft only
-    /// into observed subtrees", so any emission is a contract breach: the engine keeps its prior view
-    /// and converges on the next probe. Only [`SpliceFailureCause::IntermediateUncovered`] is
-    /// reachable through legitimate state (a cross-filesystem boundary); the other two signal an
-    /// upstream LCA / Tree lifecycle regression.
+    /// `splice` could not navigate from the prior snapshot's anchor down to `target`; `cause`
+    /// demuxes the structural failure mode (see [`SpliceFailureCause`]). The engine contract is
+    /// "graft only into observed subtrees", so any emission is a contract breach: the engine keeps
+    /// its prior view and converges on the next probe. No cause is reachable through legitimate
+    /// state; each signals an upstream target / Tree lifecycle regression.
     SpliceCrossedUncovered {
         profile: ProfileId,
         target: ResourceId,

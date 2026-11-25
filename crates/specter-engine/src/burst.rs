@@ -72,11 +72,11 @@
 //! - [`pre_fire_target`] — returns the live `ResourceId` the next pre-fire probe walks (and the
 //!   response grafts at). Centralizes the `(anchor_kind, epistemics)` rule (File anchor → anchor;
 //!   failing [`Profile::event_chains_prove_quiescence`] — Seed or events-incomplete Standard →
-//!   anchor; events-complete Standard → the live slot at the component-LCA of `dirty`'s captured
-//!   paths, a File leaf promoted to its parent Dir, anchor on any resolution miss). Post-fire
-//!   rebases target the anchor unconditionally and bypass this helper. `transition_to_verifying`
-//!   resolves the target through it and constructs [`PreFirePhase::Verifying`] with the target on
-//!   the variant payload for the choke to read back.
+//!   anchor; events-complete Standard → the deepest directory on the way to the component-LCA of
+//!   `dirty`'s captured paths that `current` lists). Post-fire rebases target the anchor
+//!   unconditionally and bypass this helper. `transition_to_verifying` resolves the target through
+//!   it and constructs [`PreFirePhase::Verifying`] with the target on the variant payload for the
+//!   choke to read back.
 //! - [`Engine::emit_owner_probe`] (in `probe`) — the single emission choke. Each burst-launch
 //!   helper is `mint → arm → emit_owner_probe(owner)`, with every post-gate state resolution loud
 //!   (`unreachable!()` on the gate-proven-impossible miss) and the arm guarded at its re-acquire
@@ -91,10 +91,10 @@
 use crate::Engine;
 use smallvec::SmallVec;
 use specter_core::{
-    ActiveBurst, BurstFinish, BurstHelper, BurstIntent, CeilingState, Diagnostic, DirtyProvenance,
-    FsEvent, PostFirePhase, PreFireBurst, PreFirePhase, ProbeSlot, Profile, ProfileId,
-    ProfileState, ReapTrigger, Resource, ResourceId, ResourceKind, ScanConfig, StepOutput, TimerId,
-    TimerKind, Tree,
+    ActiveBurst, BurstFinish, BurstHelper, BurstIntent, CeilingState, Diagnostic, DirSnapshot,
+    DirtyProvenance, FsEvent, PostFirePhase, PreFireBurst, PreFirePhase, ProbeSlot, Profile,
+    ProfileId, ProfileState, ReapTrigger, ResourceId, ResourceKind, StepOutput, TimerId, TimerKind,
+    Tree,
 };
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -727,13 +727,14 @@ impl Engine {
     /// that stale entry lazy-drops on its original deadline. The `Draining → Verifying` reconfirm arm
     /// has no settle_timer to orphan (Draining never armed one).
     ///
-    /// **Target.** Resolved via [`pre_fire_target`] — File anchors target the anchor unconditionally;
-    /// bursts failing [`Profile::event_chains_prove_quiescence`] (Seed, or events-incomplete
-    /// Standard) target the anchor regardless of phase; events-complete Standard bursts target the
-    /// live slot at the component-LCA of `dirty`'s captured paths. The same rule covers the Draining
-    /// → Verifying reconfirm: `dirty` is preserved across the burst's pre-fire lifetime (only `note`d
-    /// into), so the component-LCA on the reconfirm matches the one at the original Verifying entry;
-    /// a slot reaped in between only changes the live-id resolution (anchor fallback).
+    /// **Target.** Resolved via [`pre_fire_target`] — File anchors target the anchor
+    /// unconditionally; bursts failing [`Profile::event_chains_prove_quiescence`] (Seed, or
+    /// events-incomplete Standard) target the anchor regardless of phase; events-complete Standard
+    /// bursts target the deepest directory on the way to the component-LCA of `dirty`'s captured
+    /// paths that `current` lists. The same rule covers the Draining → Verifying reconfirm: `dirty`
+    /// is preserved across the burst's pre-fire lifetime (only `note`d into), so the component-LCA
+    /// on the reconfirm matches the one at the original Verifying entry; the descent reads the
+    /// listing the verdict committed in between.
     ///
     /// **Emission.** This helper writes the `Verifying` variant — armed slot and target shipped as
     /// one struct-variant payload — then calls [`Engine::emit_owner_probe`], the single choke that
@@ -1506,85 +1507,41 @@ impl Engine {
     }
 }
 
-/// Resolve a path to the live engine slot that should root the Standard pre-fire probe — and, read
-/// back, the response graft — at it. Descends the live `Tree` from the always-live `anchor` by
-/// `path`'s anchor-relative components (`Tree::lookup` per segment), clamped to the shape's descend
-/// chain.
+/// Descend `listing` and the `Tree` together from `anchor` along `path`, and return the slot where
+/// the descent stops: at the first component `listing` does not hold as a directory it read, or the
+/// Tree holds no slot for. A walk rooted there has its prior in `listing`, and its answer grafts —
+/// the splice resolves the same names through the same listings.
 ///
-/// **The clamp.** The walk stops *above* the first depth the shape does not descend into
-/// ([`crate::coverage::descends_at`]), returning the deepest graftable prefix. Graftability of a
-/// target at depth `d` requires a `Covered` snapshot entry at every hop `1..=d` (`splice_dir` looks
-/// up a covered Dir at each hop, the target included), and an entry at depth `k` is `Covered`
-/// exactly when the walker recursed into it — `descends_into(k)`. Both production shapes are
-/// downward-closed in depth (`Subtree`: `recursive ∧ k < max_depth`; `MatchChain`: `k <
-/// terminus_depth`), so the first non-descend depth bounds every deeper one and `descends_at(d)`
-/// alone decides graftability. Without the clamp a boundary Dir — a `MatchChain` terminus driven by
-/// an identity event, or a dirty-LCA on a `max_depth` rim — would root the probe, and the commit's
-/// splice would refuse with `SpliceCrossedUncovered` on a healthy tree. Depth 0 (the anchor) is the
-/// wholesale-replace arm that always grafts, so the clamp's fallback terminates structurally.
-///
-/// Any lookup miss — `path` not under the anchor, a non-UTF-8 component, or a reaped-not-recreated
-/// intermediate — falls back to the anchor. Both the clamp and the fallback only ever move the root
-/// *up*: the result stays an ancestor-or-equal of every captured path (`coverage` routes events only
-/// at-or-under the anchor), so neither can clip an obligation chain. The result is always a live
-/// `ResourceId` (the anchor at minimum); the caller promotes a non-Dir result to its parent Dir.
-fn resolve_under_anchor(
+/// A leaf, a boundary, an unlisted name and a reaped slot each stop the descent one level up, so
+/// every stop moves the root only *up*: the result is an ancestor-or-equal of `path`. A `path` not
+/// under the anchor never starts the descent.
+fn listed_ancestor(
     anchor: ResourceId,
-    config: &ScanConfig,
+    listing: &Arc<DirSnapshot>,
     path: &Path,
     tree: &Tree,
 ) -> ResourceId {
-    let Some(anchor_path) = tree.get(anchor).map(Resource::path) else {
+    let Some(rel) = tree
+        .get(anchor)
+        .and_then(|a| path.strip_prefix(a.path()).ok())
+    else {
         return anchor;
     };
-    let Ok(rel) = path.strip_prefix(anchor_path) else {
-        return anchor;
-    };
-    let mut cur = anchor;
-    for (i, comp) in rel.components().enumerate() {
-        let Some(seg) = comp.as_os_str().to_str() else {
-            return anchor;
+    let (mut slot, mut frame) = (anchor, listing);
+    for component in rel.components() {
+        // A non-UTF-8 component names nothing a listing can hold.
+        let Some(segment) = component.as_os_str().to_str() else {
+            break;
         };
-        let depth = u32::try_from(i + 1).unwrap_or(u32::MAX);
-        if !crate::coverage::descends_at(config, depth) {
-            return cur;
-        }
-        match tree.lookup(Some(cur), seg) {
-            Some(next) => cur = next,
-            None => return anchor,
-        }
+        let Some(next_frame) = frame.lookup_covered_dir(segment) else {
+            break;
+        };
+        let Some(next_slot) = tree.lookup(Some(slot), segment) else {
+            break;
+        };
+        (slot, frame) = (next_slot, next_frame);
     }
-    cur
-}
-
-/// Promote a non-Dir resolved slot to its parent Dir; the descendant-observation model probes Dirs
-/// (a File is a child entry of its parent). Walks `start → parent` until a `Dir`, falling back to
-/// `anchor` if the chain crosses a reaped slot or runs out of ancestors. Unprobed slots (`kind() ==
-/// None`) walk up like File-shape — we don't know what they are, the parent is the safer probe
-/// target.
-///
-/// Pairs with [`resolve_under_anchor`]: the component-LCA of ≥2 distinct captured paths is
-/// structurally a Dir (it has descendants among the captured set) and is returned as-is; only a
-/// lone-location File scope promotes one level to its containing Dir, mirroring the pre-path-LCA
-/// behaviour exactly.
-///
-/// **Pre-condition.** The caller has filtered out File-anchored Profiles (`pre_fire_target` returns
-/// the anchor for a File kind), so a Dir anchor is assumed and the walk always terminates
-/// at-or-above it.
-fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> ResourceId {
-    let mut current = start;
-    loop {
-        let Some(r) = tree.get(current) else {
-            return anchor;
-        };
-        if matches!(r.kind(), Some(ResourceKind::Dir)) {
-            return current;
-        }
-        let Some(p) = tree.parent(current) else {
-            return anchor;
-        };
-        current = p;
-    }
+    slot
 }
 
 /// Pre-fire probe target for the next emission — the live engine slot the probe walks and the
@@ -1596,53 +1553,61 @@ fn promote_to_dir(start: ResourceId, anchor: ResourceId, tree: &Tree) -> Resourc
 ///
 /// - File anchor (`Profile.kind == Some(File)`) → the anchor itself. kqueue per-file FDs surface
 ///   events at the file directly, and the walker's [`specter_core::ProbeRequest::AnchorFile`] arm
-///   lstat's the leaf — promoting past the anchor would route the probe outside the Profile's
-///   coverage.
+///   lstat's the leaf — rooting anywhere else would route the probe outside the Profile's coverage.
 /// - Failing [`Profile::event_chains_prove_quiescence`] (Dir / unclassified anchor) → the anchor.
 ///   One rule covers two emission-equivalent epistemic states: a Seed burst has no trusted prior to
 ///   scope a narrower walk against, and an events-incomplete Standard burst's stream cannot witness
 ///   in-place writes — a dirty-LCA frame would leave out-of-LCA regions out of frame for the
 ///   hash-channel samples the verdict floor compares. The emission choke keys the `WholeSubtree`
 ///   obligation on the same predicate, so target and obligation cannot diverge.
-/// - Events-complete Standard (Dir / unclassified anchor) → the live slot at the component-LCA of
-///   `dirty`'s captured paths, clamped to the shape's descend chain ([`resolve_under_anchor`]), a
-///   File leaf promoted to its parent Dir ([`promote_to_dir`] — the parent of a graftable node is
-///   graftable by the descend chain's downward closure, so promotion cannot re-enter a boundary).
-///   The LCA is computed over *captured paths* (history), not surviving slot ids, so a slot reaped
-///   mid-burst cannot collapse the scope below where an event landed; only the live-id *resolution*
-///   may fall back to the anchor (strictly wider, never chain-clipping). An empty `dirty` is a
-///   should-never this arm `debug_assert!`s against (a Standard burst always notes its trigger); it
-///   then degrades to the anchor, which the emission choke pairs with a `WholeSubtree` obligation
-///   under its own `debug_assert`, so the degrade proves the whole subtree rather than silently
-///   skipping it.
+/// - Events-complete Standard (Dir anchor) → the deepest directory on the way to the component-LCA
+///   of `dirty`'s captured paths that the Profile's `current` lists as read ([`listed_ancestor`]).
+///   Graftability is read where it is defined: the response splices into `current` at the target,
+///   which takes a read listing at every hop, and the emission ships the target's own listing as
+///   the walk's prior. The LCA is computed over *captured paths* (history), not surviving slot ids,
+///   so a slot reaped mid-burst cannot collapse the scope below where an event landed; the descent
+///   moves the root only up from it, so no obligation chain is clipped.
+///
+/// The Standard arm has two should-nevers of one family, each `debug_assert!`ed and the anchor in
+/// release. An empty `dirty`: a Standard burst notes its trigger at construction, and the emission
+/// choke pairs the anchor with a `WholeSubtree` obligation under its own `debug_assert`. No
+/// listing: a Standard burst opens only over a settled baseline, which a listing stands behind; at
+/// the anchor the walk has no prior to skip against, so it reads every chain.
 ///
 /// **Draining-reconfirm coverage.** The Draining → Verifying reconfirm folds into the Standard case
 /// because `dirty` is preserved across the burst's whole pre-fire lifetime (only `note`d into), so
-/// the component-LCA on the reconfirm equals the one at the initial Verifying entry. A slot reaped
-/// during Draining changes only the live-id resolution (anchor fallback), never the captured-path
-/// basis.
+/// the component-LCA on the reconfirm equals the one at the initial Verifying entry. The descent
+/// reads the listing the verdict just committed, so a directory that left it moves the target up;
+/// the captured-path basis never moves.
 pub(crate) fn pre_fire_target(p: &Profile, pre: &PreFireBurst, tree: &Tree) -> ResourceId {
+    let anchor = p.resource();
     if matches!(p.kind(), Some(ResourceKind::File)) || !p.event_chains_prove_quiescence(pre.intent)
     {
-        return p.resource();
+        return anchor;
     }
-    match pre.dirty.lca_path() {
-        Some(lca) => promote_to_dir(
-            resolve_under_anchor(p.resource(), p.config(), &lca, tree),
-            p.resource(),
-            tree,
-        ),
-        None => {
+    match (pre.dirty.lca_path(), p.current_dir()) {
+        (Some(lca), Some(listing)) => listed_ancestor(anchor, listing, &lca, tree),
+        (None, _) => {
             debug_assert!(
                 false,
                 "pre_fire_target: Standard burst with empty `dirty` for \
-                 anchor {:?} — a Standard burst notes its trigger at \
+                 anchor {anchor:?} — a Standard burst notes its trigger at \
                  construction, so reaching here means a future writer \
                  opened the unreachable arm; degrading to the anchor (the \
                  emission choke pairs it with a WholeSubtree obligation)",
-                p.resource(),
             );
-            p.resource()
+            anchor
+        }
+        (Some(_), None) => {
+            debug_assert!(
+                false,
+                "pre_fire_target: Standard burst with no listing for \
+                 anchor {anchor:?} — a Standard burst opens only over a \
+                 settled baseline, which a listing stands behind; degrading \
+                 to the anchor (the walk has no prior there and reads every \
+                 chain)",
+            );
+            anchor
         }
     }
 }
@@ -1659,10 +1624,11 @@ mod tests {
     )]
 
     use crate::Engine;
+    use specter_core::testkit::{covered, dir_snap, dir_snap_nested};
     use specter_core::{
-        ActiveBurst, BurstIntent, ClassSet, Input, PreFirePhase, ProbeOp, ProbeRequest, ProbeSlot,
-        Profile, ProfileIdentity, ProfileState, ProofObligation, ResourceKind, ResourceRole,
-        ScanConfig, StepOutput, TimerKind,
+        ActiveBurst, BurstIntent, ClassSet, DirSnapshot, EntryKind, Input, PreFirePhase, ProbeOp,
+        ProbeRequest, ProbeSlot, Profile, ProfileIdentity, ProfileState, ProofObligation,
+        ResourceKind, ResourceRole, ScanConfig, StepOutput, TimerKind,
     };
     use std::time::{Duration, Instant};
 
@@ -1675,10 +1641,10 @@ mod tests {
     /// Events-incomplete pins opt into [`NO_EVENTS`] explicitly.
     const EVENTS_COMPLETE: ClassSet = ClassSet::CONTENT;
 
-    /// Build an Engine with a single Profile anchored at `/anchor`. Returns the Engine + the
-    /// `ProfileId`. The anchor claim's flag is set, without the Tree contribution no pin here
-    /// reads, because the burst helpers' Idle entries assert it (an anchorless rest is `Parked`,
-    /// never a burst entry).
+    /// Build an Engine with a single Profile anchored at `/anchor`, listing an empty directory.
+    /// Returns the Engine + the `ProfileId`. The anchor claim's flag is set, without the Tree
+    /// contribution no pin here reads, because the burst helpers' Idle entries assert it (an
+    /// anchorless rest is `Parked`, never a burst entry).
     fn engine_with_profile() -> (Engine, specter_core::ProfileId) {
         let mut e = Engine::new();
         let r = e.tree.ensure_root("/anchor", ResourceRole::User);
@@ -1696,11 +1662,22 @@ mod tests {
                 None,
             ),
         );
+        list(&mut e, pid, dir_snap(&[]));
         e.profiles
             .get_mut(pid)
             .expect("freshly attached")
             .install_anchor_claim_held();
         (e, pid)
+    }
+
+    /// Install `listing` as the Profile's `current` — the read snapshot a Standard target descends.
+    /// A Standard burst opens only over a settled baseline, so a pin that computes a Standard
+    /// target gives its Profile the listing production would hold.
+    fn list(e: &mut Engine, pid: specter_core::ProfileId, listing: Arc<DirSnapshot>) {
+        e.profiles
+            .get_mut(pid)
+            .expect("live Profile")
+            .install_dir_current(listing);
     }
 
     /// The live resource's materialised path — what the sensor reports as an `FsEvent`'s `event_path`
@@ -2260,9 +2237,9 @@ mod tests {
     // ---------------------------------------------------------------------------
     // pre_fire_target — the (anchor_kind, epistemics) probe-target rule.
     //
-    // Events-complete Standard target = the live slot at the component-LCA of `dirty`'s captured
-    // *paths* (history, not surviving slot ids), descended from the always-live anchor, a File leaf
-    // promoted to its parent Dir, anchor fallback on any resolution miss. Seed and
+    // Events-complete Standard target = the deepest directory on the way to the component-LCA of
+    // `dirty`'s captured *paths* (history, not surviving slot ids) that the Profile's `current`
+    // lists, descended from the always-live anchor together with the Tree. Seed and
     // events-incomplete Standard (`!event_chains_prove_quiescence`) target the anchor. Locks the
     // contract independent of `transition_to_verifying`'s body.
     // ---------------------------------------------------------------------------
@@ -2273,9 +2250,9 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    /// Build a tree-shaped Engine: anchor `/root`, two children `a` and `b`, the Profile's mask
-    /// chosen by the caller — [`EVENTS_COMPLETE`] for the LCA / chains pins, [`NO_EVENTS`] for the
-    /// anchor + `WholeSubtree` epistemic-posture pins.
+    /// Build a tree-shaped Engine: anchor `/root`, two children `a` and `b` the Profile lists as
+    /// read directories, the Profile's mask chosen by the caller — [`EVENTS_COMPLETE`] for the LCA
+    /// / chains pins, [`NO_EVENTS`] for the anchor + `WholeSubtree` epistemic-posture pins.
     fn engine_with_two_children_masked(
         mask: ClassSet,
     ) -> (
@@ -2311,6 +2288,11 @@ mod tests {
                 None,
             ),
         );
+        list(
+            &mut e,
+            pid,
+            dir_snap_nested(&[("a", covered(dir_snap(&[]))), ("b", covered(dir_snap(&[])))]),
+        );
         (e, pid, root, a, b)
     }
 
@@ -2323,6 +2305,41 @@ mod tests {
         specter_core::ResourceId,
     ) {
         engine_with_two_children_masked(EVENTS_COMPLETE)
+    }
+
+    /// An Engine whose events-complete Profile is anchored at `/root` under `config` and lists
+    /// `listing`, with a Tree slot at each anchor-relative path of `slots` (returned in order). The
+    /// slots only name what an event can land on: the target rule reads graftability off the
+    /// listing alone.
+    fn engine_listing(
+        config: ScanConfig,
+        listing: Arc<DirSnapshot>,
+        slots: &[&str],
+    ) -> (Engine, specter_core::ProfileId, ResourceId, Vec<ResourceId>) {
+        let mut e = Engine::new();
+        let root = e.tree.ensure_root("/root", ResourceRole::User);
+        e.tree.set_kind(root, ResourceKind::Dir);
+        let slots = slots
+            .iter()
+            .map(|rel| {
+                rel.split('/').fold(root, |parent, segment| {
+                    e.tree
+                        .ensure_child(parent, segment, ResourceRole::User)
+                        .expect("test live parent")
+                })
+            })
+            .collect();
+        let pid = e.profiles.attach(
+            &mut e.tree,
+            Profile::new(
+                root,
+                ProfileIdentity::new(config, MAX_SETTLE, EVENTS_COMPLETE),
+                SETTLE,
+                None,
+            ),
+        );
+        list(&mut e, pid, listing);
+        (e, pid, root, slots)
     }
 
     /// Build a `PreFireBurst` shell for direct `pre_fire_target` calls. `dirty` is the only field
@@ -2342,10 +2359,20 @@ mod tests {
     }
 
     /// `dirty` carrying each resource id paired with its *real* tree path, so anchor-rooted
-    /// resolution genuinely re-descends. The path strings match `engine_with_two_children`'s
-    /// absolute `/root` scaffold.
+    /// resolution genuinely re-descends. The path strings match the fixtures' absolute `/root`
+    /// scaffold.
     fn dirty_at(entries: &[(ResourceId, &str)]) -> DirtyProvenance {
         dirty_provenance(entries)
+    }
+
+    /// The target `pre_fire_target` computes for an events-complete Standard burst over `dirty`.
+    fn standard_target(
+        e: &Engine,
+        pid: specter_core::ProfileId,
+        dirty: DirtyProvenance,
+    ) -> ResourceId {
+        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty);
+        pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree)
     }
 
     #[test]
@@ -2361,229 +2388,201 @@ mod tests {
         // emission choke pairs it with a WholeSubtree obligation). Also covers the Draining-reconfirm
         // hypothetical where every dirty Resource was reaped between verify and reconfirm.
         let (e, pid, _root, _a, _b) = engine_with_two_children();
-        let pre = pre_fire_burst_for_test(BurstIntent::Standard, DirtyProvenance::new());
-        let _ = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+        let _ = standard_target(&e, pid, DirtyProvenance::new());
+    }
+
+    #[test]
+    #[cfg_attr(
+        not(debug_assertions),
+        ignore = "debug_assert! is compiled out in release"
+    )]
+    #[should_panic(expected = "Standard burst with no listing")]
+    fn pre_fire_target_standard_without_listing_panics_in_debug() {
+        // The twin should-never: a Standard burst on a Profile that holds no listing. A Standard
+        // burst opens only over a settled baseline, which a listing stands behind, so the arm is a
+        // tripwire, not a fallback — a silent one would let a pin that names the rule pass without
+        // reaching it. In release it degrades to the anchor, where the walk has no prior to skip.
+        let (mut e, pid, _root, a, _b) = engine_with_two_children();
+        let _ = e.profiles.get_mut(pid).unwrap().take_current();
+        let _ = standard_target(&e, pid, dirty_at(&[(a, "/root/a")]));
     }
 
     #[test]
     fn pre_fire_target_standard_single_dirty_at_anchor_returns_anchor() {
-        // One captured path equal to the anchor: the lone-path LCA is the anchor itself, resolves
-        // back to the anchor slot.
+        // One captured path equal to the anchor: the lone-path LCA is the anchor itself, and the
+        // descent never leaves it.
         let (e, pid, root, _a, _b) = engine_with_two_children();
-        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(root, "/root")]));
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
-        assert_eq!(target, root);
+        assert_eq!(standard_target(&e, pid, dirty_at(&[(root, "/root")])), root);
     }
 
     #[test]
     fn pre_fire_target_standard_single_dirty_deep_returns_self() {
-        // One captured path at a deeper Dir: the lone-path LCA is that path; it resolves to that
-        // live slot (a Dir, no promotion).
+        // One captured path at a deeper directory the listing holds as read: the lone-path LCA is
+        // that path, and the descent reaches its slot.
         let (e, pid, _root, a, _b) = engine_with_two_children();
-        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(a, "/root/a")]));
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
-        assert_eq!(target, a);
+        assert_eq!(standard_target(&e, pid, dirty_at(&[(a, "/root/a")])), a);
     }
 
     #[test]
-    fn pre_fire_target_standard_lone_file_promotes_to_parent_dir() {
-        // The dominant single-file-edit case: the lone captured path is a File leaf. Its
-        // component-LCA is the file itself; resolution finds the live File slot, which promotes one
-        // level to its parent Dir. The descendant-observation model probes Dirs — a File-target probe
-        // is misread downstream as anchor removal, so the promotion is load-bearing, not cosmetic.
-        let mut e = Engine::new();
-        let root = e.tree.ensure_root("/root", ResourceRole::User);
-        e.tree.set_kind(root, ResourceKind::Dir);
-        let f = e
-            .tree
-            .ensure_child(root, "f", ResourceRole::User)
-            .expect("test live parent");
-        e.tree.set_kind(f, ResourceKind::File);
-        let pid = e.profiles.attach(
-            &mut e.tree,
-            Profile::new(
-                root,
-                ProfileIdentity::new(
-                    ScanConfig::builder().recursive(true).build(),
-                    MAX_SETTLE,
-                    EVENTS_COMPLETE,
-                ),
-                SETTLE,
-                None,
-            ),
+    fn pre_fire_target_standard_lone_file_roots_at_its_parent_dir() {
+        // The dominant single-file-edit case: the lone captured path is a File leaf, so its
+        // component-LCA is the file itself. The listing holds it as a leaf, not as a directory it
+        // read, so the descent stops at the directory that lists it. The descendant-observation
+        // model probes Dirs — a File-target probe is misread downstream as anchor removal.
+        let (e, pid, root, slots) = engine_listing(
+            ScanConfig::builder().recursive(true).build(),
+            dir_snap(&[("f", EntryKind::File, 1)]),
+            &["f"],
         );
-        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(f, "/root/f")]));
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
         assert_eq!(
-            target, root,
-            "a lone File leaf promotes to its parent Dir, not the File slot",
+            standard_target(&e, pid, dirty_at(&[(slots[0], "/root/f")])),
+            root,
+            "a lone File leaf roots the walk at the directory that lists it, not the File slot",
         );
     }
 
     #[test]
     fn pre_fire_target_standard_two_siblings_resolve_to_parent() {
-        // Two captured sibling paths: their component-LCA is the parent (`/root` here), which
-        // resolves back to the anchor slot.
+        // Two captured sibling paths: their component-LCA is the parent (`/root` here), the anchor.
         let (e, pid, root, a, b) = engine_with_two_children();
-        let pre = pre_fire_burst_for_test(
-            BurstIntent::Standard,
-            dirty_at(&[(a, "/root/a"), (b, "/root/b")]),
+        assert_eq!(
+            standard_target(&e, pid, dirty_at(&[(a, "/root/a"), (b, "/root/b")])),
+            root,
         );
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
-        assert_eq!(target, root);
     }
 
     #[test]
     fn pre_fire_target_standard_resolves_to_shared_intermediate_ancestor() {
-        // Two leaves under disjoint mid-3 branches share a depth-2 ancestor (`l2`). The
-        // component-LCA of their captured paths is `/l0/l1/l2`; it resolves to that live slot — not
-        // collapsing to the anchor and not returning either leaf.
-        let mut e = Engine::new();
-        let l0 = e.tree.ensure_root("/l0", ResourceRole::User);
-        e.tree.set_kind(l0, ResourceKind::Dir);
-        let l1 = e
-            .tree
-            .ensure_child(l0, "l1", ResourceRole::User)
-            .expect("test live parent");
-        e.tree.set_kind(l1, ResourceKind::Dir);
-        let l2 = e
-            .tree
-            .ensure_child(l1, "l2", ResourceRole::User)
-            .expect("test live parent");
-        e.tree.set_kind(l2, ResourceKind::Dir);
-        let l3a = e
-            .tree
-            .ensure_child(l2, "a", ResourceRole::User)
-            .expect("test live parent");
-        e.tree.set_kind(l3a, ResourceKind::Dir);
-        let l3b = e
-            .tree
-            .ensure_child(l2, "b", ResourceRole::User)
-            .expect("test live parent");
-        e.tree.set_kind(l3b, ResourceKind::Dir);
-        let leaf_a = e
-            .tree
-            .ensure_child(l3a, "x", ResourceRole::User)
-            .expect("test live parent");
-        e.tree.set_kind(leaf_a, ResourceKind::File);
-        let leaf_b = e
-            .tree
-            .ensure_child(l3b, "y", ResourceRole::User)
-            .expect("test live parent");
-        e.tree.set_kind(leaf_b, ResourceKind::File);
-        let pid = e.profiles.attach(
-            &mut e.tree,
-            Profile::new(
-                l0,
-                ProfileIdentity::new(
-                    ScanConfig::builder().recursive(true).build(),
-                    MAX_SETTLE,
-                    EVENTS_COMPLETE,
-                ),
-                SETTLE,
-                None,
-            ),
+        // Two leaves under disjoint depth-3 branches share a depth-2 ancestor (`l2`). The
+        // component-LCA of their captured paths is `/root/l1/l2`, a directory the listing holds as
+        // read; the descent reaches it — not collapsing to the anchor and not returning either leaf.
+        let (e, pid, _root, slots) = engine_listing(
+            ScanConfig::builder().recursive(true).build(),
+            dir_snap_nested(&[(
+                "l1",
+                covered(dir_snap_nested(&[(
+                    "l2",
+                    covered(dir_snap_nested(&[
+                        ("a", covered(dir_snap(&[("x", EntryKind::File, 1)]))),
+                        ("b", covered(dir_snap(&[("y", EntryKind::File, 2)]))),
+                    ])),
+                )])),
+            )]),
+            &["l1/l2", "l1/l2/a/x", "l1/l2/b/y"],
         );
-
-        let pre = pre_fire_burst_for_test(
-            BurstIntent::Standard,
-            dirty_at(&[(leaf_a, "/l0/l1/l2/a/x"), (leaf_b, "/l0/l1/l2/b/y")]),
-        );
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
         assert_eq!(
-            target, l2,
-            "component-LCA of leaves under l3a and l3b is l2",
+            standard_target(
+                &e,
+                pid,
+                dirty_at(&[(slots[1], "/root/l1/l2/a/x"), (slots[2], "/root/l1/l2/b/y")]),
+            ),
+            slots[0],
+            "component-LCA of leaves under a and b is l2",
         );
     }
 
     #[test]
-    fn pre_fire_target_standard_boundary_dirty_clamps_to_descend_chain_ancestor() {
-        // max_depth = 2: the depth-2 Dir `l2` is admitted (`accepts` at depth 2 ≤ max) but not
-        // descended into (`descends_into(2)` is false) — a boundary Dir, reachable as a dirty path
-        // via an exempt identity event (`rm` of the dir observed through co-located demand). The
-        // resolution walk stops above it: the deepest graftable prefix is `l1`, whose enumeration
-        // observes the boundary entry's identity. Without the clamp the probe would root at `l2`
-        // and the commit's splice — unable to look `l2` up as a `Covered` child — would refuse.
-        let mut e = Engine::new();
-        let l0 = e.tree.ensure_root("/l0", ResourceRole::User);
-        e.tree.set_kind(l0, ResourceKind::Dir);
-        let l1 = e
-            .tree
-            .ensure_child(l0, "l1", ResourceRole::User)
-            .expect("test live parent");
-        e.tree.set_kind(l1, ResourceKind::Dir);
-        let l2 = e
-            .tree
-            .ensure_child(l1, "l2", ResourceRole::User)
-            .expect("test live parent");
-        e.tree.set_kind(l2, ResourceKind::Dir);
-        let pid = e.profiles.attach(
-            &mut e.tree,
-            Profile::new(
-                l0,
-                ProfileIdentity::new(
-                    ScanConfig::builder()
-                        .recursive(true)
-                        .max_depth(Some(2))
-                        .build(),
-                    MAX_SETTLE,
-                    EVENTS_COMPLETE,
-                ),
-                SETTLE,
-                None,
-            ),
+    fn pre_fire_target_standard_boundary_dirty_roots_at_its_parent_dir() {
+        // max_depth = 2: the walker admits the depth-2 Dir `l2` but does not descend into it, so
+        // the listing holds it as a boundary (`Uncovered`); an exempt identity event (`rm` of the
+        // dir, observed through co-located demand) can still dirty it. The descent stops above it,
+        // at `l1`, whose read observes the boundary's identity. Rooted at `l2` the commit's splice
+        // — unable to look `l2` up as a read directory — would refuse.
+        let (e, pid, _root, slots) = engine_listing(
+            ScanConfig::builder()
+                .recursive(true)
+                .max_depth(Some(2))
+                .build(),
+            dir_snap_nested(&[("l1", covered(dir_snap(&[("l2", EntryKind::Dir, 2)])))]),
+            &["l1", "l1/l2"],
         );
-        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(l2, "/l0/l1/l2")]));
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
         assert_eq!(
-            target, l1,
-            "a boundary-Dir dirty path clamps to the deepest descend-chain ancestor",
+            standard_target(&e, pid, dirty_at(&[(slots[1], "/root/l1/l2")])),
+            slots[0],
+            "a boundary-Dir dirty path roots the walk at the directory that lists it",
         );
     }
 
     #[test]
-    fn pre_fire_target_standard_recursive_false_clamps_to_anchor() {
-        // recursive=false: every depth-1 Dir is a boundary, so the clamp terminates at depth 0 —
-        // the anchor, the wholesale-replace arm that always grafts.
-        let mut e = Engine::new();
-        let root = e.tree.ensure_root("/root", ResourceRole::User);
-        e.tree.set_kind(root, ResourceKind::Dir);
-        let a = e
-            .tree
-            .ensure_child(root, "a", ResourceRole::User)
-            .expect("test live parent");
-        e.tree.set_kind(a, ResourceKind::Dir);
-        let pid = e.profiles.attach(
-            &mut e.tree,
-            Profile::new(
-                root,
-                ProfileIdentity::new(
-                    ScanConfig::builder().recursive(false).build(),
-                    MAX_SETTLE,
-                    EVENTS_COMPLETE,
-                ),
-                SETTLE,
-                None,
-            ),
+    fn pre_fire_target_standard_recursive_false_roots_at_anchor() {
+        // recursive=false: every depth-1 Dir is a boundary the listing holds by identity alone, so
+        // the descent never leaves the anchor — the wholesale-replace arm that always grafts.
+        let (e, pid, root, slots) = engine_listing(
+            ScanConfig::builder().recursive(false).build(),
+            dir_snap(&[("a", EntryKind::Dir, 1)]),
+            &["a"],
         );
-        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty_at(&[(a, "/root/a")]));
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
-        assert_eq!(target, root);
+        assert_eq!(
+            standard_target(&e, pid, dirty_at(&[(slots[0], "/root/a")])),
+            root
+        );
     }
 
     #[test]
-    fn pre_fire_target_standard_reaped_slot_falls_back_to_anchor() {
-        // The captured path of a since-reaped slot can't resolve a live id under the anchor, so
-        // resolution falls back to the anchor — strictly wider, never chain-clipping — and silently
-        // (no diagnostic; delete-recreate churn would flood logs).
-        let (mut e, pid, root, a, _b) = engine_with_two_children();
-        let dirty = dirty_at(&[(a, "/root/a")]);
-        e.tree.try_reap(a, &mut StepOutput::default());
-        let pre = pre_fire_burst_for_test(BurstIntent::Standard, dirty);
-        let target = pre_fire_target(e.profiles.get(pid).unwrap(), &pre, &e.tree);
+    fn pre_fire_target_standard_mount_root_roots_at_its_parent_dir() {
+        // A mount inside a recursive subtree watch. The shape descends into `mnt` (no depth bound)
+        // and the engine, whose Tree slots carry no device, watches it, so the mount's own churn
+        // dirties it; but the walker stopped at the device boundary and listed it `Uncovered`. The
+        // descent reads the listing, not the shape: it stops at the anchor, which lists `mnt`. A
+        // walk rooted at `mnt` would carry no prior and could not graft.
+        let (e, pid, root, slots) = engine_listing(
+            ScanConfig::builder().recursive(true).build(),
+            dir_snap(&[("mnt", EntryKind::Dir, 1)]),
+            &["mnt"],
+        );
         assert_eq!(
-            target, root,
-            "a reaped dirty slot widens to the anchor, not below the event",
+            standard_target(&e, pid, dirty_at(&[(slots[0], "/root/mnt")])),
+            root,
+            "a mount root roots the walk at the directory that lists it",
+        );
+    }
+
+    #[test]
+    fn pre_fire_target_standard_unlisted_slot_roots_at_nearest_listed_dir() {
+        // The Tree holds `a/c`, a slot this Profile's listing does not hold — another Profile
+        // anchored inside the subtree keeps it alive, and an event there reaches this Profile by
+        // scope. The descent stops at `a`, the deepest directory the listing holds on the way:
+        // rooted at `c` the walk would carry no prior, and the splice could not find `c` in the
+        // listing it splices into.
+        let (e, pid, _root, slots) = engine_listing(
+            ScanConfig::builder().recursive(true).build(),
+            dir_snap_nested(&[("a", covered(dir_snap(&[])))]),
+            &["a", "a/c"],
+        );
+        assert_eq!(
+            standard_target(&e, pid, dirty_at(&[(slots[1], "/root/a/c")])),
+            slots[0],
+            "an unlisted slot roots the walk at the nearest directory the listing holds",
+        );
+    }
+
+    #[test]
+    fn pre_fire_target_standard_reaped_slot_roots_one_level_up() {
+        // The listing still holds `a/gone`, but its slot was reaped, so the Tree names nothing
+        // there: the descent stops one level up, at `a` — not at the anchor. The captured path
+        // stays the basis and the stop moves the root only up; silently (no diagnostic —
+        // delete-recreate churn would flood logs).
+        let (mut e, pid, _root, slots) = engine_listing(
+            ScanConfig::builder().recursive(true).build(),
+            dir_snap_nested(&[(
+                "a",
+                covered(dir_snap_nested(&[
+                    ("gone", covered(dir_snap(&[]))),
+                    ("kept", covered(dir_snap(&[]))),
+                ])),
+            )]),
+            &["a", "a/gone", "a/kept"],
+        );
+        let (a, gone) = (slots[0], slots[1]);
+        assert!(e.tree.try_reap(gone, &mut StepOutput::default()));
+        assert!(
+            e.tree.get(a).is_some(),
+            "fixture: the sibling slot keeps `a` live across the reap's upward cascade",
+        );
+        assert_eq!(
+            standard_target(&e, pid, dirty_at(&[(gone, "/root/a/gone")])),
+            a,
+            "a reaped slot stops the descent one level up, not at the anchor",
         );
     }
 
@@ -2902,6 +2901,17 @@ mod tests {
                 SETTLE,
                 None,
             ),
+        );
+        list(
+            &mut e,
+            pid,
+            dir_snap_nested(&[(
+                "sub",
+                covered(dir_snap_nested(&[
+                    ("a", covered(dir_snap(&[]))),
+                    ("b", covered(dir_snap(&[]))),
+                ])),
+            )]),
         );
         let (ap, bp) = (rpath(&e, a), rpath(&e, b));
         let now = Instant::now();

@@ -81,9 +81,8 @@ use std::sync::Arc;
 /// `exclude` / `pattern` / depth from the anchor, or its scope desyncs from the engine's `covers`.
 ///
 /// `root_dev` is the **walk root's** device — `target_path`'s, captured once in [`probe_subtree`]
-/// from the top-level `lstat`. It is the recursion root's device, not the anchor's; the two
-/// coincide only when the walk roots at the anchor (`target == anchor`), while a Standard burst can
-/// root at a dirty-LCA below the anchor. The cross-filesystem gate
+/// from the top-level `lstat`. It is the recursion root's device, not the anchor's: a Standard
+/// burst can root the walk below the anchor. The cross-filesystem gate
 /// ([`should_recurse`](Self::should_recurse)) refuses to descend into any child whose device
 /// differs from `root_dev`, leaving a sub-mount below the recursion root uncovered.
 ///

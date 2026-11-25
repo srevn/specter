@@ -3,11 +3,10 @@
 //! [`classify`] walks the segment chain from `profile.resource` (the anchor) down to the candidate
 //! `target`, delegating each prefix's in-scope test to [`specter_core::ScanConfig::accepts`] — the
 //! single source of the scope predicate, shared with the walker — then refines the admitted case by
-//! the shape's recursion edge ([`specter_core::ScanConfig::descends_into`], via [`descends_at`])
-//! into [`CoverageClass`]. The classification gates three things in the engine: whether an
-//! `FsEvent` at `R` should drive `P`'s burst, whether `R` contributes to `P`'s `watch_demand`, and
-//! how deep a pre-fire probe target may sit. [`covers`] is the boolean projection (`!= Outside`)
-//! the chain queries and external consumers keep.
+//! the shape's recursion edge ([`specter_core::ScanConfig::descends_into`]) into [`CoverageClass`].
+//! The classification gates two things in the engine: whether an `FsEvent` at `R` should drive
+//! `P`'s burst, and whether `R` contributes to `P`'s `watch_demand`. [`covers`] is the boolean
+//! projection (`!= Outside`) the chain queries and external consumers keep.
 //!
 //! [`nearest_covering_ancestor`] is the transitive derivation of [`covers`], and
 //! [`has_active_standard_descendant`] (via [`chain_reaches`]) is the pure query answering, fresh at
@@ -48,30 +47,18 @@ use std::path::PathBuf;
 ///   unconditionally), every covered Leaf (`leaf_hash` folds where the parent enumerated it — a
 ///   leaf's interior *is* its content), and every covered Dir the shape descends into.
 ///
-/// Consumers are exactly three: event routing (`on_fs_event`'s proof-relevance guard), watch
-/// installation (`reconcile::wants_descendant_watch`), and the pre-fire target clamp
-/// (`burst::resolve_under_anchor`, via [`descends_at`]). The chain queries
-/// ([`nearest_covering_ancestor`] / [`chain_reaches`]) deliberately stay on boolean [`covers`]: a
-/// minted Profile's anchor sits on the discovery Profile's terminus slot — `Boundary` for the
-/// discovery Profile — and minted bursts gate outer Profiles *through* the discovery Profile by
-/// resolving their chain across exactly that boundary coverage. Lifting the classification into the
-/// chain queries would sever the gate.
+/// Consumers are exactly two: event routing (`on_fs_event`'s proof-relevance guard) and watch
+/// installation (`reconcile::wants_descendant_watch`). The pre-fire target reads what the snapshot
+/// listed, not this classification. The chain queries ([`nearest_covering_ancestor`] /
+/// [`chain_reaches`]) deliberately stay on boolean [`covers`]: a minted Profile's anchor sits on
+/// the discovery Profile's terminus slot — `Boundary` for the discovery Profile — and minted bursts
+/// gate outer Profiles *through* the discovery Profile by resolving their chain across exactly that
+/// boundary coverage. Lifting the classification into the chain queries would sever the gate.
 #[derive(Debug, Copy, Clone, Eq, PartialEq)]
 pub(crate) enum CoverageClass {
     Outside,
     Boundary,
     Interior,
-}
-
-/// The shape's recursion edge as the engine consults it: does coverage extend *below* a Dir at
-/// `depth`? Pins `same_device = true` — the engine's `Tree` slots carry no device, so every
-/// engine-side consumer is device-blind by construction. A mount below the anchor is therefore
-/// classified `Interior` here while the snapshot stores it `Uncovered`-by-device; a graft path
-/// crossing one surfaces as `SpliceCrossedUncovered`, the one legitimately reachable residue of
-/// that blindness.
-#[must_use]
-pub(crate) fn descends_at(config: &ScanConfig, depth: u32) -> bool {
-    config.descends_into(depth, true)
 }
 
 /// True iff `profile` would scan `target` given its `ScanConfig` — the boolean projection of
@@ -119,7 +106,7 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut 
 /// [`ResourceKind::Dir`] (the Tree invariant: a non-Dir parent can't have children); the final
 /// prefix tests as `target_kind`. A failure at any prefix short-circuits to
 /// [`CoverageClass::Outside`]; an admitted `target_kind == Dir` target then forks `Interior` /
-/// `Boundary` on the recursion edge at its own depth ([`descends_at`]).
+/// `Boundary` on the recursion edge at its own depth ([`classify_chain`]).
 ///
 /// Per-prefix evaluation through the same predicate the walker consumes is what makes
 /// pattern/exclude/depth/recursive/hidden semantics co-evolve across the two callers. Drift is
@@ -214,8 +201,13 @@ fn classify_chain(
     // Every prefix admitted. A non-Dir target is its own proof object (`leaf_hash` folds where the
     // parent enumerated it); an admitted Dir forks on the recursion edge at its own depth — the
     // shape descends into it (its entries fold) or it is a boundary (only its `fs_id` folds).
+    //
+    // The edge is read with `same_device` pinned true: the engine's `Tree` slots carry no device,
+    // so a mount root inside a subtree watch classifies `Interior` here while the walker lists it
+    // `Uncovered`. It holds a watch, and each change at the mount's root opens a burst whose walk
+    // is rooted at the directory listing the mount and finds nothing that changed.
     let target_depth = u32::try_from(total).unwrap_or(u32::MAX);
-    if !matches!(target_kind, ResourceKind::Dir) || descends_at(config, target_depth) {
+    if !matches!(target_kind, ResourceKind::Dir) || config.descends_into(target_depth, true) {
         CoverageClass::Interior
     } else {
         CoverageClass::Boundary

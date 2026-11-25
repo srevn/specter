@@ -454,9 +454,9 @@ fn terminus_churn_drops_for_discovery_and_drives_only_the_minted_profile() {
 /// A terminus **delete** is an identity event at the chain's boundary slot — exempt from the
 /// proof-relevance drop (it folds to STRUCTURE at a Dir slot and *is* a membership change), so it
 /// must drive the discovery reconcile. The pre-fire target clamps to the mid-chain parent (the
-/// deepest descend-chain node — probing the vanished terminus itself could not graft), the graft at
-/// that parent is clean, and the reconcile reaps the minted Sub whose terminus left the certified
-/// set.
+/// deepest directory the snapshot lists — probing the vanished terminus itself could not graft),
+/// the graft at that parent is clean, and the reconcile reaps the minted Sub whose terminus left
+/// the certified set.
 #[test]
 fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     let mut e = Engine::new();
@@ -508,7 +508,7 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     );
 
     // Settle expiry mints the verify probe; its target is the mid-chain parent, not the vanished
-    // terminus — the clamp stops the dirty-LCA resolution above the boundary.
+    // terminus — the descent stops above the boundary the listing holds.
     let t2 = t1 + SETTLE * 2;
     let mut probe_path = None;
     while let Some(en) = e.pop_expired(t2) {
@@ -528,7 +528,7 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     assert_eq!(
         probe_path.as_deref(),
         Some(&*a_path),
-        "verify probe targets the deepest descend-chain ancestor",
+        "verify probe targets the deepest directory the snapshot lists",
     );
 
     // The honest payload at the parent: `log` is gone from its enumeration. Clean graft —

@@ -134,11 +134,12 @@ pub enum ProbeRequest {
         /// Engine-monotonic correlation token — pairs request with response.
         correlation: ProbeCorrelation,
         /// Filesystem path of the directory to walk — the **recursion root** and graft point. The
-        /// deepest start that still covers every dirty path (the dirty-LCA for a Standard burst;
-        /// the anchor for Seed / Rebase), at-or-under `anchor_path`. `Arc::clone` of
-        /// `tree.path_of(target)` shipped on the wire — the walker has no `Tree` and never needs
-        /// the engine's `ResourceId`. An empty path is the lone failure mode (the engine's stale-id
-        /// sentinel); the walker treats empty as `Vanished`.
+        /// deepest start that still covers every dirty path (for a Standard burst, the deepest
+        /// directory the Profile's snapshot lists on the way to the dirty-LCA; for Seed and Rebase,
+        /// the anchor), at-or-under `anchor_path`. `Arc::clone` of `tree.path_of(target)` shipped
+        /// on the wire — the walker has no `Tree` and never needs the engine's `ResourceId`. An
+        /// empty path is the lone failure mode (the engine's stale-id sentinel); the walker treats
+        /// empty as `Vanished`.
         target_path: Arc<Path>,
         /// Filesystem path of the Profile **anchor** — the scope basis, distinct from
         /// `target_path`. The walker measures every dirent's `rel` (hence its depth) as
@@ -170,8 +171,9 @@ pub enum ProbeRequest {
         /// Engine's last-known view of `target_path`'s subtree. The walker consults
         /// `baseline_subtree.root_meta` for mtime-skip and propagates child baselines via each
         /// child's `DirChild::Covered(arc)`, resolved by name through
-        /// [`crate::DirSnapshot::lookup_covered_dir`]. `None` means "no prior observation": first
-        /// Seed of a fresh Profile.
+        /// [`crate::DirSnapshot::lookup_covered_dir`]. `None` means "no prior observation": a Profile
+        /// that holds no listing yet, whose walk roots at the anchor. A walk rooted below the anchor
+        /// always ships one — the engine roots it only at a directory its snapshot lists.
         ///
         /// Cheap to ship — `Arc::clone` on the channel send. Multiple workers may hold the same Arc
         /// concurrently: `DirSnapshot` is fully immutable post-construction (hashes are eager

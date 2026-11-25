@@ -762,12 +762,10 @@ pub enum SpliceResult {
     /// [`crate::Diagnostic::SpliceCrossedUncovered`] carrying the cause so the contract violation
     /// is visible in operator logs with the failure mode pre-classified.
     ///
-    /// Engine contract is "graft only into observed subtrees": the pre-fire target rule clamps
-    /// every Standard probe target to a descend-chain node, so the splice path crosses only
-    /// `Covered` entries. The clamp is device-blind (engine Tree slots carry no device), which
-    /// leaves the cross-device subset of [`SpliceFailureCause::IntermediateUncovered`] — a mount
-    /// below the anchor the walker stored `Uncovered`-by-device — as the one cause reachable
-    /// through legitimate filesystem state. The other two are v1-unreachable.
+    /// Engine contract is "graft only into observed subtrees": the pre-fire target rule roots every
+    /// Standard probe at a directory the Profile's snapshot lists, so the splice path crosses only
+    /// `Covered` entries of the very snapshot it splices into, and no cause is reachable through
+    /// legitimate filesystem state. The caller keeps the arm as a defence.
     CrossedUncovered(SpliceFailureCause),
 }
 
@@ -806,11 +804,10 @@ pub enum SpliceResult {
 ///   [`DirChild::Uncovered`] intermediate (snapshot coverage gap), a missing entry, or a `Leaf` at
 ///   an interior segment.
 ///
-/// Only the cross-fs subset of [`SpliceFailureCause::IntermediateUncovered`] is reachable through
-/// legitimate filesystem state (the engine clamps probe targets to descend-chain nodes but is
-/// device-blind); the other two remain v1-unreachable. The caller's prior handle stays alive across
-/// the breach (it's an independent Arc clone), so no integration occurs; the caller emits a
-/// Diagnostic so the contract breach is observable.
+/// None is reachable through legitimate filesystem state: the engine roots every probe at a
+/// directory `prior` lists. The caller's prior handle stays alive across the breach (it's an
+/// independent Arc clone), so no integration occurs; the caller emits a Diagnostic so the contract
+/// breach is observable.
 #[must_use]
 pub fn splice(
     prior: Option<Arc<DirSnapshot>>,
@@ -894,8 +891,7 @@ fn splice_dir(
         return Ok(replacement);
     };
     // Slot reaped mid-graft. Engine contract says this can't happen for an observed subtree;
-    // surface as SlotReapedMidGraft so operators can demux it from the legitimately-reachable
-    // IntermediateUncovered.
+    // surface as SlotReapedMidGraft so operators can demux it from IntermediateUncovered.
     let name = tree
         .name(next_id)
         .ok_or(SpliceFailureCause::SlotReapedMidGraft)?;

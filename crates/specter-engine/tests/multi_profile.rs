@@ -95,8 +95,9 @@ fn parent_stays_gated_across_child_fire_tail_restart() {
         .tree_mut()
         .ensure_child(foo, "bar", ResourceRole::User)
         .expect("test live parent");
-    // A File leaf: the restarted burst's LCA of the residual `{bar}` promotes the leaf to its parent
-    // Dir, so the restart re-probes the anchor `foo` — a deterministic stable + B1-dedup finish.
+    // A File leaf: the restarted burst's LCA of the residual `{bar}` is a leaf the listing holds,
+    // so the restart re-probes the directory that lists it, the anchor `foo` — a deterministic
+    // stable + B1-dedup finish.
     e.tree_mut().set_kind(bar, ResourceKind::File);
 
     let cfg = ScanConfig::builder().recursive(true).build();

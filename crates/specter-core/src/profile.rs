@@ -127,9 +127,9 @@ impl DirtyProvenance {
 
     /// The dirty root→leaf chains for [`crate::ProofObligation::Chains`]: every captured path,
     /// `BTreeSet`-ordered for deterministic replay. Every captured path is at-or-under the burst's
-    /// probe target by construction (the target is the live id at [`Self::lca_path`], or the anchor
-    /// fallback — both ancestors-or-equal of every value), so no "intersect with the target subtree"
-    /// filter is needed: it would be a tautology. Never empty for a Standard pre-fire burst.
+    /// probe target by construction (the target is a directory on the way to [`Self::lca_path`], an
+    /// ancestor-or-equal of every value), so no "intersect with the target subtree" filter is
+    /// needed: it would be a tautology. Never empty for a Standard pre-fire burst.
     #[must_use]
     pub fn chains(&self) -> BTreeSet<Arc<Path>> {
         self.0.values().map(Arc::clone).collect()
@@ -141,7 +141,7 @@ impl DirtyProvenance {
     /// Component-wise (not byte-prefix) is load-bearing: `/a` must not match `/ab`. Sound because v1
     /// forbids symlinks / cross-filesystem, so a shared component prefix is genuine Tree ancestry. A
     /// lone captured path (the dominant single-file-edit case) returns itself with no allocation; the
-    /// engine resolves the result to a live id and promotes a File leaf to its parent Dir.
+    /// engine roots the walk at the deepest directory its snapshot lists on the way to the result.
     #[must_use]
     pub fn lca_path(&self) -> Option<Arc<Path>> {
         let mut values = self.0.values();
@@ -393,10 +393,10 @@ pub enum PreFirePhase {
     ///
     /// `target` is the resource id the probe was scoped to, computed at construction by
     /// `pre_fire_target` and immutable for the variant's lifetime. For events-complete Standard
-    /// bursts ([`Profile::event_chains_prove_quiescence`]): the live id at the component-LCA of
-    /// `dirty`'s captured paths (File leaf promoted to its parent Dir; anchor on any resolution
-    /// miss). For Seed bursts (triggered or cold-walk) and events-incomplete Standard bursts: the
-    /// Profile's anchor. The Verifying response reads this for the post-fire snapshot-commit target.
+    /// bursts ([`Profile::event_chains_prove_quiescence`]): the deepest directory on the way to the
+    /// component-LCA of `dirty`'s captured paths that the Profile's `current` lists. For Seed
+    /// bursts (triggered or cold-walk) and events-incomplete Standard bursts: the Profile's anchor.
+    /// The Verifying response reads this for the post-fire snapshot-commit target.
     ///
     /// Constructing the variant *requires* both fields, so a verify phase without a correlation or
     /// without a target cannot exist:

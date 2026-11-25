@@ -18,7 +18,7 @@
 //! response. Equivalent to diffing against an empty `DirSnapshot`, no empty-snapshot allocation.
 //!
 //! **Splice-first ordering.** [`graft`] runs `splice` *before* any Tree mutation.
-//! [`SpliceResult::CrossedUncovered`] (reachable only via a cross-device intermediate — see
+//! [`SpliceResult::CrossedUncovered`] (unreachable from legitimate filesystem state — see
 //! [`graft`]) surfaces a [`Diagnostic`] and short-circuits without touching Tree state —
 //! `Profile.current` and `Tree` stay coherent across the breach.
 //!
@@ -307,11 +307,11 @@ pub(crate) fn apply_diff_to_tree(
 ///
 /// **Splice-first ordering.** The splice runs *before* any Tree mutation. A
 /// [`SpliceResult::CrossedUncovered`] verdict surfaces a [`Diagnostic`] and short-circuits without
-/// touching Tree state — the pre-fire clamp keeps Standard targets on the shape's descend chain, so
-/// the only legitimately reachable cause is a cross-device intermediate the device-blind clamp
-/// cannot see. `Profile.current` is untouched across the breach: the `prior` arg was an Arc clone
-/// the caller (`apply_snapshot`) made from `Profile.current`'s handle, so dropping it on the
-/// failure path leaves the Profile's own handle alive at its pre-call shape.
+/// touching Tree state — the pre-fire target rule roots every Standard probe at a directory
+/// `current` lists, so no cause is reachable through legitimate state and the arm is a defence.
+/// `Profile.current` is untouched across the breach: the `prior` arg was an Arc clone the caller
+/// (`apply_snapshot`) made from `Profile.current`'s handle, so dropping it on the failure path
+/// leaves the Profile's own handle alive at its pre-call shape.
 ///
 /// **Diff at TARGET.** The Diff is built between `prior_at_target` (descended from `prior` via
 /// [`subtree_at_dir`]) and `response_arc`, so its rel-paths are relative to `target` —
