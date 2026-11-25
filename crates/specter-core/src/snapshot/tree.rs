@@ -9,9 +9,9 @@
 //! - Children are either [`LeafEntry`] (file/symlink/other; no recursion) or [`DirChild`]
 //!   (directory; a sum type of the three things a walk can truthfully say of one —
 //!   `Covered(Arc<DirSnapshot>)`, `Uncovered(FsIdentity)` and `Denied(FsIdentity)`). `Uncovered`
-//!   means the shape does not list the directory (`recursive=false`, beyond `max_depth`,
-//!   cross-filesystem, a chain terminus); `Denied` that the shape lists it and the walk could not
-//!   read it. The sum makes the discrimination structural rather than `Option`-tagged.
+//!   means the shape does not list the directory (beyond `max_depth`, cross-filesystem, a chain
+//!   terminus); `Denied` that the shape lists it and the walk could not read it. The sum makes the
+//!   discrimination structural rather than `Option`-tagged.
 //! - A `DirSnapshot` carries no engine-side identity. The walker speaks paths; the engine speaks
 //!   resources; navigation helpers ([`subtree_at_dir`], [`TreeSnapshot::subtree_at`]) take an
 //!   explicit `anchor: ResourceId` so the caller's anchor invariant lives at the call site rather
@@ -325,10 +325,10 @@ const fn entry_kind_from_flags(is_file: bool, is_symlink: bool) -> EntryKind {
 /// - `Covered` — the walk listed it. The recursive `Arc<DirSnapshot>` is the listing; its
 ///   `root_meta.fs_id` is the kernel identity.
 /// - `Uncovered` — the shape does not list it: the scan shape's recursion edge
-///   (`ScanConfig::descends_into`) refused the level — `Subtree`'s `recursive=false`,
-///   beyond-`max_depth` or cross-filesystem gates (the child's `fs_id.device` differs from the walk
-///   root's), or `MatchChain`'s terminus depth (a matched directory at the chain's end is
-///   membership, not content). A boundary: its identity is all the proof folds.
+///   (`ScanConfig::descends_into`) refused the level — `Subtree`'s beyond-`max_depth` or
+///   cross-filesystem gates (the child's `fs_id.device` differs from the walk root's), or
+///   `MatchChain`'s terminus depth (a matched directory at the chain's end is membership, not
+///   content). A boundary: its identity is all the proof folds.
 /// - `Denied` — the shape lists it, and the walk could not read it and holds no earlier listing of
 ///   it: its identity is all that is known. It never stages into a diff ([`diff_dir_pair`],
 ///   [`Diff::all_created`], [`Diff::all_deleted`]), so its Profile gives it no Tree slot and never
@@ -1190,10 +1190,9 @@ fn diff_same_name(
             }
             _ => {
                 // Every other same-fs_id flip is v1-unreachable. Between a listed variant and
-                // `Uncovered` it would need a gate the config froze (`!recursive`, `max_depth` and
-                // cross-fs are `config_hash`-frozen per Profile or change `fs_id`); `Covered` →
-                // `Denied` would be a walk denied a directory it held a listing of, where that
-                // listing stands in.
+                // `Uncovered` it would need a gate the config froze (`max_depth` and cross-fs are
+                // `config_hash`-frozen per Profile or change `fs_id`); `Covered` → `Denied` would
+                // be a walk denied a directory it held a listing of, where that listing stands in.
                 //
                 // Degrade, don't abort: a panic here stalls the single-threaded engine driver for a
                 // compounding routing breach. Release stages the name as replaced, surfacing the

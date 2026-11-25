@@ -228,9 +228,9 @@ pub enum Diagnostic {
     /// `leaf_hash`. One fact on two axes:
     ///
     /// - the resource is a **boundary Dir** — covered, but the scan shape does not descend into it
-    ///   (`recursive=false` depth-1 Dirs, `max_depth`-bound Dirs, `MatchChain` terminus Dirs). The
-    ///   snapshot folds only its identity where the parent enumerated it, so member churn inside is
-    ///   invisible to every verdict; or
+    ///   (a Dir at the `max_depth` rim, a `MatchChain` terminus Dir). The snapshot folds only its
+    ///   identity where the parent enumerated it, so member churn inside is invisible to every
+    ///   verdict; or
     /// - the event is **directory METADATA** (chmod / chown / touch) — directory metadata folds
     ///   into no proof object (`dir_hash` deliberately excludes `root_meta.mtime`).
     ///

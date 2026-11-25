@@ -125,9 +125,8 @@ pub enum ProbeRequest {
         /// the walk roots below the anchor. `target_path` is at-or-under it; a dirent outside it is
         /// a walker fault that stops the walk.
         anchor_path: Arc<Path>,
-        /// `ScanConfig` to honour (recursive, hidden, exclude, pattern, `max_depth`). The Profile's
-        /// frozen config behind its sharing handle — a refcount bump at emit time; workers read the
-        /// same allocation concurrently across probes.
+        /// The scan the walk honours: the Profile's frozen config behind its sharing handle — a
+        /// refcount bump at emit time; workers read the same allocation concurrently across probes.
         scan_config: Arc<ScanConfig>,
         /// `Profile.config_hash` at emission time. Walker stamps every `DirSnapshot.captured_with`
         /// so two Profiles sharing a Resource with different filters cannot produce identical

@@ -41,8 +41,7 @@ use std::path::PathBuf;
 ///   **Dir-only by construction**: a covered Dir at depth `d` with `descends_into(d)` false. The
 ///   walker records such a Dir as `DirChild::Uncovered(fs_id)`, so the proof object folds only its
 ///   *identity* where the parent enumerated it — member churn inside it is invisible to every
-///   verdict. `recursive=false` depth-1 Dirs, `max_depth`-bound Dirs, and every `MatchChain`
-///   terminus Dir land here.
+///   verdict. A Dir at the `max_depth` rim and every `MatchChain` terminus Dir land here.
 /// - [`Self::Interior`] — the proof object observes the node's content: the anchor (depth 0,
 ///   unconditionally), every covered Leaf (`leaf_hash` folds where the parent enumerated it — a
 ///   leaf's interior *is* its content), and every covered Dir the shape descends into.
@@ -109,9 +108,9 @@ pub fn covers(profile: &Profile, target: ResourceId, tree: &Tree, scratch: &mut 
 /// `Boundary` on the recursion edge at its own depth ([`classify_chain`]).
 ///
 /// Per-prefix evaluation through the same predicate the walker consumes is what makes
-/// pattern/exclude/depth/recursive/hidden semantics co-evolve across the two callers. Drift is
-/// structurally impossible only because both also measure from the same origin: this builds each
-/// prefix's `rel` from the anchor, and the walker strips every dirent against the anchor shipped on
+/// pattern/exclude/depth/hidden semantics co-evolve across the two callers. Drift is structurally
+/// impossible only because both also measure from the same origin: this builds each prefix's `rel`
+/// from the anchor, and the walker strips every dirent against the anchor shipped on
 /// `ProbeRequest::Subtree`'s `anchor_path` — same predicate body, same basis. A walker measuring
 /// `rel` from a deeper recursion root would silently diverge here.
 ///

@@ -162,11 +162,10 @@ pub(crate) fn lookup_descendant(
 /// Classification runs on the diff **entry's** kind, never the Tree slot's current kind. The two
 /// agree on install (Phase 2 stamps the slot from the entry first) but can diverge on release: a
 /// co-covering Profile's graft may have re-stamped a shared slot's kind between this Profile's
-/// install and its Phase-1 delete, and at a boundary-capable depth (the `max_depth` rim, depth 1
-/// under `recursive=false`) a File→Dir re-stamp would flip the classification to `Boundary` and
-/// strand the per-file contribution on the slot forever. The delete entry carries the baseline-side
-/// kind — exactly the kind the contribution was installed under — so keying on it makes release
-/// read what install read.
+/// install and its Phase-1 delete, and at a boundary-capable depth (the `max_depth` rim) a File→Dir
+/// re-stamp would flip the classification to `Boundary` and strand the per-file contribution on the
+/// slot forever. The delete entry carries the baseline-side kind — exactly the kind the
+/// contribution was installed under — so keying on it makes release read what install read.
 fn wants_descendant_watch(
     profile: &Profile,
     r: ResourceId,
@@ -663,7 +662,7 @@ mod tests {
     #[test]
     fn apply_diff_release_keys_on_entry_kind_not_restamped_slot_kind() {
         // A co-covering Profile's graft can re-stamp a shared slot's kind between this Profile's
-        // install and its release. At a boundary-capable depth (depth 1 under recursive=false) a
+        // install and its release. At a boundary-capable depth (the rim of a one-level bound) a
         // File→Dir re-stamp would classify the slot's *current* kind as Boundary and skip the
         // release — stranding the per-file contribution, which keeps `has_anchors` true and blocks
         // the slot's reap (and its kernel FD) for the daemon's lifetime. The delete entry carries
