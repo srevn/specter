@@ -56,7 +56,7 @@ impl WatchFailureExt for WatchFailure {
     fn from_io(e: &io::Error) -> Self {
         let errno = e.raw_os_error().unwrap_or(0);
         match errno {
-            libc::EMFILE | libc::ENFILE | libc::ENOSPC => Self::Pressure { errno },
+            libc::EMFILE | libc::ENFILE | libc::ENOSPC | libc::ENOMEM => Self::Pressure { errno },
             libc::ENOENT | libc::EACCES | libc::ELOOP | libc::ENOTDIR => Self::Resource { errno },
             _ => Self::Invariant { errno },
         }
@@ -87,9 +87,9 @@ pub trait ProbeFailureExt: Sized {
 impl ProbeFailureExt for ProbeFailure {
     fn from_io(e: &io::Error) -> Self {
         match e.raw_os_error() {
-            Some(n @ (libc::EMFILE | libc::ENFILE | libc::ENOSPC | libc::EAGAIN)) => {
-                Self::Transient { errno: n }
-            }
+            Some(
+                n @ (libc::EMFILE | libc::ENFILE | libc::ENOSPC | libc::ENOMEM | libc::EAGAIN),
+            ) => Self::Transient { errno: n },
             other => Self::Denied {
                 errno: other.unwrap_or(libc::EIO),
             },
@@ -444,4 +444,50 @@ pub type DefaultConfigWatcher = InotifyConfigWatcher;
 /// bin warn-logs and continues without auto-reload — SIGHUP still works.
 pub fn default_config_watcher(path: &Path) -> io::Result<DefaultConfigWatcher> {
     DefaultConfigWatcher::new(path)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ProbeFailureExt, WatchFailureExt};
+    use specter_core::{ProbeFailure, WatchFailure};
+    use std::io;
+
+    /// A read that failed says one of two things: the daemon lacked a resource — nothing about the
+    /// path, so the probe retries — or the path refused it. Want of kernel memory is the former.
+    #[test]
+    fn probe_classifier_tells_want_of_a_resource_from_a_refusal() {
+        let class = |errno| ProbeFailure::from_io(&io::Error::from_raw_os_error(errno));
+        for errno in [
+            libc::EMFILE,
+            libc::ENFILE,
+            libc::ENOSPC,
+            libc::ENOMEM,
+            libc::EAGAIN,
+        ] {
+            assert_eq!(
+                class(errno),
+                ProbeFailure::Transient { errno },
+                "errno {errno}"
+            );
+        }
+        for errno in [libc::EACCES, libc::EIO, libc::ELOOP, libc::ENOTDIR] {
+            assert_eq!(
+                class(errno),
+                ProbeFailure::Denied { errno },
+                "errno {errno}"
+            );
+        }
+    }
+
+    /// The watch side labels want of kernel memory as pressure too; the engine routes every watch
+    /// failure alike, so the class is what `watch_op_rejected` reports.
+    #[test]
+    fn watch_classifier_labels_want_of_kernel_memory_as_pressure() {
+        assert_eq!(
+            WatchFailure::from_io(&io::Error::from_raw_os_error(libc::ENOMEM)),
+            WatchFailure::Pressure {
+                errno: libc::ENOMEM
+            },
+        );
+    }
 }

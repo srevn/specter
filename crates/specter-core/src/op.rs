@@ -325,8 +325,8 @@ pub enum ProbeFailure {
     /// [`ProbeOutcome::Vanished`] before this enum is reached.
     Denied { errno: i32 },
     /// The daemon lacked a resource: the process-wide or system-wide FD ceiling was hit at the
-    /// root-`lstat` syscall, or the walker retried into a transient rate-limit (`EMFILE` / `ENFILE`
-    /// / `ENOSPC` / `EAGAIN`).
+    /// root-`lstat` syscall, the kernel could not allocate for it, or the walker retried into a
+    /// transient rate-limit (`EMFILE` / `ENFILE` / `ENOSPC` / `ENOMEM` / `EAGAIN`).
     ///
     /// The probe observed *nothing* — and says nothing about the anchor's identity. This is the
     /// epistemic twin of an [`ProofAuthority::Undischarged`] proof ("couldn't observe," not "couldn't
@@ -445,7 +445,7 @@ pub enum WatchFailure {
     /// affected resource and waits for natural retry on the parent's next reconcile.
     ///
     /// kqueue: `EMFILE` / `ENFILE` from `open(O_EVTONLY)`. inotify: `ENOSPC` from
-    /// `inotify_add_watch` (`max_user_watches`).
+    /// `inotify_add_watch` (`max_user_watches`). Both: `ENOMEM`, when the kernel cannot allocate.
     Pressure { errno: i32 },
 
     /// Path-fatal: the path doesn't resolve to an inode the engine expects. Engine treats as

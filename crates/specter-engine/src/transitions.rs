@@ -2275,16 +2275,16 @@ impl Engine {
     ///   ([`Self::start_pending_recovery`]) retries on the parent's (or co-claimed anchor slot's)
     ///   next event, an overflow, or a re-attach.
     /// - [`ProbeFailure::Transient`] — FD / kernel-resource pressure (`EMFILE` / `ENFILE` /
-    ///   `ENOSPC` / `EAGAIN`). The probe observed *nothing* — it says nothing about the anchor's
-    ///   identity, so tearing the anchor down would discard a healthy baseline exactly when the
-    ///   daemon was busiest. This is the epistemic twin of an `Undischarged` proof ("couldn't
-    ///   observe," not "couldn't find"), so it takes the same consequence the verdict floor gives
-    ///   `Undischarged`: re-batch for another window ([`Self::retry_drives_batching`]) while the
-    ///   `BurstDeadline` holds (`!forced`), or — once it forces — park the burst's evidence and
-    ///   finish to Idle (the bounded terminal observed nothing, so the witnessed paths ride the
-    ///   next burst's obligation rather than mtime-skipping against a stale baseline once the
-    ///   pressure releases). The anchor watch and any baseline are **retained** — recovery is the
-    ///   anchor's own next event, no wait on the parent.
+    ///   `ENOSPC` / `ENOMEM` / `EAGAIN`). The probe observed *nothing* — it says nothing about the
+    ///   anchor's identity, so tearing the anchor down would discard a healthy baseline exactly
+    ///   when the daemon was busiest. This is the epistemic twin of an `Undischarged` proof
+    ///   ("couldn't observe," not "couldn't find"), so it takes the same consequence the verdict
+    ///   floor gives `Undischarged`: re-batch for another window ([`Self::retry_drives_batching`])
+    ///   while the `BurstDeadline` holds (`!forced`), or — once it forces — park the burst's
+    ///   evidence and finish to Idle (the bounded terminal observed nothing, so the witnessed paths
+    ///   ride the next burst's obligation rather than mtime-skipping against a stale baseline once
+    ///   the pressure releases). The anchor watch and any baseline are **retained** — recovery is
+    ///   the anchor's own next event, no wait on the parent.
     ///
     /// The diagnostic is emitted on every window, retry included: transient pressure is the
     /// daemon's own health signal — bounded by the ceiling, and silence would hide it. `intent`
