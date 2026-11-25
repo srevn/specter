@@ -12,10 +12,10 @@
 //! as the tree moves, and [`Engine::reap_orphans`] detaches what a template minted when the
 //! template leaves, whatever removed it.
 //!
-//! The pass is idempotent: one walk of `current` yields the certified terminus set `T`, one registry
-//! projection yields the minted set `M`, and the pass mints `T ∖ M` and reaps `M ∖ T`
-//! ([`specter_core::DetachReason::MatchVanished`]) — so cold-Seed first enumeration, Standard
-//! re-reconcile, post-recovery reconcile, and forced-ceiling reconcile are the same set
+//! The pass is idempotent: one walk of `current` yields the certified terminus set `T`, the registry
+//! keeps the minted set `M` ([`specter_core::SubRegistry::minted`]), and the pass mints `T ∖ M` and
+//! reaps `M ∖ T` ([`specter_core::DetachReason::MatchVanished`]) — so cold-Seed first enumeration,
+//! Standard re-reconcile, post-recovery reconcile, and forced-ceiling reconcile are the same set
 //! reconciliation (a diff-based fast path would see nothing on the Seed pass, where `baseline ==
 //! current`). A mint classifies by its template's `enumerated` latch (closed at the end of the
 //! template's first completed pass, never re-opened) and by its [`Branch`]: un-enumerated ⇒ cold
@@ -36,7 +36,7 @@
 //! the walk certified nothing present or absent. So a degraded read can never reap a live match.
 //!
 //! Determinism: termini surface in `BTreeMap` (lexicographic) order, templates in sorted-`SubId`
-//! order, victims in sorted `(source, anchor slot)` order, so mint and reap order — and therefore
+//! order, victims in sorted `(template, anchor slot)` order, so mint and reap order — and therefore
 //! minted `SubId`s and the `StepOutput` — is deterministic across identically-driven engines.
 
 use crate::Engine;
@@ -46,10 +46,10 @@ use compact_str::{CompactString, format_compact};
 use smallvec::SmallVec;
 use specter_core::{
     ChildEntry, DetachReason, Diagnostic, DirChild, DirSnapshot, EntryKind, MintTemplate,
-    NonEmptyPathSet, PriorDir, Profile, ProfileId, ReactionSpec, ResourceId, ResourceRole,
-    StepOutput, Sub, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
+    NonEmptyPathSet, PriorDir, ProfileId, ReactionSpec, ResourceId, ResourceRole, StepOutput, Sub,
+    SubAttachAnchor, SubAttachRequest, SubId, SubParams,
 };
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -195,9 +195,6 @@ struct TemplateCapture {
     /// `true` ⇒ a miss in a standing branch is a witnessed appearance (triggered mint, owes its
     /// first fire), and a miss in a branch that opened is still an enumeration (cold).
     enumerated: bool,
-    /// Subs minted for this template by this pass — the end-of-pass fan-out sweep's gate and its
-    /// contribution to the live count. `0` at capture; the mint arm increments it.
-    minted: usize,
 }
 
 impl Engine {
@@ -235,7 +232,7 @@ impl Engine {
 
     /// Reconcile the discovery Profile's match set against the post-graft `current` — the
     /// [`Consequence::Reconcile`](crate::transitions) body. Mints a dynamic Sub per (chain terminus
-    /// × template) the registry projection doesn't know, and reaps every projected minted Sub whose
+    /// × template) missing from the template's minted set, and reaps every minted Sub whose
     /// terminus the certified walk no longer enumerates ([`DetachReason::MatchVanished`]).
     ///
     /// Registry/tree/attach work only — no burst-state writer: the caller (`fire_or_seal`) runs the
@@ -284,7 +281,7 @@ impl Engine {
         // chain directory it recorded denied marks what is found beneath it as a branch that opened.
         let before = profile.baseline_dir().map(Arc::clone);
 
-        let mut templates: Vec<TemplateCapture> = self
+        let templates: Vec<TemplateCapture> = self
             .templates_at(profile_id)
             .into_iter()
             .filter_map(|sid| {
@@ -295,7 +292,6 @@ impl Engine {
                     tpl: Arc::clone(t.spec()),
                     name: s.name.clone(),
                     enumerated: t.enumerated(),
-                    minted: 0,
                 })
             })
             .collect();
@@ -312,31 +308,6 @@ impl Engine {
             // Reconcile is idempotent; the next burst retries with a resolvable anchor.
             return;
         };
-
-        // Per-pass registry projection: every live Sub minted by one of this Profile's templates,
-        // keyed `(source template, anchor slot)`. One scan serves the pass's three set consumers —
-        // the mint dedup (`T ∖ M`), the removal pass (`M ∖ T`), and the fan-out live count. The key
-        // determines the Sub because a minted Sub for `(template, anchor)` lives exactly on the
-        // Profile at `(anchor, template.identity.config_hash())` (`attach_sub_inner`'s
-        // find-or-create partition) and template identity changes are wholesale replaces (the
-        // cascade reaps the minted set), never in-place rebinds. The anchor slot resolves even for
-        // a victim parked in a recovery descent: the `Resource.profiles` back-ref holds the slot
-        // alive while its Profile lives, whatever the state. The membership test runs once per
-        // registry Sub, so a linear `templates` scan would make the projection O(S·T); the
-        // pass-local id set drops it to O(S·log T).
-        let template_ids: BTreeSet<SubId> = templates.iter().map(|t| t.sid).collect();
-        let minted_index: BTreeMap<(SubId, ResourceId), SubId> = self
-            .subs
-            .iter()
-            .filter_map(|(sid, s)| {
-                let src = s.minted_by()?;
-                if !template_ids.contains(&src) {
-                    return None;
-                }
-                let slot = self.profiles.get(s.profile()).map(Profile::resource)?;
-                Some(((src, slot), sid))
-            })
-            .collect();
 
         // The certified terminus-slot set `T`, collected alongside the mint walk. `Symlink` /
         // `Other` termini are deliberately absent — see the skip arm — so a terminus degraded to an
@@ -411,8 +382,17 @@ impl Engine {
             live_slots.insert(slot);
 
             let mut abs: Option<Arc<Path>> = None;
-            for t in &mut templates {
-                if minted_index.contains_key(&(t.sid, slot)) {
+            for t in &templates {
+                // What `t` minted here sits on the Profile its minted identity keys at this slot —
+                // `attach_sub_inner`'s find-or-create partition. A template's identity is frozen
+                // for its lifetime (an edit to it replaces the template), so every mint of `t`
+                // carries that hash.
+                if self
+                    .profiles
+                    .find(slot, t.tpl.identity.config_hash())
+                    .and_then(|profile| self.subs.minted_at(t.sid, profile))
+                    .is_some()
+                {
                     continue;
                 }
                 let abs = abs.get_or_insert_with(|| build_abs(&terminus.segments));
@@ -468,80 +448,73 @@ impl Engine {
                     kind: terminus.kind.into(),
                     appeared: matches!(witness, SeedWitness::Appeared),
                 });
-                t.minted += 1;
             }
         }
 
-        // Removal pass — `M ∖ T`, where a listing answers for the match: a projected minted Sub whose
-        // anchor slot the certified walk did not enumerate has left the match set, unless a chain
+        // Removal pass — `M ∖ T`, where a listing answers for the match: a minted Sub whose anchor
+        // slot the certified walk did not enumerate has left the match set, unless a chain
         // directory above its terminus is one the snapshot holds denied — beneath it the walk
         // certified nothing, present or absent, so the Sub stays as it is until that directory is
         // read. A *replaced* terminus never lands here: its slot survives the replace (`(parent,
         // segment)` identity), so it sits in `M ∩ T` and its own recovery descent drives the fire.
-        // Iteration is over the local projection, so the registry mutation inside `detach_sub_inner`
-        // cannot invalidate it; the victim's anchor slot is alive even from a Pending Profile
-        // (back-ref retention), so `path_of` resolves for the narration, and the slot cascades once
-        // `detach_sub_inner` reaps the Profile. Narration precedes the detach so the source-keyed
-        // `DiscoverySubReaped` reads causally before its per-Sub `SubDetached(MatchVanished)`.
-        let mut reaped: BTreeSet<(SubId, ResourceId)> = BTreeSet::new();
-        for (&(source, slot), &victim) in &minted_index {
-            if live_slots.contains(&slot) {
-                continue;
+        // Each template's victims are collected before the first detach mutates its set; a victim's
+        // anchor slot is alive even from a Pending Profile (back-ref retention), so `path_of`
+        // resolves for the narration, and the slot cascades once `detach_sub_inner` reaps the
+        // Profile. Narration precedes the detach so the template-keyed `DiscoverySubReaped` reads
+        // causally before its per-Sub `SubDetached(MatchVanished)`.
+        for t in &templates {
+            let mut vanished: SmallVec<[(ResourceId, SubId); 4]> = self
+                .subs
+                .minted(t.sid)
+                .filter_map(|sub| {
+                    let slot = self.profiles.get(self.subs.get(sub)?.profile())?.resource();
+                    (!live_slots.contains(&slot)).then_some((slot, sub))
+                })
+                .collect();
+            vanished.sort_unstable();
+            for (slot, victim) in vanished {
+                let path = self.tree.path_of(slot).unwrap_or_else(|| {
+                    debug_assert!(
+                        false,
+                        "reconcile removal: a live minted Sub's anchor slot is back-ref-held \
+                         (sub = {victim:?}, resource = {slot:?})",
+                    );
+                    empty_path()
+                });
+                if path
+                    .strip_prefix(&anchor_path)
+                    .is_ok_and(|rel| denied_above(&root, rel))
+                {
+                    continue;
+                }
+                out.diagnostics.push(Diagnostic::DiscoverySubReaped {
+                    source: t.sid,
+                    sub: victim,
+                    path,
+                });
+                self.detach_sub_inner(victim, DetachReason::MatchVanished, out);
             }
-            let path = self.tree.path_of(slot).unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "reconcile removal: a live minted Sub's anchor slot is back-ref-held \
-                     (sub = {victim:?}, resource = {slot:?})",
-                );
-                empty_path()
-            });
-            if path
-                .strip_prefix(&anchor_path)
-                .is_ok_and(|rel| denied_above(&root, rel))
-            {
-                continue;
-            }
-            reaped.insert((source, slot));
-            out.diagnostics.push(Diagnostic::DiscoverySubReaped {
-                source,
-                sub: victim,
-                path,
-            });
-            self.detach_sub_inner(victim, DetachReason::MatchVanished, out);
         }
 
-        // End-of-pass fan-out sweep, gated on minted-this-pass. The live count crosses the
-        // threshold upward only via a mint and mints happen only in the loop above, so a pass that
-        // minted nothing cannot be the crossing pass — quiet steady-state reconciles never touch
-        // the latch. The count derives from the pass's own sets — the projection less what this
-        // pass reaped (a Sub kept beneath a denied directory is live), plus this pass's mints — so
-        // no extra registry scan runs; `SubRegistry::latch_fanout_warning`'s atomic check-and-latch
-        // keeps the once-per-template-lifetime property structural.
-        for t in templates.iter().filter(|t| t.minted > 0) {
-            let survivors = minted_index
-                .keys()
-                .filter(|key| key.0 == t.sid && !reaped.contains(key))
-                .count();
-            if let Some(count) = self.subs.latch_fanout_warning(
-                t.sid,
-                FANOUT_WARNING_THRESHOLD,
-                survivors + t.minted,
-            ) {
+        // Each template's pass closes on its minted set as the pass leaves it: its length is the
+        // fan-out the threshold is held to — the live total, a Sub kept beneath a denied directory
+        // included — and the registry's check-and-latch warns once per template lifetime. A
+        // completed pass *is* the enumeration, so the latch closes here, unconditionally and
+        // idempotently (a template detached by an interleaved cascade is a silent miss at the
+        // registry edge), and nowhere earlier: the early returns above (no Dir `current`, empty
+        // template set, unresolvable anchor path) walked nothing, so a template leaving such a pass
+        // still classifies its first *real* walk as an enumeration, not as a storm of appearances.
+        for t in &templates {
+            let live = self.subs.minted(t.sid).len();
+            if let Some(count) =
+                self.subs
+                    .latch_fanout_warning(t.sid, FANOUT_WARNING_THRESHOLD, live)
+            {
                 out.diagnostics.push(Diagnostic::DiscoveryFanoutThreshold {
                     source: t.sid,
                     count,
                 });
             }
-        }
-
-        // A completed pass *is* the enumeration: latch every captured template, unconditionally and
-        // idempotently (a stale id — template detached by an interleaved cascade — is a silent miss
-        // at the registry edge). This write must stay at the end of the completed walk: the early
-        // returns above (no Dir `current`, empty template set, unresolvable anchor path) walked
-        // nothing, so a template leaving such a pass un-latched is the point — its first *real*
-        // walk still classifies as enumeration, not as a storm of appearances.
-        for t in &templates {
             self.subs.mark_enumerated(t.sid);
         }
     }

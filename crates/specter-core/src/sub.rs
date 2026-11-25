@@ -870,6 +870,18 @@ impl SubRegistry {
             .copied()
     }
 
+    /// The Sub `template` minted on `profile`, read off the one or two Subs the Profile holds — the
+    /// mint dedup. Another Sub sharing the Profile, an operator's or another template's, is no
+    /// answer.
+    #[must_use]
+    pub fn minted_at(&self, template: SubId, profile: ProfileId) -> Option<SubId> {
+        self.at(profile).iter().copied().find(|&sid| {
+            self.subs
+                .get(sid)
+                .is_some_and(|s| s.minted_by() == Some(template))
+        })
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = (SubId, &Sub)> {
         self.subs.iter()
     }
@@ -1630,6 +1642,54 @@ mod tests {
         assert!(
             reg.by_template.is_empty(),
             "no entry outlives the Subs it holds"
+        );
+    }
+
+    /// `minted_at` answers with the template's own Sub on a Profile: an operator's Sub or another
+    /// template's mint there is no answer, and a Profile the template never minted on has none.
+    #[test]
+    fn minted_at_reads_only_the_templates_own_sub_on_a_profile() {
+        let profile = |n| ProfileId::from(slotmap::KeyData::from_ffi(n));
+        let (discovery, shared) = (profile(1), profile(2));
+        let mut reg = SubRegistry::new();
+        let alpha = reg.insert(Sub::from_request(discovery, template_params("alpha")));
+        let beta = reg.insert(Sub::from_request(discovery, template_params("beta")));
+        let on_shared = |name: &str, template: Option<SubId>| {
+            let params = match template {
+                Some(t) => SubParams::minted(
+                    name.into(),
+                    anchor_only_program(),
+                    EffectScope::SubtreeRoot,
+                    SETTLE,
+                    false,
+                    t,
+                ),
+                None => SubParams::spawn(
+                    name.into(),
+                    anchor_only_program(),
+                    EffectScope::SubtreeRoot,
+                    SETTLE,
+                    false,
+                ),
+            };
+            Sub::from_request(shared, params)
+        };
+
+        let _ = reg.insert(on_shared("build", None));
+        assert_eq!(reg.minted_at(alpha, shared), None, "an operator's Sub");
+        let beta_mint = reg.insert(on_shared("beta@/x", Some(beta)));
+        assert_eq!(
+            reg.minted_at(alpha, shared),
+            None,
+            "another template's mint"
+        );
+        assert_eq!(reg.minted_at(beta, shared), Some(beta_mint));
+        let alpha_mint = reg.insert(on_shared("alpha@/x", Some(alpha)));
+        assert_eq!(reg.minted_at(alpha, shared), Some(alpha_mint));
+        assert_eq!(
+            reg.minted_at(alpha, discovery),
+            None,
+            "nothing minted there"
         );
     }
 
