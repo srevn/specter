@@ -160,10 +160,10 @@ pub struct FireHistory {
 /// [`crate::Diagnostic::DiscoveryMinted`] says of it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum MintEntry {
-    /// Found by an enumeration — the template's first pass, or a branch the daemon could not read
-    /// until now. It may predate the watch, so its Seed pins cold.
+    /// Found by an enumeration — before the template holds a certified set, or in a branch the
+    /// daemon could not read until now. It may predate the watch, so its Seed pins cold.
     Enumerated,
-    /// Missing from a set the template had certified, in a branch the daemon had read: it appeared
+    /// Missing from a set the template held certified, in a branch the daemon had read: it appeared
     /// under watch, and its Seed owes the first fire.
     Appeared,
 }
@@ -193,9 +193,10 @@ impl MintNarration {
 #[derive(Debug)]
 pub struct MintState {
     /// How a terminus the template has not minted enters its set, in a branch the daemon had read:
-    /// `Enumerated` until a pass over the template completes, `Appeared` ever after. It never
-    /// reopens: the minted set it is read against outlives anchor loss, overflow and baseline
-    /// clears, so a miss after a blind window did appear in it.
+    /// `Enumerated` until the template holds a certified set — a completed pass's, or the empty one
+    /// of a prefix seen absent — and `Appeared` ever after. It never reopens: the minted set it is
+    /// read against outlives anchor loss, overflow and baseline clears, so a miss after a blind
+    /// window did appear in it.
     miss: MintEntry,
     /// The [`MintNarration`]s made, one bit each.
     narrated: u8,
@@ -476,14 +477,16 @@ impl ClassSet {
     /// **HAZARD — an "equal hash ⇒ skip reconcile" shortcut has two obstructions.** The load-bearing
     /// one is registry-delta starvation: a discovery template can join its Profile with no tree event
     /// in sight (hot reload, mid-life join), and its mints are then owed on an *unchanged* tree — a
-    /// hash gate would skip exactly the pass that owes them. The template's [`MintState::miss`] is
-    /// the disarm: gating additionally on "every template's miss is already an appearance" makes the
-    /// skip sound, because a joining template arrives with its enumeration open and defeats the gate.
-    /// The second obstruction is hash noise: a matched *file* terminus still folds `{mtime, size,
-    /// leaf_hash}` into the pruned snapshot hash, so an unwatched in-place append moves the hash
-    /// without an event — under this witness the hash is never consulted for the verdict and
-    /// reconciliation depends only on names and kinds, so the drift is cosmetic baseline noise, but
-    /// it keeps "equal hash" needlessly strict until terminus leaves fold identity-only.
+    /// hash gate would skip exactly the pass that owes them. The template's [`MintState::miss`] does
+    /// not disarm it: an appearance says the template holds a certified set, not that a pass ran for
+    /// it. A template that joins a descent whose prefix is then seen absent holds the empty set, and
+    /// a prefix found again with the content its settled hash recorded would skip that template's
+    /// first pass; a gate needs its own record of which templates a pass has reconciled. The second
+    /// obstruction is hash noise: a matched *file* terminus still folds `{mtime, size, leaf_hash}`
+    /// into the pruned snapshot hash, so an unwatched in-place append moves the hash without an event
+    /// — under this witness the hash is never consulted for the verdict and reconciliation depends
+    /// only on names and kinds, so the drift is cosmetic baseline noise, but it keeps "equal hash"
+    /// needlessly strict until terminus leaves fold identity-only.
     pub const MEMBERSHIP_CHANGES: Self = Self::STRUCTURE;
 
     /// True iff every bit in `other` is set in `self` AND `other` is non-empty.
@@ -1066,8 +1069,9 @@ impl SubRegistry {
     }
 
     /// `template` holds a certified set: from now on a miss in a branch the daemon had read is an
-    /// appearance ([`MintState::miss`]). Idempotent. Only a pass that walked a certified snapshot
-    /// may close it — one that walked nothing established no set.
+    /// appearance ([`MintState::miss`]). Idempotent. A set is certified by a pass that walked a
+    /// certified snapshot, or by a prefix seen absent — the empty set; a pass that walked nothing
+    /// established none.
     pub fn close_enumeration(&mut self, template: SubId) {
         if let Some(state) = self.mint_state_mut(template, "close_enumeration") {
             state.miss = MintEntry::Appeared;

@@ -546,13 +546,15 @@ impl Engine {
     /// 2. Install the anchor claim ([`Self::install_anchor_claim`]) and the watch-root parent claim
     ///    ([`Self::install_watch_root_parent_claim`] — a recovery descent's outlived the loss, so
     ///    that install adds nothing).
-    /// 3. Start the Seed burst, selected by `witness`: `Cold` opens the cold arm (`Verifying` at
-    ///    construction); `Appeared` threads the anchor as the trigger, so the Seed opens
-    ///    `Batching`-first and its stable verdict owes the first fire. The trigger's only job is
-    ///    landing in the Seed's `dirty`, where `seed_owes_first_fire` finds the witness — every
-    ///    Seed probe targets the anchor regardless. The settle window debounces only what the
-    ///    anchor's own watch delivers — a file's writes, a directory's direct entries; below a
-    ///    directory nothing is watched until the verdict's graft installs it.
+    /// 3. Start the Seed burst, selected by `witness`. `Cold` opens the cold arm (`Verifying` at
+    ///    construction). `Appeared` is drained into its two readers, one per kind of reaction:
+    ///    every template on the Profile closes its enumeration ([`Self::prefix_appeared`]), and the
+    ///    anchor threads as the trigger, so the Seed opens `Batching`-first and a firing Sub's
+    ///    stable verdict owes the first fire. The trigger's only job is landing in the Seed's
+    ///    `dirty`, where `seed_owes_first_fire` finds the witness — every Seed probe targets the
+    ///    anchor regardless. The settle window debounces only what the anchor's own watch delivers
+    ///    — a file's writes, a directory's direct entries; below a directory nothing is watched
+    ///    until the verdict's graft installs it.
     ///
     /// Touches no descent state: the descent terminus finishes its own — the flip, its prefix claim
     /// — around this call.
@@ -572,7 +574,10 @@ impl Engine {
         self.install_watch_root_parent_claim(profile_id, out);
         let trigger = match witness {
             SeedWitness::Cold => None,
-            SeedWitness::Appeared => Some((anchor, self.anchor_path(anchor))),
+            SeedWitness::Appeared => {
+                self.prefix_appeared(profile_id);
+                Some((anchor, self.anchor_path(anchor)))
+            }
         };
         self.start_seed_burst(profile_id, trigger, now, out);
     }

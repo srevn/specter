@@ -3,9 +3,10 @@
 //!
 //! A discovery Profile's Subs are templates, each carrying a [`specter_core::MintSpec`]. It fires
 //! attachments and detachments, never Effects, so nothing here writes burst state or meets the
-//! Draining gate: the burst leaves through the ordinary silent seal. The Subs a template mints come
-//! and go from here alone — [`Engine::reconcile_matches`] as the tree moves,
-//! [`Engine::reap_orphans`] when the template leaves.
+//! Draining gate: the burst leaves through the ordinary silent seal. A template's lifecycle is
+//! here: what it mints comes and goes through [`Engine::reconcile_matches`] as the tree moves and
+//! [`Engine::reap_orphans`] when it leaves, and [`Engine::prefix_appeared`] closes its enumeration
+//! when its prefix was seen absent.
 //!
 //! A pass reads the post-graft `current` once, beside the Tree and the baseline, into a
 //! [`MatchSet`] — the matches `T`, each at its slot — and holds it against each template's minted
@@ -218,7 +219,8 @@ impl Engine {
     /// the `StepOutput`'s order, and identically driven engines mint identical ids. Every mint
     /// precedes every reap, so no id a reap frees is reused by a mint of the same pass; every close
     /// follows the last mint, so each miss of a pass enters by the state its template came in with
-    /// — nothing a mint runs closes an enumeration.
+    /// — nothing a mint runs closes an enumeration: the Profile a mint seeds holds no template for
+    /// [`Self::prefix_appeared`] to close.
     ///
     /// A pass with no Dir `current` (a file, or absent) or no template (a zombie burst, whose
     /// templates' detach already took what they minted) reads nothing, makes no slot and closes no
@@ -355,6 +357,20 @@ impl Engine {
     pub(crate) fn reap_orphans(&mut self, orphans: BTreeSet<SubId>, out: &mut StepOutput) {
         for orphan in orphans {
             self.detach_sub_inner(orphan, DetachReason::DiscoverySourceDetached, out);
+        }
+    }
+
+    /// The prefix of `discovery` was seen absent before it went live: every template on it holds a
+    /// certified set — the empty one — so a miss in a branch that stood is an appearance, and what
+    /// was delivered with the prefix runs. The pass could not read this off the Seed: a cold Seed
+    /// an event interrupts holds a `dirty` too.
+    ///
+    /// The tail every anchor goes live through calls this for any appearance it witnessed
+    /// ([`Self::seed_at_anchor`]); on a firing Profile it closes nothing, as [`Self::templates_at`]
+    /// keeps only the Subs whose reaction mints.
+    pub(crate) fn prefix_appeared(&mut self, discovery: ProfileId) {
+        for template in self.templates_at(discovery) {
+            self.subs.close_enumeration(template);
         }
     }
 }

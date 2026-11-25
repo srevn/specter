@@ -2551,6 +2551,70 @@ fn a_prefix_found_at_once_enumerates_cold() {
     let _ = e.cancel_all_in_flight_probes();
 }
 
+/// A prefix the descent saw absent arrives with a match already in it (`mv staging/in /data/in`):
+/// what is delivered with it appeared under watch. Every template on the Profile holds the empty
+/// set — one that joined after the absence was seen as well — so each mints the match as an
+/// appearance, and the minted Subs fire once it settles.
+#[test]
+fn a_prefix_seen_absent_delivers_appearances_to_every_template_on_it() {
+    let mut e = Engine::new();
+    let data = pre_place_dir(&mut e, &["data"]);
+    let now = Instant::now();
+    let attach = |e: &mut Engine, name: &str| {
+        attach_discovery_returning(
+            e,
+            name,
+            SubAttachAnchor::Path("/data/in".into()),
+            "/data/in/*",
+            mint_spec(),
+            now,
+        )
+    };
+    let (alpha, pid, _) = attach(&mut e, "alpha");
+    let _ = descent_advance(&mut e, pid, None, now);
+    let (beta, joined, _) = attach(&mut e, "beta");
+    assert_eq!(
+        pid, joined,
+        "beta joins the descent after it saw the absence"
+    );
+
+    let t1 = now + Duration::from_millis(10);
+    let _ = e.step(
+        Input::FsEvent {
+            resource: data,
+            event: FsEvent::StructureChanged,
+        },
+        t1,
+    );
+    let _ = descent_advance(&mut e, pid, Some(EntryKind::Dir), t1);
+    let t2 = t1 + SETTLE * 2;
+    drain_due(&mut e, t2);
+    let out = respond(&mut e, pid, &dir_snap(&[("a", EntryKind::Dir, 1)]), t2);
+    let entries: Vec<(SubId, MintEntry)> = out
+        .diagnostics
+        .iter()
+        .filter_map(|d| match d {
+            Diagnostic::DiscoveryMinted { source, entry, .. } => Some((*source, *entry)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        [(alpha, MintEntry::Appeared), (beta, MintEntry::Appeared)],
+        "the first pass after a prefix seen absent mints appearances, for every template",
+    );
+    let anchor = e.profiles().get(pid).expect("live").resource();
+    for template in [alpha, beta] {
+        let mid = minted_under(&e, template, anchor, &["a"]);
+        let _ = settle_minted(&mut e, mid, None, t2);
+        assert!(
+            e.subs().get(mid).unwrap().has_fired(),
+            "the delivered match runs"
+        );
+    }
+    let _ = e.cancel_all_in_flight_probes();
+}
+
 /// A `/*` root pattern anchors the discovery Profile at the FS root itself: no `watch_root_parent`
 /// edge exists (there is no parent to watch), the attach opens the cold Seed directly (the root is
 /// always materialised), and a minted terminus joins paths cleanly at `/` — `disc@/x`, never
