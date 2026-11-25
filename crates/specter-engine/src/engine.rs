@@ -40,7 +40,8 @@ use specter_core::ClassSet;
 use specter_core::{CorrelationId, ProbeCorrelation};
 // Engine step I/O.
 use specter_core::{Diagnostic, FsEvent, Input, StepOutput};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 /// Per-call stale-drain bound for [`Engine::pop_expired`].
@@ -187,10 +188,10 @@ impl Engine {
 
     /// Attach a Sub at its [`SubAttachAnchor`] — a caller-supplied `Resource` slot or a `Path` the
     /// engine materialises. Reuses an existing Profile when `(anchor, config_hash)` matches;
-    /// otherwise creates a fresh Profile, emits `WatchOp::Watch` on its anchor, and starts a Seed
-    /// burst (`PreFireBurst { intent: Seed, phase: Batching }`); the baseline is established once
-    /// the settle-spaced quiescence proof converges (the Seed-Ok pin in `fire_or_seal`), not on the
-    /// first probe.
+    /// otherwise creates a fresh Profile and seeds it at its anchor ([`Self::seed_at_anchor`]: the
+    /// anchor's and its parent's claims, then a Seed burst whose `Stable` verdict pins the
+    /// baseline) — at once when the anchor is on disk, or at the terminus of the pending descent it
+    /// enters when it is not.
     ///
     /// Three-phase pipeline; sole public entry is [`Input::AttachSub`] via [`Self::step`]. The
     /// inner is `pub(crate)` so [`Self::on_config_diff`] can compose multiple detach/attach
@@ -204,9 +205,9 @@ impl Engine {
     /// the new Sub set.
     ///
     /// **Witness.** `witness` says whether a live observation of the anchor's own appearance stands
-    /// behind this attach ([`SeedWitness`]). `Fresh` attaches thread it into `bootstrap_immediate`,
-    /// where it selects the Seed's cold/triggered arm exactly as the descent terminus's latch does;
-    /// a witnessed attach landing on an *existing* Profile notes the appearance into whatever burst
+    /// behind this attach ([`SeedWitness`]). A `Fresh` attach hands it to `seed_at_anchor`, where
+    /// it selects the Seed's cold/triggered arm exactly as the descent terminus's latch does; a
+    /// witnessed attach landing on an *existing* Profile notes the appearance into whatever burst
     /// that Profile is running (a synthesized STRUCTURE event through `drive_burst` — an appearance
     /// *is* a structure change), so the live verdict fires instead of cold-pinning.
     /// `Pending`/`Parked` hits deliberately drop the note: descents own their own witness latch.
@@ -252,17 +253,11 @@ impl Engine {
     /// 2. **Sub registration.** `register_sub` consumes the request to mint the [`Sub`] and emit
     ///    [`Diagnostic::SubAttached`] — the single point at which a SubId enters the registry.
     /// 3. **Per-origin bookkeeping.** Existing-Profile arms run their targeted cleanup
-    ///    (`revive_zombie` / `join_existing`); the `Fresh` arm dispatches on the anchor resolution
-    ///    to either `bootstrap_pending` (Idle → Pending) or `bootstrap_immediate` (anchor watch +
-    ///    `watch_root_parent` + Seed burst).
-    ///
-    /// `bootstrap_pending` and `bootstrap_immediate` are *not* interchangeable orderings of the
-    /// same operations — they encode a real semantic divide:
-    /// - **Pending** only enters the descent; anchor-watch installation, the `watch_root_parent`
-    ///   bump, and the Seed-burst launch are deferred to descent's anchor branch
-    ///   (`dispatch_descent_ok`), because the anchor slot isn't a live `User` resource yet.
-    /// - **Immediate** runs anchor-watch installation, the `watch_root_parent` bump, and the Seed
-    ///   burst all at attach time.
+    ///    (`revive_zombie` / `join_existing`); the `Fresh` arm dispatches on the anchor resolution.
+    ///    An `Immediate` anchor is live, so the Profile seeds at it now ([`Self::seed_at_anchor`]);
+    ///    a `Pending` anchor is not on disk yet, so the Profile only enters the descent
+    ///    ([`Self::enter_pending_descent`]), whose terminus runs the same tail when the anchor
+    ///    appears.
     pub(crate) fn attach_sub_inner(
         &mut self,
         req: SubAttachRequest,
@@ -358,8 +353,8 @@ impl Engine {
                 self.start_pending_recovery(profile_id, out);
             }
             ProfileOrigin::Fresh => match resolved {
-                AnchorResolution::Immediate { anchor } => {
-                    self.bootstrap_immediate(profile_id, anchor, witness, now, out);
+                AnchorResolution::Immediate { .. } => {
+                    self.seed_at_anchor(profile_id, witness, now, out);
                 }
                 AnchorResolution::Pending {
                     prefix, remaining, ..
@@ -367,13 +362,19 @@ impl Engine {
                     // A witness names an observed appearance of the anchor itself, so a witnessed
                     // anchor is materialised by construction: mints anchor at a freshly ensured
                     // `SubAttachAnchor::Resource` (which never descends), and no Path-anchored
-                    // caller can claim a witness.
+                    // caller can claim a witness. The descent therefore enters unwitnessed: with no
+                    // observation behind the attach, a terminus whose segments were all present on
+                    // first observation stays cold and pins silently (attach-over-existing must not
+                    // fire), while an appearance after the attach is witnessed by the probes
+                    // themselves — an absent observation, then a present one.
                     debug_assert!(
                         matches!(witness, SeedWitness::Cold),
                         "attach_sub_inner: a witnessed attach cannot resolve Pending \
                          (profile = {profile_id:?})",
                     );
-                    self.bootstrap_pending(profile_id, prefix, remaining, out);
+                    self.enter_pending_descent(
+                        profile_id, prefix, remaining, /* witnessed: */ false, out,
+                    );
                 }
             },
         }
@@ -388,14 +389,7 @@ impl Engine {
         // containment), and Pending/Parked no-op — descents latch their own witness at loss entry.
         // The Fresh arm already threaded the witness into its Seed above.
         if matches!(witness, SeedWitness::Appeared) && !matches!(origin, ProfileOrigin::Fresh) {
-            let path = self.tree.path_of(resolved_anchor).unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "attach_sub_inner: a witnessed live anchor must resolve a path \
-                     (profile = {profile_id:?}, resource = {resolved_anchor:?})",
-                );
-                empty_path()
-            });
+            let path = self.anchor_path(resolved_anchor);
             self.drive_burst(
                 profile_id,
                 resolved_anchor,
@@ -421,18 +415,12 @@ impl Engine {
     /// A [`SubAttachAnchor::Resource`] re-gates the caller's claimed slot with an O(1) liveness
     /// check: a stale id emits [`Diagnostic::AttachResourceStale`] and returns `None`, otherwise it
     /// resolves [`AnchorResolution::Immediate`] (a `Resource` anchor never descends).
-    ///
-    /// Promotes a `DescentScaffold` anchor to `User` on the `Immediate` path (the scaffold may have
-    /// been left over from an earlier attach's `ensure_path` intermediate or from the FS-root
-    /// bootstrap). The role is metadata — retention runs through the `Profile` back-ref installed by
-    /// `find_or_create_profile`. The `Pending` arm defers role promotion to descent's anchor branch
-    /// (`dispatch_descent_ok::materialize_profile_anchor`) where the slot becomes live on disk.
     fn resolve_attach_anchor(
         &mut self,
         anchor: &SubAttachAnchor,
         out: &mut StepOutput,
     ) -> Option<AnchorResolution> {
-        let resolved = match anchor {
+        match anchor {
             SubAttachAnchor::Path(path) => {
                 let parsed = match Tree::parse_attach_path(path) {
                     Ok(p) => p,
@@ -444,7 +432,7 @@ impl Engine {
                         return None;
                     }
                 };
-                match self.materialize_path_or_pending(&parsed) {
+                Some(match self.materialize_path_or_pending(&parsed) {
                     crate::descent::MaterializeResult::Materialized(anchor) => {
                         AnchorResolution::Immediate { anchor }
                     }
@@ -457,7 +445,7 @@ impl Engine {
                         prefix,
                         remaining,
                     },
-                }
+                })
             }
             SubAttachAnchor::Resource(r) => {
                 // The caller claims `r` is already live. Re-gate it at the boundary — the request
@@ -469,18 +457,9 @@ impl Engine {
                         .push(Diagnostic::AttachResourceStale { resource: *r });
                     return None;
                 }
-                AnchorResolution::Immediate { anchor: *r }
+                Some(AnchorResolution::Immediate { anchor: *r })
             }
-        };
-
-        // Promote a `DescentScaffold` anchor to `User` on the Immediate path. The Pending arm's
-        // anchor stays scaffolded until descent's anchor branch flips it.
-        if let AnchorResolution::Immediate { anchor } = resolved {
-            self.tree
-                .promote_scaffold(anchor, specter_core::ResourceRole::User);
         }
-
-        Some(resolved)
     }
 
     /// Pure pre-check that returns `true` iff a subsequent [`Self::attach_sub_inner`] call with
@@ -591,87 +570,60 @@ impl Engine {
         }
     }
 
-    /// Phase 3 of `attach_sub_inner` — fresh-Profile, immediate-Seed arm (anchor materialised on
-    /// disk at attach time).
+    /// The anchor is live: install its claim and its parent's, then start the Seed — the one tail
+    /// of every anchor that goes live, whether an attach found it on disk (`attach_sub_inner`'s
+    /// fresh, immediate arm) or a descent's terminus just did (`materialize_profile_anchor`).
     ///
     /// Sequence:
-    /// 1. Install the anchor claim ([`Engine::install_anchor_claim`]: [`AnchorClaim::Held`] and its
-    ///    contribution at the Profile's mask).
-    /// 2. Install the watch-root parent claim ([`Engine::install_watch_root_parent_claim`]: a
-    ///    STRUCTURE contribution at the anchor's parent, for anchor-reappearance detection).
-    /// 3. Start the Seed burst, witness-selected — the descent terminus's twin
-    ///    (`materialize_profile_anchor`): a `Cold` attach opens the cold arm (`Verifying`-first,
-    ///    pins silently); an `Appeared` attach threads the anchor as the trigger, so the Seed opens
-    ///    `Batching`-first and its stable verdict owes the first fire. The settle window debounces
-    ///    only what the anchor's own watch delivers — a file's writes, a directory's direct
-    ///    entries; below a directory nothing is watched until the verdict's graft installs it.
-    ///    Either way the baseline is established once the settle-spaced quiescence proof
-    ///    converges (the Seed-Ok pin in `fire_or_seal`), not on the first probe.
+    /// 1. Promote the anchor slot to `User` — a no-op where a real role stands, so a co-resident
+    ///    peer's `WatchRootParent` / `User` is never clobbered (the tag is metadata).
+    /// 2. Install the anchor claim ([`Self::install_anchor_claim`]) and the watch-root parent claim
+    ///    ([`Self::install_watch_root_parent_claim`] — a recovery descent's outlived the loss, so
+    ///    that install adds nothing).
+    /// 3. Start the Seed burst, selected by `witness`: `Cold` opens the cold arm (`Verifying` at
+    ///    construction); `Appeared` threads the anchor as the trigger, so the Seed opens
+    ///    `Batching`-first and its stable verdict owes the first fire. The trigger's only job is
+    ///    landing in the Seed's `dirty`, where `seed_owes_first_fire` finds the witness — every Seed
+    ///    probe targets the anchor regardless. The settle window debounces only what the anchor's
+    ///    own watch delivers — a file's writes, a directory's direct entries; below a directory
+    ///    nothing is watched until the verdict's graft installs it.
     ///
-    /// (No parent-edge step: the `Draining → Verifying` reconfirm is a fresh `coverage` query, so
-    /// an attach maintains no per-Profile ancestor cache.)
-    ///
-    /// Contrast with [`Self::bootstrap_pending`]: the Pending arm runs only the descent entry — the
-    /// anchor watch, `watch_root_parent` bump, and Seed burst are deferred to descent's anchor
-    /// branch (`dispatch_descent_ok::materialize_profile_anchor`), which runs them when the anchor
-    /// becomes live on disk.
-    fn bootstrap_immediate(
+    /// Touches no descent state: the descent terminus finishes its own — the flip, its prefix
+    /// claim — around this call.
+    pub(crate) fn seed_at_anchor(
         &mut self,
         profile_id: ProfileId,
-        anchor: ResourceId,
         witness: SeedWitness,
         now: Instant,
         out: &mut StepOutput,
     ) {
+        let Some(anchor) = self.profiles.get(profile_id).map(Profile::resource) else {
+            return;
+        };
+        self.tree
+            .promote_scaffold(anchor, specter_core::ResourceRole::User);
         self.install_anchor_claim(profile_id, out);
         self.install_watch_root_parent_claim(profile_id, out);
-
-        // A witnessed appearance threads the anchor as the Seed trigger — the trigger's only job is
-        // landing in `dirty` so `seed_owes_first_fire` sees the witness; the degrade keeps it (an
-        // empty path in `dirty` still counts as activity, and every Seed probe targets the anchor
-        // off `Profile.resource`, never the dirty paths).
-        let trigger = matches!(witness, SeedWitness::Appeared).then(|| {
-            let path = self.tree.path_of(anchor).unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "bootstrap_immediate: a just-resolved live anchor must resolve a path \
-                     (profile = {profile_id:?}, resource = {anchor:?})",
-                );
-                empty_path()
-            });
-            (anchor, path)
-        });
+        let trigger = match witness {
+            SeedWitness::Cold => None,
+            SeedWitness::Appeared => Some((anchor, self.anchor_path(anchor))),
+        };
         self.start_seed_burst(profile_id, trigger, now, out);
     }
 
-    /// Phase 3 of `attach_sub_inner` — fresh-Profile, pending-descent arm (anchor scaffolded but
-    /// not yet materialised on disk). The Pending half of the `bootstrap_immediate` /
-    /// `bootstrap_pending` dispatch.
-    ///
-    /// The anchor-watch installation, the `watch_root_parent` bump, and the Seed-burst launch are all
-    /// deferred to descent's anchor branch (`dispatch_descent_ok::materialize_profile_anchor`) — this
-    /// arm only enters the descent. It is a thin delegation to `enter_pending_descent` (which runs
-    /// the four-step `mint correlation → state-flip → add_watch on prefix → emit probe` sequence);
-    /// the named arm is retained for dispatch symmetry with [`Self::bootstrap_immediate`].
-    ///
-    /// Unwitnessed entry: a [`SeedWitness`] names the anchor's own observed appearance, and an
-    /// anchor whose slot resolved `Pending` was just observed *absent* — `attach_sub_inner`
-    /// debug-asserts the witness is `Cold` before dispatching here. With no observation behind the
-    /// attach, a descent that finds every segment on first observation stays cold and pins silently
-    /// — attach-over-existing must not fire (restart-safe doctrine). An appearance *after* attach
-    /// is witnessed by the probes themselves: a response observing the awaited segment absent
-    /// records the absence half, and the later response that finds it completes the appearance, so
-    /// the terminus Seed opens triggered and fires.
-    fn bootstrap_pending(
-        &mut self,
-        profile_id: ProfileId,
-        prefix: ResourceId,
-        remaining: DescentRemaining,
-        out: &mut StepOutput,
-    ) {
-        self.enter_pending_descent(
-            profile_id, prefix, remaining, /* witnessed: */ false, out,
-        );
+    /// The path of a live Profile's anchor — the event path an observed appearance of the anchor
+    /// carries, into a Seed's trigger or an existing burst's `dirty`. The Profile's back-reference
+    /// holds the slot, so the path resolves; a miss is a state-machine breach, loud in debug, and
+    /// degrades to the empty path in release rather than dropping the appearance (an empty path in
+    /// `dirty` still counts as activity).
+    fn anchor_path(&self, anchor: ResourceId) -> Arc<Path> {
+        self.tree.path_of(anchor).unwrap_or_else(|| {
+            debug_assert!(
+                false,
+                "a live Profile's anchor resolves a path (resource = {anchor:?})",
+            );
+            empty_path()
+        })
     }
 
     /// Find an existing Profile at `(anchor, identity.config_hash())` or create a fresh one.
@@ -1181,8 +1133,8 @@ pub(crate) fn is_timer_referenced(
 
 /// Find-or-create-or-revive outcome for `attach_sub_inner`. The four arms drive distinct downstream
 /// bookkeeping:
-/// - `Fresh`: brand-new Profile, no prior burst history. Bumps the anchor's `watch_demand`, sets up
-///   `watch_root_parent`, starts a Seed burst (immediate) or enters Pending descent.
+/// - `Fresh`: brand-new Profile, no prior burst history. Seeds at its anchor
+///   ([`Engine::seed_at_anchor`]) when the anchor is on disk, else enters Pending descent.
 /// - `ExistingJoin`: Profile is alive with at least one live Sub; the attaching Sub joins the
 ///   existing burst lifecycle (or shares the existing baseline if Idle). Only `Profile.settle` may
 ///   need `min`-recompute.
@@ -1204,8 +1156,10 @@ enum ProfileOrigin {
     ZombieRevival,
 }
 
-/// Whether a live observation of the anchor's *own appearance* stands behind an `attach_sub_inner`
-/// call — the attach pipeline's twin of the descent state machine's witnessed-activity latch.
+/// Whether a live observation of the anchor's *own appearance* stands behind the anchor going live
+/// — the parameter of the anchor-materialisation tail ([`Engine::seed_at_anchor`]). The attach
+/// pipeline hands its caller's to the tail; the descent terminus reads its witnessed-activity
+/// latch into one.
 ///
 /// Deliberately an engine-internal parameter, **not** a [`SubAttachRequest`] field: the request
 /// crosses channels (config load, hot reload, IPC), and a fire-owing witness must not be claimable
@@ -1213,11 +1167,11 @@ enum ProfileOrigin {
 /// names the anchor's own appearance, so the trigger tuple derives from the resolved anchor and a
 /// witness disagreeing with its anchor is unrepresentable.
 ///
-/// `Appeared` has exactly one producer: the discovery mint arm (`reconcile_matches`), classifying a
-/// dedup miss against a template's established enumeration. Every other caller — the
-/// `Input::AttachSub` step arm and the three config-diff arms — attaches on intent alone and passes
-/// `Cold`.
-#[derive(Clone, Copy)]
+/// Among attaches, `Appeared` has exactly one producer: the discovery mint arm
+/// (`reconcile_matches`), classifying a dedup miss against a template's established enumeration.
+/// Every other attach — the `Input::AttachSub` step arm and the three config-diff arms — attaches
+/// on intent alone and passes `Cold`.
+#[derive(Clone, Copy, Debug)]
 pub(crate) enum SeedWitness {
     Cold,
     Appeared,
@@ -1225,19 +1179,20 @@ pub(crate) enum SeedWitness {
 
 /// Outcome of `attach_sub_inner`'s Phase 1 anchor resolution. The two variants encode the semantic
 /// divide between attaches whose anchor is already live on disk and those whose anchor is
-/// scaffolded awaiting materialisation. The split drives Phase 3's `bootstrap_immediate` vs
-/// `bootstrap_pending` dispatch.
+/// scaffolded awaiting materialisation. The split drives Phase 3's `Fresh` arm: seed at the anchor
+/// now, or descend to it first.
 ///
 /// The `Immediate` arm subsumes both a fully-materialised [`SubAttachAnchor::Path`] and a
 /// liveness-checked [`SubAttachAnchor::Resource`]; only `Path` can resolve `Pending`.
 enum AnchorResolution {
-    /// The anchor is a live, materialised Tree slot. `bootstrap_immediate` will install the anchor
-    /// watch contribution and start the Seed burst.
+    /// The anchor is a live, materialised Tree slot. A fresh Profile seeds at it at once
+    /// ([`Engine::seed_at_anchor`]).
     Immediate { anchor: ResourceId },
     /// The anchor is a `DescentScaffold`-roled slot awaiting materialisation. `prefix` is the
     /// deepest existing ancestor (where the descent probe is currently watching) and `remaining`
     /// carries the path components from `prefix` (exclusive) down to `anchor` (inclusive).
-    /// `bootstrap_pending` will enter `ProfileState::Pending(_)` and start descent.
+    /// A fresh Profile enters `ProfileState::Pending(_)` and descends
+    /// ([`Engine::enter_pending_descent`]).
     Pending {
         anchor: ResourceId,
         prefix: ResourceId,

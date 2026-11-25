@@ -198,8 +198,8 @@ fn recovery_from_file_to_dir_anchor_uses_subtree_probe() {
         e.profiles().get(pid_p).unwrap().kind(),
         Some(ResourceKind::File),
     );
-    // Both Profiles claim the anchor → watch_demand = 2 (the claim is bumped at attach by
-    // `bootstrap_immediate`, before the Seed).
+    // Both Profiles claim the anchor → watch_demand = 2 (each claim is installed at attach by
+    // `seed_at_anchor`, before the Seed).
     assert_eq!(e.tree().get(anchor).unwrap().watch_demand(), 2);
 
     // Expire P's first settle window → first Seed probe, then drive it to Vanished.

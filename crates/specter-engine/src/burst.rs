@@ -226,8 +226,9 @@ impl Engine {
     /// - **`Some((resource, path))` ⇔ triggered re-Seed.** Witnessed kernel activity stands behind
     ///   this Seed: a driving `FsEvent` reached an `Idle + !baseline_is_some()` Profile (the
     ///   post-recovery isolated change reached via the `undischarged_consequence` ceiling
-    ///   terminal), or a descent whose witnessed-activity latch was set materialised its anchor
-    ///   (`materialize_profile_anchor` threads the anchor as the trigger). The trigger threads into
+    ///   terminal), or an anchor went live under an observed appearance of its own — a discovery
+    ///   mint classified as one, or a descent whose witnessed-activity latch was set
+    ///   (`seed_at_anchor` threads the anchor as the trigger). The trigger threads into
     ///   `dirty` so `seed_owes_first_fire` sees the activity witness it owes a fire on. The burst
     ///   opens in `Batching { settle_timer }` exactly like `start_standard_burst`, so further
     ///   `FsEvent`s debounce identically; `last_event_time = Some(now)` seeds the settle deadline.
@@ -257,7 +258,7 @@ impl Engine {
     /// doctrine rejects. The bodies differ in `intent`, the trigger discriminator above, and
     /// Standard's mandatory `event_resource`.
     ///
-    /// **Callers.** Three unconditionally-cold sites, two witness-selected sites, one
+    /// **Callers.** Three unconditionally-cold sites, one witness-selected site, one
     /// unconditionally-triggered site:
     /// - `on_sensor_overflow` Idle path — reseed every Profile in the overflow scope (cold).
     /// - `on_sensor_overflow` Active path — after `finish_burst_to_idle` flushes the in-flight
@@ -265,14 +266,10 @@ impl Engine {
     /// - `attach_sub_inner`'s template join-reseed — a discovery template joining an Idle discovery
     ///   Profile drives one fresh certified walk (cold; the joiner's mints classify by its own
     ///   enumeration latch, never by this burst's intent).
-    /// - [`Self::bootstrap_immediate`] — fresh attach with an already-materialised anchor on disk,
-    ///   selected by the attach pipeline's witness (`crate::engine::SeedWitness`, the descent
-    ///   latch's twin): a discovery mint classified as a witnessed appearance threads the anchor as
-    ///   the trigger; every other attach stays cold.
-    /// - `materialize_profile_anchor` (descent terminus reached via `dispatch_descent_ok`) — cold
-    ///   or triggered, selected by the descent's witnessed-activity latch: a witnessed appearance
-    ///   threads the anchor as the trigger, an unwitnessed terminus (attach-time entry probe found
-    ///   the anchor without any kernel event) stays cold.
+    /// - [`Self::seed_at_anchor`] — the tail every anchor that goes live runs (a fresh attach whose
+    ///   anchor is on disk, a descent's terminus), selected by its [`crate::engine::SeedWitness`]:
+    ///   an observed appearance of the anchor — a discovery mint classified as one, a descent whose
+    ///   latch is set — threads the anchor as the trigger; every other anchor seeds cold.
     /// - `drive_burst`'s Idle + `!baseline_is_some()` branch — unconditionally triggered.
     ///
     /// `EffectComplete::Ok` does NOT call this helper; post-Effect rebase routes through
@@ -287,8 +284,8 @@ impl Engine {
         if !self.require_idle(profile_id, BurstHelper::StartSeedBurst, out) {
             return;
         }
-        // Every legitimate Idle entry holds the anchor claim: `bootstrap_immediate` and the descent
-        // terminus install it before seeding, and a burst-end Idle never released it. An anchorless
+        // Every legitimate Idle entry holds the anchor claim: `seed_at_anchor` installs it before
+        // seeding, and a burst-end Idle never released it. An anchorless
         // Profile is `Parked` (which `require_idle` rejected above), so a claim-less Profile here
         // is a consumer that re-derived "which Idle?" wrongly — the next forgotten consumer trips
         // in CI instead of fabricating a baseline.
@@ -1679,7 +1676,7 @@ mod tests {
     const EVENTS_COMPLETE: ClassSet = ClassSet::CONTENT;
 
     /// Build an Engine with a single Profile anchored at `/anchor`. Returns the Engine + the
-    /// `ProfileId`. The anchor claim is installed as `bootstrap_immediate` would — the burst
+    /// `ProfileId`. The anchor claim is installed as `seed_at_anchor` would — the burst
     /// helpers' Idle entries assert it (an anchorless rest is `Parked`, never a burst entry).
     fn engine_with_profile() -> (Engine, specter_core::ProfileId) {
         let mut e = Engine::new();

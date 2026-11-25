@@ -62,7 +62,7 @@
 //!    than being dropped (the in-flight walk may predate the signal and so cannot witness it); the
 //!    response dispatch repays the debt with a probe that postdates the signal.
 
-use crate::path::empty_path;
+use crate::engine::SeedWitness;
 use crate::probe::DescentOutcome;
 use crate::refcounts::{add_watch, sub_watch, sub_watch_then_try_reap};
 use crate::transitions::ParkNarration;
@@ -561,31 +561,26 @@ impl crate::Engine {
         self.emit_owner_probe(owner, out);
     }
 
-    /// Promote `new_resource` to the Profile's anchor slot. Sole call site is
-    /// [`Self::dispatch_descent_ok`]'s terminal arm — the descent has just resolved its last
-    /// remaining segment and the Profile is about to leave `Pending` for `Idle → Active(Seed)`.
+    /// The descent's terminus: the awaited anchor is on disk, so the Profile leaves `Pending` and
+    /// seeds at it. Sole call site is [`Self::dispatch_descent_ok`]'s terminal arm — the descent
+    /// has just resolved its last remaining segment as `new_resource`.
     ///
     /// Sequence:
-    /// 1. Read the witnessed-appearance latch off the descent state — it must happen before step
-    ///    3's `Pending → Idle` flip destroys the [`DescentState`] carrying it (the descent's probe
-    ///    slot is already disarmed at this depth, so the drop is tripwire-safe).
-    /// 2. Promote the slot's role to `User` via [`specter_core::Tree::promote_scaffold`] — a no-op
-    ///    if a co-resident peer already gave the slot a real role (`WatchRootParent` / `User`), so
-    ///    materialization never clobbers a peer's claim.
-    /// 3. Transition the Profile via [`specter_core::Profile::materialize_anchor`] — atomic `Pending
-    ///    → Idle`, kind pin. The refcount edges that follow are free in their order relative to it:
-    ///    a contribution is attributed by its explicit [`ContribKey`], never by reading
-    ///    `Profile.state` or `Profile.anchor_claim`.
-    /// 4. Release the prefix's descent claim; install the anchor claim
-    ///    ([`Self::install_anchor_claim`]: `AnchorClaim::Held` and its contribution at the Profile's
-    ///    mask).
-    /// 5. Install the watch-root parent claim ([`Self::install_watch_root_parent_claim`]) now that
-    ///    the anchor is live — a no-op for a recovery descent, whose claim outlived the loss.
-    /// 6. Start the Seed burst — triggered with the anchor as provenance iff the descent witnessed
-    ///    activity, cold otherwise. The trigger's only job is landing in the Seed's `dirty` so
-    ///    `seed_owes_first_fire` sees the witness (every Seed probe targets the anchor regardless);
-    ///    a triggered Seed opens Batching-first, so a storm of appearances debounces on the user's
-    ///    settle window.
+    /// 1. Read the witnessed-appearance latch into the tail's [`SeedWitness`] — before step 2's
+    ///    `Pending → Idle` flip destroys the [`DescentState`] carrying it (the descent's probe slot
+    ///    is already disarmed at this depth, so the drop is tripwire-safe). A witnessed descent owes
+    ///    its terminus Seed the appearance; an unwitnessed one (every segment found on first
+    ///    observation — no absence half was ever observed) stays cold: attach-over-existing pins
+    ///    silently, the restart-safe doctrine.
+    /// 2. Transition the Profile via [`specter_core::Profile::materialize_anchor`] — atomic `Pending
+    ///    → Idle`, kind pin.
+    /// 3. Release the descent's prefix claim. Its place relative to the flip is free: a
+    ///    contribution is attributed by its explicit [`ContribKey`], never by reading
+    ///    `Profile.state`.
+    /// 4. Narrate [`Diagnostic::PendingPathMaterialized`] before the Seed, so the stream reads
+    ///    recovery-complete → baseline-established in order.
+    /// 5. Seed at the anchor ([`Self::seed_at_anchor`]): its claim and its parent's, then the Seed —
+    ///    the tail an immediate attach runs too.
     fn materialize_profile_anchor(
         &mut self,
         profile_id: ProfileId,
@@ -605,13 +600,11 @@ impl crate::Engine {
                  at the terminus — dispatch_descent_ok proved it"
             );
         };
-        let witnessed = descent.witnessed();
-
-        // `new_resource` is either a freshly-ensured DescentScaffold or a peer's pre-existing slot
-        // (the caller's lookup hit). `promote_scaffold` flips only a still-scaffold slot and no-ops
-        // on a real role, so materialization never clobbers a co-resident peer's WatchRootParent /
-        // User.
-        self.tree.promote_scaffold(new_resource, ResourceRole::User);
+        let witness = if descent.witnessed() {
+            SeedWitness::Appeared
+        } else {
+            SeedWitness::Cold
+        };
 
         // Through the ProfileMap chokepoint: the bundled `Pending → (Idle, classified)` write is a
         // carrier-count edge (`Pending` counted, `Idle` not) the wrapper reconciles.
@@ -633,40 +626,17 @@ impl crate::Engine {
             ContribKey::ProfileDescent(profile_id),
             out,
         );
-        self.install_anchor_claim(profile_id, out);
-        self.install_watch_root_parent_claim(profile_id, out);
 
         // The terminus is the descent lifecycle's single positive narration: the awaited anchor is
-        // now live and the Profile is leaving Pending. Emit before the Seed burst so the stream
-        // reads recovery-complete → baseline-established in order. Unconditional across all three
-        // descent entries (attach / observed-loss / park recovery) — an unwitnessed cold descent
-        // pins its baseline without a `SubFired`, so this is the only mark it leaves.
+        // now live and the Profile is leaving Pending. Unconditional across all three descent
+        // entries (attach / observed-loss / park recovery) — an unwitnessed cold descent pins its
+        // baseline without a `SubFired`, so this is the only mark it leaves.
         out.diagnostics.push(Diagnostic::PendingPathMaterialized {
             profile: profile_id,
             anchor: new_resource,
         });
 
-        // A witnessed descent owes its terminus Seed the appearance provenance: the anchor threads
-        // in as the trigger, so the Seed opens Batching-first and classifies
-        // `Consequence::FreshSeedFire` / drift on the stable verdict. An unwitnessed descent (every
-        // segment found on first observation — no absence half was ever observed) stays cold —
-        // attach-over-existing pins silently, the restart-safe doctrine.
-        let trigger = witnessed.then(|| {
-            // The anchor slot is live by construction (ensured by the caller this step; its claim
-            // installed just above), so `path_of` resolves. The degrade keeps the witness — an
-            // empty path in `dirty` still counts as activity, and a Seed probe targets the anchor
-            // off `Profile.resource`, never the dirty paths.
-            let path = self.tree.path_of(new_resource).unwrap_or_else(|| {
-                debug_assert!(
-                    false,
-                    "materialize_profile_anchor: just-materialized anchor slot must resolve \
-                     (profile = {profile_id:?}, resource = {new_resource:?})",
-                );
-                empty_path()
-            });
-            (new_resource, path)
-        });
-        self.start_seed_burst(profile_id, trigger, now, out);
+        self.seed_at_anchor(profile_id, witness, now, out);
     }
 
     /// **Rewind chain depth.** A `Vanished` response on a rewound prefix triggers a further rewind
