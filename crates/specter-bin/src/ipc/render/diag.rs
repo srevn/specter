@@ -102,6 +102,7 @@ const fn at_field(d: &WireDiagnostic) -> &WireTime {
         | WireDiagnostic::DiscoveryUnsupportedAnchorKind { at, .. }
         | WireDiagnostic::DiscoveryFanoutThreshold { at, .. }
         | WireDiagnostic::DiscoverySubReaped { at, .. }
+        | WireDiagnostic::DiscoveryDenied { at, .. }
         | WireDiagnostic::InvalidBurstTransition { at, .. }
         | WireDiagnostic::WalkerContractViolated { at, .. }
         | WireDiagnostic::Missed { at, .. } => at,
@@ -174,6 +175,7 @@ const fn severity(d: &WireDiagnostic) -> Severity {
         | W::RebindUnknownSub { .. }
         | W::DiscoveryUnsupportedAnchorKind { .. }
         | W::DiscoveryFanoutThreshold { .. }
+        | W::DiscoveryDenied { .. }
         | W::InvalidBurstTransition { .. }
         | W::Missed { .. } => Severity::Warn,
 
@@ -528,6 +530,10 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         } => {
             field(out, sty, "source", source.0);
             field(out, sty, "sub", sub.0);
+            field(out, sty, "path", path);
+        }
+        WireDiagnostic::DiscoveryDenied { template, path, .. } => {
+            field(out, sty, "template", template.0);
             field(out, sty, "path", path);
         }
         WireDiagnostic::InvalidBurstTransition {
@@ -893,6 +899,9 @@ mod tests {
             }),
             "discovery_sub_reaped" => json!({
                 "diag": tag, "at": at, "source": id, "sub": id, "path": "/x",
+            }),
+            "discovery_denied" => json!({
+                "diag": tag, "at": at, "template": id, "path": "/x",
             }),
             "invalid_burst_transition" => json!({
                 "diag": tag, "at": at, "profile": id,

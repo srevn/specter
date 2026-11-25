@@ -704,6 +704,11 @@ pub enum Diagnostic {
         sub: SubId,
         path: Arc<Path>,
     },
+    /// A discovery pass went on without the directory at `path`, which its walk had cause to read
+    /// and could not: `template`'s matches there are unknown until the directory can be read, and
+    /// the Subs it minted beneath it stand as they are. One per template and directory, at the
+    /// discovery burst's ceiling.
+    DiscoveryDenied { template: SubId, path: Arc<Path> },
     /// A burst-lifecycle helper was invoked on a Profile whose state did not match the helper's
     /// typed precondition (e.g., `transition_to_verifying` called on a Profile in
     /// `ActivePostFire`). The helper bails before mutating any state; this variant surfaces the

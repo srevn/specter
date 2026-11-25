@@ -562,6 +562,12 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             path = %path.display(),
             "discovery-minted Sub reaped (matched path vanished from the certified match set)",
         ),
+        Diagnostic::DiscoveryDenied { template, path } => tracing::warn!(
+            ?template,
+            path = %path.display(),
+            "discovery went on without a directory it may not read; its matches there are unknown \
+             until it can be read",
+        ),
         Diagnostic::InvalidBurstTransition {
             profile,
             helper,
@@ -614,6 +620,7 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         | D::DiscoveryUnsupportedAnchorKind { source, .. }
         | D::DiscoveryFanoutThreshold { source, .. }
         | D::DiscoverySubReaped { source, .. } => Some(*source),
+        D::DiscoveryDenied { template, .. } => Some(*template),
 
         D::StaleProbeResponse { .. }
         | D::StaleTimer { .. }
@@ -719,6 +726,14 @@ mod tests {
         );
         assert_eq!(
             diag_sub_id(&Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p }),
+            Some(s)
+        );
+        // A discovery line keys to the template a per-Sub filter names.
+        assert_eq!(
+            diag_sub_id(&Diagnostic::DiscoveryDenied {
+                template: s,
+                path: std::sync::Arc::from(std::path::Path::new("/srv/lost+found")),
+            }),
             Some(s)
         );
     }

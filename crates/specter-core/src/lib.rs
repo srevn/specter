@@ -50,7 +50,9 @@ pub use profile::{
 };
 pub use program::{ActionProgram, ArgPart, ArgTemplate, ExecAction, Placeholder};
 pub use resource::{ContribKey, Resource, ResourceKind, ResourceRole};
-pub use scan_config::{ConfigError, GlobPattern, ProfileIdentity, ScanConfig, ScanConfigBuilder};
+pub use scan_config::{
+    ConfigError, Denial, GlobPattern, ProfileIdentity, ScanConfig, ScanConfigBuilder,
+};
 pub use snapshot::EntryKind;
 pub use snapshot::tree::{
     ChildEntry, DirChild, DirMeta, DirSnapshot, LeafEntry, PriorDir, SpliceResult, TreeSnapshot,

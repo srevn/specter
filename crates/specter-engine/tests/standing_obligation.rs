@@ -6,7 +6,9 @@
 //! poll: the park preserves the terminal's stop-burning-probes intent.
 
 use compact_str::CompactString;
-use specter_core::testkit::{dir_snap, empty_program, first_attached_sub, proven};
+use specter_core::testkit::{
+    denied, dir_snap, dir_snap_nested, empty_program, first_attached_sub, leaf, proven,
+};
 use specter_core::{
     ClassSet, Diagnostic, EffectScope, EntryKind, FsEvent, Input, ProbeOp, ProbeOutcome,
     ProbeRequest, ProbeResponse, ProfileState, ProofAuthority, ProofObligation, ResourceKind,
@@ -24,9 +26,9 @@ const MAX_SETTLE: Duration = Duration::from_secs(6);
 
 #[test]
 fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
-    // A Standard burst opens at file `a`; every verify refuses on its chain (`Undischarged`, a
-    // chmod-000-class obstruction); the burst deadline forces and the forced refusal folds
-    // `Abandon` — diagnostic, no commit, and the burst's captured paths park into the standing
+    // A Standard burst opens at file `a`; every verify meets `locked`, a directory it may not read
+    // (`Undischarged`); the burst deadline forces and the forced refusal folds `Abandon` — the
+    // directory named, nothing committed, and the burst's captured paths park into the standing
     // obligation. A later, unrelated in-mask event at file `b` opens a fresh burst: the drained
     // obligation widens its probe's `Chains` over the parked `a` chain, and the fresh Authoritative
     // read fires the originally-witnessed change.
@@ -75,10 +77,15 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     );
 
     let a_path: Arc<Path> = Arc::clone(e.tree().get(file_a).unwrap().path());
-    let a_parent: Arc<Path> = Arc::from(a_path.parent().expect("file `a` sits under the anchor"));
+    let locked: Arc<Path> = Arc::from(a_path.with_file_name("locked"));
+    let with_locked = dir_snap_nested(&[
+        ("a", leaf(EntryKind::File, 1)),
+        ("b", leaf(EntryKind::File, 2)),
+        ("locked", denied(3)),
+    ]);
     let undischarged = || ProbeOutcome::SubtreeProven {
-        snapshot: Arc::clone(&snap),
-        authority: ProofAuthority::certify(BTreeSet::from([Arc::clone(&a_parent)])),
+        snapshot: Arc::clone(&with_locked),
+        authority: ProofAuthority::certify(BTreeSet::from([Arc::clone(&locked)])),
     };
 
     // First (unforced) refusal: Retry → re-Batch for another window.
@@ -113,10 +120,21 @@ fn abandoned_burst_evidence_rides_next_bursts_obligation_and_fires() {
     assert!(
         abandon_out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::QuiescenceCeilingUnreadable { profile, .. } if *profile == pid,
+            Diagnostic::QuiescenceCeilingUnreadable { profile, first_unread, .. }
+                if *profile == pid && *first_unread == locked,
         )),
-        "the forced refusal abandons loudly; got {:?}",
+        "the forced refusal abandons loudly, naming the directory; got {:?}",
         abandon_out.diagnostics,
+    );
+    assert!(
+        !e.profiles()
+            .get(pid)
+            .unwrap()
+            .current_dir()
+            .expect("seeded")
+            .entries()
+            .contains_key("locked"),
+        "a subtree watch commits no directory it could not read",
     );
     assert!(
         matches!(e.profiles().get(pid).unwrap().state(), ProfileState::Idle),

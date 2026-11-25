@@ -25,7 +25,7 @@ use compact_str::CompactString;
 use smallvec::SmallVec;
 use specter_core::{
     AbsorbMode, ActiveBurst, AnchorClaim, AwaitVerdict, BurstFinish, BurstIntent, ClaimKind,
-    ClassSet, DedupKey, DescentRemaining, DetachReason, Diagnostic, Effect, EffectCommon,
+    ClassSet, DedupKey, Denial, DescentRemaining, DetachReason, Diagnostic, Effect, EffectCommon,
     EffectOutcome, EffectScope, FsEvent, OverflowScope, PostFirePhase, PreFirePhase, ProbeFailure,
     ProbeResponse, Profile, ProfileId, ProfileState, ProofAuthority, QuiescenceVerdict,
     QuiescenceWitness, Reaction, ResourceId, ResourceKind, StableReason, StepOutput,
@@ -435,70 +435,25 @@ impl Engine {
         self.finish_burst_to_idle(profile_id, out);
     }
 
-    /// Certify a Verifying / Rebase probe response: lower the typed `ProofOutcome`, guard kind
-    /// agreement, and fold the carrier's quiescence verdict — the single verdict-construction site
-    /// shared by the Verifying choke ([`Self::dispatch_burst_outcome`]) and the post-fire Rebase arm.
-    /// The two routes the engine deliberately keeps separate stay separate: each owns its success
-    /// consequence (per-[`BurstIntent`] fire/pin vs. the rebase-loop table) and its own `Vanished` /
-    /// `Failed` cleanup; only the lower→kind-check→fold spine is unified here, at the floor.
+    /// Certify a Verifying / Rebasing probe response — the one verdict-construction site of both
+    /// routes, which part again at their consequences and at their `Vanished` / `Failed` cleanups.
     ///
-    /// **Typed input.** The caller passes a `ProofOutcome`, not the wide wire
-    /// [`ProbeOutcome`](specter_core::ProbeOutcome): the proof/descent split is parsed once at the
-    /// demux seam, so the structural `SegmentObserved` shape — a walker-contract violation on a
-    /// quiescence/rebase probe — is unrepresentable here, with no defensive arm. The certifier sees
-    /// only the four shapes a proof probe can legally resolve to.
-    ///
-    /// **Lowering.** `AnchorOk` → `(File, Authoritative)` — a single `lstat` has no mtime-skip
-    /// concept, so an anchor read is definitionally authoritative and the engine injects the
-    /// certificate the wire omits. `SubtreeProven { snapshot, authority }` → `(Dir, authority)`.
-    /// `Vanished` / `Failed` are returned as-is for the caller's own per-route cleanup (the
-    /// certifier is route-agnostic — folding a non-snapshot is meaningless).
-    ///
-    /// **Fold context.** One immutable Profile resolution (`fold_context`) captures every bit the
-    /// fold consumes — `events_witness_quiescence` (invariant across the burst, folds into
-    /// `config_hash`), the prior [`specter_core::Profile::kind`], and whether the burst owes a
-    /// quiescence proof (`owes_proof_from`, a predicate spanning `profiles + subs`) — before any
-    /// `&mut` re-fetch. An absent Profile is a gate breach (the floor is reached only on
-    /// `Active(Verifying | Rebasing)` through the `profile_probe_gate` ⇒ `take_owner_probe`
-    /// dispatch): `debug_assert!` in dev/CI, `Degraded` in release.
-    ///
-    /// **Kind agreement, before the fold.** The captured prior kind is compared against the lowered
-    /// snapshot's variant, *after* the lowering and *before* the verdict fold. A kind-mismatched
-    /// response is not a valid observation of the anchor: folding a verdict over it and advancing the
-    /// certified-sample sequence with its hash would be meaningless, so the burst is torn down
-    /// through [`Engine::finalize_anchor_lost`] (reusing the tested `dispatch_*_vanished` cleanup
-    /// chain rather than a fresh "discard then graft" that leaks watch contributions and breaks the
-    /// cross-field invariant), after emitting [`Diagnostic::AnchorKindMismatch`] — so the result is
-    /// `Degraded` (already finalized). First-classify (`kind == None`, fresh Seed) passes; the
-    /// snapshot's variant *is* the kind at the [`specter_core::Profile::install_dir_current`] /
-    /// [`specter_core::Profile::install_file_current`] commit. The guard is unreachable in v1 — the
-    /// walker collapses every Dir↔File swap to `Vanished` — but operates on a *successful* lowering,
-    /// so it stays a semantic floor distinct from the payload-shape parse at the demux seam.
-    ///
-    /// **Verdict fold.** [`specter_core::quiescence_verdict`] is the floor — a pure, total
-    /// `(ProofAuthority, forced, QuiescenceWitness) → QuiescenceVerdict` projection over three axes:
-    ///
-    /// - **Authority (C1).** `Undischarged` ⇒ the walk could not read a directory it had cause to
-    ///   read. Set by the walker, threaded as-is.
-    /// - **Forced.** Set by the caller (read off the burst by [`Engine::profile_probe_gate`],
-    ///   packed onto [`crate::probe::ProfileProbeRoute`]'s `Verifying { forced }` / `Rebasing {
-    ///   forced }` payload, threaded here); both carriers — pre-fire `PreFireBurst.forced` (a
-    ///   single bit) and post-fire [`specter_core::CeilingState::Reached`] (projected to a bool at
-    ///   the gate read) — pass through this one site symmetrically. `forced` distinguishes natural
-    ///   fire from the bounded `BurstDeadline` / `RebaseCeiling` fallback.
-    /// - **Witness (C2 vs. C3).** [`QuiescenceWitness::EventsReliable`] when settle-window silence
-    ///   proves quiescence — the Profile's `events_union` covers in-place writes
-    ///   ([`specter_core::Profile::events_witness_quiescence`]) OR the burst's consequence does not
-    ///   require proof (cold-Seed `SilentPin`, see `owes_proof_from`).
-    ///   [`QuiescenceWitness::HashChannel`] otherwise: this site advances the per-burst
-    ///   `last_certified_hash` carrier through the cat-(b) cascade
-    ///   ([`specter_core::Profile::advance_certified_sample`]) and reads its prior as the channel's
-    ///   input. The advance is gated on `Authoritative ∧ needs_hash_channel` — an `Undischarged`
-    ///   observation must not advance (the prior would then reflect an unread region), and the
-    ///   `EventsReliable` path skips the carrier entirely (dead write avoided on the cold-attach
-    ///   win).
-    ///
-    /// The callers diverge only on the *consequence* (per-intent fire/pin vs. the rebase-loop table).
+    /// - **Lowering.** `AnchorOk` is `(File, Authoritative)`: one `lstat` has nothing to skip, so
+    ///   the engine injects the certificate the wire omits. `SubtreeProven` is `(Dir, authority)`.
+    /// - **Kind agreement**, before the fold. A response of another kind than the Profile's is no
+    ///   observation of its anchor: [`Diagnostic::AnchorKindMismatch`], the burst torn down through
+    ///   the anchor-loss route, `Degraded`. The walker collapses every Dir↔File swap to `Vanished`,
+    ///   so this is a contract floor.
+    /// - **The ceiling cell.** A forced `Undischarged` on a [`Denial::Bound`] shape goes on over
+    ///   what was read: [`Engine::narrate_denied`] names each directory it went on without, and the
+    ///   certificate lowers to `Authoritative`. A [`Denial::Hole`] shape's folds to `Abandon`.
+    /// - **Witness.** The hash channel engages iff the burst owes a proof and the events cannot
+    ///   witness one; its carrier ([`specter_core::Profile::advance_certified_sample`]) advances
+    ///   only on an `Authoritative` sample, since an unread one's hash would stand for a region the
+    ///   walk did not read.
+    /// - **Fold.** [`quiescence_verdict`]. `forced` is read off the burst when the response arrives
+    ///   ([`Engine::profile_probe_gate`]), so a walk in flight when the ceiling expired folds as
+    ///   forced.
     #[must_use]
     fn certify_probe_response(
         &mut self,
@@ -507,9 +462,6 @@ impl Engine {
         forced: bool,
         out: &mut StepOutput,
     ) -> CertifiedResponse {
-        // Lower the typed proof outcome to (snapshot, authority). `Vanished` / `Failed` return
-        // as-is for the caller's per-route cleanup; `SegmentObserved` is unrepresentable here —
-        // parsed out at the demux seam, so no defensive arm is needed.
         let (snap, authority) = match proof {
             ProofOutcome::AnchorOk(leaf) => {
                 (TreeSnapshot::File(leaf), ProofAuthority::Authoritative)
@@ -522,10 +474,6 @@ impl Engine {
             ProofOutcome::Failed(failure) => return CertifiedResponse::Failed(failure),
         };
 
-        // One immutable resolution of every Profile bit the fold consumes (events witness, prior
-        // kind, proof obligation), held by value so the later `&mut self` re-fetch is borrow-clean.
-        // An absent Profile is a gate breach — `profile_probe_gate` ⇒ `take_owner_probe` reaches
-        // this floor only on Active(Verifying | Rebasing); degrade to `Degraded`.
         let Some(ctx) = self.fold_context(profile_id) else {
             debug_assert!(
                 false,
@@ -535,12 +483,9 @@ impl Engine {
             return CertifiedResponse::Degraded;
         };
 
-        // Kind guard before the fold. Unreachable in v1 (the walker collapses Dir↔File swaps to
-        // `Vanished`), but a kind-mismatched response is not a valid observation of the anchor:
-        // tear the burst down and re-enter descent through `finalize_anchor_lost_and_descend` — a
-        // kind swap is itself witnessed evidence the anchor was replaced — rather than fold a
-        // verdict over a soon-discarded snapshot. First-classify (`prior == None`, fresh Seed)
-        // passes; the snapshot's variant *is* the kind at the `install_*_current` commit.
+        // A kind swap is itself evidence the anchor was replaced, so the burst re-enters descent. A
+        // first classification (`prior_kind == None`) passes: the snapshot's variant is the kind
+        // its commit installs.
         let response_kind = match &snap {
             TreeSnapshot::Dir(_) => ResourceKind::Dir,
             TreeSnapshot::File(_) => ResourceKind::File,
@@ -562,20 +507,22 @@ impl Engine {
             return CertifiedResponse::Degraded;
         }
 
-        // Witness selection. The hash channel engages iff the burst owes a proof AND the events
-        // stream is insufficient — both captured in the fold context above. The emission-time twin
-        // is `Profile::event_chains_prove_quiescence` (the probe target / obligation predicate):
-        // `!events_witness` there forces anchor-rooted `WholeSubtree` samples, so a channel engaged
-        // here always compares two full fresh reads of the proof object — by shared source, not by
-        // runtime tripwire.
+        // At its ceiling a bounded proof goes on over what was read, naming what it went on without
+        // before the pass that follows.
+        let authority = match (authority, ctx.denial) {
+            (ProofAuthority::Undischarged { denied }, Denial::Bound) if forced => {
+                self.narrate_denied(profile_id, &denied, out);
+                ProofAuthority::Authoritative
+            }
+            (authority, _) => authority,
+        };
+
+        // The emission-time twin of this test is `Profile::event_chains_prove_quiescence`: where
+        // the events cannot witness, every sample is an anchor-rooted whole-subtree read, so an
+        // engaged channel compares two full fresh reads of the proof object by shared source.
         let response_hash = snap.hash();
         let needs_hash_channel = ctx.owes_proof && !ctx.events_witness;
 
-        // Cat-(b) carrier advance: the cascade (`Profile::advance_certified_sample` →
-        // `ActiveBurst::advance_certified_sample` → `PreFireBurst::advance_certified_sample` /
-        // `PostFireBurst::advance_certified_sample`) routes to whichever burst is live. Gated on
-        // `Authoritative ∧ needs_hash_channel`: an Undischarged observation never advances (its
-        // hash reflects an unread region), and the EventsReliable path skips the write entirely.
         let prior = if needs_hash_channel && matches!(authority, ProofAuthority::Authoritative) {
             self.profiles
                 .get_mut(profile_id)
@@ -611,6 +558,7 @@ impl Engine {
         let profile = self.profiles.get(profile_id)?;
         Some(FoldContext {
             events_witness: profile.events_witness_quiescence(),
+            denial: profile.config().denial(),
             prior_kind: profile.kind(),
             owes_proof: self.owes_proof_from(profile, profile_id),
         })
@@ -3459,21 +3407,18 @@ enum EvidenceDisposition {
     Discard,
 }
 
-/// The Profile bits [`Engine::certify_probe_response`]'s verdict fold consumes, captured in one
-/// immutable resolution ([`Engine::fold_context`]) before any `&mut` re-fetch. Every field is
-/// `Copy`, so the context holds no borrow on the Profile — the caller is free to take the cat-(b)
-/// `&mut self` advance or the anchor-loss finalize afterward.
-///
-/// - `events_witness`: whether the Profile's `events_union` covers in-place writes
-///   ([`specter_core::Profile::events_witness_quiescence`]) — invariant across the burst (folds
-///   into `config_hash`).
-/// - `prior_kind`: the prior [`specter_core::Profile::kind`], or `None` for a fresh
-///   (first-classify) Seed.
-/// - `owes_proof`: whether the burst's consequence requires a tree-quiescence proof
-///   ([`Engine::owes_proof_from`]).
+/// The Profile bits [`Engine::certify_probe_response`] consumes, read in one immutable resolution
+/// ([`Engine::fold_context`]) before any `&mut` re-fetch. All `Copy`: the context holds no borrow
+/// on the Profile.
 struct FoldContext {
+    /// [`specter_core::Profile::events_witness_quiescence`].
     events_witness: bool,
+    /// What a directory the walk could not read means to the shape
+    /// ([`specter_core::ScanConfig::denial`]).
+    denial: Denial,
+    /// The Profile's kind; `None` before its first classification.
     prior_kind: Option<ResourceKind>,
+    /// Whether the burst's consequence needs a quiescence proof ([`Engine::owes_proof_from`]).
     owes_proof: bool,
 }
 

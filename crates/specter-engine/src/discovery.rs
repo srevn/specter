@@ -42,9 +42,9 @@ use crate::path::empty_path;
 use compact_str::{CompactString, format_compact};
 use smallvec::SmallVec;
 use specter_core::{
-    ChildEntry, DetachReason, Diagnostic, DirChild, DirSnapshot, EntryKind, MintTemplate, PriorDir,
-    Profile, ProfileId, ReactionSpec, ResourceId, ResourceRole, StepOutput, SubAttachAnchor,
-    SubAttachRequest, SubId, SubParams,
+    ChildEntry, DetachReason, Diagnostic, DirChild, DirSnapshot, EntryKind, MintTemplate,
+    NonEmptyPathSet, PriorDir, Profile, ProfileId, ReactionSpec, ResourceId, ResourceRole,
+    StepOutput, Sub, SubAttachAnchor, SubAttachRequest, SubId, SubParams,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -198,6 +198,38 @@ struct TemplateCapture {
 }
 
 impl Engine {
+    /// The templates on the discovery Profile `discovery`, in id order — the order a pass mints in
+    /// and a ceiling names what it went on without. `SubRegistry::at` yields attach order, which
+    /// slot reuse can decouple from id order.
+    fn templates_at(&self, discovery: ProfileId) -> SmallVec<[SubId; 2]> {
+        let mut templates: SmallVec<[SubId; 2]> = self
+            .subs
+            .at(discovery)
+            .iter()
+            .copied()
+            .filter(|&sid| self.subs.get(sid).is_some_and(Sub::is_template))
+            .collect();
+        templates.sort_unstable();
+        templates
+    }
+
+    /// Name, for each template on `discovery` and in `(template, path)` order, every directory its
+    /// walk had cause to read and could not: what a pass at its ceiling goes on without.
+    pub(crate) fn narrate_denied(
+        &self,
+        discovery: ProfileId,
+        denied: &NonEmptyPathSet,
+        out: &mut StepOutput,
+    ) {
+        for template in self.templates_at(discovery) {
+            out.diagnostics
+                .extend(denied.iter().map(|path| Diagnostic::DiscoveryDenied {
+                    template,
+                    path: Arc::clone(path),
+                }));
+        }
+    }
+
     /// Reconcile the discovery Profile's match set against the post-graft `current` — the
     /// [`Consequence::Reconcile`](crate::transitions) body. Mints a dynamic Sub per (chain terminus
     /// × template) the registry projection doesn't know, and reaps every projected minted Sub whose
@@ -250,10 +282,9 @@ impl Engine {
         let before = profile.baseline_dir().map(Arc::clone);
 
         let mut templates: Vec<TemplateCapture> = self
-            .subs
-            .at(profile_id)
-            .iter()
-            .filter_map(|&sid| {
+            .templates_at(profile_id)
+            .into_iter()
+            .filter_map(|sid| {
                 let s = self.subs.get(sid)?;
                 let t = s.discovery_template()?;
                 Some(TemplateCapture {
@@ -265,9 +296,6 @@ impl Engine {
                 })
             })
             .collect();
-        // `subs.at` yields attach order, which slot reuse can decouple from id order; the explicit
-        // sort pins the per-terminus mint order to sorted SubIds for cross-engine determinism.
-        templates.sort_unstable_by_key(|t| t.sid);
         if templates.is_empty() {
             return;
         }

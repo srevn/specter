@@ -14,11 +14,11 @@ use specter_core::testkit::{
     leaf, proven, uncovered,
 };
 use specter_core::{
-    ActiveBurst, ChildEntry, ClassSet, ContribKey, DetachReason, Diagnostic, DirSnapshot,
+    ActiveBurst, ChildEntry, ClassSet, ContribKey, DetachReason, Diagnostic, DirChild, DirSnapshot,
     EffectCompletion, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input,
     MintTemplate, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, ProfileId, ProfileIdentity,
-    ProfileState, ResourceId, ResourceKind, ScanConfig, SpawnSpec, StepOutput, SubAttachAnchor,
-    SubId, TimerKind, WatchOp,
+    ProfileState, ProofAuthority, ResourceId, ResourceKind, ScanConfig, SpawnSpec, StepOutput,
+    SubAttachAnchor, SubId, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
@@ -28,6 +28,7 @@ use specter_engine::testkit::{
     respond_anchor_file, seed_to_idle, seed_to_idle_with,
 };
 use std::collections::BTreeSet;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -466,6 +467,199 @@ fn minted_sub_beneath_a_denied_directory_is_kept_until_a_listing_answers() {
     );
     assert!(reaped(&out), "a listing that lacks the match reaps it");
     assert!(e.subs().get(mid).is_none());
+}
+
+/// Answer `pid`'s walks with `snap` under a certificate naming the directories `denied`, a settle
+/// window apart, until the burst's ceiling ends it. Returns every diagnostic the walks and the
+/// timers between them emitted, and the instant the burst ended.
+fn walk_denied_to_ceiling(
+    e: &mut Engine,
+    pid: ProfileId,
+    snap: &Arc<DirSnapshot>,
+    denied: &[&str],
+    mut at: Instant,
+) -> (Vec<Diagnostic>, Instant) {
+    let deadline = at + MAX_SETTLE * 2;
+    let mut diagnostics = Vec::new();
+    while at < deadline {
+        if let Some(correlation) = e.pending_probe_for(pid) {
+            let out = e.step(
+                Input::ProbeResponse(ProbeResponse {
+                    owner: pid,
+                    correlation,
+                    outcome: ProbeOutcome::SubtreeProven {
+                        snapshot: Arc::clone(snap),
+                        authority: ProofAuthority::certify(
+                            denied.iter().map(|p| Arc::from(Path::new(p))).collect(),
+                        ),
+                    },
+                }),
+                at,
+            );
+            diagnostics.extend(out.diagnostics);
+            if !matches!(
+                e.profiles()
+                    .get(pid)
+                    .expect("discovery Profile live")
+                    .state(),
+                ProfileState::Active(..)
+            ) {
+                return (diagnostics, at);
+            }
+        }
+        at += SETTLE;
+        diagnostics.extend(drain_due(e, at));
+    }
+    panic!("the discovery burst never reached its ceiling");
+}
+
+/// A pattern goes on without the directories its walk was denied. Each walk names them; until the
+/// ceiling the burst retries in silence, and at it one `DiscoveryDenied` per template and directory
+/// precedes the pass, which mints what was read, cold, and commits the directories as denied.
+#[test]
+fn a_pattern_at_its_ceiling_names_what_it_was_denied_and_goes_on() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let attach = |e: &mut Engine, name: &str| {
+        attach_discovery(
+            e,
+            name,
+            SubAttachAnchor::Resource(srv),
+            "/srv/*/log",
+            mint_template(),
+            now,
+        )
+    };
+    let (first, pid) = attach(&mut e, "first");
+    let (second, joined) = attach(&mut e, "second");
+    assert_eq!(pid, joined, "one pattern, one discovery Profile");
+    let snap = dir_snap_nested(&[
+        ("a", covered_at(10, &[("log", uncovered(11))])),
+        ("x", denied(20)),
+        ("y", denied(30)),
+    ]);
+
+    let (diagnostics, _) = walk_denied_to_ceiling(&mut e, pid, &snap, &["/srv/x", "/srv/y"], now);
+
+    let named: Vec<(SubId, String)> = diagnostics
+        .iter()
+        .filter_map(|d| match d {
+            Diagnostic::DiscoveryDenied { template, path } => {
+                Some((*template, path.display().to_string()))
+            }
+            _ => None,
+        })
+        .collect();
+    let (lo, hi) = (first.min(second), first.max(second));
+    assert_eq!(
+        named,
+        [
+            (lo, "/srv/x".to_string()),
+            (lo, "/srv/y".to_string()),
+            (hi, "/srv/x".to_string()),
+            (hi, "/srv/y".to_string()),
+        ],
+        "once, at the ceiling, in (template, path) order",
+    );
+    let last_named = diagnostics
+        .iter()
+        .rposition(|d| matches!(d, Diagnostic::DiscoveryDenied { .. }));
+    let first_minted = diagnostics
+        .iter()
+        .position(|d| matches!(d, Diagnostic::DiscoveryMinted { .. }));
+    assert!(last_named < first_minted, "the lines precede the pass");
+    let minted: Vec<(String, bool)> = diagnostics
+        .iter()
+        .filter_map(|d| match d {
+            Diagnostic::DiscoveryMinted { path, appeared, .. } => {
+                Some((path.display().to_string(), *appeared))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        minted,
+        [
+            ("/srv/a/log".to_string(), false),
+            ("/srv/a/log".to_string(), false),
+        ],
+        "each template mints what was read, cold",
+    );
+    assert!(
+        !diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::QuiescenceCeilingUnreadable { .. })),
+        "a pattern does not refuse at its ceiling",
+    );
+    let current = e.profiles().get(pid).unwrap().current_dir().unwrap();
+    for name in ["x", "y"] {
+        assert!(
+            matches!(
+                current.entries().get(name),
+                Some(ChildEntry::Dir(DirChild::Denied(_)))
+            ),
+            "{name} is committed as a directory the walk was denied",
+        );
+    }
+    let _ = e.cancel_all_in_flight_probes();
+}
+
+/// An overflow reseed keeps the baseline the ceiling committed, denied directories included. When
+/// the reseed's walk reads one of them — the same directory, opened — its matches mint cold, while
+/// a match new beside it is an appearance; the directory still denied, already in the baseline, is
+/// not named again.
+#[test]
+fn a_branch_denied_at_the_ceiling_opens_cold_through_an_overflow_reseed() {
+    let mut e = Engine::new();
+    let srv = pre_place_dir(&mut e, &["srv"]);
+    let now = Instant::now();
+    let (sid, pid) = attach_discovery(
+        &mut e,
+        "disc",
+        SubAttachAnchor::Resource(srv),
+        "/srv/*/log",
+        mint_template(),
+        now,
+    );
+    let a = || ("a", covered_at(10, &[("log", uncovered(11))]));
+    let denied_x_y = dir_snap_nested(&[a(), ("x", denied(20)), ("y", denied(30))]);
+    let (_, at) = walk_denied_to_ceiling(&mut e, pid, &denied_x_y, &["/srv/x", "/srv/y"], now);
+    settle_minted_seeds(&mut e, sid, at);
+
+    let t = at + Duration::from_secs(1);
+    let _ = e.step(
+        Input::SensorOverflow {
+            scope: OverflowScope::Global,
+        },
+        t,
+    );
+    let out = respond(
+        &mut e,
+        pid,
+        &dir_snap_nested(&[
+            a(),
+            ("b", covered_at(40, &[("log", uncovered(41))])),
+            ("x", covered_at(20, &[("log", uncovered(21))])),
+            ("y", denied(30)),
+        ]),
+        t,
+    );
+    assert_eq!(
+        minted_entries(&out),
+        [
+            ("/srv/b/log".to_string(), true),
+            ("/srv/x/log".to_string(), false),
+        ],
+        "the opened branch is an enumeration; the new one an appearance",
+    );
+    assert!(
+        !out.diagnostics
+            .iter()
+            .any(|d| matches!(d, Diagnostic::DiscoveryDenied { .. })),
+        "a pass over a committed denial is silent",
+    );
+    let _ = e.cancel_all_in_flight_probes();
 }
 
 /// A storm of chain events inside one settle window coalesces into one Batching window, one probe,

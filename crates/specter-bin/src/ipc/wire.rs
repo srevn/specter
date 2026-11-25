@@ -512,6 +512,11 @@ pub(crate) enum WireDiagnostic {
         sub: WireId,
         path: WirePath,
     },
+    DiscoveryDenied {
+        at: WireTime,
+        template: WireId,
+        path: WirePath,
+    },
     InvalidBurstTransition {
         at: WireTime,
         profile: WireId,
@@ -898,6 +903,11 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 sub: WireId::from(*sub),
                 path: WirePath::from(path),
             },
+            Diagnostic::DiscoveryDenied { template, path } => Self::DiscoveryDenied {
+                at: at.clone(),
+                template: WireId::from(*template),
+                path: WirePath::from(path),
+            },
             Diagnostic::InvalidBurstTransition {
                 profile,
                 helper,
@@ -981,6 +991,7 @@ impl WireDiagnostic {
             Self::DiscoveryUnsupportedAnchorKind { .. } => "discovery_unsupported_anchor_kind",
             Self::DiscoveryFanoutThreshold { .. } => "discovery_fanout_threshold",
             Self::DiscoverySubReaped { .. } => "discovery_sub_reaped",
+            Self::DiscoveryDenied { .. } => "discovery_denied",
             Self::InvalidBurstTransition { .. } => "invalid_burst_transition",
             Self::WalkerContractViolated { .. } => "walker_contract_violated",
             Self::Missed { .. } => "_missed",
@@ -1055,6 +1066,7 @@ pub(crate) const KNOWN_WIRE_VARIANTS: &[&str] = &[
     "discovery_unsupported_anchor_kind",
     "discovery_fanout_threshold",
     "discovery_sub_reaped",
+    "discovery_denied",
     "invalid_burst_transition",
     "walker_contract_violated",
     "_missed",
@@ -2452,6 +2464,11 @@ mod tests {
                 source: WireId(192),
                 sub: WireId(193),
                 path: WirePath::from(Path::new("/srv/app1/log")),
+            },
+            WireDiagnostic::DiscoveryDenied {
+                at: at(),
+                template: WireId(194),
+                path: WirePath::from(Path::new("/srv/lost+found")),
             },
             WireDiagnostic::InvalidBurstTransition {
                 at: at(),

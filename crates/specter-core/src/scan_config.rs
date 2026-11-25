@@ -99,9 +99,9 @@ impl PartialOrd for GlobPattern {
 ///
 /// Every consumer goes through the named predicates ([`Self::accepts`],
 /// [`Self::accepts_structural`], [`Self::accepts_kinded`], [`Self::descends_into`],
-/// [`Self::exclude_globs`], [`Self::quiescence_witness_classes`], [`Self::match_chain`]) or the
-/// hash; no consumer destructures the variants — shape dispatch lives entirely in this module, so a
-/// new shape is a compile error here and nowhere else.
+/// [`Self::exclude_globs`], [`Self::quiescence_witness_classes`], [`Self::denial`],
+/// [`Self::match_chain`]) or the hash; no consumer destructures the variants — shape dispatch lives
+/// entirely in this module, so a new shape is a compile error here and nowhere else.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum ScanConfig {
     /// The cumulative recursive predicate over one subtree: every filter narrows what a recursive
@@ -331,6 +331,27 @@ impl ScanConfig {
             Self::MatchChain(_) => ClassSet::MEMBERSHIP_CHANGES,
         }
     }
+
+    /// What a directory the walk could not read means to this shape's proof object.
+    #[must_use]
+    pub const fn denial(&self) -> Denial {
+        match self {
+            Self::Subtree { .. } => Denial::Hole,
+            Self::MatchChain(_) => Denial::Bound,
+        }
+    }
+}
+
+/// What a directory the walk could not read means to a shape's proof object, and so what a proof
+/// that still cannot read it does at its ceiling.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Denial {
+    /// The proof object is content, and a denied directory is a hole in it: the proof refuses.
+    Hole,
+    /// The proof object is the set of matches the daemon may read, and a denied directory bounds
+    /// it: the proof goes on over what was read, as a shell glob goes on past a directory it may
+    /// not list.
+    Bound,
 }
 
 /// Builder for [`ScanConfig::Subtree`] — the user-facing shape; the `MatchChain` shape is
