@@ -1017,6 +1017,17 @@ struct StagedEntry {
     pair_eligible: bool,
 }
 
+impl StagedEntry {
+    fn new(rel: CompactString, entry: &ChildEntry, pair_eligible: bool) -> Self {
+        Self {
+            rel,
+            kind: entry.kind(),
+            fs_id: entry.fs_id(),
+            pair_eligible,
+        }
+    }
+}
+
 fn collect_dir_pair(
     prior: &DirSnapshot,
     new: &DirSnapshot,
@@ -1035,20 +1046,20 @@ fn collect_dir_pair(
         match (left.peek(), right.peek()) {
             (None, None) => break,
             (Some((ln, lc)), None) => {
-                stage_deleted(ln, lc, rel_prefix, staged_deleted);
+                stage(compose_rel(rel_prefix, ln), lc, true, staged_deleted);
                 left.next();
             }
             (None, Some((rn, rc))) => {
-                stage_created(rn, rc, rel_prefix, staged_created);
+                stage(compose_rel(rel_prefix, rn), rc, true, staged_created);
                 right.next();
             }
             (Some((ln, lc)), Some((rn, rc))) => match ln.as_str().cmp(rn.as_str()) {
                 std::cmp::Ordering::Less => {
-                    stage_deleted(ln, lc, rel_prefix, staged_deleted);
+                    stage(compose_rel(rel_prefix, ln), lc, true, staged_deleted);
                     left.next();
                 }
                 std::cmp::Ordering::Greater => {
-                    stage_created(rn, rc, rel_prefix, staged_created);
+                    stage(compose_rel(rel_prefix, rn), rc, true, staged_created);
                     right.next();
                 }
                 std::cmp::Ordering::Equal => {
@@ -1085,18 +1096,8 @@ fn diff_same_name(
                 // Same name, different kernel identity ⇒ delete-then-create. Stage as
                 // pair_eligible: each side may legitimately pair with a cross-level entry sharing
                 // its `fs_id` (the user moved the prior file out and a different one in).
-                staged_deleted.push(StagedEntry {
-                    rel: rel.clone(),
-                    kind: p.kind,
-                    fs_id: p.fs_id,
-                    pair_eligible: true,
-                });
-                staged_created.push(StagedEntry {
-                    rel,
-                    kind: n.kind,
-                    fs_id: n.fs_id,
-                    pair_eligible: true,
-                });
+                stage(rel.clone(), pc, true, staged_deleted);
+                stage(rel, nc, true, staged_created);
             } else if p.leaf_hash() != n.leaf_hash() {
                 modified.push(EntryRef {
                     segment: rel,
@@ -1105,162 +1106,73 @@ fn diff_same_name(
                 });
             }
         }
-        (ChildEntry::Dir(p), ChildEntry::Dir(n)) => {
-            if p.fs_id() == n.fs_id() {
-                match (p, n) {
-                    (DirChild::Covered(ps), DirChild::Covered(ns)) => {
-                        if ps.dir_hash() != ns.dir_hash() {
-                            collect_dir_pair(
-                                ps,
-                                ns,
-                                &rel,
-                                modified,
-                                staged_created,
-                                staged_deleted,
-                            );
-                        }
-                    }
-                    (DirChild::Uncovered(_), DirChild::Uncovered(_)) => {
-                        // Both sides uncovered: no observation, no delta.
-                    }
-                    (DirChild::Covered(_), DirChild::Uncovered(_))
-                    | (DirChild::Uncovered(_), DirChild::Covered(_)) => {
-                        // Same-fs_id coverage flip: v1-unreachable. The walker's Uncovered gates
-                        // (`!recursive`, `max_depth`, cross-fs) are `config_hash`-frozen per
-                        // Profile or change `fs_id`, so the outer `p.fs_id() == n.fs_id()` guard
-                        // would already have failed (reachability argument unchanged).
-                        //
-                        // Degrade, don't abort: a panic here stalls the single-threaded engine driver
-                        // for a compounding routing breach. Release stages the slot ineligible
-                        // (Deleted + Created, never a Rename) and recurses both sides, surfacing the
-                        // dropped coverage delta rather than silently leaking Tree watches.
-                        debug_assert!(
-                            false,
-                            "diff_same_name: same-fs_id (Covered, Uncovered) is \
-                             v1-unreachable — Uncovered gates are config-frozen \
-                             or change fs_id",
-                        );
-                        staged_deleted.push(StagedEntry {
-                            rel: rel.clone(),
-                            kind: EntryKind::Dir,
-                            fs_id: p.fs_id(),
-                            pair_eligible: false,
-                        });
-                        staged_created.push(StagedEntry {
-                            rel: rel.clone(),
-                            kind: EntryKind::Dir,
-                            fs_id: n.fs_id(),
-                            pair_eligible: false,
-                        });
-                        stage_descendants_deleted(&rel, pc, staged_deleted);
-                        stage_descendants_created(&rel, nc, staged_created);
-                    }
+        (ChildEntry::Dir(p), ChildEntry::Dir(n)) if p.fs_id() == n.fs_id() => match (p, n) {
+            (DirChild::Covered(ps), DirChild::Covered(ns)) => {
+                if ps.dir_hash() != ns.dir_hash() {
+                    collect_dir_pair(ps, ns, &rel, modified, staged_created, staged_deleted);
                 }
-            } else {
-                // Same-name dir-replace at a different kernel identity: parent slot represents a
-                // different entity. Stage parent ineligible (it must surface as Deleted + Created,
-                // never collapse to a same-rel "Rename"), and recurse both subtrees so descendants
-                // surface as Deleted/Created or pair as cross-level Renames against the rest of the
-                // walk.
-                staged_deleted.push(StagedEntry {
-                    rel: rel.clone(),
-                    kind: EntryKind::Dir,
-                    fs_id: p.fs_id(),
-                    pair_eligible: false,
-                });
-                staged_created.push(StagedEntry {
-                    rel: rel.clone(),
-                    kind: EntryKind::Dir,
-                    fs_id: n.fs_id(),
-                    pair_eligible: false,
-                });
-                stage_descendants_deleted(&rel, pc, staged_deleted);
-                stage_descendants_created(&rel, nc, staged_created);
+            }
+            (DirChild::Uncovered(_), DirChild::Uncovered(_)) => {
+                // Both sides uncovered: no observation, no delta.
+            }
+            (DirChild::Covered(_), DirChild::Uncovered(_))
+            | (DirChild::Uncovered(_), DirChild::Covered(_)) => {
+                // Same-fs_id coverage flip: v1-unreachable. The walker's Uncovered gates
+                // (`!recursive`, `max_depth`, cross-fs) are `config_hash`-frozen per Profile or
+                // change `fs_id`, so a flip never meets an unchanged identity.
+                //
+                // Degrade, don't abort: a panic here stalls the single-threaded engine driver for a
+                // compounding routing breach. Release stages the name as replaced, surfacing the
+                // dropped coverage delta rather than silently leaking Tree watches.
+                debug_assert!(
+                    false,
+                    "diff_same_name: same-fs_id (Covered, Uncovered) is \
+                     v1-unreachable — Uncovered gates are config-frozen \
+                     or change fs_id",
+                );
+                stage_replaced(rel, pc, nc, staged_created, staged_deleted);
+            }
+        },
+        // The name changed entity: a Dir replaced at another kernel identity, or a kind change
+        // (Leaf↔Dir).
+        _ => stage_replaced(rel, pc, nc, staged_created, staged_deleted),
+    }
+}
+
+/// A name whose entity changed between the two snapshots. Each side stages ineligible — the slot
+/// must surface as Deleted + Created, never collapse into a same-name "Rename", even where the
+/// kernel reused the inode across the change — and its descendants stage eligible, so a genuine
+/// move into or out of the slot still pairs as a cross-level Rename against the rest of the walk.
+fn stage_replaced(
+    rel: CompactString,
+    prior: &ChildEntry,
+    new: &ChildEntry,
+    staged_created: &mut Vec<StagedEntry>,
+    staged_deleted: &mut Vec<StagedEntry>,
+) {
+    stage(rel.clone(), prior, false, staged_deleted);
+    stage(rel, new, false, staged_created);
+}
+
+/// Stage `entry` at `rel` on one side of a diff, then every entry of the listing beneath it,
+/// eligible — the one primitive every staged entry passes through. Depth-first pre-order: an entry
+/// precedes its subtree, and each level is lex-ordered by its `BTreeMap`. The output is a flat Diff
+/// for the Effect API, which does not care about reap order.
+fn stage(
+    rel: CompactString,
+    entry: &ChildEntry,
+    pair_eligible: bool,
+    staged: &mut Vec<StagedEntry>,
+) {
+    match entry {
+        ChildEntry::Dir(DirChild::Covered(sub)) => {
+            staged.push(StagedEntry::new(rel.clone(), entry, pair_eligible));
+            for (name, child) in &sub.entries {
+                stage(compose_rel(&rel, name), child, true, staged);
             }
         }
-        // Kind change at same name (Leaf↔Dir): the slot represents logically-different entities
-        // across the two snapshots. Stage the parent as ineligible (so pair_renames doesn't try to
-        // collapse it into a nonsensical same-name "Rename" when the kernel reuses the inode across
-        // the kind flip) and recurse the Dir side(s) so descendants surface — either as
-        // Deleted/Created or as cross-level Renames.
-        _ => {
-            staged_deleted.push(StagedEntry {
-                rel: rel.clone(),
-                kind: pc.kind(),
-                fs_id: pc.fs_id(),
-                pair_eligible: false,
-            });
-            staged_created.push(StagedEntry {
-                rel: rel.clone(),
-                kind: nc.kind(),
-                fs_id: nc.fs_id(),
-                pair_eligible: false,
-            });
-            stage_descendants_deleted(&rel, pc, staged_deleted);
-            stage_descendants_created(&rel, nc, staged_created);
-        }
-    }
-}
-
-/// Stage every descendant of `parent` (if `parent` is a covered Dir) as Deleted, with `parent_rel`
-/// as the rel-prefix. Called from `diff_same_name`'s ineligible-parent paths (kind change,
-/// Dir-replace at different inode). Leaves and uncovered Dirs are no-ops.
-fn stage_descendants_deleted(parent_rel: &str, parent: &ChildEntry, staged: &mut Vec<StagedEntry>) {
-    if let ChildEntry::Dir(DirChild::Covered(sub)) = parent {
-        for (cname, cchild) in &sub.entries {
-            stage_deleted(cname, cchild, parent_rel, staged);
-        }
-    }
-}
-
-/// Symmetric counterpart of [`stage_descendants_deleted`].
-fn stage_descendants_created(parent_rel: &str, parent: &ChildEntry, staged: &mut Vec<StagedEntry>) {
-    if let ChildEntry::Dir(DirChild::Covered(sub)) = parent {
-        for (cname, cchild) in &sub.entries {
-            stage_created(cname, cchild, parent_rel, staged);
-        }
-    }
-}
-
-fn stage_deleted(
-    name: &CompactString,
-    pc: &ChildEntry,
-    rel_prefix: &str,
-    staged: &mut Vec<StagedEntry>,
-) {
-    let rel = compose_rel(rel_prefix, name);
-    staged.push(StagedEntry {
-        rel: rel.clone(),
-        kind: pc.kind(),
-        fs_id: pc.fs_id(),
-        pair_eligible: true,
-    });
-    // For Dir deletions, recurse to emit each descendant as Deleted. Output is a flat Diff for the
-    // Effect API; it doesn't care about reap order. The recursive walk preserves lex within each
-    // level.
-    if let ChildEntry::Dir(DirChild::Covered(sub)) = pc {
-        for (cname, cchild) in &sub.entries {
-            stage_deleted(cname, cchild, &rel, staged);
-        }
-    }
-}
-
-fn stage_created(
-    name: &CompactString,
-    nc: &ChildEntry,
-    rel_prefix: &str,
-    staged: &mut Vec<StagedEntry>,
-) {
-    let rel = compose_rel(rel_prefix, name);
-    staged.push(StagedEntry {
-        rel: rel.clone(),
-        kind: nc.kind(),
-        fs_id: nc.fs_id(),
-        pair_eligible: true,
-    });
-    if let ChildEntry::Dir(DirChild::Covered(sub)) = nc {
-        for (cname, cchild) in &sub.entries {
-            stage_created(cname, cchild, &rel, staged);
+        ChildEntry::Dir(DirChild::Uncovered(_)) | ChildEntry::Leaf(_) => {
+            staged.push(StagedEntry::new(rel, entry, pair_eligible));
         }
     }
 }
@@ -1304,7 +1216,7 @@ impl Diff {
     pub fn all_created(snap: &DirSnapshot) -> Self {
         let mut staged: Vec<StagedEntry> = Vec::new();
         for (name, child) in &snap.entries {
-            stage_created(name, child, "", &mut staged);
+            stage(name.clone(), child, true, &mut staged);
         }
         let mut out = Self::default();
         out.created.reserve(staged.len());
@@ -1327,7 +1239,7 @@ impl Diff {
     pub fn all_deleted(snap: &DirSnapshot) -> Self {
         let mut staged: Vec<StagedEntry> = Vec::new();
         for (name, child) in &snap.entries {
-            stage_deleted(name, child, "", &mut staged);
+            stage(name.clone(), child, true, &mut staged);
         }
         let mut out = Self::default();
         out.deleted.reserve(staged.len());
