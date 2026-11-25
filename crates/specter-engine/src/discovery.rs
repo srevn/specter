@@ -282,7 +282,7 @@ impl Engine {
         // — so every mint of it carries this hash.
         if self
             .profiles
-            .find(m.slot, spec.identity.config_hash())
+            .find(m.slot, spec.identity().config_hash())
             .and_then(|profile| self.subs.minted_at(template, profile))
             .is_some()
         {
@@ -377,25 +377,20 @@ impl Engine {
 
 #[cfg(test)]
 mod tests {
-    //! Unit pins for the pass's walk ([`MatchSet::resolve`]), the template ⟺ `MatchChain` attach
-    //! boundary, and the pass over a Profile with no Dir `current`. The end-to-end lifecycle lives
-    //! in `tests/discovery_lifecycle.rs`.
+    //! Unit pins for the pass's walk ([`MatchSet::resolve`]) and the pass over a Profile with no
+    //! Dir `current`. The end-to-end lifecycle lives in `tests/discovery_lifecycle.rs`.
 
     use super::{Branch, Match, MatchSet};
     use crate::Engine;
-    use crate::testkit::{MAX_SETTLE, SETTLE};
-    use crate::testkit::{attach_discovery, discovery_subs_of, mint_spec, pre_place_dir};
+    use crate::testkit::{attach_discovery, discovery_subs_of, pre_place_dir};
     use specter_core::testkit::{
-        covered, covered_at, denied, dir_snap, dir_snap_nested, empty_program, leaf, uncovered,
+        covered, covered_at, denied, dir_snap, dir_snap_nested, leaf, uncovered,
     };
     use specter_core::{
-        ClassSet, EffectScope, EntryKind, FS_ROOT_SEGMENT, Input, MintEntry, PatternSpec, PriorDir,
-        ProfileIdentity, ReactionSpec, ResourceId, ResourceKind, ResourceRole, StepOutput,
-        SubAttachAnchor, SubAttachRequest, SubParams, SubtreeScan, Tree,
+        EntryKind, FS_ROOT_SEGMENT, MintEntry, PriorDir, ResourceId, ResourceKind, ResourceRole,
+        StepOutput, Tree,
     };
-    use std::num::NonZeroU32;
     use std::path::Path;
-    use std::sync::Arc;
     use std::time::Instant;
 
     /// A Tree holding the FS root and the anchor `/srv` beneath it.
@@ -544,57 +539,6 @@ mod tests {
         );
     }
 
-    /// The ⟺ attach boundary, template direction: a template on a non-chain Profile is
-    /// unconstructable — its Profile would classify a firing consequence it can never use.
-    #[test]
-    #[should_panic(expected = "ReactionSpec::Mint ⟺ ScanConfig::MatchChain")]
-    fn template_on_non_chain_profile_is_unconstructable() {
-        let mut e = Engine::new();
-        let srv = pre_place_dir(&mut e, &["srv"]);
-        let _ = e.step(
-            Input::AttachSub(SubAttachRequest::from_parts(
-                SubAttachAnchor::Resource(srv),
-                ProfileIdentity::new(
-                    SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
-                    MAX_SETTLE,
-                    ClassSet::STRUCTURE,
-                ),
-                SubParams {
-                    name: "disc".into(),
-                    settle: SETTLE,
-                    reaction: ReactionSpec::Mint(mint_spec()),
-                },
-            )),
-            Instant::now(),
-        );
-    }
-
-    /// The ⟺ attach boundary, shape direction: a plain Sub on a chain Profile is unconstructable — it
-    /// could never react (a chain Profile mints attachments, never Effects). This same assert fires
-    /// transitively on a chain-shaped *template*: its mint is a template-less Sub on a chain Profile.
-    #[test]
-    #[should_panic(expected = "ReactionSpec::Mint ⟺ ScanConfig::MatchChain")]
-    fn plain_sub_on_chain_profile_is_unconstructable() {
-        let mut e = Engine::new();
-        let srv = pre_place_dir(&mut e, &["srv"]);
-        let _ = e.step(
-            Input::AttachSub(SubAttachRequest::from_parts(
-                SubAttachAnchor::Resource(srv),
-                ProfileIdentity::discovery(Arc::new(
-                    PatternSpec::parse("/srv/*").expect("valid pattern"),
-                )),
-                SubParams::spawn(
-                    "plain".into(),
-                    empty_program(),
-                    EffectScope::SubtreeRoot,
-                    SETTLE,
-                    false,
-                ),
-            )),
-            Instant::now(),
-        );
-    }
-
     /// The reconcile's non-Dir-anchor totality arm: with no Dir `current` (the cold probe hasn't
     /// answered yet — the same shape as an anchor replaced by a file), reconcile walks no termini
     /// and mints nothing; the recovery machinery owns whatever replaced the anchor. An
@@ -603,16 +547,9 @@ mod tests {
     #[test]
     fn reconcile_without_dir_current_mints_nothing() {
         let mut e = Engine::new();
-        let srv = pre_place_dir(&mut e, &["srv"]);
+        pre_place_dir(&mut e, &["srv"]);
         let now = Instant::now();
-        let (sid, pid) = attach_discovery(
-            &mut e,
-            "disc",
-            SubAttachAnchor::Resource(srv),
-            "/srv/*",
-            mint_spec(),
-            now,
-        );
+        let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*", now);
 
         let mut out = StepOutput::default();
         e.reconcile_matches(pid, now, &mut out);

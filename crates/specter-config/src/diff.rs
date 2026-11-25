@@ -73,8 +73,8 @@ pub fn diff(old: &Config, new: &Config) -> SubRegistryDiff {
         removed.is_sorted(),
         "removed must inherit BTreeMap key order",
     );
-    modified_identity.sort_unstable_by(|a, b| a.params.name.cmp(&b.params.name));
-    modified_params.sort_unstable_by(|a, b| a.params.name.cmp(&b.params.name));
+    modified_identity.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+    modified_params.sort_unstable_by(|a, b| a.name.cmp(&b.name));
 
     SubRegistryDiff {
         added,
@@ -89,7 +89,7 @@ mod tests {
     use super::diff;
     use crate::config::Config;
     use compact_str::CompactString;
-    use specter_core::ScanConfig;
+    use specter_core::SubAttachTarget;
 
     const ROOT: &str = "/";
 
@@ -152,8 +152,8 @@ mod tests {
 
         let d = diff(&old, &new);
         assert_eq!(d.added.len(), 2);
-        assert_eq!(d.added[0].params.name, "a");
-        assert_eq!(d.added[1].params.name, "b");
+        assert_eq!(d.added[0].name, "a");
+        assert_eq!(d.added[1].name, "b");
         assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
@@ -200,7 +200,7 @@ mod tests {
         assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert_eq!(d.modified_params.len(), 1);
-        assert_eq!(d.modified_params[0].params.name, "a");
+        assert_eq!(d.modified_params[0].name, "a");
     }
 
     #[test]
@@ -213,14 +213,14 @@ mod tests {
         let d = diff(&old, &new);
 
         assert_eq!(d.added.len(), 1);
-        assert_eq!(d.added[0].params.name, "d");
+        assert_eq!(d.added[0].name, "d");
 
         assert_eq!(d.removed, vec![CompactString::from("b")]);
 
         // `block("a", "echo") → block("a", "fmt")` is a program-only change ⇒ `modified_params`.
         assert!(d.modified_identity.is_empty());
         assert_eq!(d.modified_params.len(), 1);
-        assert_eq!(d.modified_params[0].params.name, "a");
+        assert_eq!(d.modified_params[0].name, "a");
     }
 
     #[test]
@@ -246,7 +246,7 @@ mod tests {
 
         let d = diff(&old, &new);
         assert_eq!(d.added.len(), 1);
-        assert_eq!(d.added[0].params.name, "z");
+        assert_eq!(d.added[0].name, "z");
         assert_eq!(d.removed, vec![CompactString::from("a")]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
@@ -293,11 +293,7 @@ mod tests {
         let old = cfg(&old_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let new = cfg(&new_blocks.iter().map(String::as_str).collect::<Vec<_>>());
         let d = diff(&old, &new);
-        let order: Vec<&str> = d
-            .modified_params
-            .iter()
-            .map(|r| r.params.name.as_str())
-            .collect();
+        let order: Vec<&str> = d.modified_params.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(order, vec!["a", "b"]);
     }
 
@@ -319,9 +315,9 @@ mod tests {
         assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
-        assert_eq!(d.modified_identity[0].params.name, "a");
+        assert_eq!(d.modified_identity[0].name, "a");
         assert_eq!(
-            d.modified_identity[0].identity.events(),
+            d.modified_identity[0].events,
             specter_core::ClassSet::CONTENT
         );
     }
@@ -395,13 +391,13 @@ mod tests {
         let d = diff(&old, &new);
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
-        assert_eq!(d.modified_identity[0].params.name, "a");
+        assert_eq!(d.modified_identity[0].name, "a");
     }
 
     // ---- Discovery (dynamic) side ----
 
-    /// Adding a fresh dynamic [[watch]] populates `added` in source order with template-bearing
-    /// requests. Nothing on the old side, so no removed / modified entries.
+    /// Adding a fresh dynamic [[watch]] populates `added` in source order with requests addressed
+    /// to their patterns. Nothing on the old side, so no removed / modified entries.
     #[test]
     fn discovery_added_populates_added_in_source_order() {
         let old = cfg(&[]);
@@ -414,9 +410,13 @@ mod tests {
 
         let d = diff(&old, &new);
         assert_eq!(d.added.len(), 2);
-        assert_eq!(d.added[0].params.name, "logs");
-        assert_eq!(d.added[1].params.name, "sites");
-        assert!(d.added.iter().all(|r| r.params.is_template()));
+        assert_eq!(d.added[0].name, "logs");
+        assert_eq!(d.added[1].name, "sites");
+        assert!(
+            d.added
+                .iter()
+                .all(|r| matches!(r.target, SubAttachTarget::Pattern(_)))
+        );
         assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
@@ -453,12 +453,12 @@ mod tests {
         assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
-        assert_eq!(d.modified_identity[0].params.name, "logs");
+        assert_eq!(d.modified_identity[0].name, "logs");
     }
 
     /// Pattern source change re-anchors the discovery Profile; diff surfaces it as
-    /// `modified_identity` carrying the fresh `MatchChain` scan. The engine wholesale-replaces,
-    /// which reaps the old minted set and re-mints against the new pattern.
+    /// `modified_identity` carrying the fresh pattern. The engine wholesale-replaces, which reaps
+    /// the old minted set and re-mints against the new pattern.
     #[test]
     fn discovery_pattern_change_lands_in_modified_identity() {
         let old_blocks = [dyn_block("logs", "/srv/log/*.log", "echo")];
@@ -468,8 +468,8 @@ mod tests {
 
         let d = diff(&old, &new);
         assert_eq!(d.modified_identity.len(), 1);
-        let ScanConfig::MatchChain(spec) = d.modified_identity[0].identity.config() else {
-            panic!("discovery request carries MatchChain");
+        let SubAttachTarget::Pattern(spec) = &d.modified_identity[0].target else {
+            panic!("a dynamic watch's request is addressed to its pattern");
         };
         assert_eq!(spec.source(), "/srv/log/*.json");
     }
@@ -507,9 +507,9 @@ mod tests {
     // ---- Cross-kind: static ↔ dynamic migration via path edit ----
 
     /// Static → dynamic via path edit: same name, but the path crossed the `is_dynamic` boundary,
-    /// so template presence differs across the pair and the head guard classifies
-    /// `modified_identity` — a wholesale teardown then attach. The path semantics meaningfully
-    /// changed; an in-place rebind would hide that.
+    /// so the target differs across the pair and the diff classifies `modified_identity` — a
+    /// wholesale teardown then attach. The path semantics meaningfully changed; an in-place rebind
+    /// would hide that.
     #[test]
     fn static_to_dynamic_migration_lands_in_modified_identity() {
         let old_blocks = [block("foo", "echo")]; // path = "/" (static)
@@ -523,12 +523,15 @@ mod tests {
         assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
-        assert_eq!(d.modified_identity[0].params.name, "foo");
-        assert!(d.modified_identity[0].params.is_template());
+        assert_eq!(d.modified_identity[0].name, "foo");
+        assert!(matches!(
+            d.modified_identity[0].target,
+            SubAttachTarget::Pattern(_)
+        ));
     }
 
-    /// Reverse direction: dynamic → static via path edit. Same head guard (template presence on the
-    /// *old* side), same `modified_identity` bucket; the request is now template-free.
+    /// Reverse direction: dynamic → static via path edit — the same `modified_identity` bucket, the
+    /// request now addressed to a path.
     #[test]
     fn dynamic_to_static_migration_lands_in_modified_identity() {
         let old_blocks = [dyn_block("foo", "/foo/*", "echo")];
@@ -542,8 +545,11 @@ mod tests {
         assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_params.is_empty());
         assert_eq!(d.modified_identity.len(), 1);
-        assert_eq!(d.modified_identity[0].params.name, "foo");
-        assert!(!d.modified_identity[0].params.is_template());
+        assert_eq!(d.modified_identity[0].name, "foo");
+        assert!(matches!(
+            d.modified_identity[0].target,
+            SubAttachTarget::At(_)
+        ));
     }
 
     /// Mixed reload: one static modify, one discovery add, one of each removed. Static and
@@ -569,11 +575,11 @@ mod tests {
         let removed: Vec<&str> = d.removed.iter().map(CompactString::as_str).collect();
         assert_eq!(removed, vec!["dyn_drop", "static_drop"]);
         assert_eq!(d.added.len(), 1);
-        assert_eq!(d.added[0].params.name, "dyn_new");
+        assert_eq!(d.added[0].name, "dyn_new");
         // `static_keep`: echo → fmt is a program-only change on a static spec ⇒ params bucket.
         assert!(d.modified_identity.is_empty());
         assert_eq!(d.modified_params.len(), 1);
-        assert_eq!(d.modified_params[0].params.name, "static_keep");
+        assert_eq!(d.modified_params[0].name, "static_keep");
     }
 
     // ---- Enabled-toggle transitions ----
@@ -613,7 +619,7 @@ mod tests {
         let new = cfg(&[block_with_enabled("a", "echo", true).as_str()]);
         let d = diff(&old, &new);
         assert_eq!(d.added.len(), 1);
-        assert_eq!(d.added[0].params.name, "a");
+        assert_eq!(d.added[0].name, "a");
         assert_eq!(d.removed, [] as [CompactString; 0]);
         assert!(d.modified_identity.is_empty());
         assert!(d.modified_params.is_empty());
@@ -648,8 +654,8 @@ mod tests {
 
         let d = diff(&cfg(&[off.as_str()]), &cfg(&[on.as_str()]));
         assert_eq!(d.added.len(), 1);
-        assert_eq!(d.added[0].params.name, "logs");
-        assert!(d.added[0].params.is_template());
+        assert_eq!(d.added[0].name, "logs");
+        assert!(matches!(d.added[0].target, SubAttachTarget::Pattern(_)));
         assert_eq!(d.removed, [] as [CompactString; 0]);
     }
 }

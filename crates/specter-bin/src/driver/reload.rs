@@ -352,12 +352,11 @@ impl<W: FsWatcher> EngineDriver<W> {
     pub(super) fn compute_watch_diff(&self, new_config: &Config) -> specter_core::SubRegistryDiff {
         let mut diff = specter_config::diff(self.loader.current_config(), new_config);
         let disabled = &self.disabled_runtime;
-        diff.added
-            .retain(|r| !disabled.contains(r.params.name.as_str()));
+        diff.added.retain(|r| !disabled.contains(r.name.as_str()));
         diff.modified_identity
-            .retain(|r| !disabled.contains(r.params.name.as_str()));
+            .retain(|r| !disabled.contains(r.name.as_str()));
         diff.modified_params
-            .retain(|r| !disabled.contains(r.params.name.as_str()));
+            .retain(|r| !disabled.contains(r.name.as_str()));
         diff.removed.retain(|n| !disabled.contains(n.as_str()));
         diff
     }

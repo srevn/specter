@@ -5,16 +5,17 @@
 
 use crate::testkit::single_exec_program;
 use crate::{
-    ActionProgram, ArgPart, ArgTemplate, ChildEntry, DirChild, DirMeta, DirSnapshot,
-    DirtyProvenance, EntryKind, FsIdentity, LeafEntry, ProbeOutcome, ProfileId, ProofAuthority,
-    ResourceId,
+    ActionProgram, ArgPart, ArgTemplate, ChildEntry, ClassSet, DirChild, DirMeta, DirSnapshot,
+    DirtyProvenance, EffectScope, EntryKind, FsIdentity, LeafEntry, ProbeOutcome, ProfileId,
+    ProofAuthority, ResourceId, SpawnSpec, SubAttachAnchor, SubAttachRequest, SubAttachTarget,
+    SubParams, SubtreeScan,
 };
 use compact_str::CompactString;
 use slotmap::SlotMap;
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 /// Build a flat single-level directory snapshot from `(name, kind, inode)` triples.
 ///
@@ -208,4 +209,33 @@ pub fn fresh_profile_id() -> ProfileId {
 pub fn fresh_profile_ids(n: usize) -> Vec<ProfileId> {
     let mut sm = SlotMap::<ProfileId, ()>::with_key();
     (0..n).map(|_| sm.insert(())).collect()
+}
+
+impl SubAttachRequest {
+    /// A request for one Sub at `anchor`, every knob an argument — the fixtures' flat spelling of
+    /// what config lowering writes as a struct.
+    #[must_use]
+    pub fn for_anchor(
+        name: CompactString,
+        anchor: SubAttachAnchor,
+        scan: SubtreeScan,
+        max_settle: Duration,
+        settle: Duration,
+        program: Arc<ActionProgram>,
+        scope: EffectScope,
+        events: ClassSet,
+        log_output: bool,
+    ) -> Self {
+        Self {
+            name,
+            target: SubAttachTarget::At(anchor),
+            scan,
+            max_settle,
+            events,
+            params: SubParams {
+                settle,
+                spawn: SpawnSpec::new(program, scope, log_output),
+            },
+        }
+    }
 }

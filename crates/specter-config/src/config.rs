@@ -7,9 +7,9 @@ use crate::raw::{RawAction, RawConfig, RawExec, RawLogConfig, RawWatch};
 use crate::template;
 use compact_str::CompactString;
 use specter_core::{
-    self as core, ActionProgram, ArgTemplate, ClassSet, DISCOVERY_SETTLE, EffectScope, ExecAction,
-    GlobPattern, MintSpec, PatternSpec, ProfileIdentity, ReactionSpec, SpawnSpec, SubAttachAnchor,
-    SubAttachRequest, SubParams, SubtreeScan,
+    self as core, ActionProgram, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
+    PatternSpec, SpawnSpec, SubAttachAnchor, SubAttachRequest, SubAttachTarget, SubParams,
+    SubtreeScan,
 };
 use std::collections::BTreeMap;
 use std::num::NonZeroU32;
@@ -182,44 +182,34 @@ pub struct SubSpec {
 }
 
 impl SubSpec {
-    /// The request this watch attaches through: a Sub at a static path, or a template anchored at a
-    /// pattern's literal prefix, whose Profile walks the pattern's chain at the discovery pair and
-    /// which mints one Sub per match under this spec's identity and params.
+    /// The request this watch attaches through: its target and every knob as it stands, the
+    /// reaction sealed. What a pattern means beyond that — its anchor, its Profile's identity, the
+    /// template it seats — is the engine's to read off the target.
     #[must_use]
     pub fn to_attach_request(&self) -> SubAttachRequest {
-        let spawn = SpawnSpec::new(Arc::clone(&self.program), self.scope, self.log_output);
-        let firing = ProfileIdentity::new(self.scan.clone(), self.max_settle, self.events);
-        match &self.target {
-            WatchTarget::Static(path) => SubAttachRequest::from_parts(
-                SubAttachAnchor::Path(path.clone()),
-                firing,
-                SubParams {
-                    name: self.name.clone(),
-                    settle: self.settle,
-                    reaction: ReactionSpec::Spawn(spawn),
-                },
-            ),
-            WatchTarget::Dynamic(pattern) => SubAttachRequest::from_parts(
-                SubAttachAnchor::Path(pattern.literal_prefix_path()),
-                ProfileIdentity::discovery(Arc::clone(pattern)),
-                SubParams {
-                    name: self.name.clone(),
-                    settle: DISCOVERY_SETTLE,
-                    reaction: ReactionSpec::Mint(Arc::new(MintSpec {
-                        identity: firing,
-                        settle: self.settle,
-                        spawn,
-                    })),
-                },
-            ),
+        SubAttachRequest {
+            name: self.name.clone(),
+            target: match &self.target {
+                WatchTarget::Static(path) => {
+                    SubAttachTarget::At(SubAttachAnchor::Path(path.clone()))
+                }
+                WatchTarget::Dynamic(pattern) => SubAttachTarget::Pattern(Arc::clone(pattern)),
+            },
+            scan: self.scan.clone(),
+            max_settle: self.max_settle,
+            events: self.events,
+            params: SubParams {
+                settle: self.settle,
+                spawn: SpawnSpec::new(Arc::clone(&self.program), self.scope, self.log_output),
+            },
         }
     }
 
     /// True iff the edit from `self` to `other` moves the watch to another Profile: its target, or
     /// one of the three axes a firing Profile's identity folds. What is left — `program`, `scope`,
     /// `log_output`, `settle` — rebinds in place; `name` is the diff's key and `enabled` its
-    /// filter, so neither reaches here. Field-derived, so no [`ProfileIdentity`] is built to be
-    /// compared and dropped.
+    /// filter, so neither reaches here. Field-derived, so no [`core::ProfileIdentity`] is built to
+    /// be compared and dropped.
     ///
     /// Every edit of a dynamic watch is identity: the registry's rebind refuses a template
     /// ([`specter_core::SubRegistry::rebind`]), so a params edit replaces the template and the set
@@ -1396,13 +1386,13 @@ fn parse_events_field(
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, LogConfig, LogDestination, LogLevel, SubAttachAnchor, SubSpec, WatchTarget,
+        Config, LogConfig, LogDestination, LogLevel, SubAttachAnchor, SubAttachTarget, SubSpec,
+        WatchTarget,
     };
     use crate::error::{ConfigError, IssueKind};
     use specter_core::program::SpawnBody;
     use specter_core::{
-        ArgPart, ClassSet, EffectScope, GlobPattern, Placeholder, ProfileIdentity, ReactionSpec,
-        ScanConfig, SubtreeScan,
+        ArgPart, ClassSet, EffectScope, GlobPattern, Placeholder, ScanConfig, SubtreeScan,
     };
     use std::num::NonZeroU32;
     use std::path::Path;
@@ -1586,11 +1576,8 @@ mod tests {
     fn log_output_threads_into_attach_request() {
         let cfg = Config::from_str(&minimal_toml("log_output = true\n")).unwrap();
         let req = cfg.watches[0].to_attach_request();
-        let ReactionSpec::Spawn(spec) = &req.params.reaction else {
-            panic!("static watch lowers to a Spawn reaction");
-        };
         assert!(
-            spec.log_output(),
+            req.params.spawn.log_output(),
             "SubSpec.log_output reaches the request's SpawnSpec via to_attach_request",
         );
     }
@@ -1972,10 +1959,9 @@ mod tests {
     fn to_attach_request_uses_path_anchor_with_canonicalized_path() {
         let cfg = Config::from_str(&minimal_toml("")).unwrap();
         let req = cfg.watches[0].to_attach_request();
-        assert_eq!(req.params.name, "build");
-        assert!(matches!(req.anchor, SubAttachAnchor::Path(_)));
-        let SubAttachAnchor::Path(p) = &req.anchor else {
-            panic!("expected Path anchor")
+        assert_eq!(req.name, "build");
+        let SubAttachTarget::At(SubAttachAnchor::Path(p)) = &req.target else {
+            panic!("a static watch's request is addressed to its path")
         };
         assert_eq!(
             cfg.watches[0].target,
@@ -1983,7 +1969,7 @@ mod tests {
             "request carries the same path stored in SubSpec"
         );
         assert_eq!(
-            req.identity.events(),
+            req.events,
             ClassSet::DEFAULT_SUBTREE_ROOT,
             "to_attach_request threads the parsed events ClassSet through \
              into the engine surface",
@@ -2414,9 +2400,9 @@ mod tests {
     }
 
     /// The full lowering grid: a dynamic block's knobs stay on its spec, as a static block's do,
-    /// and its request anchors the template at the pattern's literal prefix, the knobs sealed into
-    /// its `MintSpec` verbatim — the minted identity's hash equals a hand-built [`ProfileIdentity`]
-    /// over the same knobs, and the template's own Profile is the discovery shape.
+    /// and its request is addressed to the one parsed pattern and carries every knob as the spec
+    /// holds it — where it anchors, its Profile's identity and the template it seats are the
+    /// engine's to read off the target.
     #[test]
     fn dynamic_block_lowers_to_discovery_sub_spec() {
         let toml = "[[watch]]\nname = \"logs\"\npath = \"/srv/log/*\"\n\
@@ -2449,20 +2435,17 @@ mod tests {
         );
 
         let req = w.to_attach_request();
-        let SubAttachAnchor::Path(anchor) = &req.anchor else {
-            panic!("a lowered request anchors at a path");
+        let SubAttachTarget::Pattern(pattern) = &req.target else {
+            panic!("a dynamic watch's request is addressed to its pattern");
         };
-        assert_eq!(anchor, Path::new("/srv/log"));
-        let ReactionSpec::Mint(minted) = &req.params.reaction else {
-            panic!("dynamic watch lowers to a Mint reaction");
-        };
-        assert_eq!(minted.settle, Duration::from_millis(300));
-        let hand_built = ProfileIdentity::new(w.scan.clone(), w.max_settle, w.events);
-        assert_eq!(minted.identity.config_hash(), hand_built.config_hash());
+        assert!(Arc::ptr_eq(pattern, spec), "one parsed pattern, shared");
         assert_eq!(
-            req.identity.config_hash(),
-            ProfileIdentity::discovery(Arc::clone(spec)).config_hash()
+            (&req.scan, req.max_settle, req.events),
+            (&w.scan, w.max_settle, w.events)
         );
+        assert_eq!(req.params.settle, w.settle);
+        assert_eq!(req.params.spawn.scope(), w.scope);
+        assert!(req.params.spawn.log_output());
     }
 
     /// Dynamic watches accept `pattern` (per-Sub include filter) and `exclude` (per-Sub exclude

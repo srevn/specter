@@ -449,10 +449,10 @@ pub(crate) struct ListRow {
     pub(crate) fire_count: Option<u64>,
     /// Cumulative B1-dedup suppressions. `None` for `mint` rows and non-attached rows.
     pub(crate) dedup_suppressed_count: Option<u64>,
-    /// `Sub.settle.as_millis()` — the per-Sub debounce floor. Distinct from `Profile.settle`
-    /// (engine-recomputed as `min(remaining_subs.settles)` across the Profile's attached Subs); the
-    /// wire field is the per-Sub value the operator declared, not the Profile-level fold. `None`
-    /// for non-attached rows.
+    /// `Sub::settle().as_millis()` — the per-Sub debounce: the one the operator declared, or on a
+    /// `mint` row the discovery walk's. Distinct from `Profile.settle` (engine-recomputed as
+    /// `min(remaining_subs.settles)` across the Profile's attached Subs), the Profile-level fold.
+    /// `None` for non-attached rows.
     pub(crate) settle_ms: Option<u64>,
     /// Which reaction kind this row's Sub carries — `spawn` (fires a program) or `mint` (a
     /// discovery template; its row's fire-stat `None`s are structural, not "never fired"). `None`
@@ -543,9 +543,8 @@ pub(crate) struct SubDetails {
     /// `Profile.absorb_count` — folds this Profile has absorbed. The fold counterpart of the
     /// `spawn` payload's `fire_count`; per-Profile (a fold is per-Profile), projected here per-Sub.
     pub(crate) absorb_count: u64,
-    /// `Sub.settle.as_millis()` — this Sub's own debounce. On a `mint` row this is the discovery
-    /// walk's debounce (a lowering constant), distinct from the template knob `minted_settle_ms`
-    /// the minted Subs inherit.
+    /// `Sub::settle().as_millis()` — this Sub's own debounce. On a `mint` row this is the discovery
+    /// walk's debounce, distinct from the template knob `minted_settle_ms` the minted Subs inherit.
     pub(crate) settle_ms: u64,
     /// `Sub::minted_by()` projection — `Some(_)` iff the Sub was minted by a discovery template.
     /// Distinct from a TOML-declared Sub with the same anchor: the source id locates which template

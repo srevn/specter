@@ -13,8 +13,8 @@ use std::sync::Arc;
 /// Single-exec program with no per-step timeout.
 ///
 /// Covers the common fixture shape used across engine and actuator tests. The returned `Arc` is the
-/// same shape `lower_to_program` mints, so it can flow directly into [`crate::Sub::from_request`] /
-/// [`crate::SubAttachRequest`] / [`crate::Effect`].
+/// same shape `lower_to_program` mints, so it can flow directly into a [`crate::SpawnSpec`] or an
+/// [`crate::Effect`].
 ///
 /// Edges:
 /// - `on_ok = Escape` (natural completion at top level).

@@ -34,7 +34,8 @@ use specter_core::{
 };
 // Registries.
 use specter_core::{
-    MintEntry, ProfileIdentity, Sub, SubAttachAnchor, SubAttachRequest, SubParams, SubRegistry,
+    DISCOVERY_SETTLE, MintEntry, MintSpec, ProfileIdentity, Sub, SubAttachAnchor, SubAttachRequest,
+    SubAttachTarget, SubParams, SubRegistry,
 };
 // Per-Resource bookkeeping.
 use specter_core::ResourceKind;
@@ -186,26 +187,34 @@ impl Engine {
         out
     }
 
-    /// Attach a Sub at its [`SubAttachAnchor`] — a caller-supplied `Resource` slot or a `Path` the
-    /// engine materialises. Reuses an existing Profile when `(anchor, config_hash)` matches
+    /// Attach a Sub where its [`SubAttachTarget`] says: at an anchor — a caller-supplied `Resource`
+    /// slot or a `Path` the engine materialises — or, for a pattern, a template at the pattern's
+    /// literal prefix. Reuses an existing Profile when `(anchor, config_hash)` matches
     /// ([`Self::join_profile`]); otherwise creates a fresh Profile and seeds it at its anchor
     /// ([`Self::seed_at_anchor`]: the anchor's and its parent's claims, then a Seed burst whose
     /// `Stable` verdict pins the baseline) — at once when the anchor is on disk, or at the terminus
     /// of the pending descent it enters when it is not. Nothing but intent stands behind a request,
     /// so its fresh anchor seeds cold and its descent enters unwitnessed.
     ///
+    /// The target decides what the request's knobs are. At an anchor they are the identity of the
+    /// Profile the Sub fires on ([`ProfileIdentity::new`]) and the params it runs. For a pattern
+    /// they are sealed into the template's [`MintSpec`], what it stamps onto each Sub it mints,
+    /// while its own Profile takes the pattern's identity ([`ProfileIdentity::discovery`]) and is
+    /// founded at the discovery debounce.
+    ///
     /// Sole public entry is [`Input::AttachSub`] via [`Self::step`]; `pub(crate)` so
     /// [`Self::on_config_diff`] can compose detaches and attaches into one [`StepOutput`]. A Sub a
     /// template mints enters through [`Self::mint_sub`] instead.
     ///
-    /// Total: an anchor the gate refuses ([`Self::admit_attach_anchor`]) attaches nothing, and the
+    /// Total: a target the gate refuses ([`Self::admit_attach_target`]) attaches nothing, and the
     /// gate's line says why.
     ///
-    /// # Production invariants (`Path` anchor)
+    /// # Production invariants (the path an attach resolves)
     ///
-    /// 1. **Absolute paths only.** [`Tree::parse_attach_path`] is the gate's parse. Config lowering
-    ///    hands the engine only paths it admits (`canonicalize_lenient`); the gate keeps the engine
-    ///    total for any other producer of an [`Input`].
+    /// 1. **Absolute paths only.** [`Tree::parse_attach_path`] is the gate's parse, of an anchor's
+    ///    own path or a pattern's literal prefix. Config lowering hands the engine only paths it
+    ///    admits (`canonicalize_lenient`); the gate keeps the engine total for any other producer
+    ///    of an [`Input`].
     /// 2. **Single FS-root.** Every validated [`specter_core::TreePath`] starts with
     ///    [`specter_core::FS_ROOT_SEGMENT`]; `materialize_path_or_pending` lazily bootstraps a
     ///    synthetic `/` slot (role `ResourceRole::DescentScaffold`) before the pre-existence walk
@@ -219,8 +228,8 @@ impl Engine {
     ///
     /// # Pipeline
     ///
-    /// 1. **The anchor.** The gate admits it; a path then materialises, or scaffolds for its
-    ///    descent ([`MaterializeResult`]). `find_or_create_profile` classifies the `(anchor,
+    /// 1. **The anchor.** The gate admits the target; a path then materialises, or scaffolds for
+    ///    its descent ([`MaterializeResult`]). `find_or_create_profile` classifies the `(anchor,
     ///    config_hash)` lookup into a [`ProfileOrigin`].
     /// 2. **Sub registration** ([`Self::register_sub`]).
     /// 3. **Per-origin bookkeeping.** A Profile that already stood takes the join; a fresh one
@@ -233,32 +242,43 @@ impl Engine {
         now: Instant,
         out: &mut StepOutput,
     ) {
-        // A discovery template and the `MatchChain` shape are coupled iff: a template on a
-        // non-chain Profile could never reconcile, and a plain Sub on a chain Profile could never
-        // react (its Profile mints attachments, not Effects).
-        debug_assert_eq!(
-            req.params.is_template(),
-            req.identity.config().match_chain().is_some(),
-            "attach_sub_inner: ReactionSpec::Mint ⟺ ScanConfig::MatchChain \
-             (a template mints; a chain Profile reconciles — neither exists without the other)",
-        );
-
         let SubAttachRequest {
-            anchor,
-            identity,
+            name,
+            target,
+            scan,
+            max_settle,
+            events,
             params,
         } = req;
-        let Some(resolved) = self.resolve_attach_anchor(&anchor, out) else {
+        let Some(resolved) = self.resolve_attach_target(&target, out) else {
             return;
         };
-        let (profile_id, origin) = find_or_create_profile(
-            &mut self.profiles,
-            &mut self.tree,
-            resolved.anchor(),
-            &identity,
-            params.settle,
-        );
-        self.register_sub(Sub::from_request(profile_id, params), out);
+        let anchor = resolved.anchor();
+        let (profile_id, origin) = match target {
+            SubAttachTarget::At(_) => {
+                let (profile, origin) = find_or_create_profile(
+                    &mut self.profiles,
+                    &mut self.tree,
+                    anchor,
+                    &ProfileIdentity::new(scan, max_settle, events),
+                    params.settle,
+                );
+                self.register_sub(Sub::declared(profile, name, params), out);
+                (profile, origin)
+            }
+            SubAttachTarget::Pattern(pattern) => {
+                let (profile, origin) = find_or_create_profile(
+                    &mut self.profiles,
+                    &mut self.tree,
+                    anchor,
+                    &ProfileIdentity::discovery(pattern),
+                    DISCOVERY_SETTLE,
+                );
+                let spec = MintSpec::new(scan, max_settle, events, params);
+                self.register_sub(Sub::template(profile, name, spec), out);
+                (profile, origin)
+            }
+        };
         match origin {
             ProfileOrigin::Fresh => match resolved {
                 MaterializeResult::Materialized(_) => {
@@ -320,11 +340,6 @@ impl Engine {
             );
             return;
         };
-        // A minted Sub reacts, so its Profile must fire: on a chain Profile it would never react.
-        debug_assert!(
-            spec.identity.config().match_chain().is_none(),
-            "mint_sub: a minted identity is never a MatchChain (template = {template:?})",
-        );
         // A Profile takes its anchor's kind from the slot when it is founded, and the pass meets
         // slots the graft never kinded: one a watch rejection reset, one a reap took and the pass
         // made anew.
@@ -333,8 +348,8 @@ impl Engine {
             &mut self.profiles,
             &mut self.tree,
             terminus,
-            &spec.identity,
-            spec.settle,
+            spec.identity(),
+            spec.params().settle,
         );
         let sub = Sub::minted(profile_id, name, template, spec);
         self.register_sub(sub, out);
@@ -362,21 +377,21 @@ impl Engine {
         });
     }
 
-    /// The one fallible boundary of an attach: what `anchor` names, admitted, or refused with its
+    /// The one fallible boundary of an attach: what `target` names, admitted, or refused with its
     /// line — [`Diagnostic::AttachResourceStale`] for a slot no longer live (a request crosses a
     /// channel and holds no Tree borrow), [`Diagnostic::AttachPathInvalid`] for a path the Tree
-    /// cannot hold.
+    /// cannot hold, an anchor's own or a pattern's literal prefix ([`admit_path`]).
     ///
     /// Reads only, so [`Self::on_config_diff`] asks it before the detach a refused attach would
     /// make for nothing. The attach asks again after: that detach can reap the very slot a request
     /// names, so nothing admitted is carried across it.
-    pub(crate) fn admit_attach_anchor(
+    pub(crate) fn admit_attach_target(
         &self,
-        anchor: &SubAttachAnchor,
+        target: &SubAttachTarget,
         out: &mut StepOutput,
     ) -> Option<AttachSite> {
-        match anchor {
-            SubAttachAnchor::Resource(slot) => {
+        match target {
+            SubAttachTarget::At(SubAttachAnchor::Resource(slot)) => {
                 if self.tree.get(*slot).is_some() {
                     Some(AttachSite::Slot(*slot))
                 } else {
@@ -385,27 +400,19 @@ impl Engine {
                     None
                 }
             }
-            SubAttachAnchor::Path(path) => match Tree::parse_attach_path(path) {
-                Ok(parsed) => Some(AttachSite::Path(parsed)),
-                Err(err) => {
-                    out.diagnostics.push(Diagnostic::AttachPathInvalid {
-                        path: Arc::from(path.as_path()),
-                        hint: err.hint(),
-                    });
-                    None
-                }
-            },
+            SubAttachTarget::At(SubAttachAnchor::Path(path)) => admit_path(path, out),
+            SubAttachTarget::Pattern(pattern) => admit_path(&pattern.literal_prefix_path(), out),
         }
     }
 
-    /// The anchor an attach stands on: admitted ([`Self::admit_attach_anchor`]), then a held slot
-    /// as it stands, and a path materialised or left pending its descent.
-    fn resolve_attach_anchor(
+    /// The anchor an attach stands on: its target admitted ([`Self::admit_attach_target`]), then a
+    /// held slot as it stands, and a path materialised or left pending its descent.
+    fn resolve_attach_target(
         &mut self,
-        anchor: &SubAttachAnchor,
+        target: &SubAttachTarget,
         out: &mut StepOutput,
     ) -> Option<MaterializeResult> {
-        Some(match self.admit_attach_anchor(anchor, out)? {
+        Some(match self.admit_attach_target(target, out)? {
             AttachSite::Slot(slot) => MaterializeResult::Materialized(slot),
             AttachSite::Path(path) => self.materialize_path_or_pending(&path),
         })
@@ -921,6 +928,21 @@ pub(crate) fn is_timer_referenced(
         .is_some_and(|live| live == id)
 }
 
+/// The gate's one parse ([`Engine::admit_attach_target`]): `path` as a site the Tree can hold, or
+/// refused with [`Diagnostic::AttachPathInvalid`].
+fn admit_path(path: &Path, out: &mut StepOutput) -> Option<AttachSite> {
+    match Tree::parse_attach_path(path) {
+        Ok(parsed) => Some(AttachSite::Path(parsed)),
+        Err(err) => {
+            out.diagnostics.push(Diagnostic::AttachPathInvalid {
+                path: Arc::from(path),
+                hint: err.hint(),
+            });
+            None
+        }
+    }
+}
+
 /// Find the Profile at `(anchor, identity.config_hash())`, classifying how a Sub joins it, or found
 /// one whose settle floor is the attaching Sub's `settle`.
 ///
@@ -1019,11 +1041,11 @@ impl From<DescentWitness> for SeedWitness {
     }
 }
 
-/// What an anchor names once the attach's gate has admitted it ([`Engine::admit_attach_anchor`]).
+/// What a target names once the attach's gate has admitted it ([`Engine::admit_attach_target`]).
 pub(crate) enum AttachSite {
     /// A slot the caller holds, found live.
     Slot(ResourceId),
-    /// A path the Tree can hold.
+    /// A path the Tree can hold: an anchor's own, or a pattern's literal prefix.
     Path(TreePath),
 }
 

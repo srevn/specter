@@ -2159,7 +2159,7 @@ actions   = [{{ exec = ["true"] }}]
     let rig = rig_for(initial, cfg_path);
     let diff = rig.driver.compute_watch_diff(&new);
     assert_eq!(diff.added.len(), 1);
-    assert_eq!(diff.added[0].params.name, "added");
+    assert_eq!(diff.added[0].name, "added");
 }
 
 #[test]

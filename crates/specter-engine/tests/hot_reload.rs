@@ -12,7 +12,7 @@ use specter_core::{
 use specter_engine::Engine;
 use specter_engine::testkit::{
     DEFAULT_EVENTS, MAX_SETTLE, NO_EVENTS, SETTLE, discovery_req, discovery_subs_of, drain_due,
-    mint_spec, pid_of, pre_place_dir, seed_to_idle, verify,
+    pid_of, pre_place_dir, seed_to_idle, verify,
 };
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -355,7 +355,11 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
         pid,
         "rebind preserves the Sub's ProfileId",
     );
-    assert_eq!(sub_after.settle, new_settle, "Sub.settle is the new value");
+    assert_eq!(
+        sub_after.settle(),
+        new_settle,
+        "Sub.settle is the new value"
+    );
     assert_eq!(
         e.profiles().get(pid).unwrap().settle,
         new_settle,
@@ -591,16 +595,11 @@ fn config_diff_modified_identity_same_path_rebinds_profile_safely() {
 #[test]
 fn config_diff_add_dynamic_attaches_and_first_reconcile_mints() {
     let mut e = Engine::new();
-    let data = pre_place_dir(&mut e, &["data"]);
+    pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
 
     let mut diff = SubRegistryDiff::default();
-    diff.added.push(discovery_req(
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-    ));
+    diff.added.push(discovery_req("disc", "/data/*"));
     let out = e.step(Input::ConfigDiff(diff), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("diff added the template");
     let pid = pid_of(&e, sid);
@@ -633,12 +632,7 @@ fn config_diff_add_dynamic_with_missing_prefix_goes_pending() {
     let now = Instant::now();
 
     let mut diff = SubRegistryDiff::default();
-    diff.added.push(discovery_req(
-        "disc",
-        SubAttachAnchor::Path(PathBuf::from("/data/x")),
-        "/data/x/*",
-        mint_spec(),
-    ));
+    diff.added.push(discovery_req("disc", "/data/x/*"));
     let out = e.step(Input::ConfigDiff(diff), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("diff added the template");
     let pid = pid_of(&e, sid);
@@ -667,17 +661,9 @@ fn config_diff_add_dynamic_with_missing_prefix_goes_pending() {
 #[test]
 fn config_diff_modify_template_cascades_and_remints() {
     let mut e = Engine::new();
-    let data = pre_place_dir(&mut e, &["data"]);
+    pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let attach = e.step(
-        Input::AttachSub(discovery_req(
-            "disc",
-            SubAttachAnchor::Resource(data),
-            "/data/*",
-            mint_spec(),
-        )),
-        now,
-    );
+    let attach = e.step(Input::AttachSub(discovery_req("disc", "/data/*")), now);
     let old_template =
         specter_core::testkit::first_attached_sub(&attach).expect("template attached");
     let old_profile = pid_of(&e, old_template);
@@ -696,12 +682,8 @@ fn config_diff_modify_template_cascades_and_remints() {
     // cancellation.
     let t1 = now + SETTLE;
     let mut diff = SubRegistryDiff::default();
-    diff.modified_identity.push(discovery_req(
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-    ));
+    diff.modified_identity
+        .push(discovery_req("disc", "/data/*"));
     let out = e.step(Input::ConfigDiff(diff), t1);
 
     assert!(
@@ -752,17 +734,9 @@ fn config_diff_modify_template_cascades_and_remints() {
 #[test]
 fn config_diff_remove_dynamic_cascades() {
     let mut e = Engine::new();
-    let data = pre_place_dir(&mut e, &["data"]);
+    pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let attach = e.step(
-        Input::AttachSub(discovery_req(
-            "disc",
-            SubAttachAnchor::Resource(data),
-            "/data/*",
-            mint_spec(),
-        )),
-        now,
-    );
+    let attach = e.step(Input::AttachSub(discovery_req("disc", "/data/*")), now);
     let sid = specter_core::testkit::first_attached_sub(&attach).expect("template attached");
     let pid = pid_of(&e, sid);
     let _ = respond(

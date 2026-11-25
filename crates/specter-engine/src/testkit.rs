@@ -13,11 +13,11 @@ use crate::Engine;
 use specter_core::testkit::{anchor_ok, file_leaf, proven, segment_observed};
 use specter_core::{
     ActiveBurst, ClassSet, DedupKey, Diagnostic, DirSnapshot, EffectCompletion, EffectOutcome,
-    EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, MintSpec, PatternSpec, PostFireBurst,
+    EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input, PatternSpec, PostFireBurst,
     PostFirePhase, PreFireBurst, PreFirePhase, ProbeCorrelation, ProbeOp, ProbeOutcome,
-    ProbeResponse, ProfileId, ProfileIdentity, ProfileState, ReactionSpec, ResourceId,
-    ResourceKind, ResourceRole, SpawnSpec, StepOutput, SubAttachAnchor, SubAttachRequest, SubId,
-    SubParams, SubtreeScan, TimerId, WatchFailure,
+    ProbeResponse, ProfileId, ProfileState, ResourceId, ResourceKind, ResourceRole, SpawnSpec,
+    StepOutput, SubAttachAnchor, SubAttachRequest, SubAttachTarget, SubId, SubParams, SubtreeScan,
+    TimerId, WatchFailure,
 };
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -136,6 +136,19 @@ pub fn is_draining(e: &Engine, pid: ProfileId) -> bool {
     e.profiles().get(pid).unwrap().state().is_draining()
 }
 
+/// Step `req` in, returning the Sub it attached, that Sub's Profile, and the attach `StepOutput`.
+#[must_use]
+pub fn attach_request(
+    e: &mut Engine,
+    req: SubAttachRequest,
+    now: Instant,
+) -> (SubId, ProfileId, StepOutput) {
+    let out = e.step(Input::AttachSub(req), now);
+    let sid = specter_core::testkit::first_attached_sub(&out).expect("the request attached");
+    let pid = pid_of(e, sid);
+    (sid, pid, out)
+}
+
 /// Attach a subtree-root Sub at `anchor`, returning the attach `StepOutput` too — for tests
 /// asserting on the attach step (probe present/absent, diagnostics).
 ///
@@ -152,23 +165,18 @@ pub fn attach_returning(
     max_settle: Duration,
     now: Instant,
 ) -> (SubId, ProfileId, StepOutput) {
-    let out = e.step(
-        Input::AttachSub(SubAttachRequest::for_anchor(
-            name.into(),
-            anchor,
-            scan,
-            max_settle,
-            SETTLE,
-            specter_core::testkit::empty_program(),
-            EffectScope::SubtreeRoot,
-            mask,
-            false,
-        )),
-        now,
+    let req = SubAttachRequest::for_anchor(
+        name.into(),
+        anchor,
+        scan,
+        max_settle,
+        SETTLE,
+        specter_core::testkit::empty_program(),
+        EffectScope::SubtreeRoot,
+        mask,
+        false,
     );
-    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
-    let pid = pid_of(e, sid);
-    (sid, pid, out)
+    attach_request(e, req, now)
 }
 
 /// [`attach_returning`] discarding the attach `StepOutput` — the common case. Returns `(SubId,
@@ -646,71 +654,46 @@ pub const fn watch_op_rejected_input(resource: ResourceId) -> Input {
     }
 }
 
-/// The fixture [`MintSpec`] with the default `SubtreeRoot` minted-reaction scope.
+/// The fixtures' dynamic watch over `pattern`.
 ///
-/// The default (unbounded) subtree scan under `ClassSet::EMPTY` and `MAX_SETTLE`; minted debounce
-/// `SETTLE`; minted reaction `/bin/true`-shaped (`empty_program`, no log forwarding).
+/// Each Sub it mints fires on the default (unbounded) subtree scan under [`NO_EVENTS`] and
+/// [`MAX_SETTLE`], debounced at [`SETTLE`], launching `/bin/true` (`empty_program`, no log
+/// forwarding); the template's own Profile takes the pattern's identity. A request is plain fields:
+/// a pin that needs another scope, mask, scan or program writes it over this one.
 #[must_use]
-pub fn mint_spec() -> Arc<MintSpec> {
-    mint_spec_scoped(EffectScope::SubtreeRoot)
-}
-
-/// [`mint_spec`] with an explicit minted-reaction scope — the per-file recovery pins thread
-/// `PerStableFile` through the spec's spawn.
-#[must_use]
-pub fn mint_spec_scoped(scope: EffectScope) -> Arc<MintSpec> {
-    Arc::new(MintSpec {
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, ClassSet::EMPTY),
-        settle: SETTLE,
-        spawn: SpawnSpec::new(specter_core::testkit::empty_program(), scope, false),
-    })
-}
-
-/// The discovery-template `SubAttachRequest` the fixtures use — [`attach_discovery_returning`]
-/// steps it directly; config-diff scenarios place it in `SubRegistryDiff` buckets.
-///
-/// The template's own Profile takes the identity every pattern's does
-/// ([`ProfileIdentity::discovery`]); its debounce is the fixtures' `SETTLE`. The minted reaction
-/// (scope included) lives on `mint`'s spawn — [`mint_spec_scoped`] threads a non-default scope.
-/// `anchor` is explicit (pre-placed `Resource` or pending `Path`).
-#[must_use]
-pub fn discovery_req(
-    name: &str,
-    anchor: SubAttachAnchor,
-    pattern: &str,
-    mint: Arc<MintSpec>,
-) -> SubAttachRequest {
-    SubAttachRequest::from_parts(
-        anchor,
-        ProfileIdentity::discovery(Arc::new(
+pub fn discovery_req(name: &str, pattern: &str) -> SubAttachRequest {
+    SubAttachRequest {
+        name: name.into(),
+        target: SubAttachTarget::Pattern(Arc::new(
             PatternSpec::parse(pattern).expect("valid test pattern"),
         )),
-        SubParams {
-            name: name.into(),
+        scan: SubtreeScan::builder().build(),
+        max_settle: MAX_SETTLE,
+        events: NO_EVENTS,
+        params: SubParams {
             settle: SETTLE,
-            reaction: ReactionSpec::Mint(mint),
+            spawn: SpawnSpec::new(
+                specter_core::testkit::empty_program(),
+                EffectScope::SubtreeRoot,
+                false,
+            ),
         },
-    )
+    }
 }
 
-/// Attach a discovery template Sub for `pattern` at `anchor`, returning the attach `StepOutput`
-/// too. The request shape is [`discovery_req`]'s; the minted reaction (scope included) is `mint`'s.
+/// Attach the fixture template ([`discovery_req`]) for `pattern`, returning the attach `StepOutput`
+/// too.
+///
+/// It anchors at the pattern's literal prefix: one the fixture pre-placed ([`pre_place_dir`])
+/// resolves at once, any other descends.
 #[must_use]
 pub fn attach_discovery_returning(
     e: &mut Engine,
     name: &str,
-    anchor: SubAttachAnchor,
     pattern: &str,
-    mint: Arc<MintSpec>,
     now: Instant,
 ) -> (SubId, ProfileId, StepOutput) {
-    let out = e.step(
-        Input::AttachSub(discovery_req(name, anchor, pattern, mint)),
-        now,
-    );
-    let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_discovery succeeded");
-    let pid = pid_of(e, sid);
-    (sid, pid, out)
+    attach_request(e, discovery_req(name, pattern), now)
 }
 
 /// [`attach_discovery_returning`] discarding the attach `StepOutput` — the common case.
@@ -718,12 +701,10 @@ pub fn attach_discovery_returning(
 pub fn attach_discovery(
     e: &mut Engine,
     name: &str,
-    anchor: SubAttachAnchor,
     pattern: &str,
-    mint: Arc<MintSpec>,
     now: Instant,
 ) -> (SubId, ProfileId) {
-    let (sid, pid, _) = attach_discovery_returning(e, name, anchor, pattern, mint, now);
+    let (sid, pid, _) = attach_discovery_returning(e, name, pattern, now);
     (sid, pid)
 }
 

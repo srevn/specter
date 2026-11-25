@@ -7,8 +7,8 @@
 use specter_core::program::{BranchTarget, ProgramBuilder, SpawnBody};
 use specter_core::{
     ActionProgram, ArgPart, ArgTemplate, ClassSet, EffectScope, ExecAction, GlobPattern,
-    Placeholder, Profile, ProfileIdentity, ProfileMap, ResourceRole, StepOutput, Sub, SubParams,
-    SubRegistry, SubtreeScan, Tree,
+    Placeholder, Profile, ProfileIdentity, ProfileMap, ResourceRole, SpawnSpec, StepOutput, Sub,
+    SubParams, SubRegistry, SubtreeScan, Tree,
 };
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -58,15 +58,13 @@ fn shared_profile_via_config_hash() {
             ),
         )
     });
-    let _sid_a = subs.insert(Sub::from_request(
+    let _sid_a = subs.insert(Sub::declared(
         pid_a,
-        SubParams::spawn(
-            "build-a".into(),
-            build_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
+        "build-a".into(),
+        SubParams {
+            settle: SETTLE,
+            spawn: SpawnSpec::new(build_program(), EffectScope::SubtreeRoot, false),
+        },
     ));
 
     // Sub B: same (resource, hash); reuses the Profile.

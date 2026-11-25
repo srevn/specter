@@ -79,5 +79,5 @@ fn changing_only_command_marks_modified_params() {
     let d = diff(&a, &b);
     assert!(d.modified_identity.is_empty());
     assert_eq!(d.modified_params.len(), 1);
-    assert_eq!(d.modified_params[0].params.name, "a");
+    assert_eq!(d.modified_params[0].name, "a");
 }

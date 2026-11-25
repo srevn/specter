@@ -26,10 +26,10 @@ use specter_core::{
     DirMeta, DirSnapshot, DirtyProvenance, EffectCompletion, EffectOutcome, EffectScope, EntryKind,
     FS_ROOT_SEGMENT, FsEvent, FsIdentity, Input, LeafEntry, OverflowScope, Placeholder,
     PostFireBurst, PostFirePhase, PreFireBurst, PreFirePhase, ProbeFailure, ProbeOp, ProbeOutcome,
-    ProbeRequest, ProbeResponse, ProbeSlot, ProfileIdentity, ProfileState, ProofAuthority,
-    ProofObligation, QuiescenceVerdict, ResourceId, ResourceKind, ResourceRole, StableReason,
-    StepOutput, SubAttachAnchor, SubAttachRequest, SubId, SubParams, SubtreeScan, Termination,
-    TimerKind, TreeSnapshot, WatchOp,
+    ProbeRequest, ProbeResponse, ProbeSlot, ProfileState, ProofAuthority, ProofObligation,
+    QuiescenceVerdict, ResourceId, ResourceKind, ResourceRole, StableReason, StepOutput,
+    SubAttachAnchor, SubAttachRequest, SubAttachTarget, SubId, SubtreeScan, Termination, TimerKind,
+    TreeSnapshot, WatchOp,
 };
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
@@ -70,17 +70,17 @@ fn engine_with_attached_sub() -> (
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
-        params: SubParams::spawn(
-            "test-sub".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "test-sub".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        DEFAULT_EVENTS,
+        false,
+    );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -226,17 +226,17 @@ fn attach_sub_unprobed_anchor_seeds_kind_on_first_response() {
     // attach against a freshly-`ensure`'d slot whose kind hasn't been classified by any prior probe.
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
-        params: SubParams::spawn(
-            "test-sub".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "test-sub".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -287,17 +287,17 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_subtree() {
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     // Leave the Resource Unknown — anchor_kind from `Resource::kind()` collapses Unknown to None,
     // so Profile.kind starts as None.
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
-        params: SubParams::spawn(
-            "test-sub".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "test-sub".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -345,17 +345,17 @@ fn dispatch_burst_outcome_classifies_kind_on_first_seed_anchor() {
     // the dispatch_burst_outcome classification path for AnchorOk; the walker never produces this
     // response shape against a Subtree request, but the engine's classification logic must still fall
     // out correctly if it ever does (defense-in-depth + symmetry with the SubtreeProven arm).
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
-        params: SubParams::spawn(
-            "test-sub".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "test-sub".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -509,17 +509,17 @@ fn kind_mismatched_response_routes_through_finalize_anchor_lost_debug() {
     let mut e = Engine::new();
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::File);
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
-        params: SubParams::spawn(
-            "test-sub".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "test-sub".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
@@ -595,17 +595,17 @@ fn attach_sub_existing_profile_bumps_refcount() {
 
     // Second attach with the same config_hash — must match the fixture's events mask, since
     // `events` folds into `config_hash`.
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
-        params: SubParams::spawn(
-            "second".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "second".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        DEFAULT_EVENTS,
+        false,
+    );
     let out = e.step(Input::AttachSub(req), now);
     let sid2 = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     assert_eq!(e.subs.at(pid).len(), pre_count + 1);
@@ -962,21 +962,17 @@ fn emit_effects_subtree_root_uses_parent_dir_for_file_profile() {
         .expect("test live parent");
     e.tree.set_kind(file_anchor, ResourceKind::File);
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(file_anchor),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
-            MAX_SETTLE,
-            DEFAULT_EVENTS,
-        ),
-        params: SubParams::spawn(
-            "build".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "build".into(),
+        SubAttachAnchor::Resource(file_anchor),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        DEFAULT_EVENTS,
+        false,
+    );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -1056,21 +1052,17 @@ fn standard_burst_on_file_anchor_targets_anchor_not_parent_dir() {
         .expect("test live parent");
     e.tree.set_kind(file_anchor, ResourceKind::File);
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(file_anchor),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
-            MAX_SETTLE,
-            DEFAULT_EVENTS,
-        ),
-        params: SubParams::spawn(
-            "build".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "build".into(),
+        SubAttachAnchor::Resource(file_anchor),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        DEFAULT_EVENTS,
+        false,
+    );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -1596,21 +1588,17 @@ fn fs_event_terminal_on_descendant_file_folds_to_content_and_drops() {
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::STRUCTURE,
-        ),
-        params: SubParams::spawn(
-            "test-sub".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "test-sub".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::STRUCTURE,
+        false,
+    );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -2187,17 +2175,17 @@ fn effect_emission_carries_diff_when_needs_diff() {
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
-        params: SubParams::spawn(
-            "fmt".into(),
-            diff_program(), // references ${specter.created}
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "fmt".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        diff_program(), // references ${specter.created}
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -2314,21 +2302,17 @@ fn probe_op_for_file_anchor_is_file_kind() {
     let mut e = Engine::new();
     let r = e.tree.ensure_root("log.txt", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::File);
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
-            MAX_SETTLE,
-            NO_EVENTS,
-        ),
-        params: SubParams::spawn(
-            "file-sub".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "file-sub".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
     let now = Instant::now();
     let attach_out = e.step(Input::AttachSub(req), now);
     // Cold-arm Seed: the probe emits at burst construction during `attach_sub`, not on settle-timer
@@ -3117,24 +3101,21 @@ fn sensor_overflow_resource_scope_filters_profiles() {
         .expect("test live parent");
     e.tree.set_kind(b, ResourceKind::Dir);
     let now = Instant::now();
-    let req_a = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(a),
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
-        params: SubParams::spawn(
-            "sub-a".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req_a = SubAttachRequest::for_anchor(
+        "sub-a".into(),
+        SubAttachAnchor::Resource(a),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
     let req_b = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(b),
-        identity: req_a.identity.clone(),
-        params: SubParams {
-            name: "sub-b".into(),
-            ..req_a.params.clone()
-        },
+        name: "sub-b".into(),
+        target: SubAttachTarget::At(SubAttachAnchor::Resource(b)),
+        ..req_a.clone()
     };
     let attach_out = e.step(Input::AttachSub(req_a), now);
     let sid_a =
@@ -3362,34 +3343,34 @@ fn detach_sub_settle_recomputed_when_subs_remain() {
     let now = Instant::now();
     let cfg = SubtreeScan::builder().build();
     let attach_out = e.step(
-        Input::AttachSub(SubAttachRequest {
-            anchor: SubAttachAnchor::Resource(r),
-            identity: ProfileIdentity::new(cfg.clone(), MAX_SETTLE, NO_EVENTS),
-            params: SubParams::spawn(
-                "fast".into(),
-                empty_program(),
-                EffectScope::SubtreeRoot,
-                Duration::from_millis(50),
-                false,
-            ),
-        }),
+        Input::AttachSub(SubAttachRequest::for_anchor(
+            "fast".into(),
+            SubAttachAnchor::Resource(r),
+            cfg.clone(),
+            MAX_SETTLE,
+            Duration::from_millis(50),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        )),
         now,
     );
     let sid_fast =
         specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid_fast).unwrap().profile();
     let _ = e.step(
-        Input::AttachSub(SubAttachRequest {
-            anchor: SubAttachAnchor::Resource(r),
-            identity: ProfileIdentity::new(cfg, MAX_SETTLE, NO_EVENTS),
-            params: SubParams::spawn(
-                "slow".into(),
-                empty_program(),
-                EffectScope::SubtreeRoot,
-                Duration::from_millis(200),
-                false,
-            ),
-        }),
+        Input::AttachSub(SubAttachRequest::for_anchor(
+            "slow".into(),
+            SubAttachAnchor::Resource(r),
+            cfg,
+            MAX_SETTLE,
+            Duration::from_millis(200),
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        )),
         now,
     );
     // Fast Sub's settle wins on attach.
@@ -3415,21 +3396,17 @@ fn config_diff_added_only_attaches_subs() {
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
 
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
-            MAX_SETTLE,
-            NO_EVENTS,
-        ),
-        params: SubParams::spawn(
-            "added".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "added".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        NO_EVENTS,
+        false,
+    );
     let mut diff = specter_core::SubRegistryDiff::default();
     diff.added.push(req);
 
@@ -3573,21 +3550,17 @@ fn per_stable_file_fires_one_effect_per_created_entry() {
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::DEFAULT_PER_FILE,
-        ),
-        params: SubParams::spawn(
-            "fmt".into(),
-            diff_program(),
-            EffectScope::PerStableFile,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "fmt".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        diff_program(),
+        EffectScope::PerStableFile,
+        ClassSet::DEFAULT_PER_FILE,
+        false,
+    );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -3683,21 +3656,17 @@ fn per_stable_file_skips_dir_entries() {
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::DEFAULT_PER_FILE,
-        ),
-        params: SubParams::spawn(
-            "fmt".into(),
-            diff_program(),
-            EffectScope::PerStableFile,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "fmt".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        diff_program(),
+        EffectScope::PerStableFile,
+        ClassSet::DEFAULT_PER_FILE,
+        false,
+    );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -3922,21 +3891,17 @@ fn b3_per_key_filter_does_not_affect_standard_burst_perfile_emission() {
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::CONTENT,
-        ),
-        params: SubParams::spawn(
-            "fmt".into(),
-            empty_program(),
-            EffectScope::PerStableFile,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "fmt".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::PerStableFile,
+        ClassSet::CONTENT,
+        false,
+    );
     let _ = e.step(Input::AttachSub(req), now);
     let pid = e.profiles.iter().next().unwrap().0;
     // Seed → Idle (establishes the baseline before the Standard burst below).
@@ -4002,21 +3967,17 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
     let mut e = Engine::new();
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::CONTENT,
-        ),
-        params: SubParams::spawn(
-            "formatter".into(),
-            empty_program(),
-            EffectScope::PerStableFile,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "formatter".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::PerStableFile,
+        ClassSet::CONTENT,
+        false,
+    );
     let out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -4027,21 +3988,17 @@ fn has_per_file_fds_is_invariant_for_profile_lifetime() {
 
     // A Sub with the same `(resource, max_settle, scan, events)` shares the existing Profile; the
     // flag stays true.
-    let req2 = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::CONTENT,
-        ),
-        params: SubParams::spawn(
-            "formatter-2".into(),
-            empty_program(),
-            EffectScope::PerStableFile,
-            SETTLE,
-            false,
-        ),
-    };
+    let req2 = SubAttachRequest::for_anchor(
+        "formatter-2".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::PerStableFile,
+        ClassSet::CONTENT,
+        false,
+    );
     let _ = e.step(Input::AttachSub(req2), Instant::now());
     assert!(e.profiles.get(pid).unwrap().has_per_file_fds());
 
@@ -4059,21 +4016,17 @@ fn structure_only_profile_has_per_file_fds_false() {
     let mut e = Engine::new();
     let r = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(r, ResourceKind::Dir);
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::STRUCTURE,
-        ),
-        params: SubParams::spawn(
-            "ls-only".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "ls-only".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::STRUCTURE,
+        false,
+    );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -4659,21 +4612,17 @@ fn rebasing_probes_whole_subtree_and_resets_awaiting_absorbed_residual() {
     let root = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(root, ResourceKind::Dir);
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(root),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::CONTENT,
-        ),
-        params: SubParams::spawn(
-            "test-sub".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "test-sub".into(),
+        SubAttachAnchor::Resource(root),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::CONTENT,
+        false,
+    );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -4844,21 +4793,17 @@ fn post_fire_settling_reschedules_on_absorbed_event() {
     let mut e = Engine::new();
     let root = e.tree.ensure_root("anchor", ResourceRole::User);
     e.tree.set_kind(root, ResourceKind::Dir);
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(root),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::CONTENT,
-        ),
-        params: SubParams::spawn(
-            "test-sub".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "test-sub".into(),
+        SubAttachAnchor::Resource(root),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::CONTENT,
+        false,
+    );
     let attach_out = e.step(Input::AttachSub(req), Instant::now());
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs.get(sid).unwrap().profile();
@@ -6941,17 +6886,17 @@ fn attach_per_stable_file_sibling(
     pid: specter_core::ProfileId,
     now: Instant,
 ) -> specter_core::SubId {
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(anchor),
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
-        params: SubParams::spawn(
-            "per-file-sibling".into(),
-            empty_program(),
-            EffectScope::PerStableFile,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "per-file-sibling".into(),
+        SubAttachAnchor::Resource(anchor),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::PerStableFile,
+        DEFAULT_EVENTS,
+        false,
+    );
     let out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&out).expect("per-file sibling attached");
     assert_eq!(
@@ -7282,17 +7227,17 @@ fn fire_history_is_per_sub_detach_drops_it_no_purge() {
 
     // Attach a second Sub at the *same* (anchor, config_hash) so it shares this Profile — it keeps
     // the Profile alive across sid_a's detach below. Identical request shape ⇒ same ProfileId.
-    let req_b = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(anchor),
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
-        params: SubParams::spawn(
-            "sibling".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req_b = SubAttachRequest::for_anchor(
+        "sibling".into(),
+        SubAttachAnchor::Resource(anchor),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        DEFAULT_EVENTS,
+        false,
+    );
     let out_b = e.step(Input::AttachSub(req_b), now);
     let sid_b = specter_core::testkit::first_attached_sub(&out_b).expect("sibling attached");
     assert_eq!(
@@ -8154,17 +8099,17 @@ mod props {
         let r = e.tree.ensure_root("anchor", ResourceRole::User);
         e.tree.set_kind(r, ResourceKind::Dir);
         let now = Instant::now();
-        let req = SubAttachRequest {
-            anchor: SubAttachAnchor::Resource(r),
-            identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, NO_EVENTS),
-            params: SubParams::spawn(
-                "test".into(),
-                empty_program(),
-                EffectScope::SubtreeRoot,
-                SETTLE,
-                false,
-            ),
-        };
+        let req = SubAttachRequest::for_anchor(
+            "test".into(),
+            SubAttachAnchor::Resource(r),
+            SubtreeScan::builder().build(),
+            MAX_SETTLE,
+            SETTLE,
+            empty_program(),
+            EffectScope::SubtreeRoot,
+            NO_EVENTS,
+            false,
+        );
         let out = e.step(Input::AttachSub(req), now);
         let sid = specter_core::testkit::first_attached_sub(&out).expect("attach_sub succeeded");
         let last_correlation = out.probe_ops().iter().find_map(|op| match op {

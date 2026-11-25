@@ -29,8 +29,8 @@ use specter_core::{
     EffectCommon, EffectOutcome, EffectScope, FsEvent, OverflowScope, PostFirePhase, PreFirePhase,
     ProbeFailure, ProbeResponse, Profile, ProfileId, ProfileState, ProofAuthority,
     QuiescenceVerdict, QuiescenceWitness, Reaction, ResourceId, ResourceKind, StableReason,
-    StepOutput, SubAttachRequest, SubId, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot,
-    WatchFailure, quiescence_verdict,
+    StepOutput, SubId, SubParams, SubRegistryDiff, TimerId, TimerKind, TreeSnapshot, WatchFailure,
+    quiescence_verdict,
 };
 use std::num::NonZeroU32;
 use std::path::Path;
@@ -954,16 +954,16 @@ impl Engine {
     /// 1. **Sub `removed`** — resolve the name. `Some` ⇒ `detach_sub_inner` (reap the Profile if
     ///    its last Sub left, defer if active). `None` ⇒ [`Diagnostic::ConfigDiffUnknownSub`] (a
     ///    name whose prior attach failed and never entered the registry — nothing to detach).
-    /// 2. **Sub `modified_params`** — anchor + identity unchanged; only per-Sub fields differ.
-    ///    Resolve the name; on `Some`, [`Self::rebind_sub_inner`] rebinds the Sub in place via the
+    /// 2. **Sub `modified_params`** — target + identity unchanged; only the params differ. Resolve
+    ///    the name; on `Some`, [`Self::rebind_sub_inner`] rebinds the Sub in place via the
     ///    [`specter_core::SubRegistry::rebind`] edge — no Profile churn, no kernel-watch flap, no
     ///    baseline loss. On `None`, the prior attach failed and the Sub never entered the registry;
     ///    the engine degrades the entry to a fresh attach
     ///    ([`Diagnostic::ConfigDiffRebindFallbackAttach`] narrates the reason).
-    /// 3. **Sub `modified_identity`** — path / scan / max_settle / events changed; the Sub must
+    /// 3. **Sub `modified_identity`** — target / scan / max_settle / events changed; the Sub must
     ///    move to a different Profile partition. The attach's own gate
-    ///    ([`Self::admit_attach_anchor`]) is asked first; on success, the engine detaches the old
-    ///    Sub (if present) and attaches the new. A refused anchor leaves the old Sub in place —
+    ///    ([`Self::admit_attach_target`]) is asked first; on success, the engine detaches the old
+    ///    Sub (if present) and attaches the new. A refused target leaves the old Sub in place —
     ///    **structural rollback** at the composition layer: the gate captures nothing, the attach
     ///    re-derives, so the state-mid-operation problem doesn't arise.
     /// 4. **Sub `added`** — `attach_sub_inner` materialises the anchor and registers the Sub.
@@ -994,28 +994,25 @@ impl Engine {
             }
         }
         for req in subs.modified_params {
-            match self.subs.find_by_name(&req.params.name) {
-                Some(sid) => {
-                    let SubAttachRequest { params, .. } = req;
-                    self.rebind_sub_inner(sid, params, out);
-                }
+            match self.subs.find_by_name(&req.name) {
+                Some(sid) => self.rebind_sub_inner(sid, req.params, out),
                 None => {
                     // Prior attach failed; the Sub never entered the registry. Params alone cannot
                     // apply to a non-existent Sub — degrade to a fresh attach, narrating the
                     // *reason* (the fallback attach emits its own lifecycle diagnostics).
                     out.diagnostics
                         .push(Diagnostic::ConfigDiffRebindFallbackAttach {
-                            name: req.params.name.clone(),
+                            name: req.name.clone(),
                         });
                     self.attach_sub_inner(req, now, out);
                 }
             }
         }
         for req in subs.modified_identity {
-            if self.admit_attach_anchor(&req.anchor, out).is_none() {
+            if self.admit_attach_target(&req.target, out).is_none() {
                 continue;
             }
-            if let Some(old) = self.subs.find_by_name(&req.params.name) {
+            if let Some(old) = self.subs.find_by_name(&req.name) {
                 self.detach_sub_inner(old, DetachReason::ConfigDiffIdentityChanged, out);
             }
             self.attach_sub_inner(req, now, out);
@@ -2816,10 +2813,14 @@ impl Engine {
         for sub_id in sub_ids {
             let (scope, needs_diff, log_output, already_fired) = match self.subs.get(sub_id) {
                 Some(s) => match s.reaction() {
-                    Reaction::Spawn { spec, history, .. } => (
-                        spec.scope(),
-                        spec.needs_diff(),
-                        spec.log_output(),
+                    Reaction::Spawn {
+                        params: SubParams { spawn, .. },
+                        history,
+                        ..
+                    } => (
+                        spawn.scope(),
+                        spawn.needs_diff(),
+                        spawn.log_output(),
                         history.has_fired,
                     ),
                     // A Mint Sub never fires — discovery's "fire" is the reconcile's batch of
@@ -2861,8 +2862,8 @@ impl Engine {
                         continue;
                     };
                     // The funnel head classified this Sub as Spawn; a None here would mean the
-                    // reaction changed under a live borrow-free window, which rebind cannot do
-                    // (variant-typed Spawn↔Spawn) — the silent skip mirrors the stale-id arm.
+                    // reaction changed under a live borrow-free window, which rebind cannot do (it
+                    // replaces params, never the variant) — the silent skip mirrors the stale-id arm.
                     let Some(spec) = sub.spawn_spec() else {
                         continue;
                     };
@@ -2900,8 +2901,8 @@ impl Engine {
                     });
                 }
                 EffectScope::PerStableFile => {
-                    // PerStableFile implies `needs_diff = true` at Sub::from_request; diff is
-                    // always built.
+                    // PerStableFile implies `needs_diff` (`SpawnSpec::new`), so the diff is always
+                    // built.
                     let Some(diff) = ensure_diff(&mut diff_arc) else {
                         continue;
                     };

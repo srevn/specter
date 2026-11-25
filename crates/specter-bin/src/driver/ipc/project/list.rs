@@ -86,7 +86,7 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
         last_fired_at,
         fire_count: history.map(|h| h.fire_count),
         dedup_suppressed_count: history.map(|h| h.dedup_suppressed_count),
-        settle_ms: Some(settle_ms(sub.settle)),
+        settle_ms: Some(settle_ms(sub.settle())),
         reaction: Some(WireReactionKind::from(sub.reaction())),
         disabled: None,
         sub: Some(WireId::from(sid)),

@@ -12,7 +12,7 @@ use std::time::Instant;
 
 use compact_str::CompactString;
 use specter_config::Config;
-use specter_core::{Profile, Reaction, Sub, SubId};
+use specter_core::{Profile, Reaction, Sub, SubId, SubParams};
 use specter_engine::Engine;
 
 use crate::driver::DriverState;
@@ -112,9 +112,13 @@ fn project_details(
     // Mint Sub (discovery template) reports the knobs its minted Subs inherit plus the live minted
     // count — never fire stats, which a template has none of.
     let reaction = match sub.reaction() {
-        Reaction::Spawn { spec, history, .. } => WireReaction::Spawn {
-            scope: WireEffectScope::from(spec.scope()),
-            program: program::render(spec.program()),
+        Reaction::Spawn {
+            params: SubParams { spawn, .. },
+            history,
+            ..
+        } => WireReaction::Spawn {
+            scope: WireEffectScope::from(spawn.scope()),
+            program: program::render(spawn.program()),
             last_fired_at: history
                 .last_fired_at
                 .map(|t| WireTime::from(project_wall(ds.start_wall, ds.start_instant, t))),
@@ -122,9 +126,9 @@ fn project_details(
             dedup_suppressed_count: history.dedup_suppressed_count,
         },
         Reaction::Mint { spec, .. } => WireReaction::Mint {
-            minted_settle_ms: settle_ms(spec.settle),
-            minted_scope: WireEffectScope::from(spec.spawn.scope()),
-            minted_program: program::render(spec.spawn.program()),
+            minted_settle_ms: settle_ms(spec.params().settle),
+            minted_scope: WireEffectScope::from(spec.params().spawn.scope()),
+            minted_program: program::render(spec.params().spawn.program()),
             minted_live: engine.subs().minted(sid).len(),
         },
     };
@@ -136,7 +140,7 @@ fn project_details(
         anchor,
         absorb,
         absorb_count: profile.map_or(0, Profile::absorb_count),
-        settle_ms: settle_ms(sub.settle),
+        settle_ms: settle_ms(sub.settle()),
         minted_by: sub.minted_by().map(WireId::from),
         reaction,
     }

@@ -11,8 +11,8 @@ use compact_str::CompactString;
 use specter_core::testkit::{dir_snap, empty_program};
 use specter_core::{
     ChildEntry, ClassSet, DirMeta, DirSnapshot, EffectScope, FsEvent, FsIdentity, Input,
-    ProbeOutcome, ProbeResponse, ProfileIdentity, ProofAuthority, ResourceKind, ResourceRole,
-    SubAttachAnchor, SubAttachRequest, SubParams, SubtreeScan,
+    ProbeOutcome, ProbeResponse, ProofAuthority, ResourceKind, ResourceRole, SubAttachAnchor,
+    SubAttachRequest, SubtreeScan,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{MAX_SETTLE, SETTLE, first_probe_correlation, seed_to_idle};
@@ -27,21 +27,17 @@ fn dense_event_storm_converges_naturally_below_burst_deadline() {
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::CONTENT,
-        ),
-        params: SubParams::spawn(
-            "build".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "build".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::CONTENT,
+        false,
+    );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).expect("sub").profile();
@@ -151,21 +147,17 @@ fn sustained_undischarged_response_storm_paces_at_settle() {
     e.tree_mut().set_kind(r, ResourceKind::Dir);
 
     let now = Instant::now();
-    let req = SubAttachRequest {
-        anchor: SubAttachAnchor::Resource(r),
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().build(),
-            MAX_SETTLE,
-            ClassSet::CONTENT,
-        ),
-        params: SubParams::spawn(
-            "build".into(),
-            empty_program(),
-            EffectScope::SubtreeRoot,
-            SETTLE,
-            false,
-        ),
-    };
+    let req = SubAttachRequest::for_anchor(
+        "build".into(),
+        SubAttachAnchor::Resource(r),
+        SubtreeScan::builder().build(),
+        MAX_SETTLE,
+        SETTLE,
+        empty_program(),
+        EffectScope::SubtreeRoot,
+        ClassSet::CONTENT,
+        false,
+    );
     let attach_out = e.step(Input::AttachSub(req), now);
     let sid = specter_core::testkit::first_attached_sub(&attach_out).expect("attach_sub succeeded");
     let pid = e.subs().get(sid).expect("sub").profile();

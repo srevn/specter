@@ -2,9 +2,9 @@
 //!
 //! Drives one `Engine` per scenario through attach → cold-Seed reconcile (mint per terminus ×
 //! template) → Standard re-reconcile → vanish/recovery/overflow/cascade with synthetic
-//! [`ProbeResponse`] injections. The inline tests (`src/discovery.rs`) pin the pass's walk and the
-//! attach-boundary asserts; this file pins the composed behaviour: consequence routing, dedup
-//! convergence, lifecycle diagnostics, and the Draining-gate shape filter.
+//! [`ProbeResponse`] injections. The inline tests (`src/discovery.rs`) pin the pass's walk; this
+//! file pins the composed behaviour: consequence routing, dedup convergence, lifecycle diagnostics,
+//! and the Draining-gate shape filter.
 //!
 //! Assertions are **converged-state** (the minted registry after quiescence), never step traces —
 //! probe cadence is an implementation detail; only the resulting registry is the contract.
@@ -16,15 +16,15 @@ use specter_core::testkit::{
 use specter_core::{
     ActiveBurst, ChildEntry, ClassSet, ContribKey, DetachReason, Diagnostic, DirChild, DirSnapshot,
     EffectCompletion, EffectOutcome, EffectScope, EntryKind, FS_ROOT_SEGMENT, FsEvent, Input,
-    MintEntry, MintSpec, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, Profile, ProfileId,
-    ProfileIdentity, ProfileState, ProofAuthority, Resource, ResourceId, ResourceKind, SpawnSpec,
-    StepOutput, SubAttachAnchor, SubId, SubtreeScan, TimerKind, WatchOp,
+    MintEntry, OverflowScope, ProbeOp, ProbeOutcome, ProbeResponse, Profile, ProfileId,
+    ProfileState, ProofAuthority, Resource, ResourceId, ResourceKind, SpawnSpec, StepOutput,
+    SubAttachAnchor, SubId, SubtreeScan, TimerKind, WatchOp,
 };
 use specter_engine::Engine;
 use specter_engine::testkit::{
     DEFAULT_EVENTS, MAX_SETTLE, SETTLE, attach, attach_discovery, attach_discovery_returning,
-    complete_effect_to_rebasing, descent_advance, discovery_subs_of, drain_due, fire_standard_once,
-    is_draining, last_probe_path, mint_spec, mint_spec_scoped, pid_of, pre_place_dir,
+    attach_request, complete_effect_to_rebasing, descent_advance, discovery_req, discovery_subs_of,
+    drain_due, fire_standard_once, is_draining, last_probe_path, pid_of, pre_place_dir,
     respond_anchor_file, seed_to_idle, seed_to_idle_with, watch_op_rejected_input,
 };
 use std::collections::BTreeSet;
@@ -72,11 +72,11 @@ fn burst_and_respond(
 /// for that entry alone); the convergence loop then answers whatever probe the burst surfaces (cold
 /// walk, verify, re-sample, rebase) with a byte-identical kind-appropriate sample (File anchors
 /// `AnchorOk`, Dir anchors an empty subtree), completes any fired effect, and advances the clock a
-/// settle window when the burst waits on a timer. The EMPTY-mask `mint_spec` folds `HashChannel`
-/// verdicts, so each certification needs two equal samples. An enumeration mint's cold Seed pins on
-/// its single sample without a clock advance; an appearance mint opens triggered (Batching-first,
-/// no probe in flight at mint time), so the loop drains its settle window, then fires and rebases.
-/// Returns the instant the Profile rests at Idle.
+/// settle window when the burst waits on a timer. The EMPTY mask `discovery_req` mints under folds
+/// `HashChannel` verdicts, so each certification needs two equal samples. An enumeration mint's
+/// cold Seed pins on its single sample without a clock advance; an appearance mint opens triggered
+/// (Batching-first, no probe in flight at mint time), so the loop drains its settle window, then
+/// fires and rebases. Returns the instant the Profile rests at Idle.
 fn settle_minted(e: &mut Engine, mid: SubId, kind: Option<EntryKind>, mut at: Instant) -> Instant {
     let pid = pid_of(e, mid);
     if matches!(
@@ -170,14 +170,7 @@ fn cold_seed_reconcile_mints_per_terminus_then_re_reconcile_dedups() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*/log",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*/log", now);
 
     // Pruned chain shape: `a/log` a Dir terminus (Uncovered), `b/log` a File terminus (Leaf).
     let chain = dir_snap_nested(&[
@@ -278,14 +271,7 @@ fn witnessed_appearance_mints_sub_that_fires() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*", now);
     // First enumeration over an empty dir: a completed pass with nothing to mint — the template's
     // enumeration is established; every later dedup miss is a delta against it.
     let _ = respond(&mut e, pid, &dir_snap(&[]), now);
@@ -362,14 +348,7 @@ fn opened_branch_mints_cold_beside_appearances() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*/log",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*/log", now);
     let a = || covered(dir_snap_nested(&[("log", uncovered(10))]));
     let out = respond(
         &mut e,
@@ -429,14 +408,7 @@ fn minted_sub_beneath_a_denied_directory_is_kept_until_a_listing_answers() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*/log",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*/log", now);
     let _ = respond(
         &mut e,
         pid,
@@ -520,18 +492,9 @@ fn walk_denied_to_ceiling(
 #[test]
 fn a_pattern_at_its_ceiling_names_what_it_was_denied_and_goes_on() {
     let mut e = Engine::new();
-    let srv = pre_place_dir(&mut e, &["srv"]);
+    pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let attach = |e: &mut Engine, name: &str| {
-        attach_discovery(
-            e,
-            name,
-            SubAttachAnchor::Resource(srv),
-            "/srv/*/log",
-            mint_spec(),
-            now,
-        )
-    };
+    let attach = |e: &mut Engine, name: &str| attach_discovery(e, name, "/srv/*/log", now);
     let (first, pid) = attach(&mut e, "first");
     let (second, joined) = attach(&mut e, "second");
     assert_eq!(pid, joined, "one pattern, one discovery Profile");
@@ -613,16 +576,9 @@ fn a_pattern_at_its_ceiling_names_what_it_was_denied_and_goes_on() {
 #[test]
 fn a_branch_denied_at_the_ceiling_opens_cold_through_an_overflow_reseed() {
     let mut e = Engine::new();
-    let srv = pre_place_dir(&mut e, &["srv"]);
+    pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*/log",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*/log", now);
     let a = || ("a", covered_at(10, &[("log", uncovered(11))]));
     let denied_x_y = dir_snap_nested(&[a(), ("x", denied(20)), ("y", denied(30))]);
     let (_, at) = walk_denied_to_ceiling(&mut e, pid, &denied_x_y, &["/srv/x", "/srv/y"], now);
@@ -670,14 +626,7 @@ fn storm_coalesces_to_one_probe_and_one_reconcile() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
     let _ = respond(&mut e, pid, &dir_snap(&[]), now);
 
     // Three events, 10ms apart — all inside the 100ms settle window.
@@ -723,14 +672,7 @@ fn terminus_churn_drops_for_discovery_and_drives_only_the_minted_profile() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*/log",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*/log", now);
     let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
     let _ = respond(&mut e, pid, &chain, now);
     settle_minted_seeds(&mut e, sid, now);
@@ -799,14 +741,7 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*/log",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*/log", now);
     let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
     let _ = respond(&mut e, pid, &chain, now);
     settle_minted_seeds(&mut e, sid, now);
@@ -918,14 +853,7 @@ fn unsupported_terminus_skips_mint_and_warns_once() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*/current",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*/current", now);
 
     // `a/current` carries the parameterised kind, `b/current` is a fifo-shaped `Other`, `c/current`
     // a regular file — the exact shape a symlink-farm pattern matches.
@@ -1030,14 +958,7 @@ fn a_match_degraded_to_a_symlink_reaps_its_sub_and_is_named() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*", now);
     let _ = respond(
         &mut e,
         pid,
@@ -1089,14 +1010,7 @@ fn terminus_vanish_reaps_minted_and_reappearance_remints_fresh() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
     let _ = respond(
         &mut e,
         pid,
@@ -1213,14 +1127,7 @@ fn ancestor_rename_reaps_old_minted_and_mints_new() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*/log",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/srv/*/log", now);
     let chain_a = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
     let _ = respond(&mut e, pid, &chain_a, now);
     settle_minted_seeds(&mut e, sid, now);
@@ -1304,19 +1211,9 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
 
-    let template = Arc::new(MintSpec {
-        identity: ProfileIdentity::new(SubtreeScan::builder().build(), MAX_SETTLE, DEFAULT_EVENTS),
-        settle: SETTLE,
-        spawn: SpawnSpec::new(empty_program(), EffectScope::SubtreeRoot, false),
-    });
-    let (src, dpid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        template,
-        now,
-    );
+    let mut template = discovery_req("disc", "/data/*");
+    template.events = DEFAULT_EVENTS;
+    let (src, dpid, _) = attach_request(&mut e, template, now);
     // Discovery cold Seed: enumerate one terminus -> mint.
     let out = respond(
         &mut e,
@@ -1444,16 +1341,9 @@ fn terminus_replace_keeps_minted_sub_and_re_fires() {
 #[test]
 fn detach_discovery_template_cascades_to_minted_subs() {
     let mut e = Engine::new();
-    let data = pre_place_dir(&mut e, &["data"]);
+    pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
     let _ = respond(
         &mut e,
         pid,
@@ -1498,24 +1388,10 @@ fn detach_discovery_template_cascades_to_minted_subs() {
 #[test]
 fn second_template_shares_profile_and_walk_mints_per_template() {
     let mut e = Engine::new();
-    let data = pre_place_dir(&mut e, &["data"]);
+    pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid1, pid) = attach_discovery(
-        &mut e,
-        "disc1",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
-    let (sid2, pid2) = attach_discovery(
-        &mut e,
-        "disc2",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid1, pid) = attach_discovery(&mut e, "disc1", "/data/*", now);
+    let (sid2, pid2) = attach_discovery(&mut e, "disc2", "/data/*", now);
     assert_eq!(pid, pid2, "same pattern ⇒ one discovery Profile");
 
     let out = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
@@ -1545,14 +1421,7 @@ fn a_mint_at_a_slot_a_watch_rejection_vacated_founds_its_profile_kinded() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (alpha, pid) = attach_discovery(
-        &mut e,
-        "alpha",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (alpha, pid) = attach_discovery(&mut e, "alpha", "/data/*", now);
     let listing = dir_snap(&[("a", EntryKind::Dir, 1)]);
     let _ = respond(&mut e, pid, &listing, now);
     settle_minted_seeds(&mut e, alpha, now);
@@ -1565,23 +1434,9 @@ fn a_mint_at_a_slot_a_watch_rejection_vacated_founds_its_profile_kinded() {
         "premise: the rejection leaves the slot unkinded",
     );
 
-    let flat = Arc::new(MintSpec {
-        identity: ProfileIdentity::new(
-            SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build(),
-            MAX_SETTLE,
-            ClassSet::EMPTY,
-        ),
-        settle: SETTLE,
-        spawn: SpawnSpec::new(empty_program(), EffectScope::SubtreeRoot, false),
-    });
-    let (beta, _) = attach_discovery(
-        &mut e,
-        "beta",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        flat,
-        t1,
-    );
+    let mut flat = discovery_req("beta", "/data/*");
+    flat.scan = SubtreeScan::builder().max_depth(NonZeroU32::new(1)).build();
+    let (beta, _, _) = attach_request(&mut e, flat, t1);
     let out = respond(&mut e, pid, &listing, t1);
     let narrated: Vec<ResourceKind> = out
         .diagnostics
@@ -1613,16 +1468,9 @@ fn a_mint_at_a_slot_a_watch_rejection_vacated_founds_its_profile_kinded() {
 #[test]
 fn template_join_on_idle_discovery_profile_reseeds_and_mints_cold() {
     let mut e = Engine::new();
-    let data = pre_place_dir(&mut e, &["data"]);
+    pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid1, pid) = attach_discovery(
-        &mut e,
-        "disc1",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid1, pid) = attach_discovery(&mut e, "disc1", "/data/*", now);
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     settle_minted_seeds(&mut e, sid1, now);
     assert!(
@@ -1632,14 +1480,7 @@ fn template_join_on_idle_discovery_profile_reseeds_and_mints_cold() {
 
     // disc2 joins post-seal — identical discovery identity, no tree event in sight.
     let t1 = now + Duration::from_millis(10);
-    let (sid2, pid2, join) = attach_discovery_returning(
-        &mut e,
-        "disc2",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        t1,
-    );
+    let (sid2, pid2, join) = attach_discovery_returning(&mut e, "disc2", "/data/*", t1);
     assert_eq!(pid2, pid, "same pattern ⇒ one discovery Profile");
     assert!(
         join.probe_ops().iter().any(|op| matches!(
@@ -1689,14 +1530,9 @@ fn prefix_rm_rf_recovery_preserves_minted_sub_without_per_file_warning() {
     let data = pre_place_dir(&mut e, &["data"]);
     let root = e.tree().parent(data).expect("FS root");
     let now = Instant::now();
-    let (sid, pid, _) = attach_discovery_returning(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec_scoped(EffectScope::PerStableFile),
-        now,
-    );
+    let mut per_file = discovery_req("disc", "/data/*");
+    per_file.params.spawn = SpawnSpec::new(empty_program(), EffectScope::PerStableFile, false);
+    let (sid, pid, _) = attach_request(&mut e, per_file, now);
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     settle_minted_seeds(&mut e, sid, now);
     let old_mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
@@ -1782,14 +1618,7 @@ fn overflow_reseed_recovers_missed_mints() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     settle_minted_seeds(&mut e, sid, now);
 
@@ -1887,14 +1716,7 @@ fn overflow_resource_scope_skips_profile_holding_descendant_fds_inside_scope() {
     let mut e = Engine::new();
     let srv = pre_place_dir(&mut e, &["srv"]);
     let now = Instant::now();
-    let (sid, disc_pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(srv),
-        "/srv/*/log",
-        mint_spec(),
-        now,
-    );
+    let (sid, disc_pid) = attach_discovery(&mut e, "disc", "/srv/*/log", now);
     let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
     let _ = respond(&mut e, disc_pid, &chain, now);
     settle_minted_seeds(&mut e, sid, now);
@@ -1954,14 +1776,7 @@ fn absorb_window_is_inert_for_discovery() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
     let _ = respond(&mut e, pid, &dir_snap(&[]), now);
 
     let t1 = now + Duration::from_millis(10);
@@ -2004,14 +1819,7 @@ fn forced_ceiling_reconciles_and_seals() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
     let _ = respond(&mut e, pid, &dir_snap(&[]), now);
 
     let t1 = now + Duration::from_millis(10);
@@ -2060,14 +1868,7 @@ fn mid_burst_discovery_descendant_does_not_drain_covering_profile() {
     );
     let outer_base = dir_snap(&[("apps", EntryKind::Dir, 1)]);
     let seed_done = seed_to_idle(&mut e, outer_pid, &outer_base, now);
-    let (tpl_sid, disc_pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(apps),
-        "/srv/apps/*/log",
-        mint_spec(),
-        seed_done,
-    );
+    let (tpl_sid, disc_pid) = attach_discovery(&mut e, "disc", "/srv/apps/*/log", seed_done);
     let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
     let _ = respond(&mut e, disc_pid, &chain, seed_done);
     settle_minted_seeds(&mut e, tpl_sid, seed_done);
@@ -2121,14 +1922,7 @@ fn mid_burst_minted_descendant_still_drains_through_discovery() {
     );
     let outer_base = dir_snap(&[("apps", EntryKind::Dir, 1)]);
     let seed_done = seed_to_idle(&mut e, outer_pid, &outer_base, now);
-    let (tpl_sid, disc_pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(apps),
-        "/srv/apps/*/log",
-        mint_spec(),
-        seed_done,
-    );
+    let (tpl_sid, disc_pid) = attach_discovery(&mut e, "disc", "/srv/apps/*/log", seed_done);
     let chain = dir_snap_nested(&[("a", covered(dir_snap_nested(&[("log", uncovered(10))])))]);
     let _ = respond(&mut e, disc_pid, &chain, seed_done);
     settle_minted_seeds(&mut e, tpl_sid, seed_done);
@@ -2170,21 +1964,14 @@ fn mixed_profile_at_minted_anchor_survives_anchor_loss_without_remint() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     settle_minted_seeds(&mut e, sid, now);
     let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
     let x = e.tree().lookup(Some(data), "x").expect("terminus slot");
 
-    // Join the minted Profile with a static Sub of the identical identity (the mint_spec fixture's:
-    // recursive Subtree, EMPTY mask, MAX_SETTLE).
+    // Join the minted Profile with a static Sub of the identical identity (what `discovery_req`
+    // mints under: recursive Subtree, EMPTY mask, MAX_SETTLE).
     let (_, co_pid) = attach(
         &mut e,
         "co-resident",
@@ -2244,14 +2031,7 @@ fn an_appearance_minted_onto_a_standing_profile_owes_its_fire() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
     let _ = respond(&mut e, pid, &dir_snap(&[]), now);
 
     let o = pre_place_dir(&mut e, &["data", "o"]);
@@ -2298,14 +2078,7 @@ fn fanout_threshold_warns_exactly_once() {
     let mut e = Engine::new();
     let big = pre_place_dir(&mut e, &["big"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(big),
-        "/big/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/big/*", now);
     let names: Vec<String> = (0..=1000).map(|i| format!("d{i:04}")).collect();
     let entries: Vec<(&str, EntryKind, u64)> = names
         .iter()
@@ -2343,14 +2116,7 @@ fn subs_kept_beneath_a_denied_directory_count_toward_fanout() {
     let mut e = Engine::new();
     let big = pre_place_dir(&mut e, &["big"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(big),
-        "/big/*/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/big/*/*", now);
     let names: Vec<String> = (0..1000).map(|i| format!("m{i:04}")).collect();
     let held: Vec<(&str, ChildEntry)> = names
         .iter()
@@ -2400,24 +2166,10 @@ fn subs_kept_beneath_a_denied_directory_count_toward_fanout() {
 fn identically_driven_engines_mint_identically() {
     let drive = || {
         let mut e = Engine::new();
-        let data = pre_place_dir(&mut e, &["data"]);
+        pre_place_dir(&mut e, &["data"]);
         let now = Instant::now();
-        let (sid1, pid) = attach_discovery(
-            &mut e,
-            "alpha",
-            SubAttachAnchor::Resource(data),
-            "/data/*",
-            mint_spec(),
-            now,
-        );
-        let (sid2, _) = attach_discovery(
-            &mut e,
-            "beta",
-            SubAttachAnchor::Resource(data),
-            "/data/*",
-            mint_spec(),
-            now,
-        );
+        let (sid1, pid) = attach_discovery(&mut e, "alpha", "/data/*", now);
+        let (sid2, _) = attach_discovery(&mut e, "beta", "/data/*", now);
         let out = respond(
             &mut e,
             pid,
@@ -2442,14 +2194,7 @@ fn identically_driven_engines_mint_identically() {
 fn pending_prefix_descends_then_first_reconcile_mints() {
     let mut e = Engine::new();
     let now = Instant::now();
-    let (sid, pid, attach_out) = attach_discovery_returning(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Path("/data/x".into()),
-        "/data/x/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid, attach_out) = attach_discovery_returning(&mut e, "disc", "/data/x/*", now);
     assert!(
         matches!(
             e.profiles().get(pid).unwrap().state(),
@@ -2490,14 +2235,7 @@ fn pending_prefix_descends_then_first_reconcile_mints() {
 fn a_prefix_found_at_once_enumerates_cold() {
     let mut e = Engine::new();
     let now = Instant::now();
-    let (sid, pid, _) = attach_discovery_returning(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Path("/data".into()),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid, _) = attach_discovery_returning(&mut e, "disc", "/data/*", now);
     assert!(
         matches!(
             e.profiles().get(pid).unwrap().state(),
@@ -2557,16 +2295,8 @@ fn a_prefix_seen_absent_delivers_appearances_to_every_template_on_it() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let attach = |e: &mut Engine, name: &str| {
-        attach_discovery_returning(
-            e,
-            name,
-            SubAttachAnchor::Path("/data/in".into()),
-            "/data/in/*",
-            mint_spec(),
-            now,
-        )
-    };
+    let attach =
+        |e: &mut Engine, name: &str| attach_discovery_returning(e, name, "/data/in/*", now);
     let (alpha, pid, _) = attach(&mut e, "alpha");
     let _ = descent_advance(&mut e, pid, None, now);
     let (beta, joined, _) = attach(&mut e, "beta");
@@ -2620,14 +2350,7 @@ fn a_prefix_seen_absent_delivers_appearances_to_every_template_on_it() {
 fn root_pattern_installs_no_parent_edge() {
     let mut e = Engine::new();
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Path("/".into()),
-        "/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/*", now);
     let p = e.profiles().get(pid).expect("discovery Profile live");
     assert!(
         p.watch_root_parent().is_none(),
@@ -2662,22 +2385,8 @@ fn second_template_detach_leaves_siblings_minted_set_intact() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid1, pid) = attach_discovery(
-        &mut e,
-        "disc1",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
-    let (sid2, _) = attach_discovery(
-        &mut e,
-        "disc2",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid1, pid) = attach_discovery(&mut e, "disc1", "/data/*", now);
+    let (sid2, _) = attach_discovery(&mut e, "disc2", "/data/*", now);
     let snap = dir_snap(&[("x", EntryKind::Dir, 1)]);
     let _ = respond(&mut e, pid, &snap, now);
     settle_minted_seeds(&mut e, sid1, now);
@@ -2732,16 +2441,9 @@ fn second_template_detach_leaves_siblings_minted_set_intact() {
 #[test]
 fn minted_seed_burst_deadline_derives_from_reconcile_now() {
     let mut e = Engine::new();
-    let data = pre_place_dir(&mut e, &["data"]);
+    pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
 
     // Answer the cold probe a full second after attach: a deadline threaded from any earlier
     // instant (the attach, the event) would fall due before the boundary probed below.
@@ -2773,14 +2475,7 @@ fn descent_vanish_preserves_co_resident_discovery_contribution() {
     let mut e = Engine::new();
     let data = pre_place_dir(&mut e, &["data"]);
     let now = Instant::now();
-    let (_, disc_pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (_, disc_pid) = attach_discovery(&mut e, "disc", "/data/*", now);
     let _ = respond(&mut e, disc_pid, &dir_snap(&[]), now);
     let demand_resident = e.tree().get(data).unwrap().watch_demand();
 
@@ -2854,14 +2549,7 @@ fn recovery_cascade_rewinds_through_parent_to_fs_root() {
     let mut e = Engine::new();
     let c = pre_place_dir(&mut e, &["a", "b", "c"]);
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(c),
-        "/a/b/c/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/a/b/c/*", now);
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     settle_minted_seeds(&mut e, sid, now);
     let old_mid = *discovery_subs_of(&e, sid).values().next().expect("minted");
@@ -2969,14 +2657,7 @@ fn repeated_loss_recovery_cycles_keep_prefix_parent_refcount_invariant() {
     let data = pre_place_dir(&mut e, &["data"]);
     let root = e.tree().parent(data).expect("FS root");
     let now = Instant::now();
-    let (sid, pid) = attach_discovery(
-        &mut e,
-        "disc",
-        SubAttachAnchor::Resource(data),
-        "/data/*",
-        mint_spec(),
-        now,
-    );
+    let (sid, pid) = attach_discovery(&mut e, "disc", "/data/*", now);
     let _ = respond(&mut e, pid, &dir_snap(&[("x", EntryKind::Dir, 1)]), now);
     settle_minted_seeds(&mut e, sid, now);
     let mid = *discovery_subs_of(&e, sid).values().next().expect("minted");

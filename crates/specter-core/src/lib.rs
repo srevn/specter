@@ -61,7 +61,7 @@ pub use snapshot::tree::{
 };
 pub use sub::{
     ClassSet, EffectScope, FireHistory, MintEntry, MintNarration, MintSpec, MintState, Reaction,
-    ReactionSpec, Removed, SpawnSpec, Sub, SubAttachAnchor, SubAttachRequest, SubParams,
+    Removed, SpawnSpec, Sub, SubAttachAnchor, SubAttachRequest, SubAttachTarget, SubParams,
     SubRegistry, SubRegistryDiff,
 };
 pub use tree::{AttachPathError, FS_ROOT_SEGMENT, StaleIdError, Tree, TreePath};
