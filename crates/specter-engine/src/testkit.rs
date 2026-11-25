@@ -347,10 +347,10 @@ pub fn assert_seed_verifying(
 /// Drive a fresh cold-arm Seed burst for `pid` through its quiescence verdict to pinned `Idle`,
 /// answering the cold walk probe with `make_outcome()`.
 ///
-/// The cold-arm Seed burst pins on the first `Authoritative` response: a `SilentPin` consequence
-/// does not owe quiescence proof, so the witness is [`QuiescenceWitness::EventsReliable`] and the
-/// fold reaches `Stable(StableReason::Natural)`; dispatch then commits the `SilentPin` (a fresh
-/// Seed with no activity) and the burst finishes to Idle. The cold-arm Verifying-first contract
+/// The cold-arm Seed burst pins on the first `Authoritative` response: a `SilentPin` consequence does
+/// not owe quiescence proof, so the witness is [`specter_core::QuiescenceWitness::EventsReliable`]
+/// and the fold reaches `Stable(StableReason::Natural)`; dispatch then commits the `SilentPin` (a
+/// fresh Seed with no activity) and the burst finishes to Idle. The cold-arm Verifying-first contract
 /// puts the probe in flight at burst construction — no Batching settle to drain on the way in.
 ///
 /// `start` is the instant the Seed burst was constructed; the probe response steps at `start +
