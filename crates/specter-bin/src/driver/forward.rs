@@ -192,9 +192,14 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             "stale probe response (state mismatch)"
         ),
         Diagnostic::StaleTimer { id } => tracing::warn!(?id, "stale timer expiration"),
-        Diagnostic::EffectCompleteOutsideAwaiting { sub, profile } => tracing::warn!(
+        Diagnostic::EffectCompleteOutsideAwaiting {
+            sub,
+            profile,
+            minted_by,
+        } => tracing::warn!(
             ?sub,
             ?profile,
+            ?minted_by,
             "effect_complete arrived outside Awaiting (gate-deadline force-transition or anchor-loss); dropped",
         ),
         Diagnostic::EffectCompleteForUnknownSub { sub } => tracing::warn!(
@@ -496,10 +501,12 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             sub,
             profile,
             count,
+            minted_by,
         } => tracing::info!(
             ?sub,
             ?profile,
             count,
+            ?minted_by,
             "sub fired (aggregated per emit_effects pass; SubtreeRoot count=1, \
              PerStableFile count=per-leaf matches)",
         ),
@@ -517,9 +524,11 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
             sub,
             profile,
             reason,
-        } => tracing::info!(?sub, ?profile, ?reason, "sub detached",),
-        Diagnostic::SubRebound { sub } => tracing::info!(
+            minted_by,
+        } => tracing::info!(?sub, ?profile, ?reason, ?minted_by, "sub detached"),
+        Diagnostic::SubRebound { sub, minted_by } => tracing::info!(
             ?sub,
+            ?minted_by,
             "sub rebound (per-Sub fields updated in place; baseline preserved)",
         ),
         Diagnostic::RebindUnknownSub { sub } => tracing::warn!(
@@ -610,7 +619,7 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
         D::SubAttached { sub, .. }
         | D::SubFired { sub, .. }
         | D::SubDetached { sub, .. }
-        | D::SubRebound { sub }
+        | D::SubRebound { sub, .. }
         | D::DetachUnknownSub { sub }
         | D::RebindUnknownSub { sub }
         | D::EffectCompleteForUnknownSub { sub }
@@ -702,7 +711,8 @@ mod tests {
             diag_sub_id(&Diagnostic::SubFired {
                 sub: s,
                 profile: p,
-                count: 1
+                count: 1,
+                minted_by: None,
             }),
             Some(s)
         );
@@ -711,10 +721,17 @@ mod tests {
                 sub: s,
                 profile: p,
                 reason: DetachReason::IpcDisabled,
+                minted_by: None,
             }),
             Some(s)
         );
-        assert_eq!(diag_sub_id(&Diagnostic::SubRebound { sub: s }), Some(s));
+        assert_eq!(
+            diag_sub_id(&Diagnostic::SubRebound {
+                sub: s,
+                minted_by: None
+            }),
+            Some(s)
+        );
         assert_eq!(
             diag_sub_id(&Diagnostic::DetachUnknownSub { sub: s }),
             Some(s)
@@ -728,7 +745,11 @@ mod tests {
             Some(s)
         );
         assert_eq!(
-            diag_sub_id(&Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p }),
+            diag_sub_id(&Diagnostic::EffectCompleteOutsideAwaiting {
+                sub: s,
+                profile: p,
+                minted_by: None,
+            }),
             Some(s)
         );
         // A discovery line keys to the template a per-Sub filter names.

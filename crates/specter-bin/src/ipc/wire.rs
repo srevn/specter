@@ -267,6 +267,7 @@ pub(crate) enum WireDiagnostic {
         at: WireTime,
         sub: WireId,
         profile: WireId,
+        minted_by: Option<WireId>,
     },
     EffectCompleteForUnknownSub {
         at: WireTime,
@@ -464,6 +465,7 @@ pub(crate) enum WireDiagnostic {
         sub: WireId,
         profile: WireId,
         count: u32,
+        minted_by: Option<WireId>,
     },
     QuiescenceAbsorbed {
         at: WireTime,
@@ -479,10 +481,12 @@ pub(crate) enum WireDiagnostic {
         sub: WireId,
         profile: WireId,
         reason: WireDetachReason,
+        minted_by: Option<WireId>,
     },
     SubRebound {
         at: WireTime,
         sub: WireId,
+        minted_by: Option<WireId>,
     },
     RebindUnknownSub {
         at: WireTime,
@@ -558,13 +562,16 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 at: at.clone(),
                 id: id.as_u64(),
             },
-            Diagnostic::EffectCompleteOutsideAwaiting { sub, profile } => {
-                Self::EffectCompleteOutsideAwaiting {
-                    at: at.clone(),
-                    sub: WireId::from(*sub),
-                    profile: WireId::from(*profile),
-                }
-            }
+            Diagnostic::EffectCompleteOutsideAwaiting {
+                sub,
+                profile,
+                minted_by,
+            } => Self::EffectCompleteOutsideAwaiting {
+                at: at.clone(),
+                sub: WireId::from(*sub),
+                profile: WireId::from(*profile),
+                minted_by: minted_by.map(WireId::from),
+            },
             Diagnostic::EffectCompleteForUnknownSub { sub } => Self::EffectCompleteForUnknownSub {
                 at: at.clone(),
                 sub: WireId::from(*sub),
@@ -837,11 +844,13 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 sub,
                 profile,
                 count,
+                minted_by,
             } => Self::SubFired {
                 at: at.clone(),
                 sub: WireId::from(*sub),
                 profile: WireId::from(*profile),
                 count: *count,
+                minted_by: minted_by.map(WireId::from),
             },
             Diagnostic::QuiescenceAbsorbed { profile } => Self::QuiescenceAbsorbed {
                 at: at.clone(),
@@ -856,15 +865,18 @@ impl From<(&Diagnostic, &WireTime)> for WireDiagnostic {
                 sub,
                 profile,
                 reason,
+                minted_by,
             } => Self::SubDetached {
                 at: at.clone(),
                 sub: WireId::from(*sub),
                 profile: WireId::from(*profile),
                 reason: WireDetachReason::from(*reason),
+                minted_by: minted_by.map(WireId::from),
             },
-            Diagnostic::SubRebound { sub } => Self::SubRebound {
+            Diagnostic::SubRebound { sub, minted_by } => Self::SubRebound {
                 at: at.clone(),
                 sub: WireId::from(*sub),
+                minted_by: minted_by.map(WireId::from),
             },
             Diagnostic::RebindUnknownSub { sub } => Self::RebindUnknownSub {
                 at: at.clone(),
@@ -2278,6 +2290,7 @@ mod tests {
                 at: at(),
                 sub: WireId(11),
                 profile: WireId(22),
+                minted_by: None,
             },
             WireDiagnostic::EffectCompleteForUnknownSub {
                 at: at(),
@@ -2470,6 +2483,7 @@ mod tests {
                 sub: WireId(151),
                 profile: WireId(152),
                 count: 3,
+                minted_by: Some(WireId(159)),
             },
             WireDiagnostic::QuiescenceAbsorbed {
                 at: at(),
@@ -2484,11 +2498,13 @@ mod tests {
                 at: at(),
                 sub: WireId(153),
                 profile: WireId(154),
-                reason: WireDetachReason::IpcDisabled,
+                reason: WireDetachReason::TemplateDetached,
+                minted_by: Some(WireId(160)),
             },
             WireDiagnostic::SubRebound {
                 at: at(),
                 sub: WireId(155),
+                minted_by: None,
             },
             WireDiagnostic::RebindUnknownSub {
                 at: at(),

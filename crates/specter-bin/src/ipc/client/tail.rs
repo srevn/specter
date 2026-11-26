@@ -184,6 +184,7 @@ mod tests {
             sub: WireId(1),
             profile: WireId(2),
             count: 1,
+            minted_by: None,
         }
     }
 

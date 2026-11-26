@@ -579,6 +579,7 @@ impl Engine {
             sub,
             profile: profile_id,
             reason,
+            minted_by: removed.sub.minted_by(),
         });
 
         // A template's orphans detach before its own Profile bookkeeping: each minted Sub's detach
@@ -652,7 +653,10 @@ impl Engine {
         for profile in rebound.filter_map(|rebound| self.subs.get(rebound).map(Sub::profile)) {
             recompute_profile_settle(&self.subs, &mut self.profiles, profile);
         }
-        out.diagnostics.push(Diagnostic::SubRebound { sub });
+        out.diagnostics.push(Diagnostic::SubRebound {
+            sub,
+            minted_by: self.subs.get(sub).and_then(Sub::minted_by),
+        });
     }
 
     /// Reap a Profile: release every contribution it holds (anchor watch, watch-root parent watch,

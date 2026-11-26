@@ -278,7 +278,7 @@ fn config_diff_modified_params_mid_burst_rebinds_in_place() {
     assert!(
         out.diagnostics
             .iter()
-            .any(|d| matches!(d, Diagnostic::SubRebound { sub } if *sub == sid_a)),
+            .any(|d| matches!(d, Diagnostic::SubRebound { sub, .. } if *sub == sid_a)),
         "SubRebound emitted for the rebound SubId; got {:?}",
         out.diagnostics,
     );
@@ -385,7 +385,7 @@ fn config_diff_modified_params_settle_change_recomputes_profile_settle() {
     assert!(
         out.diagnostics
             .iter()
-            .any(|d| matches!(d, Diagnostic::SubRebound { sub } if *sub == sid)),
+            .any(|d| matches!(d, Diagnostic::SubRebound { sub, .. } if *sub == sid)),
         "SubRebound emitted; got {:?}",
         out.diagnostics,
     );
@@ -825,7 +825,10 @@ fn config_diff_modified_params_rebinds_a_template_and_the_set_it_minted() {
     let out = e.step(params_edit(edit), t1);
     assert_eq!(
         out.diagnostics.as_slice(),
-        [Diagnostic::SubRebound { sub: template }],
+        [Diagnostic::SubRebound {
+            sub: template,
+            minted_by: None,
+        }],
         "one line: nothing detached, reaped or attached",
     );
     assert!(out.watch_ops.is_empty(), "no watch op: {:?}", out.watch_ops);
@@ -926,11 +929,19 @@ fn config_diff_modified_params_of_a_template_refolds_each_minted_floor() {
     let mut apart = watch;
     apart.name = e.subs().get(minted).expect("live").name.clone();
     apart.params.settle = SETTLE / 2;
-    let _ = e.step(params_edit(apart), now);
+    let out = e.step(params_edit(apart), now);
     assert_eq!(
         floor(&e),
         Some(SETTLE / 2),
         "premise: the minted Sub runs apart"
+    );
+    assert_eq!(
+        out.diagnostics.as_slice(),
+        [Diagnostic::SubRebound {
+            sub: minted,
+            minted_by: Some(template),
+        }],
+        "a match rebound by its own name names its template",
     );
 
     let mut command = slow;

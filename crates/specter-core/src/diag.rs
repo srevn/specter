@@ -137,6 +137,10 @@ pub enum DetachReason {
 
 /// Engine-emitted diagnostic. Equality is structural so tests can pin the exact variant + fields
 /// produced by a given dropped Input.
+///
+/// A line about a Sub the engine holds names the template that minted it (`minted_by`, `None` for a
+/// declared Sub): a reader after the step cannot ask the registry, which the same step may have
+/// taken the Sub out of. A line about a Sub the engine does not hold names none.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Diagnostic {
     /// `ProbeResponse` whose `(owner, correlation)` doesn't match the owner's in-flight `ProbeSlot`
@@ -161,7 +165,11 @@ pub enum Diagnostic {
     ///
     /// In both cases the engine drops the completion (no per-Profile state to update — the burst is
     /// already over) and emits this Diagnostic so operators can see the late arrival.
-    EffectCompleteOutsideAwaiting { sub: SubId, profile: ProfileId },
+    EffectCompleteOutsideAwaiting {
+        sub: SubId,
+        profile: ProfileId,
+        minted_by: Option<SubId>,
+    },
     /// `EffectComplete` for a Sub not in the registry. Emitted by `on_effect_complete` when the
     /// actuator delivers a completion for a `SubId` already removed from the engine. Distinct from
     /// [`Self::DetachUnknownSub`] (a stale-id detach attempt) — the triggering input is an
@@ -587,6 +595,7 @@ pub enum Diagnostic {
         sub: SubId,
         profile: ProfileId,
         count: u32,
+        minted_by: Option<SubId>,
     },
     /// A burst folded instead of firing: an armed `absorb` window caught a would-have-fired
     /// verdict, so the engine advanced the baseline silently (the rebase-family seal) rather than
@@ -627,20 +636,24 @@ pub enum Diagnostic {
         sub: SubId,
         profile: ProfileId,
         reason: DetachReason,
+        minted_by: Option<SubId>,
     },
-    /// A Sub's per-Sub fields (`program`, `scope`, `settle`, `log_output`) were rebound in place
-    /// via `rebind_sub_inner` — the `modified_params` arm of [`crate::SubRegistryDiff`]. Symmetric
-    /// with [`Self::SubAttached`]; pure operator narration.
+    /// A Sub's params (`program`, `scope`, `settle`, `log_output`) were rebound in place — the
+    /// `modified_params` arm of [`crate::SubRegistryDiff`]; what a rebind keeps is
+    /// [`crate::SubRegistry::rebind`]'s, `has_fired` included, so the next fire runs the new
+    /// program and an unchanged tree does not re-fire. Symmetric with [`Self::SubAttached`]; pure
+    /// operator narration.
     ///
-    /// **`has_fired` is preserved across rebind.** The B1 dedup floor reads it as "this Sub has
-    /// already announced the current stable tree state"; a program swap changes *what runs*, not
-    /// *whether the tree changed*. The next event-driven burst picks up the new program; the next
-    /// `seed_drift_observed` picks up the new scope and `needs_diff`. Operators who specifically
-    /// want a re-fire after a program swap can restart Specter.
+    /// A template's rebind reaches every Sub it minted in that one registry edge and makes one
+    /// line, naming the template: a count of the Subs it reached would repeat the minted set's size
+    /// at that instant, and a line per Sub would be noise at fan-out.
     ///
     /// No `name` field: identity is by id, and the rebind invariant guarantees the prior
     /// `SubAttached`'s name is still in force.
-    SubRebound { sub: SubId },
+    SubRebound {
+        sub: SubId,
+        minted_by: Option<SubId>,
+    },
     /// `rebind_sub_inner` was invoked with a stale [`SubId`]. The invariant is that the dispatcher
     /// resolves names through [`crate::SubRegistry::find_by_name`] in the same step as the rebind,
     /// so a stale id is structurally unexpected: the variant surfaces a routing breach rather than

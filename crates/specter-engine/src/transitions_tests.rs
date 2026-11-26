@@ -2115,7 +2115,7 @@ fn effect_complete_ok_in_idle_diagnoses_outside_awaiting() {
     let has_diag = out.diagnostics.iter().any(|d| {
         matches!(
             d,
-            Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p }
+            Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p, minted_by: None }
                 if *s == sid && *p == pid,
         )
     });
@@ -2153,7 +2153,7 @@ fn effect_complete_failed_in_idle_clears_hash_and_diagnoses() {
     let has_diag = out.diagnostics.iter().any(|d| {
         matches!(
             d,
-            Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p }
+            Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p, minted_by: None }
                 if *s == sid && *p == pid,
         )
     });

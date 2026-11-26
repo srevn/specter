@@ -798,7 +798,7 @@ fn fire_cycle_late_effect_complete_after_gate_deadline_diagnoses() {
     assert!(
         late_out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p }
+            Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p, minted_by: None }
                 if *s == sid && *p == pid,
         )),
         "late completion in Rebasing diagnoses",
@@ -868,7 +868,7 @@ fn fire_cycle_anchor_loss_during_awaiting_drops_burst() {
     assert!(
         late_out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p }
+            Diagnostic::EffectCompleteOutsideAwaiting { sub: s, profile: p, minted_by: None }
                 if *s == sid && *p == pid,
         )),
         "late completion after anchor loss diagnoses",

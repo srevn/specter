@@ -218,6 +218,14 @@ fn field(out: &mut String, sty: Styler, key: &str, value: impl Display) {
     );
 }
 
+/// [`field`] where `value` is present, nothing where it is not: a line omits a field that does not
+/// apply to it.
+fn optional_field(out: &mut String, sty: Styler, key: &str, value: Option<impl Display>) {
+    if let Some(value) = value {
+        field(out, sty, key, value);
+    }
+}
+
 /// Append every non-`at` field as ` key=value` pairs via [`field`]. Exhaustive match — a new
 /// variant lands a compile error here, paired with the matching arm in
 /// [`WireDiagnostic::variant_name`] and the `KNOWN_WIRE_VARIANTS` tag list.
@@ -238,9 +246,15 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         WireDiagnostic::StaleTimer { id, .. } => {
             field(out, sty, "id", id);
         }
-        WireDiagnostic::EffectCompleteOutsideAwaiting { sub, profile, .. } => {
+        WireDiagnostic::EffectCompleteOutsideAwaiting {
+            sub,
+            profile,
+            minted_by,
+            ..
+        } => {
             field(out, sty, "sub", sub.0);
             field(out, sty, "profile", profile.0);
+            optional_field(out, sty, "minted_by", minted_by.map(|t| t.0));
         }
         WireDiagnostic::EffectCompleteForUnknownSub { sub, .. } => {
             field(out, sty, "sub", sub.0);
@@ -357,11 +371,7 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
             profile, recovery, ..
         } => {
             field(out, sty, "profile", profile.0);
-            // A channel-less park omits the field — mirrors `SubAttached.minted_by`'s
-            // present-iff-meaningful shape.
-            if let Some(parent) = recovery {
-                field(out, sty, "recovery", parent.0);
-            }
+            optional_field(out, sty, "recovery", recovery.map(|parent| parent.0));
         }
         WireDiagnostic::ProfileClaimPurged {
             profile,
@@ -475,31 +485,37 @@ fn write_fields(out: &mut String, d: &WireDiagnostic, sty: Styler) {
         } => {
             field(out, sty, "sub", sub.0);
             field(out, sty, "name", name);
-            if let Some(src) = minted_by {
-                field(out, sty, "minted_by", src.0);
-            }
+            optional_field(out, sty, "minted_by", minted_by.map(|t| t.0));
         }
         WireDiagnostic::SubFired {
             sub,
             profile,
             count,
+            minted_by,
             ..
         } => {
             field(out, sty, "sub", sub.0);
             field(out, sty, "profile", profile.0);
             field(out, sty, "count", count);
+            optional_field(out, sty, "minted_by", minted_by.map(|t| t.0));
         }
         WireDiagnostic::SubDetached {
             sub,
             profile,
             reason,
+            minted_by,
             ..
         } => {
             field(out, sty, "sub", sub.0);
             field(out, sty, "profile", profile.0);
             field(out, sty, "reason", reason);
+            optional_field(out, sty, "minted_by", minted_by.map(|t| t.0));
         }
-        WireDiagnostic::SubRebound { sub, .. } | WireDiagnostic::RebindUnknownSub { sub, .. } => {
+        WireDiagnostic::SubRebound { sub, minted_by, .. } => {
+            field(out, sty, "sub", sub.0);
+            optional_field(out, sty, "minted_by", minted_by.map(|t| t.0));
+        }
+        WireDiagnostic::RebindUnknownSub { sub, .. } => {
             field(out, sty, "sub", sub.0);
         }
         WireDiagnostic::DiscoveryMinted {
@@ -574,7 +590,8 @@ mod tests {
     use std::time::UNIX_EPOCH;
 
     /// The renderer's row shape: timestamp first, variant second, fields after, newline last. Pin
-    /// per-Sub event details so the operator-visible fields stay structural.
+    /// per-Sub event details so the operator-visible fields stay structural — a minted Sub's fire
+    /// names its template.
     #[test]
     fn render_sub_fired_carries_timestamp_tag_sub_profile_count() {
         let mut s = String::new();
@@ -585,6 +602,7 @@ mod tests {
                 sub: WireId(11),
                 profile: WireId(22),
                 count: 3,
+                minted_by: Some(WireId(33)),
             },
             Styler::Plain,
         );
@@ -595,6 +613,7 @@ mod tests {
         assert!(s.contains("  sub=11"), "sub field present: {s:?}");
         assert!(s.contains("  profile=22"), "profile field present: {s:?}");
         assert!(s.contains("  count=3"), "count field present: {s:?}");
+        assert!(s.contains("  minted_by=33"), "template present: {s:?}");
         assert!(s.ends_with('\n'), "newline-terminated: {s:?}");
     }
 
@@ -668,6 +687,7 @@ mod tests {
                 sub: WireId(1),
                 profile: WireId(2),
                 reason: WireDetachReason::IpcDisabled,
+                minted_by: None,
             },
             Styler::Plain,
         );
@@ -791,9 +811,9 @@ mod tests {
                 json!({"diag": tag, "at": at, "owner": id, "correlation": 1})
             }
             "stale_timer" => json!({"diag": tag, "at": at, "id": 1}),
-            "effect_complete_outside_awaiting" => {
-                json!({"diag": tag, "at": at, "sub": id, "profile": id})
-            }
+            "effect_complete_outside_awaiting" => json!({
+                "diag": tag, "at": at, "sub": id, "profile": id, "minted_by": null,
+            }),
             "effect_complete_for_unknown_sub" | "detach_unknown_sub" => {
                 json!({"diag": tag, "at": at, "sub": id})
             }
@@ -883,17 +903,19 @@ mod tests {
             "sub_attached" => json!({
                 "diag": tag, "at": at, "sub": id, "name": "x", "minted_by": null,
             }),
-            "sub_fired" => {
-                json!({"diag": tag, "at": at, "sub": id, "profile": id, "count": 1})
-            }
+            "sub_fired" => json!({
+                "diag": tag, "at": at, "sub": id, "profile": id, "count": 1, "minted_by": null,
+            }),
             "quiescence_absorbed" => json!({"diag": tag, "at": at, "profile": id}),
             "absorb_armed" => {
                 json!({"diag": tag, "at": at, "profile": id, "mode": "consume_on_first"})
             }
             "sub_detached" => json!({
                 "diag": tag, "at": at, "sub": id, "profile": id, "reason": "ipc_disabled",
+                "minted_by": null,
             }),
-            "sub_rebound" | "rebind_unknown_sub" => json!({"diag": tag, "at": at, "sub": id}),
+            "sub_rebound" => json!({"diag": tag, "at": at, "sub": id, "minted_by": null}),
+            "rebind_unknown_sub" => json!({"diag": tag, "at": at, "sub": id}),
             "discovery_minted" => json!({
                 "diag": tag, "at": at, "template": id, "path": "/x", "kind": "dir",
                 "entry": "appeared",
@@ -955,6 +977,7 @@ mod tests {
                 sub: WireId(1),
                 profile: WireId(2),
                 count: 1,
+                minted_by: None,
             }),
             Severity::Ok,
         );
@@ -1002,6 +1025,7 @@ mod tests {
             sub: WireId(11),
             profile: WireId(22),
             count: 3,
+            minted_by: None,
         };
         let mut active = String::new();
         render(&mut active, &fired, Styler::Active);

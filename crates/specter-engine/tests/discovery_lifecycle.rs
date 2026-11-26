@@ -826,10 +826,14 @@ fn terminus_delete_drives_clamped_reconcile_and_reaps_minted() {
     assert!(
         out.diagnostics.iter().any(|d| matches!(
             d,
-            Diagnostic::SubDetached { sub, reason: DetachReason::MatchVanished, .. }
-                if *sub == mid
+            Diagnostic::SubDetached {
+                sub,
+                reason: DetachReason::MatchVanished,
+                minted_by: Some(template),
+                ..
+            } if *sub == mid && *template == sid
         )),
-        "the minted Sub's lifecycle signal carries MatchVanished",
+        "the minted Sub's lifecycle signal carries MatchVanished and its template",
     );
     assert!(e.subs().get(mid).is_none(), "minted Sub removed");
     assert!(
@@ -1371,10 +1375,11 @@ fn detach_discovery_template_cascades_to_minted_subs() {
                 Diagnostic::SubDetached {
                     sub,
                     reason: DetachReason::TemplateDetached,
+                    minted_by: Some(template),
                     ..
-                } if *sub == mid
+                } if *sub == mid && *template == sid
             )),
-            "minted Sub {mid:?} cascades under TemplateDetached",
+            "minted Sub {mid:?} cascades under TemplateDetached, naming its template",
         );
         assert!(e.subs().get(mid).is_none());
     }

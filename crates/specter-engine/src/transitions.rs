@@ -927,16 +927,14 @@ impl Engine {
     /// Sub-keyed [`Diagnostic::EffectCompleteForUnknownSub`]; still-registered → Profile-keyed
     /// [`Diagnostic::EffectCompleteOutsideAwaiting`].
     fn diagnose_late_completion(&self, sub: SubId, profile_id: ProfileId, out: &mut StepOutput) {
-        if self.subs.get(sub).is_none() {
-            out.diagnostics
-                .push(Diagnostic::EffectCompleteForUnknownSub { sub });
-        } else {
-            out.diagnostics
-                .push(Diagnostic::EffectCompleteOutsideAwaiting {
-                    sub,
-                    profile: profile_id,
-                });
-        }
+        out.diagnostics.push(match self.subs.get(sub) {
+            None => Diagnostic::EffectCompleteForUnknownSub { sub },
+            Some(held) => Diagnostic::EffectCompleteOutsideAwaiting {
+                sub,
+                profile: profile_id,
+                minted_by: held.minted_by(),
+            },
+        });
     }
 
     /// Dispatch a [`specter_core::Input::ConfigDiff`].
@@ -2811,34 +2809,36 @@ impl Engine {
         let sub_ids: SmallVec<[SubId; 2]> = self.subs.at(profile_id).into();
         let mut count: u32 = 0;
         for sub_id in sub_ids {
-            let (scope, needs_diff, log_output, already_fired) = match self.subs.get(sub_id) {
-                Some(s) => match s.reaction() {
-                    Reaction::Spawn {
-                        params: SubParams { spawn, .. },
-                        history,
-                        ..
-                    } => (
-                        spawn.scope(),
-                        spawn.needs_diff(),
-                        spawn.log_output(),
-                        history.has_fired,
-                    ),
-                    // A template never fires — discovery's "fire" is the reconcile's batch of
-                    // attachments, and the verdict floor classifies its Profile to Reconcile before
-                    // the fire fork. Reaching here is a routing breach; the skip is the
-                    // semantically correct degrade (a Mint must not fire), loud in dev so the
-                    // misrouting dispatcher gets fixed, never daemon-fatal in release.
-                    Reaction::Mint { .. } => {
-                        debug_assert!(
-                            false,
-                            "emit_effects reached a template \
+            let (scope, needs_diff, log_output, already_fired, minted_by) =
+                match self.subs.get(sub_id) {
+                    Some(s) => match s.reaction() {
+                        Reaction::Spawn {
+                            params: SubParams { spawn, .. },
+                            minted_by,
+                            history,
+                        } => (
+                            spawn.scope(),
+                            spawn.needs_diff(),
+                            spawn.log_output(),
+                            history.has_fired,
+                            *minted_by,
+                        ),
+                        // A template never fires — discovery's "fire" is the reconcile's batch of
+                        // attachments, and the verdict floor classifies its Profile to Reconcile
+                        // before the fire fork. Reaching here is a routing breach; the skip is the
+                        // semantically correct degrade (a Mint must not fire), loud in dev so the
+                        // misrouting dispatcher gets fixed, never daemon-fatal in release.
+                        Reaction::Mint { .. } => {
+                            debug_assert!(
+                                false,
+                                "emit_effects reached a template \
                              (sub = {sub_id:?}, profile = {profile_id:?})",
-                        );
-                        continue;
-                    }
-                },
-                None => continue,
-            };
+                            );
+                            continue;
+                        }
+                    },
+                    None => continue,
+                };
             match fire_decision(mode, scope, sub_id, already_fired, nothing_changed) {
                 FireVerdict::SkipScope => continue,
                 FireVerdict::SuppressDedup => {
@@ -2898,6 +2898,7 @@ impl Engine {
                         sub: sub_id,
                         profile: profile_id,
                         count: 1,
+                        minted_by,
                     });
                 }
                 EffectScope::PerStableFile => {
@@ -2926,6 +2927,7 @@ impl Engine {
                             sub: sub_id,
                             profile: profile_id,
                             count: pushed,
+                            minted_by,
                         });
                     }
                     count = count.saturating_add(pushed);

@@ -206,6 +206,7 @@ mod tests {
             sub: WireId(1),
             profile: WireId(2),
             count: 1,
+            minted_by: None,
         }
     }
 
@@ -215,6 +216,7 @@ mod tests {
             sub: WireId(1),
             profile: WireId(2),
             reason,
+            minted_by: None,
         }
     }
 
@@ -222,6 +224,7 @@ mod tests {
         WireDiagnostic::SubRebound {
             at: WireTime::from(UNIX_EPOCH),
             sub: WireId(1),
+            minted_by: None,
         }
     }
 
