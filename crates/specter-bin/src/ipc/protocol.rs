@@ -84,7 +84,8 @@ pub(crate) enum WireRequest {
     },
     Reload,
     /// Subscribe to the diagnostic stream. `name` is optional — `None` is an unfiltered tail;
-    /// `Some(n)` scopes the subscription to events naming that Sub, collapsing the historical
+    /// `Some(n)` scopes the subscription to the watch `n` names: the lines about its Sub, and about
+    /// each Sub it minted. Resolving the name in the Subscribe handler collapses the historical
     /// resolve-then-subscribe race window for the `wait` verb.
     Subscribe {
         #[serde(default)]

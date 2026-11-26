@@ -38,12 +38,12 @@
 //! [`Hub::drain_writable`], [`Hub::terminate_conn`], [`Hub::arm_writable_interests`]; the IPC verb
 //! handler reaches per-conn helpers; `forward.rs` drives [`Hub::dispatch_to_subscribers`].
 
-use super::conns::{self, ConnRole, ConnState, PushOutcome};
+use super::conns::{self, ConnRole, ConnState, DiagSub, PushOutcome};
 use crate::ipc::framing::{InfallibleSerialize, MAX_LINE_BYTES, encode_line};
 use crate::ipc::protocol::{ResponsePayload, WireErrorCode};
 use crate::ipc::wire::{WireDiagnostic, WireTime};
 use mio::{Interest, Registry, Token};
-use specter_core::{Diagnostic, SubId};
+use specter_core::Diagnostic;
 use std::collections::BTreeMap;
 use std::io;
 use std::time::SystemTime;
@@ -297,14 +297,14 @@ impl Hub {
     /// write_queue.
     ///
     /// Subscriber storage IS the per-conn map: every conn whose role is
-    /// [`super::conns::ConnRole::Sub`] is a subscriber, the per-Sub filter and back-pressure marker
-    /// accumulator live on the role payload, and the line bytes are pushed directly into
+    /// [`super::conns::ConnRole::Sub`] is a subscriber, the stream's filter and back-pressure
+    /// marker accumulator live on the role payload, and the line bytes are pushed directly into
     /// [`ConnState::write_queue`] on the reactor thread — no envelope, no worker-thread
     /// re-serialize hop.
     ///
-    /// **`diag_sub` is caller-computed** — the projection `&Diagnostic → Option<SubId>` is an
+    /// **`about` is caller-computed** — the projection `&Diagnostic → Option<DiagSub>` is an
     /// exhaustive walk of the core enum that lives next to its only call site
-    /// ([`crate::driver::forward::diag_sub_id`]); this method takes the resolved value to keep the
+    /// ([`crate::driver::forward::diag_sub`]); this method takes the resolved value to keep the
     /// Diagnostic-walking concern out of the Hub module.
     ///
     /// **Time threads through two channels.** `wire_at` is the pre-formatted RFC 3339 token the
@@ -327,15 +327,15 @@ impl Hub {
     /// **Subscriber-empty short-circuit is defensive.** The hot path already gates fan-out at the
     /// StepOutput-scoped caller ([`crate::driver::EngineDriver::forward_diagnostics`] reads
     /// [`Self::has_any_subscriber`] once per emission and skips the per-diag `WireTime` /
-    /// `diag_sub_id` work entirely). The inner check below catches a future caller that bypasses
-    /// the outer gate; the cost is one `O(MAX_IPC_CONNS)` discriminator walk before bailing, well
-    /// below the `WireDiagnostic::from` + `encode_line` build it stands in front of.
+    /// `diag_sub` work entirely). The inner check below catches a future caller that bypasses the
+    /// outer gate; the cost is one `O(MAX_IPC_CONNS)` discriminator walk before bailing, well below
+    /// the `WireDiagnostic::from` + `encode_line` build it stands in front of.
     pub(in crate::driver) fn dispatch_to_subscribers(
         &mut self,
         diag: &Diagnostic,
         at: SystemTime,
         wire_at: &WireTime,
-        diag_sub: Option<SubId>,
+        about: Option<DiagSub>,
     ) {
         if !self.has_any_subscriber() {
             return;
@@ -346,7 +346,7 @@ impl Hub {
             // The five-axis verdict (close, role, filter, capacity, marker dance) and the per-conn
             // missed-window bookkeeping live on ConnState — the Hub's job here is serialize-once +
             // iterate.
-            let _ = conn.try_dispatch_diag(&line, diag_sub, at);
+            let _ = conn.try_dispatch_diag(&line, about, at);
         }
     }
 
@@ -356,8 +356,8 @@ impl Hub {
     ///
     /// Composed by [`crate::driver::EngineDriver::forward_diagnostics`] once per `StepOutput` so
     /// the no-subscriber common path skips the per-emission [`SystemTime::now`] /
-    /// [`WireTime::from`] / [`crate::driver::forward::diag_sub_id`] work entirely. The walk is
-    /// bounded above by [`MAX_IPC_CONNS`] enum-discriminator reads — well below the syscall +
+    /// [`WireTime::from`] / [`crate::driver::forward::diag_sub`] work entirely. The walk is bounded
+    /// above by [`MAX_IPC_CONNS`] enum-discriminator reads — well below the syscall +
     /// timestamp-render allocation the outer gate would otherwise pay per emission.
     ///
     /// [`Self::dispatch_to_subscribers`] retains the same predicate as a defensive inner

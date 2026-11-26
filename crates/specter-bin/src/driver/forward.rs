@@ -20,9 +20,10 @@
 //! severities are the operator-facing catalogue.
 
 use super::EngineDriver;
+use super::ipc::conns::DiagSub;
 use crate::ipc::wire::WireTime;
 use crossbeam::channel::TrySendError;
-use specter_core::{Diagnostic, EffectOp, Input, ProbeOp, StepOutput, SubId};
+use specter_core::{Diagnostic, EffectOp, Input, ProbeOp, StepOutput};
 use specter_sensor::FsWatcher;
 use std::ops::ControlFlow;
 use std::time::SystemTime;
@@ -144,7 +145,7 @@ impl<W: FsWatcher> EngineDriver<W> {
     ///
     /// **Subscriber-empty short-circuit.** When no operator is subscribed
     /// ([`crate::driver::Hub::has_any_subscriber`] → `false`), only [`log_diagnostic`] runs per
-    /// diag — the per- emission [`SystemTime::now`] / [`WireTime::from`] / [`diag_sub_id`] /
+    /// diag — the per- emission [`SystemTime::now`] / [`WireTime::from`] / [`diag_sub`] /
     /// `dispatch_to_subscribers` work is skipped entirely. For a `StepOutput` carrying N diags on a
     /// quiet daemon this collapses to N tracing emits plus one conn-map walk, rather than N times
     /// the same walk inside the dispatch path's defensive inner gate.
@@ -162,9 +163,8 @@ impl<W: FsWatcher> EngineDriver<W> {
         let wire_at = WireTime::from(wall_now);
         for diag in diagnostics {
             log_diagnostic(diag);
-            let diag_sub = diag_sub_id(diag);
             self.ipc
-                .dispatch_to_subscribers(diag, wall_now, &wire_at, diag_sub);
+                .dispatch_to_subscribers(diag, wall_now, &wire_at, diag_sub(diag));
         }
     }
 }
@@ -598,41 +598,50 @@ pub(super) fn log_diagnostic(d: &Diagnostic) {
     }
 }
 
-/// Project a [`Diagnostic`] to the [`SubId`] it names, if any.
-///
-/// Called by [`EngineDriver::forward`] once per emitted diagnostic to resolve the `diag_sub` filter
-/// argument [`super::Hub::dispatch_to_subscribers`] consumes — the projection lives on the
-/// engine-output side of the boundary, the reactor module never names [`Diagnostic`] internals.
+/// What a [`Diagnostic`] is about, as a filtered stream reads it ([`DiagSub`]): the `about`
+/// [`super::Hub::dispatch_to_subscribers`] takes, projected here so the hub never names
+/// [`Diagnostic`] internals. A Profile-keyed line (`ProfileReaped`, `ReapPendingCancelled`, …) is
+/// about no Sub and reaches unfiltered subscribers only.
 ///
 /// Total over the [`Diagnostic`] enum — a new core variant is a compile error here (the exhaustive
 /// `match` is the structural wall, same discipline as [`crate::ipc::wire::WireDiagnostic::from`]).
-///
-/// Per-Sub variants project to their `sub`. Profile-keyed variants (`ProfileReaped`,
-/// `ReapPendingCancelled`, etc.) return `None` and reach unfiltered subscribers only.
-///
-/// The verbose `None`-arm enumeration is deliberate: a future [`Diagnostic`] variant carrying a
-/// [`SubId`] that this function silently projects to `None` would be a per-Sub `wait` bug; the
-/// exhaustive `match` forces the author to pick a side at the point of variant introduction.
-pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
+/// The verbose `None`-arm enumeration is deliberate: a future variant carrying a Sub that this
+/// function silently projects to `None` would be a `wait` bug; the exhaustive `match` forces the
+/// author to pick a side at the point of variant introduction.
+pub(super) const fn diag_sub(d: &Diagnostic) -> Option<DiagSub> {
     use Diagnostic as D;
     match d {
-        D::SubAttached { sub, .. }
-        | D::SubFired { sub, .. }
-        | D::SubDetached { sub, .. }
-        | D::SubRebound { sub, .. }
-        | D::DetachUnknownSub { sub }
-        | D::RebindUnknownSub { sub }
-        | D::EffectCompleteForUnknownSub { sub }
-        | D::EffectCompleteOutsideAwaiting { sub, .. } => Some(*sub),
+        D::SubAttached { sub, minted_by, .. }
+        | D::SubFired { sub, minted_by, .. }
+        | D::SubDetached { sub, minted_by, .. }
+        | D::SubRebound { sub, minted_by }
+        | D::EffectCompleteOutsideAwaiting { sub, minted_by, .. } => Some(DiagSub {
+            sub: *sub,
+            minted_by: *minted_by,
+        }),
 
-        // The discovery family keys to its template — the watch an operator names in a per-Sub
-        // filter. The minted/reaped Sub's own lifecycle signals (`SubAttached` / `SubDetached`)
-        // project their own ids alongside.
+        // A Sub the engine no longer holds names no template.
+        D::DetachUnknownSub { sub }
+        | D::RebindUnknownSub { sub }
+        | D::EffectCompleteForUnknownSub { sub } => Some(DiagSub {
+            sub: *sub,
+            minted_by: None,
+        }),
+
+        // A reap is about the match, and so the template that minted it.
+        D::DiscoverySubReaped { template, sub, .. } => Some(DiagSub {
+            sub: *sub,
+            minted_by: Some(*template),
+        }),
+
+        // A pass's lines are about the template that runs it.
         D::DiscoveryMinted { template, .. }
         | D::DiscoveryUnsupportedAnchorKind { template, .. }
         | D::DiscoveryFanoutThreshold { template, .. }
-        | D::DiscoverySubReaped { template, .. }
-        | D::DiscoveryDenied { template, .. } => Some(*template),
+        | D::DiscoveryDenied { template, .. } => Some(DiagSub {
+            sub: *template,
+            minted_by: None,
+        }),
 
         D::StaleProbeResponse { .. }
         | D::StaleTimer { .. }
@@ -678,10 +687,13 @@ pub(super) const fn diag_sub_id(d: &Diagnostic) -> Option<SubId> {
 
 #[cfg(test)]
 mod tests {
-    use super::diag_sub_id;
+    use super::diag_sub;
+    use crate::driver::ipc::conns::DiagSub;
     use compact_str::CompactString;
     use slotmap::KeyData;
     use specter_core::{BurstIntent, DetachReason, Diagnostic, ProbeCorrelation, ProfileId, SubId};
+    use std::path::Path;
+    use std::sync::Arc;
 
     /// Mint a non-default [`SubId`] from a raw FFI value — the fan-out filter keys on `Some(sid)`
     /// vs `None`, so a slotmap default would be indistinguishable from an absent id.
@@ -693,101 +705,103 @@ mod tests {
         ProfileId::from(KeyData::from_ffi(raw))
     }
 
-    /// Every per-Sub [`Diagnostic`] variant projects to its `sub`. Pins the load-bearing arms of
-    /// [`diag_sub_id`]; a regression here is a `wait <name>` bug.
+    /// Every per-Sub [`Diagnostic`] variant projects to its Sub, a line about a Sub the engine
+    /// holds with the template that minted it, a reap with both the match and its template, and a
+    /// pass's line to its template. A regression here is a `wait <name>` bug.
     #[test]
-    fn diag_sub_id_per_sub_variants() {
-        let s = sid(1);
-        let p = pid(0xAA);
+    fn diag_sub_pairs_each_line_with_its_template() {
+        let (s, t, p) = (sid(1), sid(2), pid(0xAA));
+        let about = |sub, minted_by| Some(DiagSub { sub, minted_by });
         assert_eq!(
-            diag_sub_id(&Diagnostic::SubAttached {
+            diag_sub(&Diagnostic::SubAttached {
                 sub: s,
-                name: CompactString::const_new("x"),
-                minted_by: None,
+                name: CompactString::const_new("t@/srv/a"),
+                minted_by: Some(t),
             }),
-            Some(s)
+            about(s, Some(t)),
         );
         assert_eq!(
-            diag_sub_id(&Diagnostic::SubFired {
+            diag_sub(&Diagnostic::SubFired {
                 sub: s,
                 profile: p,
                 count: 1,
-                minted_by: None,
+                minted_by: Some(t),
             }),
-            Some(s)
+            about(s, Some(t)),
         );
         assert_eq!(
-            diag_sub_id(&Diagnostic::SubDetached {
+            diag_sub(&Diagnostic::SubDetached {
                 sub: s,
                 profile: p,
-                reason: DetachReason::IpcDisabled,
-                minted_by: None,
+                reason: DetachReason::TemplateDetached,
+                minted_by: Some(t),
             }),
-            Some(s)
+            about(s, Some(t)),
         );
         assert_eq!(
-            diag_sub_id(&Diagnostic::SubRebound {
+            diag_sub(&Diagnostic::SubRebound {
                 sub: s,
-                minted_by: None
+                minted_by: Some(t),
             }),
-            Some(s)
+            about(s, Some(t)),
         );
         assert_eq!(
-            diag_sub_id(&Diagnostic::DetachUnknownSub { sub: s }),
-            Some(s)
-        );
-        assert_eq!(
-            diag_sub_id(&Diagnostic::RebindUnknownSub { sub: s }),
-            Some(s)
-        );
-        assert_eq!(
-            diag_sub_id(&Diagnostic::EffectCompleteForUnknownSub { sub: s }),
-            Some(s)
-        );
-        assert_eq!(
-            diag_sub_id(&Diagnostic::EffectCompleteOutsideAwaiting {
+            diag_sub(&Diagnostic::EffectCompleteOutsideAwaiting {
                 sub: s,
                 profile: p,
-                minted_by: None,
+                minted_by: Some(t),
             }),
-            Some(s)
+            about(s, Some(t)),
         );
-        // A discovery line keys to the template a per-Sub filter names.
+        // A Sub the engine no longer holds names no template.
+        for gone in [
+            Diagnostic::DetachUnknownSub { sub: s },
+            Diagnostic::RebindUnknownSub { sub: s },
+            Diagnostic::EffectCompleteForUnknownSub { sub: s },
+        ] {
+            assert_eq!(diag_sub(&gone), about(s, None), "{gone:?}");
+        }
+        let path: Arc<Path> = Arc::from(Path::new("/srv/a"));
         assert_eq!(
-            diag_sub_id(&Diagnostic::DiscoveryDenied {
-                template: s,
-                path: std::sync::Arc::from(std::path::Path::new("/srv/lost+found")),
+            diag_sub(&Diagnostic::DiscoverySubReaped {
+                template: t,
+                sub: s,
+                path: Arc::clone(&path),
             }),
-            Some(s)
+            about(s, Some(t)),
+        );
+        assert_eq!(
+            diag_sub(&Diagnostic::DiscoveryDenied { template: t, path }),
+            about(t, None),
         );
     }
 
     /// Profile-keyed and metadata-only variants project to `None` — they reach unfiltered
-    /// subscribers, never per-Sub filtered ones. Catches a future variant that carries a [`SubId`]
-    /// but lands in the wrong arm.
+    /// subscribers, never filtered ones. Catches a future variant that carries a [`SubId`] but
+    /// lands in the wrong arm.
     #[test]
-    fn diag_sub_id_profile_keyed_returns_none() {
+    fn diag_sub_profile_keyed_returns_none() {
         let p = pid(0xAA);
         assert_eq!(
-            diag_sub_id(&Diagnostic::ProfileReaped {
+            diag_sub(&Diagnostic::ProfileReaped {
                 profile: p,
                 via: specter_core::ReapTrigger::Immediate,
             }),
             None
         );
         assert_eq!(
-            diag_sub_id(&Diagnostic::ReapPendingCancelled { profile: p }),
+            diag_sub(&Diagnostic::ReapPendingCancelled { profile: p }),
             None
         );
         assert_eq!(
-            diag_sub_id(&Diagnostic::ProbeVanished {
+            diag_sub(&Diagnostic::ProbeVanished {
                 profile: p,
                 intent: BurstIntent::Standard,
             }),
             None
         );
         assert_eq!(
-            diag_sub_id(&Diagnostic::StaleProbeResponse {
+            diag_sub(&Diagnostic::StaleProbeResponse {
                 owner: p,
                 correlation: ProbeCorrelation::from(7),
             }),

@@ -67,6 +67,21 @@ pub(in crate::driver) const RESPONSE_TOO_BIG_RESERVE: usize = 1024;
 /// single- source: bumping either constant moves `ACCEPT_CAP` with it.
 pub(in crate::driver) const ACCEPT_CAP: usize = WRITE_QUEUE_HIGH_WATER - RESPONSE_TOO_BIG_RESERVE;
 
+/// What a line is about, as a filtered stream reads it: a Sub, and the template that minted it.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(in crate::driver) struct DiagSub {
+    pub(in crate::driver) sub: SubId,
+    pub(in crate::driver) minted_by: Option<SubId>,
+}
+
+impl DiagSub {
+    /// Whether a stream filtered on `filter` takes the line: the line is about that Sub, or about
+    /// one it minted.
+    fn reaches(self, filter: SubId) -> bool {
+        self.sub == filter || self.minted_by == Some(filter)
+    }
+}
+
 /// Connection state held on [`super::hub::Hub`]'s `conns: BTreeMap<Token, ConnState>`.
 ///
 /// One per accepted operator IPC client. Drops when `Hub::terminate_conn` removes the entry from
@@ -120,12 +135,12 @@ pub(in crate::driver) enum ConnRole {
     /// `ResponsePayload`. The fan-out path skips `Reqs` conns.
     Reqs,
     /// Diagnostic subscriber shape: the fan-out path appends `WireDiagnostic` lines to the
-    /// write_queue. `filter` scopes the stream to a single Sub when set (the `wait <name>` use case);
+    /// write_queue. `filter` scopes the stream to a watch when set (the `wait <name>` use case);
     /// `missed` accumulates dropped-due-to-backpressure diags for the next `Missed` marker emission.
     Sub {
-        /// `Some(sid)` ⇒ deliver only diags whose `diag_sub_id` resolves to `sid` (per-Sub `wait`).
-        /// `None` ⇒ unfiltered (`tail`). Resolved server-side at Subscribe time so a typo never
-        /// reaches the fan-out path.
+        /// `Some(sid)` ⇒ deliver only the lines a stream filtered on `sid` takes
+        /// ([`DiagSub::reaches`]): a watch's stream, `wait`'s. `None` ⇒ unfiltered (`tail`).
+        /// Resolved server-side at Subscribe time so a typo never reaches the fan-out path.
         filter: Option<SubId>,
         /// Back-pressure marker window — count + start-of-window timestamp pair, or the closed
         /// state. Flushed lazily as a `WireDiagnostic::Missed` line before the next dispatched diag
@@ -204,8 +219,8 @@ pub(in crate::driver) enum DispatchOutcome {
     /// Diag dropped — capacity gate refused. `missed` was bumped; `first_dropped_at` was captured
     /// on the `0 → 1` transition.
     Dropped,
-    /// Conn not eligible (`close_after_flush`, `role != Sub`, or per-Sub filter mismatch). No
-    /// mutation.
+    /// Conn not eligible (`close_after_flush`, `role != Sub`, or a filter the line does not reach).
+    /// No mutation.
     Skipped,
 }
 
@@ -287,7 +302,7 @@ impl ConnState {
     /// Axes evaluated in order:
     /// 1. `close_after_flush` → `Skipped` (closing conn doesn't accumulate fresh diags).
     /// 2. `role != Sub` → `Skipped` (pre-subscribe conn).
-    /// 3. Per-Sub `filter` mismatch → `Skipped`.
+    /// 3. A `filter` the line does not reach ([`DiagSub::reaches`]) → `Skipped`.
     /// 4. Capacity gate: combined `(queue_len + marker_bytes + diag_line)` must fit under
     ///    [`ACCEPT_CAP`]. The diag fan-out path honours the response-cap reserve too — a streaming
     ///    diag that could fill the reserve would deny the next
@@ -304,7 +319,7 @@ impl ConnState {
     pub(in crate::driver) fn try_dispatch_diag(
         &mut self,
         diag_line: &[u8],
-        diag_sub: Option<SubId>,
+        about: Option<DiagSub>,
         at: SystemTime,
     ) -> DispatchOutcome {
         if self.close_after_flush {
@@ -314,7 +329,7 @@ impl ConnState {
             return DispatchOutcome::Skipped;
         };
         if let Some(want) = filter
-            && diag_sub != Some(*want)
+            && !about.is_some_and(|line| line.reaches(*want))
         {
             return DispatchOutcome::Skipped;
         }
@@ -507,8 +522,8 @@ mod tests {
         assert!(conn.write_queue.is_empty());
     }
 
-    /// `try_dispatch_diag` returns `Skipped` when the per-Sub filter rejects the diag's `diag_sub`.
-    /// The unfiltered-tail (filter=None) path is covered by
+    /// `try_dispatch_diag` returns `Skipped` when the filter is on another Sub than the line is
+    /// about. The unfiltered-tail (filter=None) path is covered by
     /// `try_dispatch_diag_pushes_on_unfiltered_sub`.
     #[test]
     fn try_dispatch_diag_skips_on_filter_mismatch() {
@@ -516,10 +531,41 @@ mod tests {
         let want = make_sid(0x42);
         conn.transition_to_sub(Some(want));
         let line = b"{\"diag\":\"placeholder\"}\n";
-        let other = make_sid(0x99);
+        let other = DiagSub {
+            sub: make_sid(0x99),
+            minted_by: None,
+        };
         let outcome = conn.try_dispatch_diag(line, Some(other), SystemTime::UNIX_EPOCH);
         assert_eq!(outcome, DispatchOutcome::Skipped);
         assert!(conn.write_queue.is_empty());
+    }
+
+    /// A conn filtered on a template takes a line about a Sub it minted — the dynamic watch's
+    /// stream — and skips one about a Sub another template minted.
+    #[test]
+    fn try_dispatch_diag_filtered_on_a_template_takes_what_it_minted() {
+        let (mut conn, _peer) = fresh_conn();
+        let template = make_sid(0x42);
+        conn.transition_to_sub(Some(template));
+        let line: &[u8] = b"{\"diag\":\"placeholder\"}\n";
+        let minted = DiagSub {
+            sub: make_sid(0x43),
+            minted_by: Some(template),
+        };
+        assert_eq!(
+            conn.try_dispatch_diag(line, Some(minted), SystemTime::UNIX_EPOCH),
+            DispatchOutcome::Accepted,
+        );
+        let foreign = DiagSub {
+            sub: make_sid(0x44),
+            minted_by: Some(make_sid(0x99)),
+        };
+        assert_eq!(
+            conn.try_dispatch_diag(line, Some(foreign), SystemTime::UNIX_EPOCH),
+            DispatchOutcome::Skipped,
+        );
+        let queued: Vec<u8> = conn.write_queue.iter().copied().collect();
+        assert_eq!(queued, line, "the minted Sub's line alone is queued");
     }
 
     /// Happy path: an unfiltered Sub-mode conn under the capacity cap accepts the diag bytes

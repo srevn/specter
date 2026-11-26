@@ -285,6 +285,7 @@ struct ListResponseSnap {
 #[derive(Debug, Deserialize)]
 struct ListRowSnap {
     name: String,
+    state: Option<String>,
     disabled: Option<DisabledSourceSnap>,
 }
 
@@ -1349,6 +1350,64 @@ fn wait_fire_observing_detach_exits_two() {
     );
 }
 
+// ---------- wait on a dynamic watch returns at a minted fire --------
+
+/// `wait <dynamic> --kind fire` returns at the first fire of a Sub the watch minted: a line about a
+/// minted Sub belongs to its template's stream. Ready once the match's row reads `idle` — its Seed
+/// pinned, its anchor watched — and not at the log's `sub attached`, which is the template's: a
+/// write landing before the match is minted and watched becomes its baseline and never fires.
+#[test]
+fn wait_on_a_dynamic_watch_exits_zero_at_a_minted_fire() {
+    let sb = Sandbox::new();
+    let tree = sb.dir.join("tree");
+    fs::create_dir_all(tree.join("a")).expect("mkdir the match");
+    let config = format!(
+        r#"
+[[watch]]
+name    = "logs"
+path    = "{tree}/*"
+settle  = "50ms"
+actions = [{{ exec = ["true"] }}]
+"#,
+        tree = tree.display(),
+    );
+    fs::write(&sb.cfg, config).expect("write config");
+
+    let daemon = spawn_specter(&sb, std::iter::empty::<&str>());
+    assert!(wait_for_socket(&sb.socket, STARTUP_DEADLINE));
+    assert!(
+        poll_list_until(
+            &sb.socket,
+            |rows| rows
+                .iter()
+                .any(|r| r.name.starts_with("logs@") && r.state.as_deref() == Some("idle")),
+            STARTUP_DEADLINE,
+        )
+        .is_some(),
+        "the match was never minted and settled",
+    );
+
+    let (mut wait_child, _rx) =
+        spawn_client_stream(&sb, "wait", &["logs", "--kind", "fire", "--timeout", "5s"]);
+    thread::sleep(Duration::from_millis(400));
+    touch_unique(&tree.join("a"), "minted");
+
+    let exit = await_client_exit(&mut wait_child, Duration::from_secs(8))
+        .expect("wait must exit within its own timeout");
+    assert_eq!(
+        exit.code(),
+        Some(0),
+        "wait on a dynamic watch must exit 0 at a minted fire; got {exit:?}\n--- daemon log ---\n{}",
+        sb.log_contents(),
+    );
+
+    let daemon_exit = terminate(daemon);
+    assert!(
+        daemon_exit.success(),
+        "clean daemon exit; got {daemon_exit:?}"
+    );
+}
+
 // ---------- Disable / enable / reload integration ------------------
 //
 // Each test spawns the daemon against a config carrying one or two `[[watch]]` blocks, drives the
@@ -1375,6 +1434,27 @@ fn poll_status_until<F: Fn(&StatusResponseSnap) -> bool>(
             && pred(&s)
         {
             return Some(s);
+        }
+        thread::sleep(POLL_INTERVAL);
+    }
+    None
+}
+
+/// Helper: poll `list` until its rows match a predicate, or timeout — for a state the daemon
+/// reaches through its own ticks, such as a minted Sub's Seed pinning.
+fn poll_list_until<F: Fn(&[ListRowSnap]) -> bool>(
+    socket: &Path,
+    pred: F,
+    deadline: Duration,
+) -> Option<Vec<ListRowSnap>> {
+    let stop = Instant::now() + deadline;
+    while Instant::now() < stop {
+        if let Ok(line) = one_shot(socket, r#"{"op":"list"}"#)
+            && let Ok(ResponseSnap::List(list)) =
+                serde_json::from_str::<ResponseSnap>(line.trim_end())
+            && pred(&list.rows)
+        {
+            return Some(list.rows);
         }
         thread::sleep(POLL_INTERVAL);
     }
