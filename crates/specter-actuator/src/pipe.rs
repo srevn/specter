@@ -89,11 +89,9 @@ impl ChildSignaler for CombinedSignaler {
     }
 
     fn mark_dead(&self) {
-        // Symmetric with `is_dead`: a pipe-level `mark_dead` publishes into every per-stage
-        // signaler's ratchet so the wrapper-layer backstop (`PipeWaiter::wait`'s outer `catch_unwind`
-        // in `wait_loop`) closes the PID-reuse window for the whole pipe with one call, even when
-        // no per-stage closure ran (i.e. the aggregating waiter itself panicked before spawning the
-        // per-stage threads). Idempotent against every per-stage writer.
+        // `wait_loop`'s backstop reaches every stage's ratchet through this one call, whatever ended
+        // the pipe's wait: a panic that took it down before a stage thread marked its stage among
+        // them. Idempotent against every per-stage writer.
         for s in self.stages.iter() {
             s.mark_dead();
         }
@@ -106,8 +104,7 @@ impl ChildSignaler for CombinedSignaler {
 /// The stages are waited on at once so that a failure is seen when it happens: a stage upstream of
 /// it that blocks without writing (`sleep 60`) would otherwise hold the wait before the failure was
 /// ever read. The stage threads are scoped to the wait, so one that dies before it reports makes
-/// the wait itself panic: a stage whose ending is unknown ends the job `Internal`, the actuator's
-/// own failure, and never folds as a stage that succeeded.
+/// the wait itself panic: a stage whose ending is unknown never folds as one that succeeded.
 pub(crate) struct PipeWaiter {
     key: DedupKey,
     stages: Vec<SpawnHandles>,
