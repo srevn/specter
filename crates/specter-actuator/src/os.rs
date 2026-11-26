@@ -18,10 +18,7 @@
 //! descriptors (Linux pidfd, FreeBSD pdfork) to eliminate it entirely.
 
 use crate::lifecycle::DeadFlag;
-use crate::pipe::{CombinedSignaler, PipeWaiter};
-use crate::spawner::{
-    ChildSignaler, ChildWaiter, PipeSpawnHandles, SpawnHandles, Spawner, StageSpec,
-};
+use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles, Spawner, StageSpec};
 use specter_core::{EffectOutcome, Termination};
 use std::io;
 use std::os::fd::OwnedFd;
@@ -45,98 +42,36 @@ impl OsSpawner {
 }
 
 impl Spawner for OsSpawner {
-    fn spawn(&self, stage: &StageSpec<'_>, cwd: &Path) -> io::Result<SpawnHandles> {
-        let (pid, waiter, signaler) = build_pair(build_command(stage, cwd).spawn()?);
-        Ok(SpawnHandles { pid, waiter: Box::new(waiter), signaler: Arc::new(signaler) })
-    }
-
-    fn spawn_pipe(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<PipeSpawnHandles> {
-        let n = stages.len();
-        if n < 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "spawn_pipe requires at least two stages",
-            ));
-        }
-        // Pipe layout: interleave pipe(2) creation with each stage's spawn so the parent holds at
-        // most one pipe pair's fds at any moment, rather than all N-1 pairs up front. Caps the
-        // parent-side fd footprint at ~3 fds even for deep pipes — relevant on hosts under fd
-        // pressure (kqueue watchers already consume one O_EVTONLY fd per watched directory).
-        //
-        // `prev_read` carries pipe K-1's read end (whose write end was moved into stage K-1's stdout
-        // on the prior iter) into iter K as stage K's stdin. Each non-last iter sets it; the next
-        // iter consumes it via `take()`. The OwnedFds are *moved* (not cloned) into `cmd`, which
-        // consumes them — parent's copy closes as soon as `cmd` is dropped at end of iter. The
-        // child's dup'd fd (stdin fd 0 / stdout fd 1) carries forward the pipe through fork+exec;
-        // CLOEXEC on the OwnedFd is cleared by dup2 on the dup target only (the source keeps CLOEXEC
-        // and closes anyway when the parent drops it).
-        //
-        // Producer write-end timing: by moving pipe K-1's write end into stage K-1's stdout (rather
-        // than holding a parent copy until end of function), the kernel sees zero parent-side writers
-        // from the moment iter K-1 returns. When stage K-1 exits, its dup of pipe K-1's write end
-        // is the only remaining writer; closing it gives stage K a prompt EOF rather than hanging
-        // until the function returns.
-        let mut prev_read: Option<OwnedFd> = None;
-        let mut stage_waiters: Vec<Box<dyn ChildWaiter>> = Vec::with_capacity(n);
-        let mut stage_signalers: Vec<Arc<dyn ChildSignaler>> = Vec::with_capacity(n);
-        let mut last_pid: u32 = 0;
-
+    fn spawn(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<Vec<SpawnHandles>> {
+        // A link is made just before the stage that writes into it, so the parent holds at most one
+        // link's two ends at a time, however deep the pipe — the kqueue watcher already holds a
+        // descriptor per watched directory. Each end moves into the `Command` that takes it and
+        // closes in the parent when that `Command` drops, at the end of its iteration or on an early
+        // return: the parent keeps no copy of a write end, so it never holds a reader's input open.
+        // A child's dup2 onto its fd 0 or 1 clears close-on-exec there only; the parent's end keeps
+        // the flag.
+        let mut children = Vec::with_capacity(stages.len());
+        let mut link: Option<OwnedFd> = None;
         for (idx, stage) in stages.iter().enumerate() {
             let mut cmd = build_command(stage, cwd);
-            if idx > 0 {
-                cmd.stdin(prev_read.take().expect("stage K-1 parked its read end"));
+            if let Some(read) = link.take() {
+                cmd.stdin(read);
             }
-            if idx + 1 < n {
-                let (read, write) = match create_cloexec_pipe() {
-                    Ok(link) => link,
-                    Err(e) => {
-                        // `cmd` drops on the early return, closing the read end it took.
-                        rollback_partial_pipe(&stage_signalers);
-                        return Err(e);
-                    }
-                };
+            if idx + 1 < stages.len() {
+                let (read, write) = create_cloexec_pipe().inspect_err(|_| rollback(&children))?;
                 cmd.stdout(write);
-                prev_read = Some(read);
+                link = Some(read);
             }
-            let child = match cmd.spawn() {
-                Ok(c) => c,
-                Err(e) => {
-                    // `cmd` drops on the early return, closing the pipe ends it holds in the parent;
-                    // `prev_read` (if Some — this iter parked the new pipe's read end before calling
-                    // spawn) drops at function exit.
-                    rollback_partial_pipe(&stage_signalers);
-                    return Err(e);
-                }
-            };
-            let (pid, waiter, signaler) = build_pair(child);
-            last_pid = pid;
-            stage_waiters.push(Box::new(waiter));
-            stage_signalers.push(Arc::new(signaler));
+            children.push(build_pair(cmd.spawn().inspect_err(|_| rollback(&children))?));
         }
-        debug_assert!(
-            prev_read.is_none(),
-            "last iter does not create a pipe; prev_read must be consumed by the loop",
-        );
-
-        // Collapse the per-stage signaler `Vec` into a single `Arc<[...]>` heap allocation backing
-        // all three downstream co-owners: the aggregating waiter, the combined signaler, and the
-        // controller's local handle that rides out on `PipeSpawnHandles`. Each consumer takes its
-        // share via `Arc::clone` — one refcount bump per consumer instead of re-allocating the slice
-        // three times.
-        let stage_signalers: Arc<[Arc<dyn ChildSignaler>]> = Arc::from(stage_signalers);
-        let combined: Arc<dyn ChildSignaler> =
-            Arc::new(CombinedSignaler::new(Arc::clone(&stage_signalers)));
-        let waiter: Box<dyn ChildWaiter> =
-            Box::new(PipeWaiter::new(stage_waiters, Arc::clone(&stage_signalers)));
-
-        Ok(PipeSpawnHandles { last_pid, waiter, combined_signaler: combined, stage_signalers })
+        Ok(children)
     }
 }
 
 /// The [`Command`] every child is spawned from, with stdin, stdout and stderr on `/dev/null`. Specter
 /// keeps nothing a command prints — an inherited fd would interleave its bytes with the daemon's
 /// own lines and with every other command's — so a command that keeps its output routes it itself.
-/// [`OsSpawner::spawn_pipe`] rewires only a pipe's interior links. `Command` inherits all three by
+/// [`OsSpawner::spawn`] rewires only a pipe's interior links. `Command` inherits all three by
 /// default: a line dropped here hands the child the daemon's own fd, its terminal or its log.
 ///
 /// # Env-handling contract: **additive**
@@ -202,17 +137,17 @@ fn disqualify_posix_spawn(cmd: &mut Command) {
 #[cfg(not(target_os = "macos"))]
 const fn disqualify_posix_spawn(_cmd: &mut Command) {}
 
-/// Construct an `OsChildWaiter` + `OsChildSignaler` pair from a freshly-spawned [`Child`]. They share
-/// a [`DeadFlag`] so a controller-side signal observing `is_dead == true` short-circuits the syscall
-/// (closes the PID-reuse race at the protocol layer; ESRCH-collapse is the syscall fallback).
-///
-/// Returns concrete types — the caller wraps in `Box<dyn>` for the waiter (single-consumer at wait
-/// time) and `Arc<dyn>` for the signaler (the controller installs it on `pool::state::RunningJob`
-/// and clones it into any per-step timer thread).
-fn build_pair(child: Child) -> (u32, OsChildWaiter, OsChildSignaler) {
+/// The handles of a freshly-spawned [`Child`]: an `OsChildWaiter` and an `OsChildSignaler` sharing
+/// one [`DeadFlag`], so a controller-side signal observing `is_dead == true` short-circuits the
+/// syscall (closes the PID-reuse race at the protocol layer; ESRCH-collapse is the syscall fallback).
+fn build_pair(child: Child) -> SpawnHandles {
     let pid = child.id();
     let dead = DeadFlag::new();
-    (pid, OsChildWaiter { child, dead: dead.clone() }, OsChildSignaler { pid, dead })
+    SpawnHandles {
+        pid,
+        waiter: Box::new(OsChildWaiter { child, dead: dead.clone() }),
+        signaler: Arc::new(OsChildSignaler { pid, dead }),
+    }
 }
 
 /// Create one pipe with both ends CLOEXEC.
@@ -239,22 +174,16 @@ fn create_cloexec_pipe() -> io::Result<(OwnedFd, OwnedFd)> {
     }
 }
 
-/// Best-effort rollback for [`OsSpawner::spawn_pipe`]: SIGKILL + `reap_blocking` each
-/// previously-spawned stage so the partial chain leaves no zombies. Errors are logged (via `tracing`
-/// from `signal_kill`/`reap_blocking` implementations) and swallowed — the caller is already
-/// returning an `io::Error` to its own caller, and a second-order failure here doesn't change the
-/// outcome.
-///
-/// Safe to call with an empty slice: the loop is a no-op. The function takes a slice rather than
-/// consuming the Vec so the caller retains the per-stage signalers across the rollback (they're not
-/// needed after, but the call site is more readable without a `mem::take`).
-fn rollback_partial_pipe(signalers: &[Arc<dyn ChildSignaler>]) {
-    for s in signalers {
-        if let Err(e) = s.signal_kill() {
-            tracing::warn!(?e, "spawn_pipe rollback: SIGKILL failed");
+/// Best-effort rollback of a spawn that failed at a later stage: SIGKILL + `reap_blocking` each stage
+/// already spawned, so none is left a zombie. Errors are logged and swallowed — the caller is already
+/// returning an `io::Error`, and a second-order failure here doesn't change the outcome.
+fn rollback(children: &[SpawnHandles]) {
+    for child in children {
+        if let Err(e) = child.signaler.signal_kill() {
+            tracing::warn!(pid = child.pid, ?e, "spawn rollback: SIGKILL failed");
         }
-        if let Err(e) = s.reap_blocking() {
-            tracing::warn!(?e, "spawn_pipe rollback: reap_blocking failed");
+        if let Err(e) = child.signaler.reap_blocking() {
+            tracing::warn!(pid = child.pid, ?e, "spawn rollback: reap_blocking failed");
         }
     }
 }
@@ -388,9 +317,9 @@ mod recovery_tests {
     //!
     //! The test drops the waiter explicitly to simulate the `thread::Builder::spawn` failure path
     //! (where the closure that owned the waiter was dropped on `Err`), then drives `signal_kill +
-    //! reap_blocking` through the signaler exactly as the controller's
-    //! `recover_orphan_after_wait_thread_failure` helper does.
+    //! reap_blocking` through the signaler exactly as the controller's `reap_orphan` does.
     use super::*;
+    use crate::pipe;
     use crate::spawner::Spawner;
     use std::path::Path;
 
@@ -406,7 +335,7 @@ mod recovery_tests {
         let sleeper = stage(&["/bin/sleep", "30"]);
         let cwd = Path::new("/tmp");
 
-        let handles = spawner.spawn(&sleeper, cwd).expect("spawn /bin/sleep");
+        let handles = pipe::join(spawner.spawn(&[sleeper], cwd).expect("spawn /bin/sleep"));
         let pid = handles.pid;
         let signaler = handles.signaler;
 
@@ -442,7 +371,8 @@ mod recovery_tests {
         let spawner = OsSpawner::new();
         let cwd = Path::new("/tmp");
 
-        let handles = spawner.spawn(&stage(&["/bin/sleep", "0"]), cwd).expect("spawn");
+        let handles =
+            pipe::join(spawner.spawn(&[stage(&["/bin/sleep", "0"])], cwd).expect("spawn"));
         let signaler = handles.signaler;
         drop(handles.waiter);
 
@@ -455,13 +385,14 @@ mod recovery_tests {
 
 #[cfg(test)]
 mod pipe_tests {
-    //! Real fork+exec exercise for [`OsSpawner::spawn_pipe`]. The aggregating waiter and combined
-    //! signaler are unit-tested in `crate::pipe::tests` against synthetic per-stage stubs; this
-    //! module pins the load-bearing pieces only `OsSpawner` can exercise: the `pipe(2)` + CLOEXEC
-    //! fd plumbing, the SIGPIPE chain across real children, and the partial-spawn rollback that reaps
-    //! stages 0..K when stage K's exec fails.
+    //! Real fork+exec exercise for [`OsSpawner::spawn`] over a pipe's stages. The aggregating waiter
+    //! and combined signaler are unit-tested in `crate::pipe::tests` against synthetic per-stage
+    //! stubs; this module pins the load-bearing pieces only `OsSpawner` can exercise: the `pipe(2)` +
+    //! CLOEXEC fd plumbing, the SIGPIPE chain across real children, and the partial-spawn rollback
+    //! that reaps stages 0..K when stage K's exec fails.
 
     use super::*;
+    use crate::pipe;
     use crate::spawner::{Spawner, StageSpec};
     use std::path::Path;
     use std::time::{Duration, Instant};
@@ -470,19 +401,18 @@ mod pipe_tests {
     /// the aggregated outcome is `Ok`. Asserts that:
     /// - Both `pipe(2)` ends route correctly (stage 0 writes; stage 1 reads + EOFs when stage 0 exits
     ///   and the parent drops its copy of the write end).
-    /// - `last_pid` is the second stage's pid (operator-facing).
+    /// - The spawner hands back each stage's handles, and the joined pipe goes by its last stage's
+    ///   pid (operator-facing).
     #[test]
     fn pipe_echo_then_cat_completes_ok() {
-        let spawner = OsSpawner::new();
         let stages = [stage(&["/bin/echo", "hello"]), stage(&["/bin/cat"])];
-        let cwd = Path::new("/tmp");
+        let children = OsSpawner::new().spawn(&stages, Path::new("/tmp")).expect("spawn");
+        assert_eq!(children.len(), 2);
+        let cat = children[1].pid;
 
-        let handles = spawner.spawn_pipe(&stages, cwd).expect("spawn_pipe");
-        assert_ne!(handles.last_pid, 0, "last_pid is the cat pid");
-        assert_eq!(handles.stage_signalers.len(), 2);
-
-        let outcome = handles.waiter.wait().expect("pipe waiter drains cleanly");
-        assert_eq!(outcome, EffectOutcome::Ok);
+        let pipe = pipe::join(children);
+        assert_eq!(pipe.pid, cat, "a pipe goes by its last stage's pid");
+        assert_eq!(pipe.waiter.wait().expect("pipe waiter drains cleanly"), EffectOutcome::Ok);
     }
 
     /// Every stage of a three-stage pipe finds fds 3–9 closed: a link's ends close on exec, so a
@@ -497,7 +427,8 @@ mod pipe_tests {
                 "for fd in 3 4 5 6 7 8 9; do [ -e /dev/fd/$fd ] && exit 1; done; cat >/dev/null",
             ])
         });
-        let handles = OsSpawner::new().spawn_pipe(&stages, Path::new("/tmp")).expect("spawn_pipe");
+        let handles =
+            pipe::join(OsSpawner::new().spawn(&stages, Path::new("/tmp")).expect("spawn"));
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 
@@ -522,7 +453,7 @@ mod pipe_tests {
         let cwd = Path::new("/tmp");
 
         let start = Instant::now();
-        let result = spawner.spawn_pipe(&stages, cwd);
+        let result = spawner.spawn(&stages, cwd);
         let elapsed = start.elapsed();
 
         assert!(result.is_err(), "stage-1 spawn must fail and propagate");
@@ -546,6 +477,7 @@ mod stdio_tests {
     //! process-wide, and no other test in this binary reads stdin.
 
     use super::*;
+    use crate::pipe;
     use crate::spawner::{Spawner, StageSpec};
     use std::path::Path;
 
@@ -563,13 +495,14 @@ mod stdio_tests {
         stdin_from_pipe();
         let check = sh("[ /dev/stdin -ef /dev/null ] && [ /dev/stdout -ef /dev/null ] \
              && [ /dev/stderr -ef /dev/null ]");
-        let handles = OsSpawner::new().spawn(&check, Path::new("/tmp")).expect("spawn");
+        let handles =
+            pipe::join(OsSpawner::new().spawn(&[check], Path::new("/tmp")).expect("spawn"));
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 
     /// Three stages: a token crosses both links, so the middle stage reads one and writes the other.
     #[test]
-    fn spawn_pipe_rewires_only_the_links_between_stages() {
+    fn spawn_rewires_only_the_links_between_stages() {
         stdin_from_pipe();
         let stages = [
             sh(
@@ -581,7 +514,8 @@ mod stdio_tests {
             sh("read l && [ \"$l\" = specter-link ] && [ /dev/stdout -ef /dev/null ] \
                 && [ /dev/stderr -ef /dev/null ]"),
         ];
-        let handles = OsSpawner::new().spawn_pipe(&stages, Path::new("/tmp")).expect("spawn_pipe");
+        let handles =
+            pipe::join(OsSpawner::new().spawn(&stages, Path::new("/tmp")).expect("spawn"));
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 }
@@ -591,6 +525,7 @@ mod tests {
     #![allow(unsafe_code)] // mirrors the production site (`disqualify_posix_spawn`); the test exercises it.
 
     use super::*;
+    use crate::pipe;
     use crate::spawner::Spawner;
     use std::os::fd::OwnedFd;
     use std::path::Path;
@@ -658,9 +593,11 @@ mod tests {
         // used and succeeds.
         let spawner = OsSpawner::new();
         let cwd = Path::new("/tmp");
-        let handles = spawner
-            .spawn(&stage(&["/bin/sh", "-c", "exit 0"]), cwd)
-            .expect("spawn must succeed under high fd pressure (fork+exec route)");
+        let handles = pipe::join(
+            spawner
+                .spawn(&[stage(&["/bin/sh", "-c", "exit 0"])], cwd)
+                .expect("spawn must succeed under high fd pressure (fork+exec route)"),
+        );
         let outcome = handles.waiter.wait().expect("wait must succeed for a spawned child");
         assert_eq!(outcome, EffectOutcome::Ok, "child exited cleanly; outcome should be Ok");
 

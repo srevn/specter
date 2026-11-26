@@ -35,22 +35,20 @@ pub struct EnvVar<'a> {
 /// Process spawner — the single I/O seam between the actuator's (otherwise pure) state machine and
 /// the OS.
 ///
+/// It spawns a step's processes and wires a pipe's links, and nothing more: what the stages are to
+/// the pool — each stage's timer, a pipe joined into one job ([`crate::pipe::join`]) — is decided
+/// above it, the same for every implementation.
+///
 /// Production = [`super::OsSpawner`] (`std::process::Command`); tests = `testkit::MockSpawner`. The
 /// actuator controller is single-threaded and is the sole caller — `Send` lets the bin's `Box<dyn
 /// Spawner>` move into the actuator thread (see `specter-bin`'s `spawn_actuator_thread`); no caller
 /// ever shares `&dyn Spawner` across threads, so `Sync` is not part of the contract.
 pub trait Spawner: Send {
-    /// Spawn one child running `stage`, returning its [`SpawnHandles`].
-    fn spawn(&self, stage: &StageSpec<'_>, cwd: &Path) -> io::Result<SpawnHandles>;
-
-    /// Spawn N stages wired stdout→stdin, returning their [`PipeSpawnHandles`]. The producer-side
-    /// of stage K writes to a pipe whose read-end is the consumer-side stdin of stage K+1; the kernel
-    /// handles the SIGPIPE chain when an upstream stage exits.
-    ///
-    /// On partial-spawn failure (stage K's spawn raises [`io::Error`]), implementations must roll
-    /// back: SIGKILL + `reap_blocking` every prior stage and close every pipe fd in the parent before
-    /// returning the error. Returning leaves no zombies and no orphan pipe fds.
-    fn spawn_pipe(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<PipeSpawnHandles>;
+    /// Spawns one process per stage, each stage's stdout the next stage's stdin, and returns each
+    /// stage's handles in stage order; an exec is one stage. Where stage K fails to spawn,
+    /// implementations SIGKILL and reap every stage before K and close every link before returning
+    /// the error: no zombie, no orphan descriptor.
+    fn spawn(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<Vec<SpawnHandles>>;
 }
 
 /// One stage's command as the resolver rendered it: the program, its arguments, and the env it adds
@@ -62,44 +60,8 @@ pub struct StageSpec<'a> {
     pub env: Vec<EnvVar<'a>>,
 }
 
-/// Paired handles for a freshly-spawned pipe of N stages.
-///
-/// See [`Spawner::spawn_pipe`] for the contract. The `combined_signaler` is `Arc<dyn>` because it's
-/// shared between the controller's shutdown path and (in the aggregating waiter) the
-/// SIGTERM-cascade-on-first-failure path; `stage_signalers` are `Arc<dyn>` so the per-stage timer
-/// threads can co-own with the waiter without ceremony.
-///
-/// The slice container itself is `Arc<[_]>` (not `Box<[_]>`) so a single heap allocation backs all
-/// three downstream co-owners — the aggregating [`crate::pipe::PipeWaiter`], the
-/// [`crate::pipe::CombinedSignaler`], and the controller's local `stage_signalers` handle — at the
-/// cost of one refcount bump per co-owner instead of cloning the slice three times.
-pub struct PipeSpawnHandles {
-    /// Pid of the *last* stage — what an operator inspecting the pipe via `ps` would call "the pid
-    /// of this pipe". The actuator surfaces this via `pool::state::RunningJob::pid` and uses it only
-    /// for log lines; the per-stage signalers carry their own pids internally for syscall routing.
-    pub last_pid: u32,
-    /// Aggregating waiter: waits on every stage concurrently and applies pipefail-on semantics.
-    /// Consumed once via `Box<dyn ChildWaiter>::wait`.
-    pub waiter: Box<dyn ChildWaiter>,
-    /// Shutdown signaler: fans SIGTERM/SIGKILL out to every stage.
-    pub combined_signaler: Arc<dyn ChildSignaler>,
-    /// Per-stage signalers, parallel-indexed with the input stage slice. The controller hands each
-    /// one to its per-stage timer thread; not all stages need a timer (only those whose
-    /// `ExecAction.timeout` is set). Shares its heap allocation with the aggregating waiter and the
-    /// combined signaler via `Arc::clone`.
-    pub stage_signalers: Arc<[Arc<dyn ChildSignaler>]>,
-}
-
-impl std::fmt::Debug for PipeSpawnHandles {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("PipeSpawnHandles")
-            .field("last_pid", &self.last_pid)
-            .field("stages", &self.stage_signalers.len())
-            .finish_non_exhaustive()
-    }
-}
-
-/// Paired handles for a freshly-spawned child.
+/// A running child's pid, waiter and signaler — one stage's, as the spawner hands it back, or a whole
+/// pipe's, which [`crate::pipe::join`] makes one child under its last stage's pid.
 ///
 /// The `waiter` is moved to the wait thread (consumed via `Box<Self>` at wait-call time); the
 /// `signaler` stays on the controller, used at shutdown to deliver SIGTERM and (after the grace
@@ -107,11 +69,9 @@ impl std::fmt::Debug for PipeSpawnHandles {
 /// `crate::lifecycle::DeadFlag` newtype) so post-reap signals are no-ops at the protocol layer —
 /// closes the PID-reuse race independently of the kernel-level ESRCH-collapse fallback.
 ///
-/// `signaler` is `Arc<dyn>` because the controller installs the signaler into the per-job
-/// `RunningJob::signaler` slot and *also* clones it into the per-step timer thread (when
-/// [`specter_core::ExecAction`]'s `timeout` is set) — both paths need to outlive each other
-/// independently. The pipe path's `PipeSpawnHandles::stage_signalers` are likewise `Arc`, so the
-/// spawn surface speaks a single signaler-ownership shape.
+/// `signaler` is `Arc<dyn>` because its co-owners outlive each other independently: the job's
+/// `RunningJob::signaler`, the wait thread's backstop, a timed stage's timer thread, and a joined
+/// pipe's waiter and combined signaler.
 pub struct SpawnHandles {
     pub pid: u32,
     pub waiter: Box<dyn ChildWaiter>,

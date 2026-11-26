@@ -1,15 +1,13 @@
 //! Test fixtures behind the `testkit` Cargo feature.
 //!
-//! [`MockSpawner`] is a pure-Rust [`crate::Spawner`] that records every `spawn` call into a
-//! `Mutex<Vec<SpawnRecord>>` and returns handles whose `wait` blocks on a per-call channel until
-//! the test signals [`MockSpawner::complete`]. The signaler records `signal_term` / `signal_kill`
-//! calls. This lets coalescing, concurrency, and shutdown logic be tested deterministically without
-//! forking real children.
+//! [`MockSpawner`] is a pure-Rust [`crate::spawner::Spawner`] that records every stage it spawns
+//! into a `Mutex<Vec<SpawnRecord>>` and returns handles whose `wait` blocks on a per-stage channel
+//! until the test signals [`MockSpawner::complete`]. The signaler records `signal_term` /
+//! `signal_kill` calls. This lets coalescing, concurrency, and shutdown logic be tested
+//! deterministically without forking real children.
 
 use crate::lifecycle::DeadFlag;
-use crate::spawner::{
-    ChildSignaler, ChildWaiter, PipeSpawnHandles, SpawnHandles, Spawner, StageSpec,
-};
+use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles, Spawner, StageSpec};
 use crossbeam::channel::{Receiver, Sender, bounded};
 use specter_core::EffectOutcome;
 use std::collections::BTreeMap;
@@ -18,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 
-/// Recorded spawn — what the controller passed to [`Spawner::spawn`].
+/// One recorded stage — what the controller passed to [`Spawner::spawn`], a stage at a time.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SpawnRecord {
     pub pid: u32,
@@ -108,86 +106,41 @@ impl MockSpawner {
     }
 }
 
-impl MockSpawner {
-    /// Allocate one spawn slot: mint a pid, register the completion channel, record the
-    /// [`SpawnRecord`]. Returns the primitives the caller assembles into per-stage waiter + signaler
-    /// pair shapes — `Box<dyn>` for single-spawn (`Self::spawn`) or `Arc<dyn ChildSignaler>` for
-    /// pipe stages (`Self::spawn_pipe`).
-    ///
-    /// Centralising the id minting / channel bookkeeping here keeps `MockSpawner::complete(pid,
-    /// outcome)` a single contract: any pid returned from `take_spawns()` / `spawns()` is wired into
-    /// exactly one in-flight completion channel.
-    fn allocate_spawn(
-        &self, stage: &StageSpec<'_>, cwd: &Path,
-    ) -> (u32, Receiver<EffectOutcome>, DeadFlag) {
-        let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = bounded::<EffectOutcome>(1);
-        self.completions.lock().unwrap().insert(pid, tx);
-        self.spawns.lock().unwrap().push(SpawnRecord {
-            pid,
-            argv: std::iter::once(&stage.program).chain(&stage.args).cloned().collect(),
-            env: stage
-                .env
-                .iter()
-                .map(|e| (e.key.to_owned(), e.value.as_ref().to_owned()))
-                .collect(),
-            cwd: cwd.to_owned(),
-        });
-        (pid, rx, DeadFlag::new())
-    }
-}
-
 impl Spawner for MockSpawner {
-    fn spawn(&self, stage: &StageSpec<'_>, cwd: &Path) -> io::Result<SpawnHandles> {
+    fn spawn(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<Vec<SpawnHandles>> {
         // Copy out of the lock before checking — Mutex guard's significant Drop should not span the
         // if-let body.
         let injected = *self.inject_spawn_error.lock().unwrap();
         if let Some(kind) = injected {
             return Err(io::Error::from(kind));
         }
-        let (pid, rx, dead) = self.allocate_spawn(stage, cwd);
-        Ok(SpawnHandles {
-            pid,
-            waiter: Box::new(MockChildWaiter { rx, dead: dead.clone() }),
-            signaler: Arc::new(MockChildSignaler { pid, dead, signals: Arc::clone(&self.signals) }),
-        })
-    }
-
-    fn spawn_pipe(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<PipeSpawnHandles> {
-        // Same injection point as `spawn` — tests can flip the flag and observe a pipe spawn failure
-        // as a stage-0 failure.
-        let injected = *self.inject_spawn_error.lock().unwrap();
-        if let Some(kind) = injected {
-            return Err(io::Error::from(kind));
-        }
-        if stages.len() < 2 {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "MockSpawner::spawn_pipe requires at least two stages",
-            ));
-        }
-        let mut stage_waiters: Vec<Box<dyn ChildWaiter>> = Vec::with_capacity(stages.len());
-        let mut stage_signalers: Vec<Arc<dyn ChildSignaler>> = Vec::with_capacity(stages.len());
-        let mut last_pid: u32 = 0;
+        let mut children = Vec::with_capacity(stages.len());
         for stage in stages {
-            let (pid, rx, dead) = self.allocate_spawn(stage, cwd);
-            last_pid = pid;
-            stage_waiters.push(Box::new(MockChildWaiter { rx, dead: dead.clone() }));
-            stage_signalers.push(Arc::new(MockChildSignaler {
+            let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
+            let (tx, rx) = bounded::<EffectOutcome>(1);
+            self.completions.lock().unwrap().insert(pid, tx);
+            self.spawns.lock().unwrap().push(SpawnRecord {
                 pid,
-                dead,
-                signals: Arc::clone(&self.signals),
-            }));
+                argv: std::iter::once(&stage.program).chain(&stage.args).cloned().collect(),
+                env: stage
+                    .env
+                    .iter()
+                    .map(|e| (e.key.to_owned(), e.value.as_ref().to_owned()))
+                    .collect(),
+                cwd: cwd.to_owned(),
+            });
+            let dead = DeadFlag::new();
+            children.push(SpawnHandles {
+                pid,
+                waiter: Box::new(MockChildWaiter { rx, dead: dead.clone() }),
+                signaler: Arc::new(MockChildSignaler {
+                    pid,
+                    dead,
+                    signals: Arc::clone(&self.signals),
+                }),
+            });
         }
-        // Mirror `OsSpawner::spawn_pipe`: one `Arc<[_]>` backs the aggregating waiter, the combined
-        // signaler, and the controller's `stage_signalers` handle. Tests reading
-        // `handles.stage_signalers.len()` see the same shape as production.
-        let stage_signalers: Arc<[Arc<dyn ChildSignaler>]> = Arc::from(stage_signalers);
-        let combined: Arc<dyn ChildSignaler> =
-            Arc::new(crate::pipe::CombinedSignaler::new(Arc::clone(&stage_signalers)));
-        let waiter: Box<dyn ChildWaiter> =
-            Box::new(crate::pipe::PipeWaiter::new(stage_waiters, Arc::clone(&stage_signalers)));
-        Ok(PipeSpawnHandles { last_pid, waiter, combined_signaler: combined, stage_signalers })
+        Ok(children)
     }
 }
 

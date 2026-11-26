@@ -1,16 +1,8 @@
-//! Shared pipe-spawn helpers used by both the production [`OsSpawner`] and the `MockSpawner` testkit.
-//! The two types here are the "aggregating" side of the pipe machinery — they coordinate per-stage
-//! outcomes (waiter) and per-stage shutdown signals (signaler) into a single `ChildWaiter` /
-//! `ChildSignaler` pair the controller can reason about uniformly.
-//!
-//! Lives outside of `os.rs` so `MockSpawner` can construct pipe handles against its own per-stage
-//! mock signalers/waiters without re-implementing the aggregation rules. The shapes ARE the contract
-//! — `Spawner::spawn_pipe`'s pipefail-on semantics and shutdown-fan-out behaviour both live in this
-//! module.
-//!
-//! [`OsSpawner`]: crate::OsSpawner
+//! A step's spawned stages, made one job by [`join`]: a lone stage is its own job; a pipe's waiter
+//! ([`PipeWaiter`]) folds every stage's report and its signaler ([`CombinedSignaler`]) reaches every
+//! stage. Both are the actuator's policy over the stages, whichever spawner made them.
 
-use crate::spawner::{ChildSignaler, ChildWaiter};
+use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles};
 use crossbeam::channel::{Receiver, unbounded};
 use specter_core::{EffectOutcome, Termination};
 use std::io;
@@ -20,11 +12,9 @@ use std::thread;
 
 /// Combined signaler — fans SIGTERM/SIGKILL out to every stage.
 ///
-/// Used as `PipeSpawnHandles.combined_signaler`: the controller's shutdown path calls `signal_term`
-/// / `signal_kill` against it and the call propagates to every stage. The aggregating waiter
-/// ([`PipeWaiter`]) holds its own per-stage signaler references for the
-/// SIGTERM-cascade-on-first-failure path; the combined signaler is for callers that want to address
-/// the pipe as a whole.
+/// A joined pipe's signaler: the controller's cancel, shutdown and orphan recovery address the pipe
+/// as a whole through it, and each call reaches every stage. The aggregating waiter ([`PipeWaiter`])
+/// shares the same slice of stage signalers for the SIGTERM-cascade-on-first-failure path.
 ///
 /// Errors from individual stage signalers are aggregated: the first non-`Ok` is propagated as the
 /// combined result; subsequent stages still get the signal (best-effort). This matches the
@@ -36,9 +26,22 @@ pub(crate) struct CombinedSignaler {
     stages: Arc<[Arc<dyn ChildSignaler>]>,
 }
 
-impl CombinedSignaler {
-    pub(crate) fn new(stages: Arc<[Arc<dyn ChildSignaler>]>) -> Self {
-        Self { stages }
+/// One job over a step's spawned stages: a lone stage's own handles; for a pipe, the waiter that
+/// folds every stage's report and the signaler that reaches every stage, under the last stage's pid
+/// — the one a shell's `$!` names for a pipeline.
+pub(crate) fn join(stages: Vec<SpawnHandles>) -> SpawnHandles {
+    match <[SpawnHandles; 1]>::try_from(stages) {
+        Ok([lone]) => lone,
+        Err(stages) => {
+            let pid = stages.last().expect("a spawn hands back a stage at least").pid;
+            let signalers: Arc<[Arc<dyn ChildSignaler>]> =
+                stages.iter().map(|stage| Arc::clone(&stage.signaler)).collect();
+            SpawnHandles {
+                pid,
+                waiter: Box::new(PipeWaiter { stages, signalers: Arc::clone(&signalers) }),
+                signaler: Arc::new(CombinedSignaler { stages: signalers }),
+            }
+        }
     }
 }
 
@@ -127,25 +130,13 @@ impl ChildSignaler for CombinedSignaler {
 /// `Vec<Option<EffectOutcome>>` and iterating `0..n` at fold time — completion order doesn't bleed
 /// into the reported outcome.
 ///
-/// `signalers` is parallel-indexed with `waiters`. The cascade iterates every signaler whose index
-/// differs from the first-Failed stage and whose paired waiter hasn't reported yet (`is_dead`
-/// short-circuits already-reaped stages — their waiter set the shared flag before returning).
+/// Each stage's handles go whole to its own thread; `signalers`, every stage's signaler in stage
+/// order and shared with the pipe's [`CombinedSignaler`], is how the cascade reaches the others. It
+/// skips the first-Failed stage and every stage whose waiter has reported (`is_dead` short-circuits
+/// an already-reaped stage — its waiter set the shared flag before returning).
 pub(crate) struct PipeWaiter {
-    waiters: Vec<Box<dyn ChildWaiter>>,
+    stages: Vec<SpawnHandles>,
     signalers: Arc<[Arc<dyn ChildSignaler>]>,
-}
-
-impl PipeWaiter {
-    pub(crate) fn new(
-        waiters: Vec<Box<dyn ChildWaiter>>, signalers: Arc<[Arc<dyn ChildSignaler>]>,
-    ) -> Self {
-        debug_assert_eq!(
-            waiters.len(),
-            signalers.len(),
-            "PipeWaiter: per-stage waiter/signaler counts must match",
-        );
-        Self { waiters, signalers }
-    }
 }
 
 /// One per-stage report carried over the aggregator channel.
@@ -156,47 +147,38 @@ struct StageReport {
 
 impl ChildWaiter for PipeWaiter {
     fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
-        let Self { waiters, signalers } = *self;
-        let n = signalers.len();
-        debug_assert_eq!(waiters.len(), n);
-
-        // Empty pipes are rejected by the builder/lowering; guard anyway so a degenerate value (e.g.
-        // tests constructing `PipeWaiter::new` with zero stages) collapses to Ok rather than blocking
-        // on an empty channel below.
-        if n == 0 {
-            return Ok(EffectOutcome::Ok);
-        }
+        let Self { stages, signalers } = *self;
+        let n = stages.len();
 
         let (tx, rx) = unbounded::<StageReport>();
         let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(n);
         let mut spawn_failed: Option<(usize, io::Error)> = None;
         let mut leftover: Vec<Box<dyn ChildWaiter>> = Vec::new();
 
-        for (idx, w) in waiters.into_iter().enumerate() {
+        for (idx, SpawnHandles { waiter, signaler, .. }) in stages.into_iter().enumerate() {
             if spawn_failed.is_some() {
                 // After the first spawn failure we keep collecting remaining waiters so the recovery
                 // path can drain them synchronously (SIGKILL above makes wait fast).
-                leftover.push(w);
+                leftover.push(waiter);
                 continue;
             }
             let tx_stage = tx.clone();
-            // Per-stage dead-ratchet backstop: pair the closure with its own stage signaler so the
-            // post-`catch_unwind` publish covers a panicking per-stage waiter impl that didn't reach
-            // its own write site. Idempotent against the production happy-path mark inside
-            // `OsChildWaiter::wait` and against the outer `wait_loop` backstop (which fans out via
-            // `CombinedSignaler::mark_dead`).
-            let signaler_stage = Arc::clone(&signalers[idx]);
+            // The stage's own signaler publishes the dead-ratchet backstop after the `catch_unwind`,
+            // covering a panicking waiter impl that never reached its own write site. Idempotent
+            // against the happy-path mark inside `OsChildWaiter::wait` and against the outer
+            // `wait_loop` backstop (which fans out via `CombinedSignaler::mark_dead`).
             let spawn_result = thread::Builder::new()
                 // pthread_setname_np on Linux truncates at 15+null; "act-pipe-NN" is 11 chars even
                 // at idx=99, leaving headroom for triple-digit stage counts (unreachable in v1 —
                 // pipes top out far below).
                 .name(format!("act-pipe-{idx}"))
                 .spawn(move || {
-                    let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| w.wait())) {
+                    let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| waiter.wait()))
+                    {
                         Ok(Ok(o)) => o,
                         Ok(Err(_)) | Err(_) => EffectOutcome::Failed(Termination::Internal),
                     };
-                    signaler_stage.mark_dead();
+                    signaler.mark_dead();
                     // Channel is unbounded and owned by the aggregator (this function); send cannot
                     // block, and a Disconnected error here would only happen if the aggregator
                     // panicked — we drop the report silently in that case.
@@ -205,8 +187,8 @@ impl ChildWaiter for PipeWaiter {
             match spawn_result {
                 Ok(h) => handles.push(h),
                 Err(e) => {
-                    // Closure (and waiter `w`) was dropped along with the failed spawn attempt; the
-                    // child process is alive but has no paired waiter. Subsequent loop iterations
+                    // The closure (and the stage's waiter) dropped with the failed spawn attempt;
+                    // the child process is alive but has no paired waiter. Subsequent loop iterations
                     // route into the leftover branch.
                     spawn_failed = Some((idx, e));
                 }
@@ -309,8 +291,8 @@ fn fold_reports(reports: Vec<Option<EffectOutcome>>) -> EffectOutcome {
 
 /// Cleanup path when a stage's wait-thread `Builder::spawn` failed. The child process for
 /// `failed_idx` is alive but its waiter was dropped along with the failed spawn closure, so the
-/// controller must SIGKILL + sync-reap it via the signaler — same shape as
-/// `pool::state::recover_orphan_after_wait_thread_failure` for the single-process path.
+/// controller must SIGKILL + sync-reap it via the signaler — the shape `pool::state::reap_orphan`
+/// has for a job whose own wait thread failed to start.
 ///
 /// SIGKILLing every stage before draining serves two purposes:
 /// 1. The already-spawned waiter threads' children exit promptly so their threads return.
@@ -367,12 +349,11 @@ fn recover_from_spawn_failure(
 
 #[cfg(test)]
 mod tests {
-    //! Direct tests for the aggregator types. The wiring into `OsSpawner::spawn_pipe` and
-    //! `MockSpawner::spawn_pipe` is exercised by their respective test suites; here we just pin the
-    //! aggregation rules.
-    use super::{CombinedSignaler, PipeWaiter};
+    //! Direct tests for the aggregator types, each pipe built through [`super::join`] as the pool
+    //! builds one; `os.rs`'s tests drive the OS wiring. Here we just pin the aggregation rules.
+    use super::CombinedSignaler;
     use crate::lifecycle::DeadFlag;
-    use crate::spawner::{ChildSignaler, ChildWaiter};
+    use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles};
     use crossbeam::channel::{Receiver, Sender, bounded};
     use specter_core::{EffectOutcome, Termination};
     use std::io;
@@ -432,6 +413,23 @@ mod tests {
 
     fn probes_into_signalers(probes: &[Arc<Probe>]) -> Arc<[Arc<dyn ChildSignaler>]> {
         probes.iter().map(|p| Arc::clone(p) as Arc<dyn ChildSignaler>).collect()
+    }
+
+    /// The pipe [`super::join`] makes of these stages, each waiter beside its stage's signaler.
+    fn pipe(
+        waiters: Vec<Box<dyn ChildWaiter>>, signalers: &[Arc<dyn ChildSignaler>],
+    ) -> Box<dyn ChildWaiter> {
+        let stages = waiters
+            .into_iter()
+            .zip(signalers)
+            .zip(0..)
+            .map(|((waiter, signaler), pid)| SpawnHandles {
+                pid,
+                waiter,
+                signaler: Arc::clone(signaler),
+            })
+            .collect();
+        super::join(stages).waiter
     }
 
     /// Probe paired with a [`BlockingWaiter`]: the waiter blocks on a crossbeam channel until any
@@ -529,7 +527,7 @@ mod tests {
             Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p1) }),
             Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p2) }),
         ];
-        let outcome = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
+        let outcome = pipe(waiters, &signalers).wait().unwrap();
         assert_eq!(outcome, EffectOutcome::Ok);
         assert_eq!(p0.term.load(Ordering::SeqCst), 0);
         assert_eq!(p1.term.load(Ordering::SeqCst), 0);
@@ -563,7 +561,7 @@ mod tests {
             Box::new(p1_waiter),
             Box::new(p2_waiter),
         ];
-        let outcome = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
+        let outcome = pipe(waiters, &signalers).wait().unwrap();
         match outcome {
             EffectOutcome::Failed(Termination::PipeMixed { last_exit, first_signal }) => {
                 assert_eq!(last_exit, 7, "last non-zero exit propagates");
@@ -603,7 +601,7 @@ mod tests {
                 dead: Arc::clone(&p2),
             }),
         ];
-        let outcome = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
+        let outcome = pipe(waiters, &signalers).wait().unwrap();
         match outcome {
             EffectOutcome::Failed(Termination::PipeMixed { last_exit, first_signal }) => {
                 // last_exit = last non-zero in spawn order = 9 (stage 2); first_signal = first
@@ -642,7 +640,7 @@ mod tests {
             }),
         ];
         let start = Instant::now();
-        let outcome = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
+        let outcome = pipe(waiters, &signalers).wait().unwrap();
         let elapsed = start.elapsed();
         assert!(
             elapsed < Duration::from_secs(5),
@@ -685,7 +683,7 @@ mod tests {
                 dead: Arc::clone(&p2),
             }),
         ];
-        let outcome = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
+        let outcome = pipe(waiters, &signalers).wait().unwrap();
         match outcome {
             EffectOutcome::Failed(Termination::PipeMixed { last_exit, first_signal }) => {
                 assert_eq!(last_exit, 7, "last non-zero exit (stage 2)");
@@ -711,7 +709,7 @@ mod tests {
             }),
             Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p1) }),
         ];
-        let _ = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
+        let _ = pipe(waiters, &signalers).wait().unwrap();
         assert_eq!(
             p1.term.load(Ordering::SeqCst),
             0,
@@ -725,8 +723,9 @@ mod tests {
         let p0 = Arc::new(Probe::new());
         let p1 = Arc::new(Probe::new());
         let p2 = Arc::new(Probe::new());
-        let combined =
-            CombinedSignaler::new(probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]));
+        let combined = CombinedSignaler {
+            stages: probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]),
+        };
 
         combined.signal_term().unwrap();
         combined.signal_term().unwrap();
@@ -743,7 +742,8 @@ mod tests {
     fn combined_signaler_is_dead_requires_all_stages_dead() {
         let p0 = Arc::new(Probe::new());
         let p1 = Arc::new(Probe::new());
-        let combined = CombinedSignaler::new(probes_into_signalers(&[p0.clone(), p1.clone()]));
+        let combined =
+            CombinedSignaler { stages: probes_into_signalers(&[p0.clone(), p1.clone()]) };
         assert!(!combined.is_dead());
         p0.mark_dead();
         assert!(!combined.is_dead(), "one alive ⇒ combined not dead");
@@ -759,8 +759,9 @@ mod tests {
         let p0 = Arc::new(Probe::new());
         let p1 = Arc::new(Probe::new());
         let p2 = Arc::new(Probe::new());
-        let combined =
-            CombinedSignaler::new(probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]));
+        let combined = CombinedSignaler {
+            stages: probes_into_signalers(&[p0.clone(), p1.clone(), p2.clone()]),
+        };
 
         combined.mark_dead();
 
@@ -796,7 +797,7 @@ mod tests {
             Box::new(PanickingWaiter),
             Box::new(StaticWaiter { outcome: Ok(EffectOutcome::Ok), dead: Arc::clone(&p2) }),
         ];
-        let _ = Box::new(PipeWaiter::new(waiters, signalers)).wait().unwrap();
+        let _ = pipe(waiters, &signalers).wait().unwrap();
 
         assert!(
             p1.is_dead(),

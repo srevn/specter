@@ -10,12 +10,12 @@
 //! # Programs, cursors, and accounting
 //!
 //! An [`Effect`] carries an [`specter_core::ActionProgram`]: a flat `Box<[ProgramOp]>` walked by a
-//! `u32` cursor. Each op carries a [`SpawnBody`] (single Exec or N-stage Pipe) plus explicit `on_ok`
-//! / `on_failed` branch targets — dispatch after a reap is a single
-//! [`ProgramOp::target`](specter_core::program::ProgramOp::target) lookup on the outcome. The
-//! actuator walks the program with stop-on-failure semantics encoded by the lowering pass (Exec/Pipe
-//! `on_failed = Terminate`; predicate `on_failed` ≠ Terminate so the predicate outcome doesn't
-//! propagate).
+//! `u32` cursor. Each op carries a [`SpawnBody`](specter_core::program::SpawnBody) (the stages it
+//! spawns, one for an exec) plus explicit `on_ok` / `on_failed` branch targets — dispatch after a
+//! reap is a single [`ProgramOp::target`](specter_core::program::ProgramOp::target) lookup on the
+//! outcome. The actuator walks the program with stop-on-failure semantics encoded by the lowering
+//! pass (Exec/Pipe `on_failed = Terminate`; predicate `on_failed` ≠ Terminate so the predicate
+//! outcome doesn't propagate).
 //!
 //! - **Per-Effect-stable** state (per-Sub set membership, diff tmp file) is owned by
 //!   [`ActuatorState::start_plan`]: insert on plan start, remove on plan terminus.
@@ -35,12 +35,13 @@
 use crate::EffectCompleteSender;
 use crate::env::EnvSnapshot;
 use crate::permits::{Permit, Permits};
+use crate::pipe;
 use crate::resolve;
-use crate::spawner::{ChildSignaler, ChildWaiter, Spawner, StageSpec};
-use crate::timer;
+use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles, Spawner};
+use crate::timer::{self, TimerContext};
 use crate::tmp::DiffTmpFile;
 use crossbeam::channel::Sender;
-use specter_core::program::{BranchTarget, ExecAction, SpawnBody};
+use specter_core::program::BranchTarget;
 use specter_core::{
     DedupKey, Effect, EffectCompletion, EffectOutcome, ProfileId, SubId, Termination,
 };
@@ -49,7 +50,8 @@ use std::num::NonZeroUsize;
 use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Duration;
+use std::thread;
+use std::time::{Duration, SystemTime};
 
 /// Policy for [`ActuatorState::terminate_plan`]: under `Pump` re-queue the slot's pending Effect
 /// (if any) for the next pump cycle; under `Drop` (shutdown drain) drop pending and remove the slot.
@@ -102,13 +104,12 @@ enum SpawnFailureCause {
     /// A stage's argv / env could not be rendered ([`crate::resolve::ResolveError`]), so no process
     /// of the step was spawned.
     Resolver,
-    /// OS-level process spawn failed — [`crate::spawner::Spawner::spawn`] / `spawn_pipe` returned
-    /// an error (ENOENT on the binary, EAGAIN, EMFILE, …). For pipes the spawner has already rolled
-    /// back any partially-spawned stages before the error reaches this discriminant.
+    /// OS-level process spawn failed — [`crate::spawner::Spawner::spawn`] returned an error (ENOENT
+    /// on the binary, EAGAIN, EMFILE, …), having rolled back every stage it had spawned.
     OsSpawn,
-    /// `thread::Builder::spawn` for the wait thread failed. The spawned child is alive but its paired
-    /// [`crate::spawner::ChildWaiter`] was dropped; the recovery branch SIGKILLs and synchronously
-    /// reaps the orphan before this discriminant surfaces.
+    /// `thread::Builder::spawn` for the wait thread failed. The step's processes are alive but their
+    /// [`crate::spawner::ChildWaiter`] went with the thread's closure; [`reap_orphan`] SIGKILLs and
+    /// reaps them before this discriminant surfaces.
     WaitThread,
 }
 
@@ -154,16 +155,10 @@ pub(crate) struct Slot {
 ///
 /// Carries:
 ///
-/// - **`pid`** — the operator-facing pid. For [`SpawnBody::Exec`], the child's pid; for
-///   [`SpawnBody::Pipe`], the *last* stage's pid (what `ps` would label "the pipe").
-///   Intermediate-stage pids stay inside the per-stage signalers (used only for the per-stage timer
-///   threads at install time, then dropped).
-/// - **`signaler`** — the signaler the controller uses for shutdown SIGTERM / SIGKILL. For Exec this
-///   is the single-child signaler; for Pipe this is the combined fan-out signaler that signals every
-///   stage. Per-stage signalers DO NOT live here: pipe install collects them as locals, arms
-///   per-stage timer threads against each (cloning the Arc), then drops the locals when install
-///   returns. The aggregating `PipeWaiter` owns its own per-stage signaler clones for the
-///   SIGTERM-cascade-on-first-failure path, independent of this combined signaler.
+/// - **`pid`** — the job's pid ([`crate::pipe::join`]): an exec's child, a pipe's last stage.
+/// - **`signaler`** — the job's signaler, which cancel, shutdown and orphan recovery address: an
+///   exec's child's own, a pipe's [`crate::pipe::CombinedSignaler`] over every stage. A stage's own
+///   signaler lives on with its timer and the pipe's waiter, not here.
 /// - **`effect`** — the plan's shared `Arc<Effect>`. The advance branch in
 ///   [`ActuatorState::advance_or_terminate`] re-resolves op N+1's argv + env from the same snapshot
 ///   without re-fetching.
@@ -174,9 +169,6 @@ pub(crate) struct Slot {
 ///   the last co-owner is dropped — at plan terminus, after the final
 ///   [`ActuatorState::terminate_plan`] has emitted `EffectComplete`. See [`crate::tmp`] for the
 ///   lifecycle invariant.
-///
-/// `signaler` is `Arc<dyn>` so the controller's installed-side reference and the per-step timer
-/// thread's clone are independent co-owners; either may outlive the other.
 pub(crate) struct RunningJob {
     pub pid: u32,
     pub signaler: Arc<dyn ChildSignaler>,
@@ -934,119 +926,64 @@ impl ActuatorState {
             .map_err(SpawnError::Failed)
     }
 
-    /// Spawn one op of a plan with a pre-acquired permit. Installs [`Slot::running`] on success.
+    /// Spawn one op of a plan with a pre-acquired permit; on success its [`RunningJob`] is installed
+    /// and its wait thread drives the next reap.
     ///
-    /// Dispatches on the op's [`SpawnBody`] at `cursor`:
+    /// Every stage of the op ([`SpawnBody::stages`](specter_core::program::SpawnBody::stages); an
+    /// exec is one) resolves against one `now`, so a pipe's stages agree on `${specter.time}` — the
+    /// documented contract pins "the wall-clock instant immediately before the kernel runs the user's
+    /// command", which for a pipe is the instant all stages start. A stage the resolver refuses
+    /// spawns no stage of its step.
     ///
-    /// - [`SpawnBody::Exec`] → [`Self::spawn_exec_with_permit`]: one resolver call, one
-    ///   [`Spawner::spawn`], one [`RunningJob`] installed, one wait thread, one optional timer
-    ///   thread.
-    /// - [`SpawnBody::Pipe`] → [`Self::spawn_pipe_with_permit`]: N resolver calls, one
-    ///   [`Spawner::spawn_pipe`], one [`RunningJob`] (with combined signaler for shutdown fan-out),
-    ///   one aggregating wait thread, and per-stage timer threads for stages with a `timeout`.
-    ///
-    /// At the IR level there is no predicate distinction — predicate behavior is the op's `on_failed`
-    /// edge, read by the reap-path.
-    ///
-    /// `now: SystemTime` is sampled at the dispatcher and threaded into every resolver call so a
-    /// single pipe sees one shared `${specter.time}` across all stages — the documented contract
-    /// pins "the wall-clock instant immediately before the kernel runs the user's command," which
-    /// for a pipe is the instant all stages start.
+    /// The job is installed once its wait thread is alive: the controller reads `reap_rx` only after
+    /// this returns, so the thread's `Reaped` cannot reach it first. On any failure the permit drops,
+    /// with this call or with the thread's closure.
     fn spawn_step_with_permit(
         &mut self, key: &DedupKey, sub: SubId, effect: &Arc<Effect>, cursor: u32,
         diff_tmp: Option<&Arc<DiffTmpFile>>, permit: Permit, spawner: &dyn Spawner,
         reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
-        let now = std::time::SystemTime::now();
-        let cwd: &Path = resolve::compute_cwd(effect);
+        let now = SystemTime::now();
+        let cwd = resolve::compute_cwd(effect);
+        let diff_path = diff_tmp.map(|tmp| tmp.path());
+        let stages = effect.program.ops()[cursor as usize].body().stages();
 
-        let op = &effect.program.ops()[cursor as usize];
-        match op.body() {
-            SpawnBody::Exec(exec) => self.spawn_exec_with_permit(
-                key, sub, effect, cursor, exec, now, cwd, diff_tmp, permit, spawner, reap_tx,
-            ),
-            SpawnBody::Pipe(stages) => {
-                // `MultiStage::stages()` borrows the shared stage slice; its Arc lifetime is tied
-                // to `effect`, so the slice outlives the resolve/spawn_pipe sequence. The slice is
-                // ≥2 by construction — `MultiStage::new` is the sole producer of `SpawnBody::Pipe`
-                // and rejects fewer — so the pipe path's stdout→stdin / pipefail assumptions hold
-                // with no runtime arity check on this path.
-                let stages_slice: &[ExecAction] = stages.stages();
-                self.spawn_pipe_with_permit(
-                    key,
-                    sub,
-                    effect,
-                    cursor,
-                    stages_slice,
-                    now,
-                    cwd,
-                    diff_tmp,
-                    permit,
-                    spawner,
-                    reap_tx,
-                )
+        let specs = stages
+            .iter()
+            .map(|stage| resolve::resolve_stage(effect, stage, now, diff_path, &self.env_snapshot))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| {
+                tracing::error!(?key, cursor, %e, "resolver error; aborting step");
+                SpawnFailureCause::Resolver
+            })?;
+        let children = spawner.spawn(&specs, cwd).map_err(|e| {
+            tracing::error!(?key, cursor, ?cwd, ?e, "spawn failed");
+            SpawnFailureCause::OsSpawn
+        })?;
+
+        // Each timer reads its stage's pid and signaler off one handle, so it names the process it
+        // stops. Arming ahead of the wait thread is safe: a timer whose step then fails to start
+        // finds its stage reaped at the deadline.
+        for (stage, (exec, child)) in stages.iter().zip(&children).enumerate() {
+            if let Some(deadline) = exec.timeout() {
+                let ctx = TimerContext { key: *key, cursor, stage, pid: child.pid };
+                timer::arm_timer(deadline, self.shutdown_grace, Arc::clone(&child.signaler), ctx);
             }
         }
-    }
 
-    /// Single-process spawn path for [`SpawnBody::Exec`]. Outcome routing (propagate / branch /
-    /// no-op) lives on the op's edges; this function is shape-only.
-    ///
-    /// Sequencing pinned: slot.running is installed **before** the wait thread is spawned, so a
-    /// fast-completing wait thread (mock under test, or a child that exits between fork and wait)
-    /// can't send `Reaped` before the controller knows about it.
-    ///
-    /// On wait-thread spawn failure: the freshly-spawned child is alive but has no waiter (the
-    /// closure that owned it has been dropped by `Builder::spawn`'s `Err` path). The recovery branch
-    /// SIGKILLs the orphan via the signaler held in `slot.running`, then synchronously reaps it via
-    /// [`crate::spawner::ChildSignaler::reap_blocking`] so the OS doesn't leak a zombie.
-    /// `slot.running` is then cleared (the terminate_plan caller expects it to be `None`) and
-    /// `SpawnError::Failed` returns.
-    ///
-    /// **Slot invariant.** All `self.slots.get_mut(key)` lookups in this function assume the slot
-    /// was just touched by the caller (the controller is single-threaded; no Reap or Submit can
-    /// interleave between caller's `pump` / `reap_pump` and here). A missing slot is a programming
-    /// error, surfaced via `expect` rather than silently masked — silent masking would otherwise
-    /// leak the signaler and leave the child unreachable from shutdown signaling.
-    fn spawn_exec_with_permit(
-        &mut self, key: &DedupKey, sub: SubId, effect: &Arc<Effect>, cursor: u32,
-        exec: &ExecAction, now: std::time::SystemTime, cwd: &Path,
-        diff_tmp: Option<&Arc<DiffTmpFile>>, permit: Permit, spawner: &dyn Spawner,
-        reap_tx: &Sender<EffectCompletion>,
-    ) -> Result<(), SpawnFailureCause> {
-        let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
-        let spec = match resolve::resolve_stage(effect, exec, now, diff_path, &self.env_snapshot) {
-            Ok(spec) => spec,
-            Err(e) => {
-                // No spawn, no wait thread, no timer. Permit drops at the end of this scope; caller
-                // routes through `advance_or_terminate` with synthesised `EffectOutcome::Failed`.
-                tracing::error!(?key, cursor, %e, "resolver error; aborting step");
-                drop(permit);
-                return Err(SpawnFailureCause::Resolver);
-            }
-        };
-
-        let handles = match spawner.spawn(&spec, cwd) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!(?key, cursor, ?cwd, ?e, "spawn failed");
-                drop(permit);
-                return Err(SpawnFailureCause::OsSpawn);
-            }
-        };
-        let crate::spawner::SpawnHandles { pid, waiter, signaler } = handles;
-
-        // The signaler Arc has up to three co-owners: the installed [`RunningJob::signaler`]
-        // (consumed by shutdown / recovery), the optional per-step timer thread (drops on natural
-        // completion via the `is_dead` short-circuit), and the wait thread (publishes the
-        // dead-ratchet backstop after `catch_unwind`). Clone the two extras here, then move the
-        // original into `RunningJob` — keeps the controller's install-side reference live regardless
-        // of whether either sibling spawn succeeds. The timer clone is conditional (only paid when
-        // `exec.timeout().is_some()`) and pairs the cloned Arc with its deadline so the two can't
-        // drift apart.
-        let timer_arm: Option<(Duration, Arc<dyn ChildSignaler>)> =
-            exec.timeout().map(|deadline| (deadline, Arc::clone(&signaler)));
-        let signaler_for_wait = Arc::clone(&signaler);
+        let SpawnHandles { pid, waiter, signaler } = pipe::join(children);
+        let wait_thread = thread::Builder::new()
+            // Linux keeps 15 bytes of a thread's name: an 8-byte prefix leaves a 7-digit pid whole.
+            .name(format!("act-job-{pid}"))
+            .spawn({
+                let (key, signaler, reap_tx) = (*key, Arc::clone(&signaler), reap_tx.clone());
+                move || wait_loop(waiter, &*signaler, key, sub, permit, &reap_tx)
+            });
+        if let Err(e) = wait_thread {
+            tracing::error!(?key, cursor, pid, ?e, "wait thread spawn failed; killing the step");
+            reap_orphan(&*signaler, pid);
+            return Err(SpawnFailureCause::WaitThread);
+        }
         let slot = self
             .slots
             .get_mut(key)
@@ -1058,240 +995,21 @@ impl ActuatorState {
             cursor,
             diff_tmp: diff_tmp.map(Arc::clone),
         });
-
-        self.spawn_wait_thread_after_install(
-            key,
-            sub,
-            pid,
-            cursor,
-            waiter,
-            signaler_for_wait,
-            permit,
-            reap_tx,
-        )?;
-
-        // Per-step timer: arm AFTER the wait thread is alive so the wait thread's `dead` flag is
-        // the natural-completion signal the timer short-circuits on. Best-effort + log-and-proceed
-        // policy lives inside [`timer::arm_timer`].
-        if let Some((deadline, timer_signaler)) = timer_arm {
-            timer::arm_timer(
-                deadline,
-                self.shutdown_grace,
-                timer_signaler,
-                timer::TimerContext::Exec { key: *key, cursor, pid },
-            );
-        }
-
-        tracing::debug!(?key, cursor, pid, "spawned instruction");
-        Ok(())
-    }
-
-    /// Multi-stage spawn path for [`SpawnBody::Pipe`].
-    ///
-    /// `stages` is ≥2 by construction: `MultiStage::new` is the sole producer of [`SpawnBody::Pipe`]
-    /// and rejects fewer, and the lone caller passes `MultiStage::stages()`. The stdout→stdin wiring
-    /// and pipefail aggregation below assume that arity — it is sealed at the type's constructor,
-    /// not re-checked on this path.
-    ///
-    /// The shape mirrors [`Self::spawn_exec_with_permit`] at every step, scaled to N stages:
-    ///
-    /// 1. Resolve every stage's argv + env against the shared `now` (so `${specter.time}` agrees
-    ///    across stages — see [`Self::spawn_step_with_permit`] for the contract).
-    /// 2. Call [`Spawner::spawn_pipe`] which mints N processes, an aggregating
-    ///    [`crate::spawner::ChildWaiter`], a combined [`crate::spawner::ChildSignaler`] for shutdown
-    ///    fan-out, and per-stage signalers for per-stage timer threads.
-    /// 3. Install [`RunningJob`] BEFORE spawning the wait thread (slot.running invariant: the wait
-    ///    thread must not be able to send `Reaped` before the controller has the job in hand). The
-    ///    job carries the combined signaler only — the per-stage signalers are locals to this
-    ///    function, cloned into any per-stage timer thread and dropped on return.
-    /// 4. Spawn one wait thread that drains the aggregating waiter and surfaces a single `Reaped`
-    ///    event to the controller — the engine's accounting is "one EffectComplete per Effect" and
-    ///    that holds regardless of pipe vs single-process.
-    /// 5. For each stage with a `timeout`, spawn one detached timer thread that observes the stage's
-    ///    `dead` flag and signals the stage individually. The aggregating waiter sees the resulting
-    ///    per-stage Failed and cascades SIGTERM to alive siblings; the engine receives one aggregated
-    ///    Failed outcome.
-    ///
-    /// Resolver failure on **any** stage aborts the entire pipe (no processes have spawned yet at
-    /// that point). Pipe-spawn failure (returned by [`Spawner::spawn_pipe`]) means the spawner has
-    /// already rolled back any partially-spawned stages — the caller just returns
-    /// `SpawnError::Failed`.
-    fn spawn_pipe_with_permit(
-        &mut self, key: &DedupKey, sub: SubId, effect: &Arc<Effect>, cursor: u32,
-        stages: &[ExecAction], now: std::time::SystemTime, cwd: &Path,
-        diff_tmp: Option<&Arc<DiffTmpFile>>, permit: Permit, spawner: &dyn Spawner,
-        reap_tx: &Sender<EffectCompletion>,
-    ) -> Result<(), SpawnFailureCause> {
-        let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
-        let specs: Vec<StageSpec<'_>> = match stages
-            .iter()
-            .map(|stage| resolve::resolve_stage(effect, stage, now, diff_path, &self.env_snapshot))
-            .collect()
-        {
-            Ok(specs) => specs,
-            Err(e) => {
-                tracing::error!(?key, cursor, %e, "resolver error in pipe stage; aborting step");
-                drop(permit);
-                return Err(SpawnFailureCause::Resolver);
-            }
-        };
-
-        let handles = match spawner.spawn_pipe(&specs, cwd) {
-            Ok(h) => h,
-            Err(e) => {
-                // Partial-spawn rollback already happened inside `spawn_pipe` (every prior stage
-                // SIGKILLed + reaped, every pipe fd closed in the parent).
-                tracing::error!(?key, cursor, ?cwd, ?e, "pipe spawn failed");
-                drop(permit);
-                return Err(SpawnFailureCause::OsSpawn);
-            }
-        };
-        let crate::spawner::PipeSpawnHandles {
-            last_pid,
-            waiter,
-            combined_signaler,
-            stage_signalers,
-        } = handles;
-
-        // Clone the combined signaler for the wait-thread's dead-ratchet backstop before moving the
-        // original into `RunningJob`. `CombinedSignaler::mark_dead` fans out to every per-stage flag,
-        // so this single Arc covers the whole pipe at the outer `wait_loop` layer (per-stage closures
-        // inside `PipeWaiter::wait` additionally backstop their own `catch_unwind` sites with the
-        // per-stage signalers).
-        let signaler_for_wait = Arc::clone(&combined_signaler);
-        let slot = self
-            .slots
-            .get_mut(key)
-            .expect("slot present at install (single-threaded controller just dispatched here)");
-        slot.running = Some(RunningJob {
-            pid: last_pid,
-            signaler: combined_signaler,
-            effect: Arc::clone(effect),
-            cursor,
-            diff_tmp: diff_tmp.map(Arc::clone),
-        });
-
-        self.spawn_wait_thread_after_install(
-            key,
-            sub,
-            last_pid,
-            cursor,
-            waiter,
-            signaler_for_wait,
-            permit,
-            reap_tx,
-        )?;
-
-        // Per-stage timers: arm AFTER the wait thread is alive so the wait thread's per-stage `dead`
-        // flags are the natural-completion signal each timer short-circuits on. The wait-thread `?`
-        // above also ensures we don't arm timers for a pipe with no waiter (would leave undrained
-        // orphans).
-        //
-        // Best-effort + log-and-proceed policy lives inside [`timer::arm_timer`]. The per-stage
-        // `Arc::clone(sig)` is paid only on stages that carry a timeout — most pipes don't.
-        // `stage_signalers` (the install-time local `Arc` handles) drop at function exit; the
-        // aggregating waiter and any armed timer threads keep the per-stage signalers alive through
-        // reap.
-        for (idx, (stage, sig)) in stages.iter().zip(stage_signalers.iter()).enumerate() {
-            if let Some(deadline) = stage.timeout() {
-                let stage = u32::try_from(idx)
-                    .expect("pipe stage count is bounded by spawn arity (≤ u32::MAX)");
-                timer::arm_timer(
-                    deadline,
-                    self.shutdown_grace,
-                    Arc::clone(sig),
-                    timer::TimerContext::PipeStage { key: *key, cursor, stage, pid: last_pid },
-                );
-            }
-        }
-
-        tracing::debug!(?key, cursor, last_pid, stages = stages.len(), "spawned pipe");
-        Ok(())
-    }
-
-    /// Spawn the wait thread for an already-installed [`Slot::running`]. On `thread::Builder::spawn`
-    /// failure, take the running job back via the slot, recover the orphan child (SIGKILL +
-    /// `reap_blocking`), and return [`SpawnFailureCause::WaitThread`] so the caller routes through
-    /// `advance_or_terminate` with a synthesised `EffectOutcome::Failed`.
-    ///
-    /// `pid` is used only for the wait-thread's OS name (`act-wait-{pid}`); for single-process steps
-    /// it's the spawned child's pid; for pipes it's the last stage's pid (the operator-facing "the
-    /// pid of this pipe"). The `key` is needed to look up the slot in the recovery branch.
-    ///
-    /// `signaler` is a clone of the same [`Arc`] the controller installed on
-    /// [`RunningJob::signaler`]. The wait thread owns it solely to publish the dead-ratchet backstop
-    /// after the `catch_unwind` of [`ChildWaiter::wait`] — see [`wait_loop`] for the protocol
-    /// contract. Cloning at the call site (rather than at the [`SpawnHandles`](crate::SpawnHandles)
-    /// origin) keeps the controller's install-side reference live regardless of whether the
-    /// spawn-the-wait-thread step succeeds; on `Builder::spawn` failure the closure-owned clone
-    /// drops, the recovery branch drives the install-side clone through SIGKILL + `reap_blocking`,
-    /// and nothing leaks.
-    ///
-    /// The function is `&mut self` because the recovery branch mutates `self.slots[key].running`.
-    /// The slot lookup is an `expect` for the same reason as `spawn_exec_with_permit`: the controller
-    /// is single-threaded and the caller has just installed `slot.running`.
-    #[allow(clippy::needless_pass_by_value)]
-    fn spawn_wait_thread_after_install(
-        &mut self, key: &DedupKey, sub: SubId, pid: u32, cursor: u32, waiter: Box<dyn ChildWaiter>,
-        signaler: Arc<dyn ChildSignaler>, permit: Permit, reap_tx: &Sender<EffectCompletion>,
-    ) -> Result<(), SpawnFailureCause> {
-        let reap_tx_for_thread = reap_tx.clone();
-        let wait_key = *key;
-        if let Err(e) = std::thread::Builder::new()
-            // Linux pthread_setname_np truncates to 15 chars + null; `act-wait-` is 9 chars, leaving
-            // room for a 6-digit pid unscathed. macOS allows 64 bytes.
-            .name(format!("act-wait-{pid}"))
-            .spawn(move || {
-                wait_loop(waiter, signaler, wait_key, sub, permit, reap_tx_for_thread);
-            })
-        {
-            tracing::error!(
-                ?key,
-                cursor,
-                pid,
-                ?e,
-                "wait thread spawn failed; SIGKILL + sync reap orphan, synth Failed",
-            );
-            let slot = self
-                .slots
-                .get_mut(key)
-                .expect("slot installed by this call; controller is single-threaded");
-            let job = slot.running.take().expect("slot.running installed unconditionally above");
-            recover_orphan_after_wait_thread_failure(job);
-            return Err(SpawnFailureCause::WaitThread);
-        }
+        tracing::debug!(?key, cursor, pid, stages = stages.len(), "spawned step");
         Ok(())
     }
 }
 
-/// Recovery path for the wait-thread-spawn-failure case in [`ActuatorState::spawn_step_with_permit`].
-/// The child is alive but its paired [`crate::spawner::ChildWaiter`] was dropped along with the
-/// failed `Builder::spawn` closure — so the controller must SIGKILL it and synchronously reap it
-/// through the signaler. Without the reap the OS would leak a zombie until process exit.
-///
-/// Both syscalls are best-effort: errors are logged and swallowed. The caller's synthesised
-/// `EffectOutcome::Failed` is what the engine observes; this function exists only for OS resource
-/// hygiene.
-///
-/// Extracted as a free function so it can be unit-tested in isolation without standing up the full
-/// spawn flow (the actual `thread::Builder::spawn` failure path is rare and not directly injectable
-/// in tests).
-///
-/// `job` is taken by value to express the ownership transfer: the caller has just
-/// `slot.running.take()`-ed and hands the in-flight bookkeeping over for tear-down; once we return,
-/// the signaler / effect Arc / diff-tmp path all drop. Borrowing would force the caller into a
-/// take-then-restore dance for no behavioural gain.
-///
-/// Same recovery shape for Exec and Pipe: the [`RunningJob::signaler`] is either the single-child
-/// signaler or the combined fan-out signaler, and both implement SIGKILL + `reap_blocking` correctly
-/// for their underlying children.
-#[allow(clippy::needless_pass_by_value)]
-fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
-    let pid = job.pid;
-    if let Err(e) = job.signaler.signal_kill() {
+/// Kill and reap a step whose wait thread failed to start: its processes are alive, but their waiter
+/// went with the thread's closure, so without the reap each would stay a zombie until the daemon
+/// exits. Both syscalls are best-effort — errors are logged and swallowed; the caller's synthesised
+/// `EffectOutcome::Failed` is what the engine observes. A free function so it is tested without the
+/// spawn flow, whose `thread::Builder::spawn` failure is not injectable.
+fn reap_orphan(signaler: &dyn ChildSignaler, pid: u32) {
+    if let Err(e) = signaler.signal_kill() {
         tracing::warn!(pid, ?e, "orphan SIGKILL failed");
     }
-    if let Err(e) = job.signaler.reap_blocking() {
+    if let Err(e) = signaler.reap_blocking() {
         tracing::warn!(pid, ?e, "orphan reap_blocking failed");
     }
 }
@@ -1309,11 +1027,9 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
 ///    the wait outcome. This is the additive wrapper-layer backstop: a panicking `wait` impl never
 ///    reaches its own publish, and even a clean `Err` return can leave a custom impl that publishes
 ///    only on the happy path racing PID-reuse. Calling `mark_dead` here closes the window at the
-///    protocol layer; idempotent against the waiter's own early publish on the happy path. For the
-///    pipe shape, the wrapping signaler is the [`crate::pipe::CombinedSignaler`] and the call fans
-///    out to every per-stage flag so the outer backstop closes every stage's window even when
-///    [`crate::pipe::PipeWaiter::wait`] aggregated correctly; the per-stage closures inside
-///    `PipeWaiter` additionally backstop their own catch_unwind sites.
+///    protocol layer; idempotent against the waiter's own early publish on the happy path. A joined
+///    pipe's signaler is its [`crate::pipe::CombinedSignaler`], so the call reaches every stage's
+///    flag; each stage's own thread inside [`crate::pipe::PipeWaiter`] backstops its stage as well.
 ///
 /// 3. Permit release precedes reap notification. Spawns for *other* Subs can dispatch immediately
 ///    on the freed permit even if the reap channel is briefly saturated. Spawns for the *same* Sub
@@ -1328,10 +1044,9 @@ fn recover_orphan_after_wait_thread_failure(job: RunningJob) {
 /// [`ActuatorState::handle_reap_drop`] function exit and [`crate::tmp::DiffTmpFile::drop`] unlinks.
 /// A wait-thread panic-unwind caught here cannot trigger an early unlink because no Arc lives on
 /// this side of the channel.
-#[allow(clippy::needless_pass_by_value)] // closure-spawned: arguments owned for the thread
 fn wait_loop(
-    waiter: Box<dyn ChildWaiter>, signaler: Arc<dyn ChildSignaler>, key: DedupKey, sub: SubId,
-    permit: Permit, reap_tx: Sender<EffectCompletion>,
+    waiter: Box<dyn ChildWaiter>, signaler: &dyn ChildSignaler, key: DedupKey, sub: SubId,
+    permit: Permit, reap_tx: &Sender<EffectCompletion>,
 ) {
     let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| waiter.wait())) {
         Ok(Ok(o)) => o,
@@ -1502,13 +1217,8 @@ mod tests {
     #[derive(Default)]
     struct UnusedSpawner;
     impl Spawner for UnusedSpawner {
-        fn spawn(&self, _stage: &StageSpec<'_>, _cwd: &Path) -> io::Result<SpawnHandles> {
+        fn spawn(&self, _stages: &[StageSpec<'_>], _cwd: &Path) -> io::Result<Vec<SpawnHandles>> {
             unreachable!("UnusedSpawner used by a test that didn't expect spawn()")
-        }
-        fn spawn_pipe(
-            &self, _stages: &[crate::spawner::StageSpec<'_>], _cwd: &Path,
-        ) -> io::Result<crate::spawner::PipeSpawnHandles> {
-            unreachable!("UnusedSpawner used by a test that didn't expect spawn_pipe()")
         }
     }
 
@@ -1550,32 +1260,27 @@ mod tests {
         }
     }
     impl Spawner for ScriptedSpawner {
-        fn spawn(&self, _stage: &StageSpec<'_>, _cwd: &Path) -> io::Result<SpawnHandles> {
+        fn spawn(&self, stages: &[StageSpec<'_>], _cwd: &Path) -> io::Result<Vec<SpawnHandles>> {
             // Copy out of the lock before checking — the MutexGuard's significant Drop would
             // otherwise live across the if-let.
             let injected = *self.inject_err.lock().unwrap();
             if let Some(kind) = injected {
                 return Err(io::Error::from(kind));
             }
-            let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
-            self.spawns.lock().unwrap().push(pid);
-            let (tx, rx) = crossbeam::channel::bounded::<EffectOutcome>(1);
-            self.completions.lock().unwrap().insert(pid, tx);
-            let dead = crate::lifecycle::DeadFlag::new();
-            Ok(SpawnHandles {
-                pid,
-                waiter: Box::new(ScriptedWaiter { rx, dead: dead.clone() }),
-                signaler: Arc::new(ScriptedSignaler { dead }),
-            })
-        }
-        fn spawn_pipe(
-            &self, _stages: &[crate::spawner::StageSpec<'_>], _cwd: &Path,
-        ) -> io::Result<crate::spawner::PipeSpawnHandles> {
-            // The multi-step pure-state tests in this module don't exercise pipe dispatch — they
-            // use single-Exec programs only. Treat as a regression catcher: if a future test
-            // accidentally enables pipe dispatch against this stub, surface the missing scaffolding
-            // instead of silently succeeding.
-            unreachable!("ScriptedSpawner used by a test that didn't expect spawn_pipe()")
+            let mut children = Vec::with_capacity(stages.len());
+            for _ in stages {
+                let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
+                self.spawns.lock().unwrap().push(pid);
+                let (tx, rx) = crossbeam::channel::bounded::<EffectOutcome>(1);
+                self.completions.lock().unwrap().insert(pid, tx);
+                let dead = crate::lifecycle::DeadFlag::new();
+                children.push(SpawnHandles {
+                    pid,
+                    waiter: Box::new(ScriptedWaiter { rx, dead: dead.clone() }),
+                    signaler: Arc::new(ScriptedSignaler { dead }),
+                });
+            }
+            Ok(children)
         }
     }
     struct ScriptedWaiter {
@@ -1673,24 +1378,13 @@ mod tests {
 
     // ---------- wait-thread-spawn-failure recovery ----------
 
-    /// Direct test for [`super::recover_orphan_after_wait_thread_failure`]. The production-path
-    /// trigger (`thread::Builder::spawn` returning `Err`) is rare and not directly injectable in
-    /// the controller harness, so we exercise the recovery helper in isolation against a stub
-    /// [`RunningJob`].
-    ///
-    /// The bug the helper closes: pre-fix, the recovery branch only called `signal_kill`. The waiter
-    /// (the sole reap path) was dropped along with the failed thread closure, so the SIGKILL'd orphan
-    /// was never `waitpid`-ed — leaking a zombie until process exit. The helper now drives both
-    /// `signal_kill` and `reap_blocking` through the controller-held signaler.
+    /// [`super::reap_orphan`] kills a step whose wait thread never started, then reaps it: its waiter
+    /// went with the thread's closure, so the reap is the only one it gets.
     #[test]
-    fn recover_orphan_after_wait_thread_failure_kills_and_reaps() {
-        let key = perfile_key(50, 50, 50);
-        let res = unique_resource_id(50);
-        let effect = Arc::new(dummy_effect(key, res, 1));
-        let signaler = Arc::new(CountingSignaler::default());
-        let job = stub_running_job(effect, Arc::clone(&signaler));
+    fn reap_orphan_kills_then_reaps() {
+        let signaler = CountingSignaler::default();
 
-        super::recover_orphan_after_wait_thread_failure(job);
+        super::reap_orphan(&signaler, 99_999);
 
         assert_eq!(
             signaler.kill.load(Ordering::SeqCst),
@@ -1724,20 +1418,12 @@ mod tests {
 
         let key = perfile_key(60, 60, 60);
         let sub = unique_sub_id(60);
-        let signaler: Arc<dyn ChildSignaler> =
-            Arc::new(ScriptedSignaler { dead: crate::lifecycle::DeadFlag::new() });
+        let signaler = ScriptedSignaler { dead: crate::lifecycle::DeadFlag::new() };
         let permits = crate::permits::Permits::new(nz(1));
         let permit = permits.try_acquire().expect("permit available");
         let (reap_tx, _reap_rx) = reap_channel();
 
-        super::wait_loop(
-            Box::new(PanickingWaiter),
-            Arc::clone(&signaler),
-            key,
-            sub,
-            permit,
-            reap_tx,
-        );
+        super::wait_loop(Box::new(PanickingWaiter), &signaler, key, sub, permit, &reap_tx);
 
         assert!(
             signaler.is_dead(),

@@ -40,7 +40,7 @@ impl DeadFlag {
     /// `DeadFlag::default()` would silently mint a fresh independent cell where a `.clone()` was
     /// meant — a protocol bug manifesting as "signals never short-circuit after reap". Forcing the
     /// explicit mint here, and sharing via [`Clone`], makes pairing visible at every construction
-    /// site (`build_pair` in production; `allocate_spawn` in the mock).
+    /// site (`build_pair` in production; `MockSpawner::spawn` in the mock).
     pub(crate) fn new() -> Self {
         Self(Arc::new(AtomicBool::new(false)))
     }

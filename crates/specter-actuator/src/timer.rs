@@ -29,92 +29,37 @@
 //!
 //! `thread::Builder::spawn` can fail (OOM, EAGAIN, ulimit) — extremely rare. [`arm_timer`] treats
 //! this as **best-effort**: logs at `tracing::error!` and proceeds without timer enforcement for
-//! that single step. The alternative (kill the child to fail the plan) would race the wait thread
-//! that's already alive, risking a double-`EffectComplete` for the same Effect. The user-visible
-//! regression is "this one step ran without its deadline"; the plan otherwise completes normally.
-//! The policy lives at one site (this module) — callers don't choose it per call.
+//! that single stage. The alternative (kill the child to fail the plan) would race the step's wait
+//! thread, risking a double-`EffectComplete` for the same Effect. The user-visible regression is
+//! "this one stage ran without its deadline"; the plan otherwise completes normally. The policy lives
+//! at one site (this module) — callers don't choose it per call.
 //!
-//! # Thread name budget
+//! # Thread name
 //!
-//! Linux `pthread_setname_np` truncates to 15 bytes plus a null; macOS allows 64. The names built
-//! by [`TimerContext::os_thread_name`] are shaped around what `ps -T` / `gdb info threads` can
-//! render:
-//!
-//! - Exec: `act-timer-c{cursor}-pid{pid}` — fits a 9-char pid unscathed at `cursor=0`.
-//! - PipeStage: `act-timer-pipe-c{cursor}-s{stage}-pid{pid}` — exceeds the Linux ceiling at any
-//!   non-trivial stage/pid, so live-system inspection on Linux must cross-reference via the `tracing`
-//!   log keyed on the same `pid` (the spawn-failure error line and the `tracing::debug!("spawned
-//!   …")` line both carry `?key` + `pid`).
-//!
-//! The sub identifier is intentionally omitted — adding it would push even the Exec name past the
-//! Linux ceiling.
+//! `act-tmr-{pid}`, named for the stage it times: Linux keeps 15 bytes of a thread's name, and the
+//! 8-byte prefix leaves a 7-digit pid whole. The key, cursor and stage are in its lines.
 
 use crate::spawner::ChildSignaler;
 use specter_core::DedupKey;
-use std::io;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
-/// Observability identity for a timer arm — the structured fields the spawn-failure log emits and
-/// the typed parts the OS thread name is built from. Kept as a typed enum (rather than loose `&str` +
-/// opaque log payload) so the two variants — exec single-process and pipe per-stage — share one shape
-/// at the seam and the variant-specific name / log differences are encapsulated in this module.
+/// The stage a timer times, as its thread's name and its lines say it.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum TimerContext {
-    /// Single-process [`specter_core::program::SpawnBody::Exec`] step.
-    Exec { key: DedupKey, cursor: u32, pid: u32 },
-    /// One stage of a multi-stage [`specter_core::program::SpawnBody::Pipe`] step. `stage` is the
-    /// index inside the pipe's stage list; `pid` is the per-stage pid.
-    PipeStage { key: DedupKey, cursor: u32, stage: u32, pid: u32 },
+pub(crate) struct TimerContext {
+    pub key: DedupKey,
+    pub cursor: u32,
+    pub stage: usize,
+    pub pid: u32,
 }
 
-impl TimerContext {
-    /// Build the OS thread name from typed parts. Single allocation per arm. The Linux 15-byte
-    /// ceiling lives in the module docs, not at the call site.
-    fn os_thread_name(&self) -> String {
-        match *self {
-            Self::Exec { cursor, pid, .. } => format!("act-timer-c{cursor}-pid{pid}"),
-            Self::PipeStage { cursor, stage, pid, .. } => {
-                format!("act-timer-pipe-c{cursor}-s{stage}-pid{pid}")
-            }
-        }
-    }
-
-    /// Emit the spawn-failure log at `tracing::error!`. The deadline is included so an operator
-    /// triaging "this step ran past its declared timeout" can correlate; `?e` carries the kernel
-    /// error (typically `EAGAIN` / `ENOMEM` / a ulimit).
-    fn log_spawn_failure(&self, deadline: Duration, e: &io::Error) {
-        match *self {
-            Self::Exec { key, cursor, pid } => tracing::error!(
-                ?key,
-                cursor,
-                pid,
-                ?deadline,
-                ?e,
-                "per-step timer thread spawn failed; deadline not enforced",
-            ),
-            Self::PipeStage { key, cursor, stage, pid } => tracing::error!(
-                ?key,
-                cursor,
-                stage,
-                pid,
-                ?deadline,
-                ?e,
-                "per-stage timer thread spawn failed; deadline not enforced",
-            ),
-        }
-    }
-}
-
-/// Arm a detached one-shot timer thread that enforces `deadline` against the child paired with
-/// `signaler`. See module docs for the algorithm, the spawn-failure contract, and the thread-name
-/// budget.
+/// Arm a detached one-shot timer thread that enforces `deadline` against the stage `signaler`
+/// signals. See module docs for the algorithm, the spawn-failure policy and the thread's name.
 ///
-/// No return value: the thread is detached (nothing useful to await) and the `thread::Builder::spawn`
-/// outcome is policy-handled inside this function — log at `tracing::error!` via
-/// [`TimerContext::log_spawn_failure`] and proceed. Pinning the policy here means the two production
-/// call sites (exec / pipe stage) can't drift on log severity or structured fields.
+/// No return value: the thread is detached (nothing useful to await), and a failed
+/// `thread::Builder::spawn` is logged at `tracing::error!` — with the deadline, so an operator
+/// triaging "this step ran past its declared timeout" can correlate — and otherwise ignored.
 ///
 /// `deadline > Duration::ZERO` is upheld by config validation (`IssueKind::TimeoutZero`); the
 /// `debug_assert!` is defense-in-depth for a future regression in that layer.
@@ -125,11 +70,20 @@ pub(crate) fn arm_timer(
         deadline > Duration::ZERO,
         "arm_timer requires deadline > 0; config validation must reject zero",
     );
-    let name = ctx.os_thread_name();
-    if let Err(e) =
-        thread::Builder::new().name(name).spawn(move || run_timer(deadline, grace, &*signaler))
+    let TimerContext { key, cursor, stage, pid } = ctx;
+    if let Err(e) = thread::Builder::new()
+        .name(format!("act-tmr-{pid}"))
+        .spawn(move || run_timer(deadline, grace, &*signaler))
     {
-        ctx.log_spawn_failure(deadline, &e);
+        tracing::error!(
+            ?key,
+            cursor,
+            stage,
+            pid,
+            ?deadline,
+            ?e,
+            "step timer thread spawn failed; deadline not enforced",
+        );
     }
 }
 

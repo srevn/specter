@@ -1833,9 +1833,9 @@ mod tests {
 
     // ---------- pipe dispatch (Pipe body) ----------
     //
-    // A single op with `SpawnBody::Pipe` triggers N spawns, an aggregating waiter, a combined
-    // signaler for shutdown, and optional per-stage timers. These tests exercise the dispatcher
-    // wiring against the testkit `MockSpawner::spawn_pipe`.
+    // A single op with `SpawnBody::Pipe` spawns its N stages in one call, joined into an aggregating
+    // waiter and a combined signaler for shutdown, with optional per-stage timers. These tests
+    // exercise the dispatcher wiring against the testkit `MockSpawner`.
 
     /// Build a single-op program wrapping a pipe body. `on_ok = Escape`, `on_failed = Terminate`.
     fn pipe_program(stages: Arc<[ExecAction]>) -> Arc<ActionProgram> {
@@ -1949,8 +1949,8 @@ mod tests {
             &completions[0],
             Input::EffectComplete(c) if matches!(c.outcome, EffectOutcome::Failed(Termination::Internal))
         ));
-        // No stages recorded — the inject_spawn_error path short-circuits MockSpawner::spawn_pipe
-        // before allocate_spawn.
+        // No stages recorded — the injected error short-circuits `MockSpawner::spawn` before it
+        // records a stage.
         assert_eq!(h.spawner.spawns().len(), 0, "no stages recorded when pipe spawn fails");
         h.shutdown();
     }
