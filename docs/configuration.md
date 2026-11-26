@@ -229,8 +229,22 @@ path    = "/srv/repo/src"
 actions = [{ exec = ["sh", "-c", "exec cargo build >>/srv/repo/build.log 2>&1"] }]
 ```
 
-`exec` gives the command the shell's place: it is the process Specter
-runs, so its exit status is the action's, and a step's `timeout`
+or into the system log, tagged, through `logger`:
+
+```toml
+[[watch.actions]]
+pipe = [
+  { exec = ["sh", "-c", "exec cargo build 2>&1"] },
+  { exec = ["logger", "-t", "rebuild"] },
+]
+```
+
+When the build fails, so does the action, and `logger` still relays
+every line the build wrote: a failing stage stops only the stages
+before it ([Pipes](#pipes)).
+
+In both, `exec` gives the command the shell's place: it is the process
+Specter runs, so its exit status is the action's, and its `timeout`
 signals the command itself.
 
 ## Hot reload
