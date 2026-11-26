@@ -34,7 +34,10 @@ pub(super) use list::list;
 pub(super) use show::show;
 pub(super) use status::status;
 
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
+
+use crate::driver::DriverState;
+use crate::ipc::wire::WireTime;
 
 /// Project a settle window onto its wire millisecond count. Shared by the `list` row, the `show`
 /// detail block's own `settle_ms`, and the mint payload's `minted_settle_ms`, so the fits-in-u64
@@ -44,23 +47,18 @@ pub(super) fn settle_ms(settle: Duration) -> u64 {
         .expect("Duration::as_millis fits u64 for any operator-meaningful settle window")
 }
 
-/// Project an engine-monotonic [`Instant`] onto a wall-clock [`SystemTime`] using the driver's
-/// startup anchor pair.
+/// Project an engine-monotonic [`Instant`] onto the wire's wall clock through the driver's startup
+/// anchor pair.
 ///
 /// `Instant` is monotonic and not directly displayable; the wire emits RFC3339 strings. The anchor
-/// pair (`start_wall`, `start_instant`) is captured atomically in
-/// [`crate::driver::DriverState::new`], so the projection agrees with the operator's wall clock at
-/// boot.
+/// pair (`start_wall`, `start_instant`) is captured atomically in [`DriverState::new`], so the
+/// projection agrees with the operator's wall clock at boot.
 ///
 /// `t < start_instant` is structurally impossible (the engine records fires after the driver
 /// starts); `saturating_duration_since` guards the type-system corner anyway.
 ///
 /// `start_wall + duration` overflow is unreachable in any realistic operating window (`i64::MAX`
 /// seconds past the epoch); no guard.
-pub(super) fn project_wall(
-    start_wall: SystemTime,
-    start_instant: Instant,
-    t: Instant,
-) -> SystemTime {
-    start_wall + t.saturating_duration_since(start_instant)
+pub(super) fn project_wall(ds: &DriverState, t: Instant) -> WireTime {
+    WireTime::from(ds.start_wall + t.saturating_duration_since(ds.start_instant))
 }

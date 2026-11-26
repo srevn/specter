@@ -18,7 +18,7 @@ use specter_engine::Engine;
 use crate::driver::DriverState;
 use crate::ipc::protocol::{DisabledSource, ShowResponse, SubDetails, WireId, WireReaction};
 use crate::ipc::wire::{
-    WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WirePath, WireStateLabel, WireTime,
+    WireAbsorbMode, WireAbsorbWindow, WireEffectScope, WirePath, WireStateLabel,
 };
 
 use super::{program, project_wall, settle_ms};
@@ -105,7 +105,7 @@ fn project_details(
     let absorb = profile
         .and_then(|p| p.absorb_window_if_live(now))
         .map(|w| WireAbsorbWindow {
-            expiry: WireTime::from(project_wall(ds.start_wall, ds.start_instant, w.expiry)),
+            expiry: project_wall(ds, w.expiry),
             mode: WireAbsorbMode::from(w.mode),
         });
     // Honest render across the reaction sum: a Spawn Sub reports its own payload and history; a
@@ -119,9 +119,7 @@ fn project_details(
         } => WireReaction::Spawn {
             scope: WireEffectScope::from(spawn.scope()),
             program: program::render(spawn.program()),
-            last_fired_at: history
-                .last_fired_at
-                .map(|t| WireTime::from(project_wall(ds.start_wall, ds.start_instant, t))),
+            last_fired_at: history.last_fired_at.map(|t| project_wall(ds, t)),
             fire_count: history.fire_count,
             dedup_suppressed_count: history.dedup_suppressed_count,
         },

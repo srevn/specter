@@ -15,7 +15,7 @@ use specter_engine::Engine;
 
 use crate::driver::DriverState;
 use crate::ipc::protocol::{DisabledSource, ListResponse, ListRow, WireId};
-use crate::ipc::wire::{WirePath, WireReactionKind, WireStateLabel, WireTime};
+use crate::ipc::wire::{WirePath, WireReactionKind, WireStateLabel};
 
 use super::{project_wall, settle_ms};
 
@@ -78,7 +78,7 @@ fn project_attached(sid: SubId, sub: &Sub, engine: &Engine, ds: &DriverState) ->
     let history = sub.fire_history();
     let last_fired_at = history
         .and_then(|h| h.last_fired_at)
-        .map(|t| WireTime::from(project_wall(ds.start_wall, ds.start_instant, t)));
+        .map(|t| project_wall(ds, t));
     ListRow {
         name: sub.name.to_string(),
         state,
