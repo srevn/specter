@@ -35,8 +35,8 @@
 use crate::EffectCompleteSender;
 use crate::env::EnvSnapshot;
 use crate::permits::{Permit, Permits};
-use crate::resolve::{self, CommandResolved};
-use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, Spawner, StageSpec};
+use crate::resolve;
+use crate::spawner::{ChildSignaler, ChildWaiter, Spawner, StageSpec};
 use crate::timer;
 use crate::tmp::DiffTmpFile;
 use crossbeam::channel::Sender;
@@ -99,10 +99,8 @@ enum SpawnError {
 /// routing without inspecting cause).
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
 enum SpawnFailureCause {
-    /// Argv / env substitution failed before any child or wait thread was spawned. Today the only
-    /// resolver error is [`crate::resolve::ResolveError::UnsetEnvVar`] — a strict `${env.<NAME>}`
-    /// reference against an unset key with no `:-` default. Future resolver-time errors (e.g., path
-    /// canonicalisation) would land here.
+    /// A stage's argv / env could not be rendered ([`crate::resolve::ResolveError`]), so no process
+    /// of the step was spawned.
     Resolver,
     /// OS-level process spawn failed — [`crate::spawner::Spawner::spawn`] / `spawn_pipe` returned
     /// an error (ENOENT on the binary, EAGAIN, EMFILE, …). For pipes the spawner has already rolled
@@ -1017,20 +1015,18 @@ impl ActuatorState {
         reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
         let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
-        let (CommandResolved { argv }, env) =
-            match resolve::resolve_step(effect, exec, now, diff_path, &self.env_snapshot) {
-                Ok(resolved) => resolved,
-                Err(e) => {
-                    // Strict `${env.<NAME>}` failure: no spawn, no wait thread, no timer. Permit
-                    // drops at the end of this scope; caller routes through `advance_or_terminate`
-                    // with synthesised `EffectOutcome::Failed`.
-                    tracing::error!(?key, cursor, %e, "resolver error; aborting step");
-                    drop(permit);
-                    return Err(SpawnFailureCause::Resolver);
-                }
-            };
+        let spec = match resolve::resolve_stage(effect, exec, now, diff_path, &self.env_snapshot) {
+            Ok(spec) => spec,
+            Err(e) => {
+                // No spawn, no wait thread, no timer. Permit drops at the end of this scope; caller
+                // routes through `advance_or_terminate` with synthesised `EffectOutcome::Failed`.
+                tracing::error!(?key, cursor, %e, "resolver error; aborting step");
+                drop(permit);
+                return Err(SpawnFailureCause::Resolver);
+            }
+        };
 
-        let handles = match spawner.spawn(&argv, &env, cwd) {
+        let handles = match spawner.spawn(&spec, cwd) {
             Ok(h) => h,
             Err(e) => {
                 tracing::error!(?key, cursor, ?cwd, ?e, "spawn failed");
@@ -1127,29 +1123,20 @@ impl ActuatorState {
         reap_tx: &Sender<EffectCompletion>,
     ) -> Result<(), SpawnFailureCause> {
         let diff_path: Option<&Path> = diff_tmp.map(|h| h.path());
-        // Resolve every stage's argv + env. The result tuples own the argv `Vec<String>` and the
-        // env `Vec<EnvVar<'_>>`; the env's `Cow::Borrowed` slots borrow from `effect`, the resolver's
-        // owned per-stage `parent_str` / `time_str` (moved into the env Cow::Owned slots), and
-        // `diff_path` (if present). All borrowed sources outlive this function's body, so the
-        // resolved Vec is stable across the `spawn_pipe` call.
-        let resolved: Vec<(CommandResolved, Vec<EnvVar<'_>>)> = match stages
+        let specs: Vec<StageSpec<'_>> = match stages
             .iter()
-            .map(|stage| resolve::resolve_step(effect, stage, now, diff_path, &self.env_snapshot))
-            .collect::<Result<Vec<_>, _>>()
+            .map(|stage| resolve::resolve_stage(effect, stage, now, diff_path, &self.env_snapshot))
+            .collect()
         {
-            Ok(r) => r,
+            Ok(specs) => specs,
             Err(e) => {
                 tracing::error!(?key, cursor, %e, "resolver error in pipe stage; aborting step");
                 drop(permit);
                 return Err(SpawnFailureCause::Resolver);
             }
         };
-        let stage_specs: Vec<StageSpec<'_>> = resolved
-            .iter()
-            .map(|(cmd, env)| StageSpec { argv: cmd.argv.as_slice(), env: env.as_slice() })
-            .collect();
 
-        let handles = match spawner.spawn_pipe(&stage_specs, cwd) {
+        let handles = match spawner.spawn_pipe(&specs, cwd) {
             Ok(h) => h,
             Err(e) => {
                 // Partial-spawn rollback already happened inside `spawn_pipe` (every prior stage
@@ -1159,12 +1146,6 @@ impl ActuatorState {
                 return Err(SpawnFailureCause::OsSpawn);
             }
         };
-        // We're done with `stage_specs` and `resolved` — let them drop here so per-stage env Vecs /
-        // argvs aren't kept alive past the spawn call. (They don't carry per-process state; the
-        // spawner has dup'd the argv/env into the children.)
-        drop(stage_specs);
-        drop(resolved);
-
         let crate::spawner::PipeSpawnHandles {
             last_pid,
             waiter,
@@ -1394,7 +1375,7 @@ mod tests {
     use super::super::SHUTDOWN_GRACE;
     use super::{ActuatorState, PlanContinuation, RunningJob, Slot};
     use crate::env::EnvSnapshot;
-    use crate::spawner::{ChildSignaler, ChildWaiter, EnvVar, SpawnHandles, Spawner};
+    use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles, Spawner, StageSpec};
     use crate::{EffectCompleteSender, SendError};
     use compact_str::CompactString;
     use crossbeam::channel::{Sender, unbounded};
@@ -1521,9 +1502,7 @@ mod tests {
     #[derive(Default)]
     struct UnusedSpawner;
     impl Spawner for UnusedSpawner {
-        fn spawn(
-            &self, _argv: &[String], _env: &[EnvVar<'_>], _cwd: &Path,
-        ) -> io::Result<SpawnHandles> {
+        fn spawn(&self, _stage: &StageSpec<'_>, _cwd: &Path) -> io::Result<SpawnHandles> {
             unreachable!("UnusedSpawner used by a test that didn't expect spawn()")
         }
         fn spawn_pipe(
@@ -1571,9 +1550,7 @@ mod tests {
         }
     }
     impl Spawner for ScriptedSpawner {
-        fn spawn(
-            &self, _argv: &[String], _env: &[EnvVar<'_>], _cwd: &Path,
-        ) -> io::Result<SpawnHandles> {
+        fn spawn(&self, _stage: &StageSpec<'_>, _cwd: &Path) -> io::Result<SpawnHandles> {
             // Copy out of the lock before checking — the MutexGuard's significant Drop would
             // otherwise live across the if-let.
             let injected = *self.inject_err.lock().unwrap();

@@ -1,22 +1,20 @@
-//! Pure resolver — turns the substitution-domain projection on [`Effect`] plus one [`ExecAction`]
-//! step into [`CommandResolved`] argv plus the standard `SPECTER_*` env-var set.
+//! Pure resolver — turns the substitution-domain projection on [`Effect`] plus one stage's
+//! [`ExecAction`] into the [`StageSpec`] its spawner runs: the program, its arguments and the
+//! standard `SPECTER_*` env-var set.
 //!
 //! Lives next to the actuator because resolution runs immediately before `spawner.spawn` —
 //! Latest-coalesce drops `pending` Effects before they reach the syscall, so resolving at submit
 //! time wastes the bytes; resolving at spawn time preserves "render late" as the architectural
 //! invariant.
 //!
-//! Pure data work — no `std::env`, no `std::process`, no I/O. The actuator's `spawn_effect` is the
-//! sole production caller; sibling unit tests drive directly.
+//! Pure data work — no `std::env`, no `std::process`, no I/O.
 //!
 //! # The `(Effect, ExecAction)` split
 //!
 //! Per-Effect-stable values live on [`Effect`] (`anchor_path`, `target_relative`, `sub_name`,
-//! `exclude`, `diff`, `key`, `forced`, `correlation`); the per-op argv template lives on
-//! [`ExecAction`]. The caller extracts the op at `effect.program.ops()[cursor]`, reaches into its
-//! [`specter_core::program::SpawnBody`] for the `ExecAction(s)`, and passes both references in.
-//! Single-process ops ([`specter_core::program::SpawnBody::Exec`]) hand one `ExecAction`; multi-stage
-//! pipes ([`specter_core::program::SpawnBody::Pipe`]) pass each stage's [`ExecAction`] in turn.
+//! `exclude`, `diff`, `key`, `forced`, `correlation`); the per-stage argv template lives on
+//! [`ExecAction`]. The caller resolves each stage of the op at `effect.program.ops()[cursor]` in
+//! turn.
 //!
 //! # `target_path` is derived, not stored
 //!
@@ -28,9 +26,9 @@
 //!
 //! # `SPECTER_DIFF_PATH` slots in alphabetically
 //!
-//! The actuator's `spawn_effect` materialises the diff tmp file (path depends on the actuator
-//! process's pid, so it can't be derived purely) and passes the resulting `&Path` to [`resolve_step`]
-//! as `diff_path`. The resolver inserts `SPECTER_DIFF_PATH` at its alphabetical position in the env
+//! The pool materialises the diff tmp file at plan start (its path depends on the actuator process's
+//! pid, so it can't be derived purely) and passes the resulting `&Path` to [`resolve_stage`] as
+//! `diff_path`. The resolver inserts `SPECTER_DIFF_PATH` at its alphabetical position in the env
 //! vec rather than relying on the caller to append after the fact. The env-order golden test
 //! (`tests::env_order_is_alphabetical`) is then a guarantee about the bytes the spawned child sees,
 //! not just a property of the resolver's standalone output.
@@ -93,7 +91,7 @@
 //!
 //! All four shared single-value derivations — `${specter.path}` / `SPECTER_PATH`, `${specter.anchor}`
 //! / `SPECTER_ANCHOR`, `${specter.parent}` / `SPECTER_PARENT`, and `${specter.time}` / `SPECTER_TIME`
-//! — are rendered exactly once at the top of [`resolve_step`] and threaded through both
+//! — are rendered exactly once at the top of [`resolve_stage`] and threaded through both
 //! `substitute_argv` and `build_env` as a [`Derived<'a>`] bundle whose `Cow<'a, str>` fields
 //! propagate the input borrow: Subtree fires (where `target_path` and `anchor_path` already live as
 //! `&'a Path`) emit `Cow::Borrowed` on the UTF-8 fast path, so `SPECTER_PATH`, `SPECTER_ANCHOR`,
@@ -109,7 +107,7 @@
 //! emit `Cow::Owned` after newline-joining.
 
 use crate::env::EnvSnapshot;
-use crate::spawner::EnvVar;
+use crate::spawner::{EnvVar, StageSpec};
 use compact_str::CompactString;
 use jiff::Timestamp;
 use specter_core::{
@@ -119,26 +117,10 @@ use std::borrow::Cow;
 use std::path::Path;
 use std::time::SystemTime;
 
-/// The argv [`resolve_step`] renders from an [`Effect`] plus one [`ExecAction`] — handed straight
-/// to the spawner.
-///
-/// Only `Debug` is derived (the strict-env-failure test asserts via `Result::expect_err`, which
-/// bounds the `Ok` type `Debug`); nothing clones, compares, or defaults it.
-#[derive(Debug)]
-pub(crate) struct CommandResolved {
-    pub argv: Vec<String>,
-}
-
-/// Resolver-side failure. Surfaces only causes the resolver can detect without spawning a process;
-/// OS-level spawn failures take the `SpawnFailureCause::OsSpawn` route at the `spawner.spawn`
-/// boundary in `pool::state`. Resolver errors surface as `SpawnFailureCause::Resolver` at the same
-/// boundary, distinguishing "argv could not be rendered" from "binary could not be exec'd".
-///
-/// v1 has one variant — strict `${env.<NAME>}` references that found neither an entry in the captured
-/// snapshot nor a `:-default` literal. The caller maps every variant to `EffectOutcome::Failed
-/// { exit_code: None, signal: None }` after a `tracing::error!` log line; the operator sees a clear
-/// "Specter could not satisfy a required env reference" message in their journal, followed by a
-/// `tracing::warn!` at the synth-Failed dispatch site carrying the `Resolver` cause discriminant.
+/// A stage the resolver cannot render into a command, refused before any process of its step is
+/// spawned. The pool fails the step as `SpawnFailureCause::Resolver` — "argv could not be rendered",
+/// beside `SpawnFailureCause::OsSpawn`'s "binary could not be exec'd" — so its outcome is
+/// `Failed(Termination::Internal)`, routed on the op's `on_failed` edge like any failure.
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub(crate) enum ResolveError {
     /// `${env.<NAME>}` references an unset env var with no default literal. The captured snapshot
@@ -146,6 +128,10 @@ pub(crate) enum ResolveError {
     /// must not silently render the empty string — operators opt into lenient explicitly with
     /// `${env.NAME:-}` (empty default) or `${env.NAME:-fallback}` (literal default).
     UnsetEnvVar { name: CompactString },
+    /// Every argv slot rendered to nothing — a multi-value placeholder alone in its slot over an
+    /// empty list (`exec = ["${specter.created}"]` on a fire that created nothing) — so there is no
+    /// program to run.
+    EmptyArgv,
 }
 
 impl std::fmt::Display for ResolveError {
@@ -154,13 +140,14 @@ impl std::fmt::Display for ResolveError {
             Self::UnsetEnvVar { name } => {
                 write!(f, "env var `{name}` is unset and the placeholder has no `:-` default")
             }
+            Self::EmptyArgv => f.write_str("argv rendered no slot, so there is no program to run"),
         }
     }
 }
 
 impl std::error::Error for ResolveError {}
 
-/// Bundle of the four single-value derivations [`resolve_step`] renders once and threads through
+/// Bundle of the four single-value derivations [`resolve_stage`] renders once and threads through
 /// [`substitute_argv`] and [`build_env`]. The argv and env surfaces share the same byte sequence
 /// for each placeholder by construction — no second source-of-truth can drift under future edits.
 ///
@@ -184,24 +171,22 @@ struct Derived<'a> {
     time_str: String,
 }
 
-/// Resolve one [`ExecAction`] step against its owning [`Effect`] — rendering argv plus the standard
-/// `SPECTER_*` env-var set. See module docs.
+/// Resolve one stage's [`ExecAction`] against its owning [`Effect`] into the [`StageSpec`] its
+/// spawner runs, or refuse it ([`ResolveError`]). See module docs.
 ///
-/// `now` is sampled by the actuator's `spawn_effect` immediately before `spawner.spawn` and reused
-/// for the `${specter.time}` argv slot AND the `SPECTER_TIME` env value — they agree on the
-/// wall-clock instant immediately before the kernel runs the user's command. Tests inject a
-/// deterministic `now`; production sources `SystemTime::now()`.
+/// `now` is sampled once per step, immediately before its spawn, and reused for the `${specter.time}`
+/// argv slot AND the `SPECTER_TIME` env value — every stage of a step agrees on the wall-clock
+/// instant immediately before the kernel runs the user's command. Tests inject a deterministic `now`;
+/// production sources `SystemTime::now()`.
 ///
 /// `diff_path` is the absolute path of the actuator-materialised diff tmp file when the Effect
 /// carries a [`Diff`] AND the file write succeeded; otherwise `None`. The resolver emits
 /// `SPECTER_DIFF_PATH` in alphabetical position iff this is `Some`, keeping env order total across
 /// the spawn-time set the child observes.
-pub(crate) fn resolve_step<'a>(
-    effect: &'a Effect, exec: &'a ExecAction, now: SystemTime, diff_path: Option<&'a Path>,
+pub(crate) fn resolve_stage<'a>(
+    effect: &'a Effect, stage: &ExecAction, now: SystemTime, diff_path: Option<&'a Path>,
     env_snapshot: &EnvSnapshot,
-) -> Result<(CommandResolved, Vec<EnvVar<'a>>), ResolveError> {
-    // Unpack the `Arc<Diff>` once and thread `Option<&Diff>` through both surfaces — pipe stages
-    // otherwise pay the same Arc deref per stage, and per-arg argv loops pay it per template.
+) -> Result<StageSpec<'a>, ResolveError> {
     let diff: Option<&'a Diff> = effect.diff().map(|d| &**d);
 
     // Materialise the four shared single-value derivations once. The `path_lossy` / `parent_lossy`
@@ -215,11 +200,15 @@ pub(crate) fn resolve_step<'a>(
         time_str: format_now(now),
     };
 
-    let argv = substitute_argv(exec, effect, &derived, diff, env_snapshot)?;
+    let mut argv = substitute_argv(stage, effect, &derived, diff, env_snapshot)?.into_iter();
+    let program = argv.next().ok_or(ResolveError::EmptyArgv)?;
     // `build_env` consumes `derived` — each field moves into the env vec instead of being cloned at
     // the per-key push site.
-    let env = build_env(effect, derived, diff, diff_path);
-    Ok((CommandResolved { argv }, env))
+    Ok(StageSpec {
+        program,
+        args: argv.collect(),
+        env: build_env(effect, derived, diff, diff_path),
+    })
 }
 
 /// Render `target_path` and its parent as a `(path_lossy, parent_lossy)` pair of UTF-8-lossy `Cow<'a,
@@ -542,7 +531,7 @@ const SPECTER_ENV_BASE_COUNT: usize = 15;
 /// regardless of whether a diff is present. Order is fixed for golden-test stability and operator
 /// predictability (e.g., `env | sort` matches positional `getenv` reads).
 ///
-/// `derived` carries the four single-value derivations [`resolve_step`] pre-rendered (`path_lossy`,
+/// `derived` carries the four single-value derivations [`resolve_stage`] pre-rendered (`path_lossy`,
 /// `anchor_lossy`, `parent_lossy`, `time_str`); each field moves into the env vec at its `SPECTER_*`
 /// push site so this function and [`substitute_argv`] emit identical bytes for the corresponding
 /// placeholders.
@@ -615,12 +604,12 @@ fn build_env<'a>(
 
 #[cfg(test)]
 mod tests {
-    //! Sibling unit tests for [`super::resolve`]. Pure data work — all fixtures are inline; no I/O.
+    //! Sibling unit tests for [`super::resolve_stage`]. Pure data work — all fixtures are inline;
+    //! no I/O.
     #![allow(clippy::items_after_statements, clippy::missing_const_for_fn, clippy::too_many_lines)]
 
-    use super::CommandResolved;
     use crate::env::EnvSnapshot;
-    use crate::spawner::EnvVar;
+    use crate::spawner::StageSpec;
     use compact_str::CompactString;
     use smallvec::smallvec;
     use specter_core::program::SpawnBody;
@@ -635,21 +624,25 @@ mod tests {
     use std::sync::Arc;
     use std::time::SystemTime;
 
-    /// Empty env snapshot used by tests that don't exercise `${env.<NAME>}` resolution. Constructed
-    /// once via `OnceLock` and threaded through the `resolve` helper.
+    /// Empty env snapshot used by tests that don't exercise `${env.<NAME>}` resolution, threaded
+    /// through the `resolve` helper.
     fn empty_env() -> EnvSnapshot {
         EnvSnapshot::from_map::<_, &str, &str>([])
     }
 
     /// Convenience wrapper for tests that don't exercise `${specter.time}` / `SPECTER_TIME` rendering
     /// — pins `now` to the Unix epoch, omits the diff tmp file, and uses an empty env snapshot.
-    /// Time-sensitive tests call [`super::resolve_step`] directly with the instant they want;
+    /// Time-sensitive tests call [`super::resolve_stage`] directly with the instant they want;
     /// diff-tmp-aware tests pass `diff_path: Some(_)` directly; env-aware tests build a fresh
     /// snapshot inline.
-    fn resolve(e: &Effect) -> (CommandResolved, Vec<EnvVar<'_>>) {
-        let exec = exec_of(e);
-        super::resolve_step(e, exec, SystemTime::UNIX_EPOCH, None, &empty_env())
-            .expect("test fixtures don't exercise the strict-env failure path")
+    fn resolve(e: &Effect) -> StageSpec<'_> {
+        super::resolve_stage(e, exec_of(e), SystemTime::UNIX_EPOCH, None, &empty_env())
+            .expect("test fixtures render a program and set every env var they read")
+    }
+
+    /// The argv a child of `spec` sees: its program, then its arguments.
+    fn argv(spec: &StageSpec<'_>) -> Vec<String> {
+        std::iter::once(&spec.program).chain(&spec.args).cloned().collect()
     }
 
     /// Borrow the single [`ExecAction`] inside an [`Effect`]'s program. Tests build effects with
@@ -731,8 +724,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _env) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["make".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["make".to_string()]);
     }
 
     #[test]
@@ -747,8 +739,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _env) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["fmt".to_string(), "/proj/src/a.c".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["fmt".to_string(), "/proj/src/a.c".to_string()]);
     }
 
     #[test]
@@ -763,8 +754,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _env) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["log".to_string(), "src/a.c".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["log".to_string(), "src/a.c".to_string()]);
     }
 
     #[test]
@@ -779,8 +769,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _env) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["build".to_string(), "/proj".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["build".to_string(), "/proj".to_string()]);
     }
 
     // ---------- ${specter.excluded} / SPECTER_EXCLUDED ----------
@@ -809,9 +798,8 @@ mod tests {
             CompactString::from("**/.git/"),
         ]
         .into();
-        let (cmd, _) = resolve(&e);
         assert_eq!(
-            cmd.argv,
+            argv(&resolve(&e)),
             vec![
                 "rsync".to_string(),
                 "--exclude=*.tmp".to_string(),
@@ -841,9 +829,8 @@ mod tests {
             None,
         );
         // exclude defaults empty in make_effect.
-        let (cmd, _) = resolve(&e);
         assert_eq!(
-            cmd.argv,
+            argv(&resolve(&e)),
             vec!["rsync".to_string(), "/src/".to_string()],
             "empty ${{specter.excluded}} drops the surrounding slot"
         );
@@ -869,7 +856,7 @@ mod tests {
             CompactString::from("**/.git/"),
         ]
         .into();
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(
             env.iter().find(|e| e.key == "SPECTER_EXCLUDED").unwrap().value,
             "*.tmp\ncache/\n**/.git/",
@@ -890,7 +877,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_EXCLUDED").unwrap().value, "");
     }
 
@@ -914,9 +901,9 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _) = super::resolve_step(&e, exec_of(&e), now, None, &empty_env())
+        let spec = super::resolve_stage(&e, exec_of(&e), now, None, &empty_env())
             .expect("test fixtures don\'t exercise the strict-env failure path");
-        assert_eq!(cmd.argv, vec![FIXED_NOW_RFC3339.to_owned()]);
+        assert_eq!(argv(&spec), vec![FIXED_NOW_RFC3339.to_owned()]);
     }
 
     #[test]
@@ -932,8 +919,9 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = super::resolve_step(&e, exec_of(&e), now, None, &empty_env())
-            .expect("test fixtures don\'t exercise the strict-env failure path");
+        let env = super::resolve_stage(&e, exec_of(&e), now, None, &empty_env())
+            .expect("test fixtures don\'t exercise the strict-env failure path")
+            .env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_TIME").unwrap().value, FIXED_NOW_RFC3339);
     }
 
@@ -953,15 +941,15 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _) = super::resolve_step(&e, exec_of(&e), pre, None, &empty_env())
+        let spec = super::resolve_stage(&e, exec_of(&e), pre, None, &empty_env())
             .expect("test fixtures don\'t exercise the strict-env failure path");
-        assert_eq!(cmd.argv, vec!["1970-01-01T00:00:00Z".to_owned()]);
+        assert_eq!(argv(&spec), vec!["1970-01-01T00:00:00Z".to_owned()]);
 
         // 10000-01-01T00:00:00Z — past jiff's `Timestamp::MAX`, which is the rendered ceiling.
         let post = SystemTime::UNIX_EPOCH + std::time::Duration::from_hours(70_389_528);
-        let (cmd, _) = super::resolve_step(&e, exec_of(&e), post, None, &empty_env())
+        let spec = super::resolve_stage(&e, exec_of(&e), post, None, &empty_env())
             .expect("test fixtures don\'t exercise the strict-env failure path");
-        assert_eq!(cmd.argv, vec!["9999-12-30T22:00:00Z".to_owned()]);
+        assert_eq!(argv(&spec), vec!["9999-12-30T22:00:00Z".to_owned()]);
     }
 
     // ---------- ${specter.parent} ----------
@@ -986,8 +974,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["/anchor".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["/anchor".to_string()]);
     }
 
     #[test]
@@ -1004,8 +991,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["/proj".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["/proj".to_string()]);
     }
 
     #[test]
@@ -1023,8 +1009,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["/".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["/".to_string()]);
     }
 
     #[test]
@@ -1041,10 +1026,9 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _) = resolve(&e);
         // Empty parent → ArgTemplate produces a single empty argv slot (single-value placeholders
         // never drop the slot, only multi-values with zero entries do).
-        assert_eq!(cmd.argv, vec![String::new()]);
+        assert_eq!(argv(&resolve(&e)), vec![String::new()]);
     }
 
     #[test]
@@ -1061,7 +1045,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_PARENT").unwrap().value, "");
     }
 
@@ -1077,7 +1061,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_PARENT").unwrap().value, "/anchor/src");
     }
 
@@ -1095,8 +1079,10 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _env) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["notify-send".to_string(), "build settled".to_string()]);
+        assert_eq!(
+            argv(&resolve(&e)),
+            vec!["notify-send".to_string(), "build settled".to_string()]
+        );
     }
 
     #[test]
@@ -1111,8 +1097,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _env) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["--input=/proj/a.c".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["--input=/proj/a.c".to_string()]);
     }
 
     #[test]
@@ -1131,9 +1116,8 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(diff)),
         );
-        let (cmd, _env) = resolve(&e);
         assert_eq!(
-            cmd.argv,
+            argv(&resolve(&e)),
             vec!["fmt".to_string(), "a.rs".to_string(), "b.rs".to_string(), "c.rs".to_string()]
         );
     }
@@ -1154,8 +1138,7 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(diff)),
         );
-        let (cmd, _) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["x".to_string(), "y".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["x".to_string(), "y".to_string()]);
     }
 
     #[test]
@@ -1171,8 +1154,7 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(diff)),
         );
-        let (cmd, _) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["m.rs".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["m.rs".to_string()]);
     }
 
     #[test]
@@ -1198,9 +1180,8 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(diff)),
         );
-        let (cmd, _) = resolve(&e);
         assert_eq!(
-            cmd.argv,
+            argv(&resolve(&e)),
             vec![
                 "mv".to_string(),
                 "a".to_string(),
@@ -1223,8 +1204,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["fmt".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["fmt".to_string()]);
     }
 
     #[test]
@@ -1239,8 +1219,7 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(Diff::default())),
         );
-        let (cmd, _) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["fmt".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["fmt".to_string()]);
     }
 
     #[test]
@@ -1261,9 +1240,8 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(diff)),
         );
-        let (cmd, _) = resolve(&e);
         assert_eq!(
-            cmd.argv,
+            argv(&resolve(&e)),
             vec!["pre".to_string(), "a".to_string(), "b".to_string(), "post".to_string()]
         );
     }
@@ -1282,12 +1260,28 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(diff)),
         );
-        let (cmd, _) = resolve(&e);
-        assert_eq!(cmd.argv, vec!["--out=a".to_string(), "--out=b".to_string()]);
+        assert_eq!(argv(&resolve(&e)), vec!["--out=a".to_string(), "--out=b".to_string()]);
     }
 
     #[test]
     fn resolve_with_multivalue_having_prefix_and_empty_diff_yields_zero_slots() {
+        let e = make_effect(
+            "x",
+            EffectScope::PerStableFile,
+            vec![arg(vec![lit("fmt")]), arg(vec![lit("--out="), ph(Placeholder::Created)])],
+            Path::new("/p"),
+            "",
+            false,
+            CorrelationId::from(1),
+            Some(Arc::new(Diff::default())),
+        );
+        assert_eq!(argv(&resolve(&e)), ["fmt"]);
+    }
+
+    /// An argv whose every slot renders to nothing names no program, so the stage is refused before
+    /// any process of its step is spawned.
+    #[test]
+    fn resolve_refuses_an_argv_that_renders_no_slot() {
         let e = make_effect(
             "x",
             EffectScope::PerStableFile,
@@ -1298,8 +1292,9 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(Diff::default())),
         );
-        let (cmd, _) = resolve(&e);
-        assert_eq!(cmd.argv, [] as [String; 0]);
+        let refused =
+            super::resolve_stage(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &empty_env());
+        assert_eq!(refused.expect_err("no slot, so no program"), super::ResolveError::EmptyArgv);
     }
 
     // ---------- diff-derived env vars ----------
@@ -1323,7 +1318,7 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(diff)),
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(
             env.iter().find(|e| e.key == "SPECTER_CREATED").unwrap().value,
             "a.rs\nsrc/b.rs\nc",
@@ -1334,7 +1329,7 @@ mod tests {
     #[test]
     fn env_specter_deleted_and_modified_render_their_categories() {
         // One Diff carrying entries for two categories; each env var pulls from its own list. Asserts
-        // the dispatch in `diff_env_segs` doesn't cross-contaminate.
+        // the dispatch in `for_each_multivalue` doesn't cross-contaminate.
         let diff = Diff {
             deleted: smallvec![entry_ref("d1", 1), entry_ref("d2", 2)],
             modified: smallvec![entry_ref("m1", 3)],
@@ -1350,7 +1345,7 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(diff)),
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_DELETED").unwrap().value, "d1\nd2");
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_MODIFIED").unwrap().value, "m1");
         // Categories not populated stay empty even though the diff is present.
@@ -1361,7 +1356,7 @@ mod tests {
     fn env_specter_renamed_from_and_to_use_correct_sides() {
         // Two renames, each with distinct from/to segments. The two env vars must each pull their
         // respective side; cross-contamination would mean the from/to projection in
-        // `diff_env_renames` is broken.
+        // `for_each_multivalue` is broken.
         let diff = Diff {
             renamed: smallvec![
                 Rename { from: entry_ref("old1", 1), to: entry_ref("new1", 1) },
@@ -1379,7 +1374,7 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(diff)),
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(
             env.iter().find(|e| e.key == "SPECTER_RENAMED_FROM").unwrap().value,
             "old1\nold2",
@@ -1392,8 +1387,8 @@ mod tests {
         // `Effect.diff = None` (Sub doesn't reference any diff-derived placeholder and isn't
         // `per-stable-file`). All five list env vars emit as empty strings — always-emit policy
         // mirrors SPECTER_EXCLUDED and avoids `set -u` surprises in the spawned shell. The
-        // `Some(Diff::default())` variant exits the same way through `join_with_newlines`'s
-        // empty-iter branch (already pinned by `env_exclude_empty_is_empty_string`).
+        // `Some(Diff::default())` variant exits the same way through `env_multivalue`'s empty-list
+        // branch (already pinned by `env_exclude_empty_is_empty_string`).
         let e = make_effect(
             "x",
             EffectScope::SubtreeRoot,
@@ -1404,7 +1399,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         for k in [
             "SPECTER_CREATED",
             "SPECTER_DELETED",
@@ -1434,7 +1429,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         let path = env.iter().find(|e| e.key == "SPECTER_PATH").unwrap();
         assert_eq!(path.value, "/proj");
     }
@@ -1451,7 +1446,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         let path = env.iter().find(|e| e.key == "SPECTER_PATH").unwrap();
         assert_eq!(path.value, "/proj/a.c");
     }
@@ -1468,7 +1463,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_RELATIVE_PATH").unwrap().value, "");
     }
 
@@ -1484,7 +1479,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_RELATIVE_PATH").unwrap().value, "src/a.c");
     }
 
@@ -1501,7 +1496,7 @@ mod tests {
                 CorrelationId::from(1),
                 None,
             );
-            let (_, env) = resolve(&e);
+            let env = resolve(&e).env;
             let v = env.iter().find(|e| e.key == "SPECTER_ANCHOR").unwrap();
             assert_eq!(v.value, "/anchor/dir", "scope = {scope:?}");
         }
@@ -1519,7 +1514,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_WATCH").unwrap().value, "build");
     }
 
@@ -1535,7 +1530,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_FORCED").unwrap().value, "0");
     }
 
@@ -1551,7 +1546,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_FORCED").unwrap().value, "1");
     }
 
@@ -1567,7 +1562,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(
             env.iter().find(|e| e.key == "SPECTER_EVENT_KIND").unwrap().value,
             "dir-subtree"
@@ -1586,7 +1581,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_EVENT_KIND").unwrap().value, "file");
     }
 
@@ -1602,7 +1597,7 @@ mod tests {
             CorrelationId::from(42),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert_eq!(env.iter().find(|e| e.key == "SPECTER_CORRELATION").unwrap().value, "42");
     }
 
@@ -1619,7 +1614,7 @@ mod tests {
             CorrelationId::from(1),
             Some(Arc::new(diff)),
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         assert!(env.iter().all(|e| e.key != "SPECTER_DIFF_PATH"));
     }
 
@@ -1635,7 +1630,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         let keys: Vec<&str> = env.iter().map(|e| e.key).collect();
         assert_eq!(
             keys,
@@ -1675,14 +1670,15 @@ mod tests {
             None,
         );
         let diff_path = Path::new("/tmp/specter-1234-deadbeef.diff");
-        let (_, env) = super::resolve_step(
+        let env = super::resolve_stage(
             &e,
             exec_of(&e),
             SystemTime::UNIX_EPOCH,
             Some(diff_path),
             &empty_env(),
         )
-        .expect("test fixtures don\'t exercise the strict-env failure path");
+        .expect("test fixtures don\'t exercise the strict-env failure path")
+        .env;
         let keys: Vec<&str> = env.iter().map(|e| e.key).collect();
         assert_eq!(
             keys,
@@ -1733,7 +1729,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         let path = env.iter().find(|e| e.key == "SPECTER_PATH").unwrap();
         let parent = env.iter().find(|e| e.key == "SPECTER_PARENT").unwrap();
         assert!(
@@ -1763,7 +1759,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         let path = env.iter().find(|e| e.key == "SPECTER_PATH").unwrap();
         let parent = env.iter().find(|e| e.key == "SPECTER_PARENT").unwrap();
         assert!(matches!(path.value, Cow::Owned(_)));
@@ -1789,7 +1785,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (_, env) = resolve(&e);
+        let env = resolve(&e).env;
         for k in [
             "SPECTER_CREATED",
             "SPECTER_DELETED",
@@ -1823,9 +1819,9 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _) = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
+        let spec = super::resolve_stage(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
             .expect("HOME present in snapshot");
-        assert_eq!(cmd.argv, vec!["/home/op".to_string()]);
+        assert_eq!(argv(&spec), vec!["/home/op".to_string()]);
     }
 
     /// Strict default: unset env var with no `:-` default fails the resolve — the caller maps
@@ -1843,7 +1839,7 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let err = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
+        let err = super::resolve_stage(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
             .expect_err("unset env var must fail strict resolve");
         assert_eq!(err, crate::resolve::ResolveError::UnsetEnvVar { name: "MISSING".into() });
     }
@@ -1869,8 +1865,8 @@ mod tests {
             CorrelationId::from(1),
             None,
         );
-        let (cmd, _) = super::resolve_step(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
+        let spec = super::resolve_stage(&e, exec_of(&e), SystemTime::UNIX_EPOCH, None, &env)
             .expect("default rendered when env unset");
-        assert_eq!(cmd.argv, vec!["/tmp".to_string(), String::new()]);
+        assert_eq!(argv(&spec), vec!["/tmp".to_string(), String::new()]);
     }
 }

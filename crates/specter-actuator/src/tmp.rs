@@ -84,7 +84,7 @@ impl DiffTmpFile {
     }
 
     /// Borrow the on-disk path. The returned `&Path` is valid for as long as any `Arc<Self>` co-owner
-    /// of `*self` is alive — the resolver borrows for one `resolve_step` call; `Slot::running` /
+    /// of `*self` is alive — the resolver borrows for one `resolve_stage` call; `Slot::running` /
     /// `Slot::plan_continue` co-own the Arc across the rest of the plan.
     pub(crate) fn path(&self) -> &Path {
         &self.path

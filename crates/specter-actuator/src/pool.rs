@@ -1673,7 +1673,7 @@ mod tests {
     /// op) → spawn the else-branch (literal `/bin/else`).
     ///
     /// **Why this is a distinct test from [`predicate_spawn_failure_does_not_propagate_no_else`]**:
-    /// resolver failure short-circuits in [`crate::resolve::resolve_step`] before `Spawner::spawn`
+    /// resolver failure short-circuits in [`crate::resolve::resolve_stage`] before `Spawner::spawn`
     /// is reached at all (different code path from OS-level spawn-failure). And **why distinct from
     /// [`predicate_failed_spawns_else_branch_outcome_does_not_propagate`]**: that test reaps a
     /// natural Failed from a real spawn; this test has zero predicate spawns recorded — the

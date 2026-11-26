@@ -8,7 +8,7 @@
 
 use crate::lifecycle::DeadFlag;
 use crate::spawner::{
-    ChildSignaler, ChildWaiter, EnvVar, PipeSpawnHandles, SpawnHandles, Spawner, StageSpec,
+    ChildSignaler, ChildWaiter, PipeSpawnHandles, SpawnHandles, Spawner, StageSpec,
 };
 use crossbeam::channel::{Receiver, Sender, bounded};
 use specter_core::EffectOutcome;
@@ -118,32 +118,34 @@ impl MockSpawner {
     /// outcome)` a single contract: any pid returned from `take_spawns()` / `spawns()` is wired into
     /// exactly one in-flight completion channel.
     fn allocate_spawn(
-        &self, argv: Vec<String>, env: Vec<(String, String)>, cwd: PathBuf,
+        &self, stage: &StageSpec<'_>, cwd: &Path,
     ) -> (u32, Receiver<EffectOutcome>, DeadFlag) {
         let pid = self.next_pid.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = bounded::<EffectOutcome>(1);
         self.completions.lock().unwrap().insert(pid, tx);
-        self.spawns.lock().unwrap().push(SpawnRecord { pid, argv, env, cwd });
+        self.spawns.lock().unwrap().push(SpawnRecord {
+            pid,
+            argv: std::iter::once(&stage.program).chain(&stage.args).cloned().collect(),
+            env: stage
+                .env
+                .iter()
+                .map(|e| (e.key.to_owned(), e.value.as_ref().to_owned()))
+                .collect(),
+            cwd: cwd.to_owned(),
+        });
         (pid, rx, DeadFlag::new())
-    }
-
-    /// Owned `Vec<(String, String)>` mirror of the spawner's borrowed env slice. Shared by
-    /// [`Self::spawn`] and [`Self::spawn_pipe`] so the recorded env shape is stable.
-    fn env_to_owned(env: &[EnvVar<'_>]) -> Vec<(String, String)> {
-        env.iter().map(|e| (e.key.to_owned(), e.value.as_ref().to_owned())).collect()
     }
 }
 
 impl Spawner for MockSpawner {
-    fn spawn(&self, argv: &[String], env: &[EnvVar<'_>], cwd: &Path) -> io::Result<SpawnHandles> {
+    fn spawn(&self, stage: &StageSpec<'_>, cwd: &Path) -> io::Result<SpawnHandles> {
         // Copy out of the lock before checking — Mutex guard's significant Drop should not span the
         // if-let body.
         let injected = *self.inject_spawn_error.lock().unwrap();
         if let Some(kind) = injected {
             return Err(io::Error::from(kind));
         }
-        let (pid, rx, dead) =
-            self.allocate_spawn(argv.to_vec(), Self::env_to_owned(env), cwd.to_owned());
+        let (pid, rx, dead) = self.allocate_spawn(stage, cwd);
         Ok(SpawnHandles {
             pid,
             waiter: Box::new(MockChildWaiter { rx, dead: dead.clone() }),
@@ -168,11 +170,7 @@ impl Spawner for MockSpawner {
         let mut stage_signalers: Vec<Arc<dyn ChildSignaler>> = Vec::with_capacity(stages.len());
         let mut last_pid: u32 = 0;
         for stage in stages {
-            let (pid, rx, dead) = self.allocate_spawn(
-                stage.argv.to_vec(),
-                Self::env_to_owned(stage.env),
-                cwd.to_owned(),
-            );
+            let (pid, rx, dead) = self.allocate_spawn(stage, cwd);
             last_pid = pid;
             stage_waiters.push(Box::new(MockChildWaiter { rx, dead: dead.clone() }));
             stage_signalers.push(Arc::new(MockChildSignaler {

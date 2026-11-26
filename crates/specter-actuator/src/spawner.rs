@@ -24,9 +24,8 @@ use std::sync::Arc;
 /// target path). The trait shape thereby matches the producer's natural lifetimes instead of forcing
 /// a flatten-to-owned hop.
 ///
-/// The lifetime parameter `'a` ties the borrow to the source data: in production, the resolver
-/// returns a `Vec<EnvVar<'_>>` borrowing from the `Effect` and the optional diff-tmp path, both of
-/// which outlive the synchronous `Spawner::spawn` call.
+/// The lifetime `'a` ties the borrow to the source data — the [`specter_core::Effect`] and the
+/// optional diff-tmp path, both of which outlive the synchronous [`Spawner`] call.
 #[derive(Clone, Debug)]
 pub struct EnvVar<'a> {
     pub key: &'static str,
@@ -41,8 +40,8 @@ pub struct EnvVar<'a> {
 /// Spawner>` move into the actuator thread (see `specter-bin`'s `spawn_actuator_thread`); no caller
 /// ever shares `&dyn Spawner` across threads, so `Sync` is not part of the contract.
 pub trait Spawner: Send {
-    /// Spawn one child, returning its [`SpawnHandles`].
-    fn spawn(&self, argv: &[String], env: &[EnvVar<'_>], cwd: &Path) -> io::Result<SpawnHandles>;
+    /// Spawn one child running `stage`, returning its [`SpawnHandles`].
+    fn spawn(&self, stage: &StageSpec<'_>, cwd: &Path) -> io::Result<SpawnHandles>;
 
     /// Spawn N stages wired stdout→stdin, returning their [`PipeSpawnHandles`]. The producer-side
     /// of stage K writes to a pipe whose read-end is the consumer-side stdin of stage K+1; the kernel
@@ -54,13 +53,13 @@ pub trait Spawner: Send {
     fn spawn_pipe(&self, stages: &[StageSpec<'_>], cwd: &Path) -> io::Result<PipeSpawnHandles>;
 }
 
-/// One stage of a pipe spawn. Borrow shape mirrors [`Spawner::spawn`]: argv as `&[String]` (the
-/// resolver's owning slice), env as `&[EnvVar<'_>]` (resolver borrows from the Effect / diff-tmp
-/// path / time string).
+/// One stage's command as the resolver rendered it: the program, its arguments, and the env it adds
+/// to the daemon's own.
 #[derive(Debug)]
 pub struct StageSpec<'a> {
-    pub argv: &'a [String],
-    pub env: &'a [EnvVar<'a>],
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<EnvVar<'a>>,
 }
 
 /// Paired handles for a freshly-spawned pipe of N stages.

@@ -20,7 +20,7 @@
 use crate::lifecycle::DeadFlag;
 use crate::pipe::{CombinedSignaler, PipeWaiter};
 use crate::spawner::{
-    ChildSignaler, ChildWaiter, EnvVar, PipeSpawnHandles, SpawnHandles, Spawner, StageSpec,
+    ChildSignaler, ChildWaiter, PipeSpawnHandles, SpawnHandles, Spawner, StageSpec,
 };
 use specter_core::{EffectOutcome, Termination};
 use std::io;
@@ -45,11 +45,8 @@ impl OsSpawner {
 }
 
 impl Spawner for OsSpawner {
-    fn spawn(&self, argv: &[String], env: &[EnvVar<'_>], cwd: &Path) -> io::Result<SpawnHandles> {
-        let Some((head, tail)) = argv.split_first() else {
-            return Err(io::Error::new(io::ErrorKind::InvalidInput, "argv is empty"));
-        };
-        let (pid, waiter, signaler) = build_pair(build_command(head, tail, env, cwd).spawn()?);
+    fn spawn(&self, stage: &StageSpec<'_>, cwd: &Path) -> io::Result<SpawnHandles> {
+        let (pid, waiter, signaler) = build_pair(build_command(stage, cwd).spawn()?);
         Ok(SpawnHandles { pid, waiter: Box::new(waiter), signaler: Arc::new(signaler) })
     }
 
@@ -61,15 +58,6 @@ impl Spawner for OsSpawner {
                 "spawn_pipe requires at least two stages",
             ));
         }
-        for (idx, stage) in stages.iter().enumerate() {
-            if stage.argv.is_empty() {
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidInput,
-                    format!("spawn_pipe: stage {idx} argv is empty"),
-                ));
-            }
-        }
-
         // Pipe layout: interleave pipe(2) creation with each stage's spawn so the parent holds at
         // most one pipe pair's fds at any moment, rather than all N-1 pairs up front. Caps the
         // parent-side fd footprint at ~3 fds even for deep pipes — relevant on hosts under fd
@@ -94,7 +82,7 @@ impl Spawner for OsSpawner {
         let mut last_pid: u32 = 0;
 
         for (idx, stage) in stages.iter().enumerate() {
-            let mut cmd = build_command(&stage.argv[0], &stage.argv[1..], stage.env, cwd);
+            let mut cmd = build_command(stage, cwd);
             if idx > 0 {
                 cmd.stdin(prev_read.take().expect("stage K-1 parked its read end"));
             }
@@ -157,8 +145,8 @@ impl Spawner for OsSpawner {
 /// process's environment. The child sees `parent_env ∪ resolver_env`, with resolver entries shadowing
 /// any parent-env collisions on the same key.
 ///
-/// **Why not `env_clear()` + additive?** Without per-action env spec (v1 [`crate::spawner::EnvVar`]
-/// only carries the resolver's `SPECTER_*` set; the action grammar has no operator-side `env` field),
+/// **Why not `env_clear()` + additive?** Without per-action env spec (v1 [`StageSpec::env`] only
+/// carries the resolver's `SPECTER_*` set; the action grammar has no operator-side `env` field),
 /// `env_clear()` would strip `PATH`, `HOME`, `LANG`, etc., breaking the common case of `["/bin/sh",
 /// "-c", "..."]` whose body invokes other binaries by name. The operator can already pin specific
 /// parent-env values into argv at resolve time via `${env.NAME}` (snapshot-backed; see
@@ -175,10 +163,10 @@ impl Spawner for OsSpawner {
 /// Operators who run specter under a credential-bearing supervisor should scrub the supervisor's
 /// env before spawning specter (a `systemd` unit with `Environment=` is the canonical shape), since
 /// v1 has no actuator-side scrub.
-fn build_command(arg0: &str, argv_tail: &[String], env: &[EnvVar<'_>], cwd: &Path) -> Command {
-    let mut cmd = Command::new(arg0);
-    cmd.args(argv_tail)
-        .envs(env.iter().map(|e| (e.key, e.value.as_ref())))
+fn build_command(stage: &StageSpec<'_>, cwd: &Path) -> Command {
+    let mut cmd = Command::new(&stage.program);
+    cmd.args(&stage.args)
+        .envs(stage.env.iter().map(|e| (e.key, e.value.as_ref())))
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -380,6 +368,17 @@ fn reap_pid(pid: u32) -> io::Result<()> {
     }
 }
 
+/// A stage running `command` — its program, then its arguments — with no env of its own.
+#[cfg(test)]
+fn stage(command: &[&str]) -> StageSpec<'static> {
+    let (program, args) = command.split_first().expect("a stage names its program");
+    StageSpec {
+        program: (*program).to_owned(),
+        args: args.iter().map(|&arg| arg.to_owned()).collect(),
+        env: Vec::new(),
+    }
+}
+
 #[cfg(test)]
 mod recovery_tests {
     //! Real fork+exec exercise for the wait-thread-spawn-failure recovery path.
@@ -392,7 +391,7 @@ mod recovery_tests {
     //! reap_blocking` through the signaler exactly as the controller's
     //! `recover_orphan_after_wait_thread_failure` helper does.
     use super::*;
-    use crate::spawner::{EnvVar, Spawner};
+    use crate::spawner::Spawner;
     use std::path::Path;
 
     /// Spawn a long-running child, drop the waiter without ever calling `wait`, then verify the
@@ -404,11 +403,10 @@ mod recovery_tests {
         let spawner = OsSpawner::new();
         // `/bin/sleep 30` keeps the child alive long enough that the SIGKILL + reap exercises the
         // actual zombie-cleanup path (not a child that exited before we got around to reaping).
-        let argv: Vec<String> = vec!["/bin/sleep".into(), "30".into()];
-        let env: Vec<EnvVar<'_>> = Vec::new();
+        let sleeper = stage(&["/bin/sleep", "30"]);
         let cwd = Path::new("/tmp");
 
-        let handles = spawner.spawn(&argv, &env, cwd).expect("spawn /bin/sleep");
+        let handles = spawner.spawn(&sleeper, cwd).expect("spawn /bin/sleep");
         let pid = handles.pid;
         let signaler = handles.signaler;
 
@@ -442,11 +440,9 @@ mod recovery_tests {
     #[test]
     fn signaler_reap_blocking_is_idempotent_after_first_reap() {
         let spawner = OsSpawner::new();
-        let argv: Vec<String> = vec!["/bin/sleep".into(), "0".into()];
-        let env: Vec<EnvVar<'_>> = Vec::new();
         let cwd = Path::new("/tmp");
 
-        let handles = spawner.spawn(&argv, &env, cwd).expect("spawn");
+        let handles = spawner.spawn(&stage(&["/bin/sleep", "0"]), cwd).expect("spawn");
         let signaler = handles.signaler;
         drop(handles.waiter);
 
@@ -466,7 +462,7 @@ mod pipe_tests {
     //! stages 0..K when stage K's exec fails.
 
     use super::*;
-    use crate::spawner::{EnvVar, Spawner, StageSpec};
+    use crate::spawner::{Spawner, StageSpec};
     use std::path::Path;
     use std::time::{Duration, Instant};
 
@@ -478,13 +474,7 @@ mod pipe_tests {
     #[test]
     fn pipe_echo_then_cat_completes_ok() {
         let spawner = OsSpawner::new();
-        let stage0_argv = vec!["/bin/echo".into(), "hello".into()];
-        let stage1_argv = vec!["/bin/cat".into()];
-        let empty_env: Vec<EnvVar<'_>> = Vec::new();
-        let stages = [
-            StageSpec { argv: &stage0_argv, env: &empty_env },
-            StageSpec { argv: &stage1_argv, env: &empty_env },
-        ];
+        let stages = [stage(&["/bin/echo", "hello"]), stage(&["/bin/cat"])];
         let cwd = Path::new("/tmp");
 
         let handles = spawner.spawn_pipe(&stages, cwd).expect("spawn_pipe");
@@ -500,13 +490,13 @@ mod pipe_tests {
     /// keep that link's reader from ever seeing end of input.
     #[test]
     fn pipe_stage_inherits_no_other_link() {
-        let argv: Vec<String> = vec![
-            "/bin/sh".into(),
-            "-c".into(),
-            "for fd in 3 4 5 6 7 8 9; do [ -e /dev/fd/$fd ] && exit 1; done; cat >/dev/null".into(),
-        ];
-        let stages: [StageSpec<'_>; 3] =
-            std::array::from_fn(|_| StageSpec { argv: &argv, env: &[] });
+        let stages: [StageSpec<'_>; 3] = std::array::from_fn(|_| {
+            stage(&[
+                "/bin/sh",
+                "-c",
+                "for fd in 3 4 5 6 7 8 9; do [ -e /dev/fd/$fd ] && exit 1; done; cat >/dev/null",
+            ])
+        });
         let handles = OsSpawner::new().spawn_pipe(&stages, Path::new("/tmp")).expect("spawn_pipe");
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
@@ -524,15 +514,11 @@ mod pipe_tests {
     #[test]
     fn pipe_partial_spawn_failure_rolls_back_prior_stages() {
         let spawner = OsSpawner::new();
-        let stage0_argv = vec!["/bin/sleep".into(), "30".into()];
+        let sleeper = stage(&["/bin/sleep", "30"]);
         // ENOENT — exec(2) returns ENOENT, std::process::Command surfaces it as io::Error with kind
         // NotFound. Use a path that's guaranteed not to exist on any sane host.
-        let stage1_argv = vec!["/no/such/binary/specter-pipe-test".into()];
-        let empty_env: Vec<EnvVar<'_>> = Vec::new();
-        let stages = [
-            StageSpec { argv: &stage0_argv, env: &empty_env },
-            StageSpec { argv: &stage1_argv, env: &empty_env },
-        ];
+        let missing = stage(&["/no/such/binary/specter-pipe-test"]);
+        let stages = [sleeper, missing];
         let cwd = Path::new("/tmp");
 
         let start = Instant::now();
@@ -563,8 +549,8 @@ mod stdio_tests {
     use crate::spawner::{Spawner, StageSpec};
     use std::path::Path;
 
-    fn sh(script: &str) -> Vec<String> {
-        vec!["/bin/sh".into(), "-c".into(), script.into()]
+    fn sh(script: &str) -> StageSpec<'static> {
+        stage(&["/bin/sh", "-c", script])
     }
 
     fn stdin_from_pipe() {
@@ -575,9 +561,9 @@ mod stdio_tests {
     #[test]
     fn spawn_puts_stdin_stdout_and_stderr_on_dev_null() {
         stdin_from_pipe();
-        let argv = sh("[ /dev/stdin -ef /dev/null ] && [ /dev/stdout -ef /dev/null ] \
+        let check = sh("[ /dev/stdin -ef /dev/null ] && [ /dev/stdout -ef /dev/null ] \
              && [ /dev/stderr -ef /dev/null ]");
-        let handles = OsSpawner::new().spawn(&argv, &[], Path::new("/tmp")).expect("spawn");
+        let handles = OsSpawner::new().spawn(&check, Path::new("/tmp")).expect("spawn");
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 
@@ -585,7 +571,7 @@ mod stdio_tests {
     #[test]
     fn spawn_pipe_rewires_only_the_links_between_stages() {
         stdin_from_pipe();
-        let argvs = [
+        let stages = [
             sh(
                 "[ /dev/stdin -ef /dev/null ] && [ /dev/stderr -ef /dev/null ] && echo specter-link",
             ),
@@ -595,7 +581,6 @@ mod stdio_tests {
             sh("read l && [ \"$l\" = specter-link ] && [ /dev/stdout -ef /dev/null ] \
                 && [ /dev/stderr -ef /dev/null ]"),
         ];
-        let stages = argvs.each_ref().map(|argv| StageSpec { argv, env: &[] });
         let handles = OsSpawner::new().spawn_pipe(&stages, Path::new("/tmp")).expect("spawn_pipe");
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
@@ -673,10 +658,8 @@ mod tests {
         // used and succeeds.
         let spawner = OsSpawner::new();
         let cwd = Path::new("/tmp");
-        let argv: Vec<String> = vec!["/bin/sh".into(), "-c".into(), "exit 0".into()];
-        let env: Vec<EnvVar<'_>> = Vec::new();
         let handles = spawner
-            .spawn(&argv, &env, cwd)
+            .spawn(&stage(&["/bin/sh", "-c", "exit 0"]), cwd)
             .expect("spawn must succeed under high fd pressure (fork+exec route)");
         let outcome = handles.waiter.wait().expect("wait must succeed for a spawned child");
         assert_eq!(outcome, EffectOutcome::Ok, "child exited cleanly; outcome should be Ok");
