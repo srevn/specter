@@ -27,11 +27,8 @@ fn banner() -> String {
     )
 }
 
-/// Top-level CLI parser — subcommand dispatcher.
-///
-/// `specter run` is the daemon (the historical flat invocation, now under a subcommand). The other
-/// verbs are operator clients that connect to the running daemon over a UNIX socket. The client
-/// surface is declared here so `--help` exposes it; verbs without a live handler exit `2`.
+/// `specter run` is the daemon; every other verb is a client of a running daemon, over its UNIX
+/// socket.
 #[derive(Debug, Parser)]
 #[command(
     name = "specter",
@@ -174,8 +171,7 @@ pub struct StatusArgs {
     #[arg(long, short = 'o', value_enum, default_value_t = OutputFormat::Human)]
     pub output: OutputFormat,
 
-    /// Include rarely-needed fields (counters, ids, full paths). Only affects `-o human`; `-o json`
-    /// is always lossless.
+    /// Accepted beside `list --wide`; `status` has no wider view, so it changes nothing.
     #[arg(long)]
     pub wide: bool,
 }
@@ -248,8 +244,8 @@ pub struct TailArgs {
     #[command(flatten)]
     pub client: ClientArgs,
 
-    /// Restrict the stream to one or more `WireDiagnostic` variant names (e.g. `SubFired`,
-    /// `SubDetached`). Repeatable; case- sensitive. Empty (the default) streams every variant.
+    /// Restrict the stream to one or more diagnostic tags (e.g. `sub_fired`, `sub_detached`).
+    /// Repeatable; case-sensitive. Empty (the default) streams every tag.
     #[arg(long)]
     pub filter: Vec<String>,
 
@@ -269,7 +265,8 @@ pub struct WaitArgs {
     #[command(flatten)]
     pub client: ClientArgs,
 
-    /// Event class to wait for. `fire` (default) matches `SubFired`; `detach` matches `SubDetached`.
+    /// What to wait for: the watch's first fire (default) — on a dynamic watch, any match's — or
+    /// the watch's own detach.
     #[arg(long, value_enum, default_value_t = WaitKind::Fire)]
     pub kind: WaitKind,
 
@@ -304,10 +301,10 @@ pub enum ColorWhen {
 /// Event class for `specter wait`.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, ValueEnum)]
 pub enum WaitKind {
-    /// Match `SubFired` — the Sub emitted at least one Effect.
+    /// The watch fires (`sub_fired`); on a dynamic watch, any of its matches does.
     Fire,
-    /// Match `SubDetached` — the Sub left the engine (IPC `disable`, config-removal, or
-    /// `modified_identity` rebind).
+    /// The watch itself leaves the daemon (`sub_detached`): `disable`, its removal from the config,
+    /// or an edit that replaces it — never a match's reap.
     Detach,
 }
 

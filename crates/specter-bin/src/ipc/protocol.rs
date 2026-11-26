@@ -148,7 +148,9 @@ pub(crate) enum ResponsePayload {
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum WireErrorCode {
-    /// Sub name not in the engine registry, the operator-runtime disable set, or the TOML watches.
+    /// The verb named no Sub the engine holds: `absorb`, `disable` and a named subscribe resolve
+    /// through the engine alone, so a disabled watch answers it too — save to `disable`, which
+    /// answers [`Self::NotDisabled`] for a watch disabled at runtime.
     UnknownSub,
     /// `disable` or `absorb` named a Sub a dynamic watch minted, which neither verb addresses: its
     /// template's next pass would mint it again. The verbs take the dynamic watch's own name.
@@ -378,7 +380,8 @@ pub(crate) struct StatusResponse {
     pub(crate) sub_disabled_toml: usize,
     /// Operator-runtime-disabled Subs (`disabled_runtime.len()`).
     pub(crate) sub_disabled_runtime: usize,
-    /// `engine.profiles().active_count()` — Profiles not in `ProfileState::Idle`.
+    /// `engine.profiles().active_count()` — Profiles at work: a burst in flight, or a pending
+    /// descent.
     pub(crate) profile_active: usize,
     /// Count of templates — the operator's "how many dynamic watches are live" view.
     pub(crate) discovery_active: usize,
@@ -413,8 +416,9 @@ pub(crate) struct WireLastReload {
     pub(crate) via: WireReloadTrigger,
 }
 
-/// `specter list` response — every operator-declared Sub keyed by name. Attached, runtime-disabled,
-/// and TOML-disabled populations union into one alphabetically-ordered row set.
+/// `specter list` response — every attached Sub, each match of a dynamic watch under its
+/// `<template_name>@<matched_path>` among them, and every runtime- and TOML-disabled watch: one row
+/// per name, alphabetically.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ListResponse {
     pub(crate) rows: Vec<ListRow>,
