@@ -818,6 +818,7 @@ dependencies = [
  "signal-hook",
  "slotmap",
  "specter-actuator",
+ "specter-bin",
  "specter-config",
  "specter-core",
  "specter-engine",

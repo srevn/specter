@@ -37,9 +37,13 @@ tracing-appender.workspace   = true
 [dev-dependencies]
 nix.workspace      = true
 tempfile.workspace = true
+specter-bin      = { path = ".", features = ["testkit"] }
 specter-core     = { path = "../specter-core", features = ["testkit"] }
 specter-engine   = { path = "../specter-engine", features = ["testkit"] }
 specter-sensor   = { path = "../specter-sensor", features = ["testkit"] }
+
+[features]
+testkit = ["specter-core/testkit", "specter-engine/testkit"]
 
 [lints]
 workspace = true
