@@ -314,6 +314,7 @@ mod recovery_tests {
     use super::*;
     use crate::pipe;
     use crate::spawner::Spawner;
+    use specter_core::DedupKey;
     use std::path::Path;
 
     /// Spawn a long-running child, drop the waiter without ever calling `wait`, then verify the
@@ -328,7 +329,10 @@ mod recovery_tests {
         let sleeper = stage(&["/bin/sleep", "30"]);
         let cwd = Path::new("/tmp");
 
-        let handles = pipe::join(spawner.spawn(&[sleeper], cwd).expect("spawn /bin/sleep"));
+        let handles = pipe::join(
+            DedupKey::default(),
+            spawner.spawn(&[sleeper], cwd).expect("spawn /bin/sleep"),
+        );
         let pid = handles.pid;
         let signaler = handles.signaler;
 
@@ -364,8 +368,10 @@ mod recovery_tests {
         let spawner = OsSpawner;
         let cwd = Path::new("/tmp");
 
-        let handles =
-            pipe::join(spawner.spawn(&[stage(&["/bin/sleep", "0"])], cwd).expect("spawn"));
+        let handles = pipe::join(
+            DedupKey::default(),
+            spawner.spawn(&[stage(&["/bin/sleep", "0"])], cwd).expect("spawn"),
+        );
         let signaler = handles.signaler;
         drop(handles.waiter);
 
@@ -387,6 +393,7 @@ mod pipe_tests {
     use super::*;
     use crate::pipe;
     use crate::spawner::{Spawner, StageSpec};
+    use specter_core::DedupKey;
     use std::path::Path;
     use std::time::{Duration, Instant};
 
@@ -403,7 +410,7 @@ mod pipe_tests {
         assert_eq!(children.len(), 2);
         let cat = children[1].pid;
 
-        let pipe = pipe::join(children);
+        let pipe = pipe::join(DedupKey::default(), children);
         assert_eq!(pipe.pid, cat, "a pipe goes by its last stage's pid");
         assert_eq!(pipe.waiter.wait().expect("pipe waiter drains cleanly"), EffectOutcome::Ok);
     }
@@ -420,7 +427,10 @@ mod pipe_tests {
                 "for fd in 3 4 5 6 7 8 9; do [ -e /dev/fd/$fd ] && exit 1; done; cat >/dev/null",
             ])
         });
-        let handles = pipe::join(OsSpawner.spawn(&stages, Path::new("/tmp")).expect("spawn"));
+        let handles = pipe::join(
+            DedupKey::default(),
+            OsSpawner.spawn(&stages, Path::new("/tmp")).expect("spawn"),
+        );
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 
@@ -471,6 +481,7 @@ mod stdio_tests {
     use super::*;
     use crate::pipe;
     use crate::spawner::{Spawner, StageSpec};
+    use specter_core::DedupKey;
     use std::path::Path;
 
     fn sh(script: &str) -> StageSpec<'static> {
@@ -487,7 +498,10 @@ mod stdio_tests {
         stdin_from_pipe();
         let check = sh("[ /dev/stdin -ef /dev/null ] && [ /dev/stdout -ef /dev/null ] \
              && [ /dev/stderr -ef /dev/null ]");
-        let handles = pipe::join(OsSpawner.spawn(&[check], Path::new("/tmp")).expect("spawn"));
+        let handles = pipe::join(
+            DedupKey::default(),
+            OsSpawner.spawn(&[check], Path::new("/tmp")).expect("spawn"),
+        );
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 
@@ -505,7 +519,10 @@ mod stdio_tests {
             sh("read l && [ \"$l\" = specter-link ] && [ /dev/stdout -ef /dev/null ] \
                 && [ /dev/stderr -ef /dev/null ]"),
         ];
-        let handles = pipe::join(OsSpawner.spawn(&stages, Path::new("/tmp")).expect("spawn"));
+        let handles = pipe::join(
+            DedupKey::default(),
+            OsSpawner.spawn(&stages, Path::new("/tmp")).expect("spawn"),
+        );
         assert_eq!(handles.waiter.wait().expect("wait"), EffectOutcome::Ok);
     }
 }
@@ -517,6 +534,7 @@ mod tests {
     use super::*;
     use crate::pipe;
     use crate::spawner::Spawner;
+    use specter_core::DedupKey;
     use std::os::fd::OwnedFd;
     use std::path::Path;
 
@@ -584,6 +602,7 @@ mod tests {
         let spawner = OsSpawner;
         let cwd = Path::new("/tmp");
         let handles = pipe::join(
+            DedupKey::default(),
             spawner
                 .spawn(&[stage(&["/bin/sh", "-c", "exit 0"])], cwd)
                 .expect("spawn must succeed under high fd pressure (fork+exec route)"),

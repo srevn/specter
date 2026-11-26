@@ -4,7 +4,7 @@
 
 use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles};
 use crossbeam::channel::{Sender, unbounded};
-use specter_core::{EffectOutcome, Termination};
+use specter_core::{DedupKey, EffectOutcome, Termination};
 use std::io;
 use std::ops::Range;
 use std::panic::AssertUnwindSafe;
@@ -27,8 +27,8 @@ pub(crate) struct CombinedSignaler {
 
 /// One job over a step's spawned stages: a lone stage's own handles; for a pipe, the waiter that
 /// folds every stage's report and the signaler that reaches every stage, under the last stage's pid
-/// — the one a shell's `$!` names for a pipeline.
-pub(crate) fn join(stages: Vec<SpawnHandles>) -> SpawnHandles {
+/// — the one a shell's `$!` names for a pipeline. The waiter's lines name the plan by its `key`.
+pub(crate) fn join(key: DedupKey, stages: Vec<SpawnHandles>) -> SpawnHandles {
     match <[SpawnHandles; 1]>::try_from(stages) {
         Ok([lone]) => lone,
         Err(stages) => {
@@ -37,7 +37,7 @@ pub(crate) fn join(stages: Vec<SpawnHandles>) -> SpawnHandles {
                 stages.iter().map(|stage| Arc::clone(&stage.signaler)).collect();
             SpawnHandles {
                 pid,
-                waiter: Box::new(PipeWaiter { stages, signalers: Arc::clone(&signalers) }),
+                waiter: Box::new(PipeWaiter { key, stages, signalers: Arc::clone(&signalers) }),
                 signaler: Arc::new(CombinedSignaler { stages: signalers }),
             }
         }
@@ -109,13 +109,14 @@ impl ChildSignaler for CombinedSignaler {
 /// the wait itself panic: a stage whose ending is unknown ends the job `Internal`, the actuator's
 /// own failure, and never folds as a stage that succeeded.
 pub(crate) struct PipeWaiter {
+    key: DedupKey,
     stages: Vec<SpawnHandles>,
     signalers: Arc<[Arc<dyn ChildSignaler>]>,
 }
 
 impl ChildWaiter for PipeWaiter {
     fn wait(self: Box<Self>) -> io::Result<EffectOutcome> {
-        let Self { stages, signalers } = *self;
+        let Self { key, stages, signalers } = *self;
         let (reports, reported) = unbounded();
         Ok(thread::scope(|scope| {
             let mut stages = stages.into_iter().enumerate();
@@ -123,9 +124,9 @@ impl ChildWaiter for PipeWaiter {
                 let report = reports.clone();
                 let started = thread::Builder::new()
                     .name(format!("act-pipe-{stage}"))
-                    .spawn_scoped(scope, move || wait_stage(stage, handles, &report));
+                    .spawn_scoped(scope, move || wait_stage(key, stage, handles, &report));
                 if let Err(e) = started {
-                    return fail_unstarted(stage, &e, &signalers, stages);
+                    return fail_unstarted(key, stage, &e, &signalers, stages);
                 }
             }
             // The stage threads hold the only senders left, so the loop ends with the last report.
@@ -134,7 +135,7 @@ impl ChildWaiter for PipeWaiter {
             for (stage, outcome) in &reported {
                 for upstream in pipefail.record(stage, outcome) {
                     if let Err(e) = signalers[upstream].signal_term() {
-                        tracing::debug!(stage = upstream, ?e, "upstream SIGTERM failed");
+                        tracing::debug!(?key, stage = upstream, ?e, "upstream SIGTERM failed");
                     }
                 }
             }
@@ -143,13 +144,22 @@ impl ChildWaiter for PipeWaiter {
     }
 }
 
-/// A stage thread's body: waits on the stage, a failed or panicked wait ending it `Internal`, and
-/// reports how it ended.
-fn wait_stage(stage: usize, handles: SpawnHandles, report: &Sender<(usize, EffectOutcome)>) {
-    let SpawnHandles { waiter, signaler, .. } = handles;
+/// A stage thread's body: waits on the stage and reports how it ended. A failed or panicked wait
+/// ends the stage `Internal` and says which, as `pool::state::wait_loop` says it for a job.
+fn wait_stage(
+    key: DedupKey, stage: usize, handles: SpawnHandles, report: &Sender<(usize, EffectOutcome)>,
+) {
+    let SpawnHandles { pid, waiter, signaler } = handles;
     let outcome = match std::panic::catch_unwind(AssertUnwindSafe(|| waiter.wait())) {
         Ok(Ok(outcome)) => outcome,
-        Ok(Err(_)) | Err(_) => EffectOutcome::Failed(Termination::Internal),
+        Ok(Err(e)) => {
+            tracing::warn!(?key, stage, pid, ?e, "stage wait failed");
+            EffectOutcome::Failed(Termination::Internal)
+        }
+        Err(_) => {
+            tracing::error!(?key, stage, pid, "stage wait panicked");
+            EffectOutcome::Failed(Termination::Internal)
+        }
     };
     // A waiter that panicked never marked its stage.
     signaler.mark_dead();
@@ -198,17 +208,17 @@ impl Pipefail {
 /// and the unstarted stages are waited on here. The pipe ends `Internal`, as a step does whose own
 /// wait thread failed to start.
 fn fail_unstarted(
-    stage: usize, err: &io::Error, signalers: &[Arc<dyn ChildSignaler>],
+    key: DedupKey, stage: usize, err: &io::Error, signalers: &[Arc<dyn ChildSignaler>],
     unstarted: impl Iterator<Item = (usize, SpawnHandles)>,
 ) -> EffectOutcome {
-    tracing::error!(stage, ?err, "pipe stage thread spawn failed; killing the pipe");
+    tracing::error!(?key, stage, ?err, "pipe stage thread spawn failed; killing the pipe");
     for (idx, signaler) in signalers.iter().enumerate() {
         if let Err(e) = signaler.signal_kill() {
-            tracing::debug!(stage = idx, ?e, "SIGKILL of an unwaited pipe failed");
+            tracing::debug!(?key, stage = idx, ?e, "SIGKILL of an unwaited pipe failed");
         }
     }
     if let Err(e) = signalers[stage].reap_blocking() {
-        tracing::warn!(stage, ?e, "reap of a pipe stage with no wait thread failed");
+        tracing::warn!(?key, stage, ?e, "reap of a pipe stage with no wait thread failed");
     }
     for (_, SpawnHandles { waiter, .. }) in unstarted {
         let _ = waiter.wait();
@@ -225,7 +235,7 @@ mod tests {
     use crate::lifecycle::DeadFlag;
     use crate::spawner::{ChildSignaler, ChildWaiter, SpawnHandles};
     use crossbeam::channel::{Receiver, Sender, bounded};
-    use specter_core::{EffectOutcome, Termination};
+    use specter_core::{DedupKey, EffectOutcome, Termination};
     use std::io;
     use std::panic::AssertUnwindSafe;
     use std::sync::Arc;
@@ -303,7 +313,7 @@ mod tests {
                 signaler: Arc::clone(signaler),
             })
             .collect();
-        super::join(stages).waiter
+        super::join(DedupKey::default(), stages).waiter
     }
 
     /// Probe paired with a [`BlockingWaiter`]: the waiter blocks on a crossbeam channel until any

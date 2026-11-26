@@ -971,7 +971,7 @@ impl ActuatorState {
             }
         }
 
-        let SpawnHandles { pid, waiter, signaler } = pipe::join(children);
+        let SpawnHandles { pid, waiter, signaler } = pipe::join(*key, children);
         let wait_thread = thread::Builder::new()
             // Linux keeps 15 bytes of a thread's name: an 8-byte prefix leaves a 7-digit pid whole.
             .name(format!("act-job-{pid}"))
